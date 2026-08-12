@@ -99,6 +99,33 @@ fn apply_reasoning(body: &mut Value, model: &CatalogModel, effort: Effort) {
     }
 }
 
+/// How each vendor spells the output ceiling.
+///
+/// OpenAI's reasoning models **reject** `max_tokens` on chat-completions — it is
+/// `max_completion_tokens` there, because the ceiling has to cover reasoning
+/// tokens the response never shows. Every OpenAI entry in the catalog is a
+/// reasoning model, and `max_tokens` is always set on the agent path
+/// (`agent::run`) and on tab naming, so the wrong key is a 400 on the first
+/// request rather than a degraded one.
+///
+/// Everyone else keeps `max_tokens`: it is what Mistral documents, and what
+/// Ollama, LM Studio, vLLM, llama.cpp's server and LiteLLM all accept — several of
+/// which have never heard of `max_completion_tokens`. Conservative on that wire
+/// for the same reason `stream_options` is.
+fn apply_max_tokens(body: &mut Value, model: &CatalogModel, max_tokens: Option<u32>) {
+    let Some(max) = max_tokens else {
+        return;
+    };
+    match model.provider {
+        ProviderId::OpenAi => body["max_completion_tokens"] = json!(max),
+        ProviderId::Mistral | ProviderId::Remote => body["max_tokens"] = json!(max),
+        // Spelled out rather than left to `_`, as in `apply_reasoning`: a
+        // catch-all is exactly how a new variant goes quiet. Neither of these
+        // reaches this module.
+        ProviderId::Local | ProviderId::Anthropic => {}
+    }
+}
+
 /// Byte offset such that at least `keep` *characters* remain after it. Slicing on
 /// a raw byte count would split a multibyte character.
 fn hold_back(s: &str, keep: usize) -> usize {
@@ -318,9 +345,7 @@ impl Provider for OpenAiCompatProvider {
             // Without this the final chunk carries no usage numbers.
             "stream_options": {"include_usage": true},
         });
-        if let Some(max) = params.max_tokens {
-            body["max_tokens"] = json!(max);
-        }
+        apply_max_tokens(&mut body, self.model, params.max_tokens);
         // The GPT-5.6 reasoning models reject temperature; the catalog says who.
         if let (true, Some(t)) = (self.model.supports_temperature, params.temperature) {
             body["temperature"] = json!(t.clamp(0.0, 2.0));
@@ -503,6 +528,53 @@ mod tests {
         let mut body = json!({});
         apply_reasoning(&mut body, model, model.clamp_effort(effort));
         body
+    }
+
+    fn token_body(model: &CatalogModel, max: Option<u32>) -> Value {
+        let mut body = json!({});
+        apply_max_tokens(&mut body, model, max);
+        body
+    }
+
+    #[test]
+    fn openai_spells_the_ceiling_max_completion_tokens() {
+        // A reasoning model 400s on `max_tokens` — "Unsupported parameter". Both
+        // halves are asserted: sending the right key is useless if the wrong one
+        // rides along beside it.
+        let body = token_body(catalog::find("openai/gpt-5.6-sol").unwrap(), Some(4096));
+        assert_eq!(body["max_completion_tokens"], 4096);
+        assert!(body.get("max_tokens").is_none(), "{body}");
+    }
+
+    #[test]
+    fn everyone_else_keeps_max_tokens() {
+        // Mistral documents `max_tokens`, and several self-hosted servers have
+        // never heard of the other spelling — so this wire must not follow OpenAI.
+        for model in [
+            catalog::find("mistral/mistral-small-latest").unwrap(),
+            remote_model(),
+        ] {
+            let body = token_body(model, Some(512));
+            assert_eq!(body["max_tokens"], 512, "{:?}", model.provider);
+            assert!(
+                body.get("max_completion_tokens").is_none(),
+                "{:?}: {body}",
+                model.provider
+            );
+        }
+    }
+
+    #[test]
+    fn no_ceiling_sends_no_key_at_all() {
+        // `None` means "the model's own limit". Neither spelling may appear, or a
+        // server that validates the field sees a null it cannot parse.
+        for model in [
+            catalog::find("openai/gpt-5.6-luna").unwrap(),
+            catalog::find("mistral/mistral-small-latest").unwrap(),
+            remote_model(),
+        ] {
+            assert_eq!(token_body(model, None), json!({}), "{:?}", model.provider);
+        }
     }
 
     #[test]
