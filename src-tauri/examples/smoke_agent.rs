@@ -99,6 +99,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some("Done") => {
                     d.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
+                // A guard rail, not a failure. Printed distinctly from Error
+                // because that is the whole point of the variant — and without an
+                // arm here the catch-all below would swallow it, making a paused
+                // run look like one that simply stopped.
+                Some("Paused") => {
+                    eprintln!(
+                        "\n[paused] reason={} steps={} limit={} context={}/{}",
+                        v.get("reason").and_then(|c| c.as_str()).unwrap_or(""),
+                        v.get("steps").and_then(|c| c.as_i64()).unwrap_or(-1),
+                        v.get("limit").and_then(|c| c.as_i64()).unwrap_or(-1),
+                        v.get("context_used").and_then(|c| c.as_i64()).unwrap_or(-1),
+                        v.get("context_limit")
+                            .and_then(|c| c.as_i64())
+                            .unwrap_or(-1),
+                    );
+                }
                 Some("Error") => {
                     eprintln!(
                         "\n[error] {}",
@@ -125,7 +141,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .ok()
             .and_then(|s| vterminal_lib::provider::Effort::parse(s.trim()))
             .unwrap_or(vterminal_lib::provider::Effort::Off),
-        max_iterations: 6,
+        // `SMOKE_MAX_STEPS=2` forces the step-limit pause without editing this
+        // file, which is the only way to exercise that path headlessly.
+        max_iterations: std::env::var("SMOKE_MAX_STEPS")
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(6),
+        // Generous on purpose: this example exists to exercise tool calling, not
+        // the context guard. `SMOKE_CONTEXT_TOKENS=6144` is enough to watch a
+        // ContextLimit pause instead — at Off effort the reserve is 5120, so the
+        // guard is live and trips once a round's input passes ~1k.
+        context_tokens: std::env::var("SMOKE_CONTEXT_TOKENS")
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(32_768),
         command_timeout_secs: 30,
         // The smoke run drives a local GGUF, which has no server-side web tool
         // for this to switch on anyway.

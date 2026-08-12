@@ -99,10 +99,45 @@ pub enum StreamEvent {
         prompt_tokens: u32,
         completion_tokens: u32,
     },
+    /// The loop stopped at a LIMIT, not because the model finished.
+    ///
+    /// Deliberately not `Error`: the transcript is intact and already resumable
+    /// (the cap path returns `Ok(messages)`, so `agent_start` resolves and the
+    /// frontend stores it as `modelTranscript`), which makes this a checkpoint
+    /// the user extends with one click rather than a failure. It also carries the
+    /// run's usage, because no `Done` fires on this path and the counters would
+    /// otherwise be silently lost.
+    Paused {
+        reason: PauseReason,
+        /// Steps actually taken.
+        steps: u32,
+        /// The user's configured `agent_max_iterations` — NEVER the
+        /// steer-extended budget, which is a number they cannot find in Settings.
+        limit: u32,
+        prompt_tokens: u32,
+        completion_tokens: u32,
+        /// Last round's input size and the model's window. Both 0 when the
+        /// provider reported no usage (see `PauseReason::ContextLimit`).
+        context_used: u32,
+        context_limit: u32,
+    },
     Cancelled,
     Error {
         message: String,
     },
+}
+
+/// Why a run paused. `snake_case` on the wire — unlike the outer `StreamEvent`,
+/// which is `tag = "type"` with no `rename_all` and so ships PascalCase verbatim.
+/// Both literals are pinned by `pause_reasons_serialize_as_snake_case`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PauseReason {
+    /// Spent the step budget.
+    StepLimit,
+    /// The next round would not fit the model's context window. Only ever
+    /// reachable when the provider reports usage — see `run.rs`.
+    ContextLimit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

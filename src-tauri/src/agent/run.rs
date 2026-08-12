@@ -2,7 +2,9 @@ use serde_json::json;
 use tauri::ipc::Channel;
 
 use super::exec;
-use super::{ApprovalDecision, ApprovalState, PtyExecState, Steer, SteerState, StreamEvent};
+use super::{
+    ApprovalDecision, ApprovalState, PauseReason, PtyExecState, Steer, SteerState, StreamEvent,
+};
 use crate::provider::{
     ChatMessage, ChatParams, FinishReason, Provider, ProviderError, ProviderEvent, Role, ToolCall,
     ToolChoiceMode, ToolDef,
@@ -29,6 +31,13 @@ pub struct AgentConfig {
     pub temperature: Option<f32>,
     pub effort: crate::provider::Effort,
     pub max_iterations: u32,
+    /// The active model's context window, used to pause before the provider
+    /// returns a context-length 400. 0 disables the guard.
+    ///
+    /// For a local model this is the CATALOG value, which the on-device load
+    /// clamp in `commands/models.rs` may have lowered for RAM — so the guard is
+    /// optimistic there. Still strictly better than a raw provider error.
+    pub context_tokens: u32,
     pub command_timeout_secs: u64,
     /// Whether this run may reach the web. Per-run rather than per-model:
     /// it folds the user's setting together with what the model can do, and
@@ -208,6 +217,19 @@ pub async fn run_agent(
     let mut budget = config.max_iterations;
     let hard_cap = config.max_iterations.saturating_mul(3);
 
+    // Constant across the run: effort never changes mid-run.
+    let round_max_tokens = round_max_tokens(config.effort);
+    let context_reserve = context_reserve(round_max_tokens);
+    // Last round's INPUT size — the live measure of how full the window is.
+    // Stays 0 when the provider reports no usage (some third-party
+    // OpenAI-compat shims), which is exactly what makes the guard below
+    // degrade to the step cap instead of misfiring on a zero.
+    let mut last_prompt_tokens: u32 = 0;
+    // Deliberately uninitialized and NOT an Option: every `break` out of the loop
+    // below is a pause and must say why, and the compiler enforces that. A
+    // defaulted value would let a future third break ship mislabelled.
+    let pause_reason: PauseReason;
+
     loop {
         if *cancel.borrow() {
             let _ = on_event.send(StreamEvent::Cancelled);
@@ -224,7 +246,7 @@ pub async fn run_agent(
         // clear the user's "queued" badge on a message the model never saw, so
         // the steer is deliberately left in the mailbox to surface as
         // undelivered.
-        let extended = (iteration + 1 + config.max_iterations).min(hard_cap);
+        let extended = extended_budget(iteration, config.max_iterations, hard_cap);
         if extended > iteration {
             let queued = steers.drain(&config.request_id);
             if !queued.is_empty() {
@@ -236,21 +258,22 @@ pub async fn run_agent(
         }
 
         if iteration >= budget {
+            pause_reason = PauseReason::StepLimit;
+            break;
+        }
+
+        // Stop one round SHORT of the window rather than letting the provider
+        // reject the request. Checked here, at the top, because the transcript is
+        // tool-pair-complete at this point and `last_prompt_tokens` already
+        // measures it.
+        if context_exhausted(last_prompt_tokens, config.context_tokens, context_reserve) {
+            pause_reason = PauseReason::ContextLimit;
             break;
         }
 
         let params = ChatParams {
             temperature: config.temperature,
-            // The cap includes reasoning tokens, so it scales with depth —
-            // a deep trace under a shallow cap truncates the answer, not the
-            // reasoning.
-            max_tokens: Some(match config.effort {
-                crate::provider::Effort::Off => 2048,
-                crate::provider::Effort::Low => 4096,
-                crate::provider::Effort::Medium => 6144,
-                crate::provider::Effort::High => 10240,
-                crate::provider::Effort::Max => 16384,
-            }),
+            max_tokens: Some(round_max_tokens),
             tool_choice: ToolChoiceMode::Auto,
             effort: config.effort,
             web_access: config.web_access,
@@ -266,6 +289,9 @@ pub async fn run_agent(
         // the max here under-reported a 10-round run by roughly 5x.
         total_usage.0 += usage.0;
         total_usage.1 += usage.1;
+        // Not a sum: this is the size of the window RIGHT NOW, which is what the
+        // context guard at the top of the loop compares against.
+        last_prompt_tokens = usage.0;
 
         if calls.is_empty() {
             // The round hit the token cap with nothing to show — usually the
@@ -551,10 +577,18 @@ pub async fn run_agent(
         iteration += 1;
     }
 
-    let _ = on_event.send(StreamEvent::Error {
-        message: format!(
-            "Stopped after {budget} steps (iteration limit). Increase it in settings if needed."
-        ),
+    let _ = on_event.send(StreamEvent::Paused {
+        reason: pause_reason,
+        steps: iteration,
+        // The CONFIGURED value, deliberately not `budget`: a steer extends the
+        // budget up to 3x, and reporting the extended number named a limit the
+        // user could not find in Settings. `steps` may therefore exceed `limit`,
+        // and the frontend explains the gap.
+        limit: config.max_iterations,
+        prompt_tokens: total_usage.0,
+        completion_tokens: total_usage.1,
+        context_used: last_prompt_tokens,
+        context_limit: config.context_tokens,
     });
     Ok(messages)
 }
@@ -625,6 +659,49 @@ fn network_refusal(count: u32) -> String {
     s
 }
 
+/// Output ceiling for one round. Includes reasoning tokens, so it scales with
+/// depth — a deep trace under a shallow cap truncates the answer, not the
+/// reasoning.
+fn round_max_tokens(effort: crate::provider::Effort) -> u32 {
+    match effort {
+        crate::provider::Effort::Off => 2048,
+        crate::provider::Effort::Low => 4096,
+        crate::provider::Effort::Medium => 6144,
+        crate::provider::Effort::High => 10240,
+        crate::provider::Effort::Max => 16384,
+    }
+}
+
+/// What the NEXT round will append to the transcript: one assistant turn at this
+/// effort's ceiling, plus one tool result capped at `exec::MODEL_TAIL` (8 KiB
+/// ≈ 2k tokens), plus slack. `history::normalize` runs once BEFORE the loop and
+/// never inside it, so the transcript only ever grows.
+fn context_reserve(round_max_tokens: u32) -> u32 {
+    round_max_tokens + 2_048 + 1_024
+}
+
+/// Whether the next round would not fit the model's context window.
+///
+/// False whenever the provider reported no usage (`last_prompt_tokens == 0`, as
+/// some third-party OpenAI-compat shims do) or the window is unknown or smaller
+/// than the reserve. In those cases the step cap becomes the only stop — the
+/// intended degradation, rather than misfiring on a zero or pausing a tiny window
+/// before it has done anything.
+fn context_exhausted(last_prompt_tokens: u32, context_tokens: u32, reserve: u32) -> bool {
+    last_prompt_tokens > 0
+        && context_tokens > reserve
+        && last_prompt_tokens.saturating_add(reserve) >= context_tokens
+}
+
+/// The budget a steer grants from `iteration`: a fresh full allowance from
+/// wherever the run has got to, never past the hard cap.
+fn extended_budget(iteration: u32, max_iterations: u32, hard_cap: u32) -> u32 {
+    iteration
+        .saturating_add(1)
+        .saturating_add(max_iterations)
+        .min(hard_cap)
+}
+
 fn tool_result(tool_call_id: &str, content: &str) -> ChatMessage {
     ChatMessage {
         role: Role::Tool,
@@ -658,6 +735,120 @@ mod tests {
             tool_call_id: None,
             images: None,
         }
+    }
+
+    // ---- pause limits ----------------------------------------------------
+    //
+    // The arithmetic below used to live inline in `run_agent`, where it could
+    // only be reached through a live provider — so none of it was covered.
+
+    #[test]
+    fn a_steer_grants_a_fresh_allowance_from_where_the_run_got_to() {
+        // max 10, steered at iteration 5 → 5 + 1 + 10.
+        assert_eq!(extended_budget(5, 10, 30), 16);
+        // Steered before the first round: the full allowance, plus the round the
+        // message itself buys.
+        assert_eq!(extended_budget(0, 10, 30), 11);
+    }
+
+    #[test]
+    fn the_hard_cap_bounds_every_extension() {
+        // Repeated steering cannot keep a run alive indefinitely: 3x and no more.
+        assert_eq!(extended_budget(25, 10, 30), 30);
+        assert_eq!(extended_budget(29, 10, 30), 30);
+        // Already past it — never negative, never wrapping.
+        assert_eq!(extended_budget(100, 10, 30), 30);
+    }
+
+    #[test]
+    fn a_steer_past_the_hard_cap_gains_no_ground() {
+        // `extended > iteration` is what gates draining the mailbox, so a steer
+        // arriving here is left queued and surfaces as undelivered rather than
+        // being silently marked delivered to a model that never saw it.
+        let hard_cap = 30;
+        assert!(extended_budget(30, 10, hard_cap) <= 30);
+    }
+
+    #[test]
+    fn the_context_guard_pauses_one_round_short_of_the_window() {
+        let reserve = context_reserve(round_max_tokens(crate::provider::Effort::Medium));
+        assert_eq!(reserve, 6144 + 2048 + 1024);
+        // A 32k window with 24k already used cannot fit another round.
+        assert!(context_exhausted(24_000, 32_768, reserve));
+        // Same window, early in the run: plenty of headroom.
+        assert!(!context_exhausted(4_000, 32_768, reserve));
+        // A 262k window is nowhere near the wall at 24k.
+        assert!(!context_exhausted(24_000, 262_144, reserve));
+    }
+
+    #[test]
+    fn the_context_guard_is_inert_when_the_provider_reports_no_usage() {
+        // Some third-party OpenAI-compat shims drop `stream_options.include_usage`,
+        // so `last_prompt_tokens` stays 0. That must degrade to the step cap, not
+        // pause instantly on a zero.
+        let reserve = context_reserve(round_max_tokens(crate::provider::Effort::Off));
+        assert!(!context_exhausted(0, 32_768, reserve));
+        assert!(!context_exhausted(0, 0, reserve));
+    }
+
+    #[test]
+    fn the_context_guard_is_inert_when_the_window_is_unknown_or_tiny() {
+        let reserve = context_reserve(round_max_tokens(crate::provider::Effort::Max));
+        // 0 means "no catalog value" — never pause on it.
+        assert!(!context_exhausted(50_000, 0, reserve));
+        // A window smaller than one round's reserve would otherwise pause before
+        // the run had done anything at all.
+        assert!(!context_exhausted(1, reserve, reserve));
+        assert!(!context_exhausted(1, reserve - 1, reserve));
+    }
+
+    #[test]
+    fn deeper_effort_reserves_more_context() {
+        // The reserve tracks the output ceiling, so a Max-effort run stops
+        // earlier — its next assistant turn can be 16k tokens on its own.
+        let off = context_reserve(round_max_tokens(crate::provider::Effort::Off));
+        let max = context_reserve(round_max_tokens(crate::provider::Effort::Max));
+        assert!(max > off);
+        assert!(context_exhausted(24_000, 40_000, max));
+        assert!(!context_exhausted(24_000, 40_000, off));
+    }
+
+    #[test]
+    fn pause_reasons_serialize_as_snake_case() {
+        // A serialized enum name IS a frontend type: `lib/types.ts` matches these
+        // literals. `rename_all` mangles multi-word variants, so pin both.
+        assert_eq!(
+            serde_json::to_string(&PauseReason::StepLimit).unwrap(),
+            "\"step_limit\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PauseReason::ContextLimit).unwrap(),
+            "\"context_limit\""
+        );
+    }
+
+    #[test]
+    fn the_paused_event_is_tagged_paused_and_reports_the_configured_limit() {
+        // `StreamEvent` is `tag = "type"` with NO `rename_all`, so the variant
+        // ships PascalCase verbatim — unlike `PauseReason` above.
+        let json = serde_json::to_value(StreamEvent::Paused {
+            reason: PauseReason::StepLimit,
+            // A steer extended this run to 30, but `limit` must stay the number
+            // the user can actually find in Settings.
+            steps: 30,
+            limit: 10,
+            prompt_tokens: 1234,
+            completion_tokens: 567,
+            context_used: 24_000,
+            context_limit: 32_768,
+        })
+        .unwrap();
+        assert_eq!(json["type"], "Paused");
+        assert_eq!(json["reason"], "step_limit");
+        assert_eq!(json["steps"], 30);
+        assert_eq!(json["limit"], 10);
+        assert_eq!(json["context_used"], 24_000);
+        assert_eq!(json["context_limit"], 32_768);
     }
 
     #[test]

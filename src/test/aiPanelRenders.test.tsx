@@ -443,4 +443,86 @@ describe("AiPanel renders", () => {
     render(<AiPanel sessionId="s1" />);
     expect(screen.getByRole("button", { name: /new chat/i })).toHaveProperty("disabled", false);
   });
+
+  /** A run stopped at the step limit is a checkpoint, not a failure: it offers a
+   *  real control and deliberately avoids the red error line. */
+  it("offers Continue on a paused run, without the error banner", () => {
+    useAppStore.setState({
+      sessions: [session("s1")],
+      aiStreams: {
+        s1: {
+          ...emptyAiStream(),
+          mode: "agent",
+          status: "paused",
+          pause: { reason: "step_limit", steps: 10, limit: 10 },
+        },
+      },
+    });
+    render(<AiPanel sessionId="s1" />);
+    expect(screen.getByRole("button", { name: "Continue" })).toBeTruthy();
+    expect(screen.getByText(/Paused after 10 steps/i)).toBeTruthy();
+    expect(screen.queryByText(/^Error:/)).toBeNull();
+  });
+
+  /** The reported limit must be one the user can find in Settings. A steer extends
+   *  the budget up to 3x, and naming only the extended number was the original bug. */
+  it("explains a step count that a mid-run steer pushed past the configured limit", () => {
+    useAppStore.setState({
+      sessions: [session("s1")],
+      aiStreams: {
+        s1: {
+          ...emptyAiStream(),
+          mode: "agent",
+          status: "paused",
+          pause: { reason: "step_limit", steps: 30, limit: 10 },
+        },
+      },
+    });
+    render(<AiPanel sessionId="s1" />);
+    expect(screen.getByText(/your limit is 10, extended because you sent a message mid-run/i))
+      .toBeTruthy();
+  });
+
+  /** THE safety property. Arming an auto mode narrows which COMMANDS need a click;
+   *  it must never resume a run that spent its budget, or the step cap becomes no
+   *  cap at all, unattended. Nothing polls the paused state and the `Paused` event
+   *  arm never reads `permissionMode` — this pins the outcome. */
+  it("never auto-continues a paused run, even with All armed", () => {
+    useAppStore.setState({
+      sessions: [session("s1")],
+      aiStreams: {
+        s1: {
+          ...emptyAiStream(),
+          mode: "agent",
+          status: "paused",
+          permissionMode: "auto_all",
+          pause: { reason: "step_limit", steps: 10, limit: 10 },
+        },
+      },
+    });
+    render(<AiPanel sessionId="s1" />);
+    // Still parked, still asking. The button is the only way forward.
+    expect(useAppStore.getState().aiStreams["s1"].status).toBe("paused");
+    expect(useAppStore.getState().aiStreams["s1"].pause).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Continue" })).toBeTruthy();
+  });
+
+  /** A context pause says so rather than blaming the step limit — the user's fix is
+   *  a new conversation or a smaller task, not a bigger number in Settings. */
+  it("names the context window when that is what ran out", () => {
+    useAppStore.setState({
+      sessions: [session("s1")],
+      aiStreams: {
+        s1: {
+          ...emptyAiStream(),
+          mode: "agent",
+          status: "paused",
+          pause: { reason: "context_limit", steps: 4, limit: 10 },
+        },
+      },
+    });
+    render(<AiPanel sessionId="s1" />);
+    expect(screen.getByText(/context window/i)).toBeTruthy();
+    expect(screen.queryByText(/Settings → Agent/)).toBeNull();
+  });
 });

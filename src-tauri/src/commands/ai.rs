@@ -8,6 +8,44 @@ use crate::provider::{ChatMessage, ChatParams, Provider, ToolChoiceMode};
 
 // One-shot streamed chats plus the agent loop, both over the `Provider` seam.
 
+/// The context window `agent::run`'s pause guard may trust, or 0 to disable it.
+///
+/// Deliberately NOT `model.context_tokens` verbatim, for two unrelated reasons:
+///
+/// * A LOCAL model is *loaded* at `min(max_context_tokens, catalog)` — the clamp
+///   in `commands::models` — so on the default model the catalog number is 8x the
+///   real ceiling (262_144 declared, 32_768 loaded). A guard reading the catalog
+///   value would trip at ~257k, long after `provider::local` has already refused
+///   the prompt outright, making it inert in exactly the configuration it exists
+///   for. This mirrors that clamp and must keep mirroring it.
+/// * A REMOTE model's value is ADVISORY: an unprobed server reports
+///   `ServerKind::default_context()`, a conservative guess (4096/8192) that is
+///   never 0 and often far below what the server really serves. Pausing on a
+///   guess would break agent mode against a 128k server — and at low effort the
+///   guess is *smaller* than one round's reserve, which inverted the guard so it
+///   fired on round 1 at Off/Low and switched off at Medium. So the guard stays
+///   off for remote servers and the step cap is the only limit there, preserving
+///   the promise in `models::remote` that a wrong value costs a wrong tooltip and
+///   never a failed request.
+fn agent_context_window(app: &tauri::AppHandle<Wry>, model: &CatalogModel) -> u32 {
+    context_window_for(
+        model.provider,
+        model.context_tokens,
+        // Same key and same default as the load clamp in `commands::models`.
+        crate::commands::settings::read_u32(app, "max_context_tokens", 32_768),
+    )
+}
+
+/// The pure half of `agent_context_window`, split out so the three arms can be
+/// pinned without an `AppHandle`.
+fn context_window_for(provider: ProviderId, catalog_tokens: u32, local_setting: u32) -> u32 {
+    match provider {
+        ProviderId::Remote => 0,
+        ProviderId::Local => local_setting.min(catalog_tokens),
+        _ => catalog_tokens,
+    }
+}
+
 /// The selected model, resolved into something we can actually talk to.
 pub struct Resolved {
     pub provider: Box<dyn Provider>,
@@ -598,7 +636,13 @@ pub async fn agent_start(
         cwd: context.cwd.clone(),
         temperature: crate::commands::settings::read_f64_opt(&app, "temperature").map(|t| t as f32),
         effort: resolved.effort,
-        max_iterations: crate::commands::settings::read_u32(&app, "agent_max_iterations", 10),
+        // Clamped on READ as well as on write: `save_settings` bounds this to
+        // 1..=100 but `read_u32` returns a hand-edited `settings.json` verbatim,
+        // and the value now feeds both the 3x steer hard cap and a number shown
+        // to the user.
+        max_iterations: crate::commands::settings::read_u32(&app, "agent_max_iterations", 10)
+            .clamp(1, 100),
+        context_tokens: agent_context_window(&app, resolved.model),
         command_timeout_secs: u64::from(crate::commands::settings::read_u32(
             &app,
             "agent_command_timeout_secs",
@@ -869,6 +913,69 @@ async fn run_chat(
             });
             Err(message)
         }
+    }
+}
+
+#[cfg(test)]
+mod context_window_tests {
+    use super::context_window_for;
+    use crate::models::catalog::{self, ProviderId};
+
+    #[test]
+    fn a_local_model_is_bounded_by_what_it_was_actually_loaded_with() {
+        // The anti-drift pin for `commands::models`' load clamp. The default
+        // model declares 262_144 but loads at the `max_context_tokens` setting,
+        // so trusting the catalog here made the guard inert 8x too late.
+        assert_eq!(
+            context_window_for(ProviderId::Local, 262_144, 32_768),
+            32_768
+        );
+        // Raising the setting past what the model advertises cannot exceed it —
+        // same `.min()` direction as the load clamp.
+        assert_eq!(
+            context_window_for(ProviderId::Local, 32_768, 262_144),
+            32_768
+        );
+    }
+
+    #[test]
+    fn the_default_model_reports_its_loaded_window_not_its_catalog_window() {
+        let default = catalog::find("local/qwen3.5-9b").expect("default model in catalog");
+        assert_eq!(default.provider, ProviderId::Local);
+        assert!(
+            context_window_for(default.provider, default.context_tokens, 32_768)
+                < default.context_tokens,
+            "the catalog value must not reach the guard for a clamped local model"
+        );
+    }
+
+    #[test]
+    fn a_remote_server_disables_the_guard_entirely() {
+        // A configured server's context_tokens is ADVISORY — an unprobed one
+        // reports ServerKind::default_context(), 4096 or 8192. Those are guesses,
+        // never 0, and smaller than one round's reserve at some effort rungs, so
+        // trusting them paused every run at Off/Low while switching the guard off
+        // at Medium. 0 means "no guard"; the step cap is the only limit there.
+        assert_eq!(context_window_for(ProviderId::Remote, 8_192, 32_768), 0);
+        assert_eq!(context_window_for(ProviderId::Remote, 4_096, 32_768), 0);
+        assert_eq!(context_window_for(ProviderId::Remote, 128_000, 32_768), 0);
+    }
+
+    #[test]
+    fn a_cloud_model_is_trusted_verbatim() {
+        // Nothing clamps a cloud window locally, and the vendor enforces it.
+        assert_eq!(
+            context_window_for(ProviderId::Anthropic, 200_000, 32_768),
+            200_000
+        );
+        assert_eq!(
+            context_window_for(ProviderId::OpenAi, 400_000, 32_768),
+            400_000
+        );
+        assert_eq!(
+            context_window_for(ProviderId::Mistral, 131_072, 32_768),
+            131_072
+        );
     }
 }
 

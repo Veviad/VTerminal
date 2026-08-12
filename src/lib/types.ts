@@ -151,6 +151,25 @@ export type StreamEvent =
    *  a SteerDelivered is one the model never saw. */
   | { type: "SteerDelivered"; ids: string[] }
   | { type: "Done"; prompt_tokens: number; completion_tokens: number }
+  /** The loop stopped at a guard rail instead of finishing. NOT an error: the
+   *  transcript is intact and resumable, so this renders as a calm banner with a
+   *  Continue button. Note the two casing conventions — `StreamEvent` is tagged
+   *  with no `rename_all` so the tag is PascalCase, while `reason` comes from
+   *  `PauseReason`, which is snake_case. Both are pinned by Rust tests. */
+  | {
+      type: "Paused";
+      reason: "step_limit" | "context_limit";
+      /** May EXCEED `limit`: a mid-run steer extends the budget up to 3x. */
+      steps: number;
+      /** The value in Settings → Agent, never the extended budget. */
+      limit: number;
+      prompt_tokens: number;
+      completion_tokens: number;
+      /** 0 when the guard was off (remote servers, or a provider that reported no
+       *  usage) — never render this as the model's window. */
+      context_used: number;
+      context_limit: number;
+    }
   | { type: "Cancelled" }
   | { type: "Error"; message: string };
 

@@ -260,7 +260,13 @@ pub fn save_settings(
         // `exec::MODEL_TAIL` (8 KiB), and the in-run transcript is never trimmed
         // (`history::normalize` only guards STORED history). So a 100-step run
         // is reachable on a 200k cloud model and will die of context on a 32k
-        // local one — long before it spends its steps.
+        // local one — long before it spends its steps. Which is why raising this
+        // ceiling would be cosmetic, and why `agent::run` pauses on the context
+        // window too: whichever limit binds first, the run stops resumably rather
+        // than on a provider 400.
+        //
+        // Also clamped on READ (`commands::ai`), since a hand-edited settings.json
+        // reaches `read_u32` unfiltered.
         store.set("agent_max_iterations", json!(v.clamp(1, 100)));
     }
     if let Some(v) = agent_command_timeout_secs {

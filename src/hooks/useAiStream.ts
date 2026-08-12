@@ -294,6 +294,30 @@ export function useAiStream() {
     }
   }, []);
 
+  /** Resume a run that paused at a guard rail, with a fresh step budget.
+   *
+   *  MUST stay a human click, and structurally is one: nothing polls the paused
+   *  state, the `Paused` arm of `dispatchPanelEvent` never reads `permissionMode`,
+   *  and this is the only caller. Auto-firing it under an armed auto mode would
+   *  turn the step cap into no cap at all, unattended — the single property the
+   *  pause exists to protect.
+   *
+   *  Resumption needs no new backend plumbing: the pause path returns the
+   *  transcript normally, so `startAgent` picks it up as `history` and the backend
+   *  starts a fresh budget from iteration 0. The continuation goes in as a real
+   *  user turn because the wire requires one (`history::normalize`'s
+   *  post-condition is that the last message is a user goal) and because it keeps
+   *  the transcript honest about why the run carried on. */
+  const continueRun = useCallback(
+    async (sessionId: string) => {
+      // Idempotent against a double click and against a button left over from a
+      // pause that has already been resumed.
+      if (useAppStore.getState().aiStreams[sessionId]?.status !== "paused") return;
+      await startAgent(sessionId, S.aiPanel.continueGoal);
+    },
+    [startAgent],
+  );
+
   /** Redirect an agent run that is already going, without cancelling it.
    *
    *  The message is QUEUED, not injected: the backend appends it at the next
@@ -353,7 +377,16 @@ export function useAiStream() {
     }
   }, []);
 
-  return { generateCommand, explainBlock, ask, startAgent, steer, respondToProposal, cancel };
+  return {
+    generateCommand,
+    explainBlock,
+    ask,
+    startAgent,
+    continueRun,
+    steer,
+    respondToProposal,
+    cancel,
+  };
 }
 
 function isSessionBusy(sessionId: string): boolean {
@@ -462,6 +495,21 @@ function dispatchPanelEvent(sessionId: string, requestId: string, e: StreamEvent
       // a tab after. Debounced and heavily gated (see lib/sessionNaming.ts) —
       // and deliberately after finishAiStream, so the session reads as idle and
       // the naming call cannot queue behind the answer the user is waiting for.
+      nameSession(sessionId);
+      markTranscriptDirty(sessionId);
+      break;
+    case "Paused":
+      // Carries its own usage rather than being preceded by a Done: the Done arm
+      // above sets status "idle" and would settle the run twice.
+      store.pauseAiStream(
+        sessionId,
+        { reason: e.reason, steps: e.steps, limit: e.limit },
+        { prompt: e.prompt_tokens, completion: e.completion_tokens },
+      );
+      // Named and archived like a completed exchange, because that is what it is
+      // from the outside: real work happened in the terminal, and the user may
+      // never click Continue. `canName` auto-names at most once per session, so
+      // resuming will not spend a second inference on another title.
       nameSession(sessionId);
       markTranscriptDirty(sessionId);
       break;

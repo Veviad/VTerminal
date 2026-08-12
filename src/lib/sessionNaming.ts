@@ -13,7 +13,7 @@
  *    cancel the other.
  */
 import * as api from "./tauri";
-import { useAppStore } from "../stores/appStore";
+import { useAppStore, type AiStreamState } from "../stores/appStore";
 import { cwdLabel } from "./sessionTitle";
 
 /** Enough context to name a session without shipping a transcript. */
@@ -70,6 +70,17 @@ function buildDigest(sessionId: string): string | null {
   return digest.trim() ? digest.slice(0, MAX_DIGEST_CHARS) : null;
 }
 
+/** Whether a stream status leaves the session free for a cosmetic naming call.
+ *
+ *  "paused" counts as RESTING, not busy: a run parked at the step limit may sit
+ *  there indefinitely, and treating it as busy left such a tab unnamed forever.
+ *  The states that do block are the ones where the user is waiting on their own
+ *  generation, which must not queue behind a title.
+ */
+export function statusAllowsNaming(status: AiStreamState["status"] | undefined): boolean {
+  return !status || status === "idle" || status === "error" || status === "paused";
+}
+
 function canName(sessionId: string, force: boolean): boolean {
   const state = useAppStore.getState();
   const session = state.sessions.find((s) => s.id === sessionId);
@@ -83,8 +94,7 @@ function canName(sessionId: string, force: boolean): boolean {
   if (!state.aiReady()) return false;
   if (inFlight.has(sessionId)) return false;
   // Don't make the user's own generation wait behind a cosmetic one.
-  const status = state.aiStreams[sessionId]?.status;
-  if (status && status !== "idle" && status !== "error") return false;
+  if (!statusAllowsNaming(state.aiStreams[sessionId]?.status)) return false;
   if (force) return true;
   if (autoNamed.has(sessionId) || session.aiTitle) return false;
   const commands = state.sessionUi[sessionId]?.blocks.filter((b) => b.command.trim()).length ?? 0;
