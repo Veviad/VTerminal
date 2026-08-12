@@ -43,9 +43,16 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/configure-pages@v5
-
-      - uses: actions/upload-pages-artifact@v4
+      # No `actions/configure-pages` step on purpose. It exists to enable Pages
+      # and to emit base_path/base_url for generators that bake the base URL in
+      # at build time — this page has no build step and only relative paths (the
+      # check above enforces that), so nothing consumed its outputs. It also
+      # calls GET /repos/{owner}/{repo}/pages, which needs the `pages`
+      # permission; this job has only `contents: read`, so it failed the first
+      # deploy with "Resource not accessible by integration". Dropping it is the
+      # fix rather than widening the token — the build job has no reason to hold
+      # write access to Pages when only `deploy` publishes.
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: docs
 
@@ -62,5 +69,8 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      # v5 over v4 purely for the runtime: v4 declares `runs.using: node20`,
+      # which the runners now force onto Node 24 and warn about on every run.
+      # v5's changelog is that bump and nothing else.
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
