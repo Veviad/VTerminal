@@ -5,13 +5,15 @@ use rusqlite::Connection;
 // instead. (Learned the hard way: extending v2 after it had already applied
 // left a database at version 2 permanently missing the tables added later.)
 pub fn run(conn: &Connection) -> Result<(), String> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);",
-    )
-    .map_err(|e| e.to_string())?;
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);")
+        .map_err(|e| e.to_string())?;
 
     let version: i64 = conn
-        .query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |r| r.get(0))
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |r| r.get(0),
+        )
         .map_err(|e| e.to_string())?;
 
     if version < 1 {
@@ -356,8 +358,12 @@ mod tests {
     }
 
     fn version(conn: &Connection) -> i64 {
-        conn.query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |r| r.get(0))
-            .unwrap()
+        conn.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -399,8 +405,10 @@ mod tests {
         .unwrap();
 
         let count = |conn: &Connection| -> i64 {
-            conn.query_row("SELECT COUNT(*) FROM archived_attachments", [], |r| r.get(0))
-                .unwrap()
+            conn.query_row("SELECT COUNT(*) FROM archived_attachments", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
         };
         assert_eq!(count(&conn), 1);
 
@@ -490,8 +498,14 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert!(tables.contains(&"workspace_state".to_string()), "got {tables:?}");
-        assert!(tables.contains(&"session_snapshots".to_string()), "got {tables:?}");
+        assert!(
+            tables.contains(&"workspace_state".to_string()),
+            "got {tables:?}"
+        );
+        assert!(
+            tables.contains(&"session_snapshots".to_string()),
+            "got {tables:?}"
+        );
         // And the saved host survived the upgrade.
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM ssh_hosts", [], |r| r.get(0))
@@ -530,8 +544,14 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert!(tables.contains(&"archived_sessions".to_string()), "got {tables:?}");
-        assert!(tables.contains(&"archived_messages".to_string()), "got {tables:?}");
+        assert!(
+            tables.contains(&"archived_sessions".to_string()),
+            "got {tables:?}"
+        );
+        assert!(
+            tables.contains(&"archived_messages".to_string()),
+            "got {tables:?}"
+        );
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM session_snapshots", [], |r| r.get(0))
             .unwrap();
@@ -551,10 +571,24 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert!(!tables.contains(&"conversations".to_string()), "got {tables:?}");
-        assert!(!tables.contains(&"ai_messages".to_string()), "got {tables:?}");
-        for kept in ["command_history", "ssh_hosts", "session_snapshots", "workspace_state"] {
-            assert!(tables.contains(&kept.to_string()), "{kept} missing, got {tables:?}");
+        assert!(
+            !tables.contains(&"conversations".to_string()),
+            "got {tables:?}"
+        );
+        assert!(
+            !tables.contains(&"ai_messages".to_string()),
+            "got {tables:?}"
+        );
+        for kept in [
+            "command_history",
+            "ssh_hosts",
+            "session_snapshots",
+            "workspace_state",
+        ] {
+            assert!(
+                tables.contains(&kept.to_string()),
+                "{kept} missing, got {tables:?}"
+            );
         }
     }
 
@@ -571,7 +605,10 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert!(indices.contains(&"idx_history_session".to_string()), "got {indices:?}");
+        assert!(
+            indices.contains(&"idx_history_session".to_string()),
+            "got {indices:?}"
+        );
     }
 
     #[test]

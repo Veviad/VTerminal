@@ -29,8 +29,8 @@ use tauri::ipc::Channel;
 
 use super::chat_template::ChatTemplate;
 use super::{
-    ChatMessage, ChatParams, Effort, FinishReason, Provider, ProviderError, ProviderEvent, ToolCall,
-    ToolDef,
+    ChatMessage, ChatParams, Effort, FinishReason, Provider, ProviderError, ProviderEvent,
+    ToolCall, ToolDef,
 };
 use crate::models::catalog::LocalFamily;
 use crate::models::LoadEvent;
@@ -177,7 +177,9 @@ pub struct ReadyModel {
 pub(crate) fn load_template(model: &LlamaModel) -> Result<ChatTemplate, String> {
     let source = model
         .chat_template(None)
-        .map_err(|e| format!("this GGUF has no embedded chat template ({e}) — it cannot be used for chat"))?
+        .map_err(|e| {
+            format!("this GGUF has no embedded chat template ({e}) — it cannot be used for chat")
+        })?
         .to_string()
         .map_err(|e| format!("chat template is not valid UTF-8: {e}"))?;
 
@@ -651,9 +653,14 @@ fn parse_qwen_xml_call(payload: &str) -> Option<(String, String)> {
         let body = &after[gt + 1..];
         // An unterminated parameter means the call was truncated; keep what
         // parsed rather than dropping an otherwise usable call.
-        let Some(end) = body.find("</parameter>") else { break };
+        let Some(end) = body.find("</parameter>") else {
+            break;
+        };
         if !key.is_empty() {
-            args.insert(key, Value::String(strip_one_newline(&body[..end]).to_string()));
+            args.insert(
+                key,
+                Value::String(strip_one_newline(&body[..end]).to_string()),
+            );
         }
         cursor = &body[end + "</parameter>".len()..];
     }
@@ -665,8 +672,13 @@ fn parse_qwen_xml_call(payload: &str) -> Option<(String, String)> {
 /// newline on each side belongs to the envelope. Interior newlines are part of
 /// a multi-line command and must survive.
 fn strip_one_newline(s: &str) -> &str {
-    let s = s.strip_prefix("\r\n").or_else(|| s.strip_prefix('\n')).unwrap_or(s);
-    s.strip_suffix("\r\n").or_else(|| s.strip_suffix('\n')).unwrap_or(s)
+    let s = s
+        .strip_prefix("\r\n")
+        .or_else(|| s.strip_prefix('\n'))
+        .unwrap_or(s);
+    s.strip_suffix("\r\n")
+        .or_else(|| s.strip_suffix('\n'))
+        .unwrap_or(s)
 }
 
 /// Gemma 4 does not emit JSON. Its own template defines a brace DSL:
@@ -730,7 +742,10 @@ impl<'a> GemmaParser<'a> {
                 while self.i < self.s.len() && self.s[self.i] != b':' {
                     self.i += 1;
                 }
-                std::str::from_utf8(&self.s[start..self.i]).ok()?.trim().to_string()
+                std::str::from_utf8(&self.s[start..self.i])
+                    .ok()?
+                    .trim()
+                    .to_string()
             };
             self.skip_ws();
             if self.i >= self.s.len() || self.s[self.i] != b':' {
@@ -998,7 +1013,12 @@ fn generate(
         .unwrap_or(0);
     let mut chain = Vec::new();
     if (p.sampling.penalty_repeat - 1.0).abs() > f32::EPSILON {
-        chain.push(LlamaSampler::penalties(64, p.sampling.penalty_repeat, 0.0, 0.0));
+        chain.push(LlamaSampler::penalties(
+            64,
+            p.sampling.penalty_repeat,
+            0.0,
+            0.0,
+        ));
     }
     chain.extend([
         LlamaSampler::top_k(p.sampling.top_k),
@@ -1118,7 +1138,10 @@ mod tests {
         // Gemma 4 does not emit <think>; parsing it with Qwen's markers would
         // leak the whole reasoning trace to the user as prose.
         let mut s = OutputSplitter::new(LocalFamily::Gemma, false);
-        let (text, think) = drain(&mut s, &["<|channel>thought", "weigh it", "<channel|>", "done"]);
+        let (text, think) = drain(
+            &mut s,
+            &["<|channel>thought", "weigh it", "<channel|>", "done"],
+        );
         assert_eq!(think, "weigh it");
         assert_eq!(text, "done");
     }
@@ -1258,10 +1281,12 @@ mod tests {
     fn qwen_still_accepts_the_qwen3_json_body() {
         // The catalog spans both generations; an older download must keep
         // working after the XML fallback was added.
-        let (name, args) =
-            parse_tool_call(LocalFamily::Qwen, r#"{"name":"finish","arguments":{"summary":"ok"}}"#)
-                .map(|c| (c.name, c.arguments))
-                .unwrap();
+        let (name, args) = parse_tool_call(
+            LocalFamily::Qwen,
+            r#"{"name":"finish","arguments":{"summary":"ok"}}"#,
+        )
+        .map(|c| (c.name, c.arguments))
+        .unwrap();
         assert_eq!(name, "finish");
         assert_eq!(args, r#"{"summary":"ok"}"#);
     }
@@ -1290,9 +1315,10 @@ mod tests {
 
     #[test]
     fn gemma_dsl_handles_non_string_scalars_and_nesting() {
-        let (name, args) =
-            parse_gemma_call(r#"call:x{n:3,ok:true,missing:null,inner:{<|"|>k<|"|>:<|"|>v<|"|>},list:[1,2]}"#)
-                .unwrap();
+        let (name, args) = parse_gemma_call(
+            r#"call:x{n:3,ok:true,missing:null,inner:{<|"|>k<|"|>:<|"|>v<|"|>},list:[1,2]}"#,
+        )
+        .unwrap();
         assert_eq!(name, "x");
         let v: serde_json::Value = serde_json::from_str(&args).unwrap();
         assert_eq!(v["n"], 3);

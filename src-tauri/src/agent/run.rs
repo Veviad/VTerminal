@@ -130,7 +130,10 @@ async fn one_round(
                         let _ = on_event.send(StreamEvent::ThinkingDelta { content: delta });
                     }
                     ProviderEvent::ToolCalls(calls) => collected_calls.extend(calls),
-                    ProviderEvent::Usage { prompt_tokens, completion_tokens } => {
+                    ProviderEvent::Usage {
+                        prompt_tokens,
+                        completion_tokens,
+                    } => {
                         usage = (prompt_tokens, completion_tokens);
                     }
                     ProviderEvent::Done { finish_reason } => finish = finish_reason,
@@ -252,18 +255,13 @@ pub async fn run_agent(
             effort: config.effort,
             web_access: config.web_access,
         };
-        let (calls, text, usage, finish) = one_round(
-            provider,
-            messages.clone(),
-            params,
-            cancel.clone(),
-            on_event,
-        )
-        .await
-        .map_err(|e| match e {
-            ProviderError::Cancelled => "cancelled".to_string(),
-            other => other.to_string(),
-        })?;
+        let (calls, text, usage, finish) =
+            one_round(provider, messages.clone(), params, cancel.clone(), on_event)
+                .await
+                .map_err(|e| match e {
+                    ProviderError::Cancelled => "cancelled".to_string(),
+                    other => other.to_string(),
+                })?;
         // Each round is billed its own input tokens, so this is a sum. Taking
         // the max here under-reported a 10-round run by roughly 5x.
         total_usage.0 += usage.0;
@@ -350,11 +348,18 @@ pub async fn run_agent(
                     return Ok(messages);
                 }
                 "run_command" => {
-                    let parsed: Result<serde_json::Value, _> = serde_json::from_str(&call.arguments);
+                    let parsed: Result<serde_json::Value, _> =
+                        serde_json::from_str(&call.arguments);
                     let (command, explanation) = match &parsed {
                         Ok(v) => (
-                            v.get("command").and_then(|c| c.as_str()).unwrap_or("").to_string(),
-                            v.get("explanation").and_then(|c| c.as_str()).unwrap_or("").to_string(),
+                            v.get("command")
+                                .and_then(|c| c.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            v.get("explanation")
+                                .and_then(|c| c.as_str())
+                                .unwrap_or("")
+                                .to_string(),
                         ),
                         Err(_) => (String::new(), String::new()),
                     };
@@ -450,7 +455,9 @@ pub async fn run_agent(
                             // saved-host connects. Note the edit box is only
                             // reachable for a command that already passed the
                             // network gate — a refused one never draws a card.
-                            let edited = response.edited_command.filter(|c| c.trim() != command.trim());
+                            let edited = response
+                                .edited_command
+                                .filter(|c| c.trim() != command.trim());
                             let was_edited = edited.is_some();
                             let final_command = edited.unwrap_or(command);
                             let result = match &config.exec_target {
@@ -506,7 +513,11 @@ pub async fn run_agent(
                                         &format!(
                                             "{edit_note}exit code: {}\noutput (tail):\n{}",
                                             r.exit_code,
-                                            if r.output_tail.is_empty() { "(no output)" } else { &r.output_tail }
+                                            if r.output_tail.is_empty() {
+                                                "(no output)"
+                                            } else {
+                                                &r.output_tail
+                                            }
                                         ),
                                     ));
                                 }

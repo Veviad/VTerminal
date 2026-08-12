@@ -22,8 +22,7 @@ pub fn workspace_restore(
     db: State<'_, DbState>,
 ) -> Result<workspace::WorkspaceRestore, String> {
     let env_disabled = std::env::var(DISABLE_ENV).is_ok_and(|v| !v.is_empty() && v != "0");
-    let enabled =
-        !env_disabled && settings::read_bool(&app, "restore_sessions_on_start", true);
+    let enabled = !env_disabled && settings::read_bool(&app, "restore_sessions_on_start", true);
     let mut conn = db.0.lock().map_err(|_| "db poisoned")?;
     workspace::restore(
         &mut conn,

@@ -61,7 +61,11 @@ pub fn pty_spawn(
 }
 
 #[tauri::command]
-pub fn pty_write(state: State<'_, PtyManager>, session_id: String, data: String) -> Result<(), String> {
+pub fn pty_write(
+    state: State<'_, PtyManager>,
+    session_id: String,
+    data: String,
+) -> Result<(), String> {
     let sessions = state.sessions.lock().map_err(|_| "pty state poisoned")?;
     let session = sessions
         .get(&session_id)

@@ -35,7 +35,10 @@ mod tests {
 
     #[test]
     fn parses_common_quants() {
-        assert_eq!(parse_quant("Qwen3.5-9B-Q4_K_M.gguf").as_deref(), Some("Q4_K_M"));
+        assert_eq!(
+            parse_quant("Qwen3.5-9B-Q4_K_M.gguf").as_deref(),
+            Some("Q4_K_M")
+        );
         assert_eq!(
             parse_quant("Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf").as_deref(),
             Some("Q4_K_XL")

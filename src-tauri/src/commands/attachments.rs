@@ -38,7 +38,9 @@ fn extension_for(media_type: &str) -> Option<&'static str> {
 fn safe_component(value: &str, what: &str) -> Result<String, String> {
     let ok = !value.is_empty()
         && value.len() <= 128
-        && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
     if ok {
         Ok(value.to_string())
     } else {
@@ -114,7 +116,8 @@ pub async fn attachment_read(
         std::fs::canonicalize(Path::new(&path)).map_err(|_| "attachment is gone".to_string())?;
     // canonicalize the root too, or a symlinked app-data dir fails the compare on
     // macOS (/var vs /private/var).
-    let canonical_root = std::fs::canonicalize(&root).map_err(|_| "no attachments yet".to_string())?;
+    let canonical_root =
+        std::fs::canonicalize(&root).map_err(|_| "no attachments yet".to_string())?;
     if !canonical.starts_with(&canonical_root) {
         return Err("attachment is outside the attachments directory".into());
     }
@@ -154,7 +157,10 @@ mod tests {
         assert!(safe_component("att-abc-123", "id").is_ok());
         assert!(safe_component("s1", "id").is_ok());
         for bad in ["../etc", "a/b", "..", "", "a b", "a.b", "a\0b"] {
-            assert!(safe_component(bad, "id").is_err(), "{bad:?} should be rejected");
+            assert!(
+                safe_component(bad, "id").is_err(),
+                "{bad:?} should be rejected"
+            );
         }
     }
 

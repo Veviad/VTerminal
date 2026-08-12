@@ -353,7 +353,8 @@ impl Provider for AnthropicProvider {
                         + usage("cache_read_input_tokens");
                 }
                 "content_block_start" => {
-                    if v.pointer("/content_block/type").and_then(Value::as_str) == Some("tool_use") {
+                    if v.pointer("/content_block/type").and_then(Value::as_str) == Some("tool_use")
+                    {
                         let idx = v["index"].as_u64().unwrap_or(0);
                         pending.insert(
                             idx,
@@ -387,7 +388,9 @@ impl Provider for AnthropicProvider {
                         "input_json_delta" => {
                             let idx = v["index"].as_u64().unwrap_or(0);
                             if let Some(entry) = pending.get_mut(&idx) {
-                                entry.2.push_str(delta["partial_json"].as_str().unwrap_or_default());
+                                entry
+                                    .2
+                                    .push_str(delta["partial_json"].as_str().unwrap_or_default());
                             }
                         }
                         _ => {}
@@ -419,7 +422,8 @@ impl Provider for AnthropicProvider {
                     }
                 }
                 "error" => {
-                    let msg = v.pointer("/error/message")
+                    let msg = v
+                        .pointer("/error/message")
                         .and_then(Value::as_str)
                         .unwrap_or("stream error");
                     return Err(ProviderError::Http(msg.to_string()));
@@ -522,12 +526,19 @@ mod tests {
 
     #[test]
     fn web_fetch_rides_the_same_tools_array_as_client_tools() {
-        let (wire, _) = build_tools(&[client_tool()], &params(true, ToolChoiceMode::Auto), opus())
-            .expect("tools present");
+        let (wire, _) = build_tools(
+            &[client_tool()],
+            &params(true, ToolChoiceMode::Auto),
+            opus(),
+        )
+        .expect("tools present");
         assert_eq!(wire.len(), 2);
         // A server tool is typed and schemaless — sending it with an
         // `input_schema` (or as a bare function) is a 400.
-        let web = wire.iter().find(|t| t["type"] == "web_fetch_20250910").unwrap();
+        let web = wire
+            .iter()
+            .find(|t| t["type"] == "web_fetch_20250910")
+            .unwrap();
         assert_eq!(web["name"], "web_fetch");
         assert!(web.get("input_schema").is_none());
         assert!(web.get("description").is_none());
@@ -544,11 +555,18 @@ mod tests {
         let (wire, choice) = build_tools(&[], &params(true, ToolChoiceMode::None), opus())
             .expect("web tool alone still counts as tools");
         assert_eq!(wire.len(), 1);
-        assert_eq!(choice, None, "must not send tool_choice:none with only a server tool");
+        assert_eq!(
+            choice, None,
+            "must not send tool_choice:none with only a server tool"
+        );
 
         // With real client tools, `none` still means none.
-        let (_, choice) = build_tools(&[client_tool()], &params(true, ToolChoiceMode::None), opus())
-            .unwrap();
+        let (_, choice) = build_tools(
+            &[client_tool()],
+            &params(true, ToolChoiceMode::None),
+            opus(),
+        )
+        .unwrap();
         assert_eq!(choice, Some(json!({"type": "none"})));
     }
 
@@ -557,15 +575,23 @@ mod tests {
     /// dropping it is a 400 on the next round.
     #[test]
     fn parallel_tool_use_is_disabled_when_web_and_client_tools_coexist() {
-        let (_, choice) = build_tools(&[client_tool()], &params(true, ToolChoiceMode::Auto), opus())
-            .unwrap();
+        let (_, choice) = build_tools(
+            &[client_tool()],
+            &params(true, ToolChoiceMode::Auto),
+            opus(),
+        )
+        .unwrap();
         assert_eq!(
             choice,
             Some(json!({"type": "auto", "disable_parallel_tool_use": true}))
         );
         // No web tool: nothing to serialize, so leave tool_choice implicit.
-        let (_, choice) =
-            build_tools(&[client_tool()], &params(false, ToolChoiceMode::Auto), opus()).unwrap();
+        let (_, choice) = build_tools(
+            &[client_tool()],
+            &params(false, ToolChoiceMode::Auto),
+            opus(),
+        )
+        .unwrap();
         assert_eq!(choice, None);
     }
 
@@ -637,8 +663,14 @@ mod tests {
         let (_, msgs) = build_messages(vec![ChatMessage::user_with_images(
             "what is this",
             vec![
-                crate::provider::ImagePart { media_type: "image/png".into(), data: "AAAA".into() },
-                crate::provider::ImagePart { media_type: "image/jpeg".into(), data: "BBBB".into() },
+                crate::provider::ImagePart {
+                    media_type: "image/png".into(),
+                    data: "AAAA".into(),
+                },
+                crate::provider::ImagePart {
+                    media_type: "image/jpeg".into(),
+                    data: "BBBB".into(),
+                },
             ],
         )]);
 

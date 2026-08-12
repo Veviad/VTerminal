@@ -72,7 +72,9 @@ async fn run_inner(
     cancel: &mut tokio::sync::oneshot::Receiver<()>,
 ) -> Result<Outcome, String> {
     if super::hf::is_multipart(&req.filename) {
-        return Err("Multi-part GGUF files are not supported yet — pick a single-file quant.".into());
+        return Err(
+            "Multi-part GGUF files are not supported yet — pick a single-file quant.".into(),
+        );
     }
 
     let url = format!(
@@ -126,7 +128,15 @@ async fn run_inner(
         // but before the rename) is already complete — finalize it directly; a
         // ranged GET from EOF would get HTTP 416 and wedge every retry.
         if resume_from == total {
-            return finalize(req, on_event, &part_path, &meta_path, &final_path, total_size).await;
+            return finalize(
+                req,
+                on_event,
+                &part_path,
+                &meta_path,
+                &final_path,
+                total_size,
+            )
+            .await;
         }
         // Oversized part = corrupt; start over.
         if resume_from > total {
@@ -153,7 +163,10 @@ async fn run_inner(
     if resume_from > 0 {
         request = request.header(reqwest::header::RANGE, format!("bytes={resume_from}-"));
     }
-    let resp = request.send().await.map_err(|e| format!("GET failed: {e}"))?;
+    let resp = request
+        .send()
+        .await
+        .map_err(|e| format!("GET failed: {e}"))?;
     let status = resp.status();
     if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
         // Stale/corrupt .part — clean up so the NEXT attempt starts fresh
@@ -228,7 +241,15 @@ async fn run_inner(
     file.flush().await.map_err(|e| format!("flush: {e}"))?;
     drop(file);
 
-    finalize(req, on_event, &part_path, &meta_path, &final_path, total_size).await
+    finalize(
+        req,
+        on_event,
+        &part_path,
+        &meta_path,
+        &final_path,
+        total_size,
+    )
+    .await
 }
 
 /// Verify the .part against the expected size, atomically rename it into
@@ -285,7 +306,6 @@ pub fn delete_model_files(models_dir: &Path, model: &registry::LocalModel) -> Re
     Ok(())
 }
 
-
 /// Presents a MULTI-FILE download as one progress stream.
 ///
 /// A vision model is weights + an mmproj projector, but the frontend's
@@ -304,7 +324,11 @@ pub struct RebasedSink<'a> {
 
 impl<'a> RebasedSink<'a> {
     pub fn new(inner: &'a dyn EventSink, offset: u64, total: u64) -> Self {
-        Self { inner, offset, total }
+        Self {
+            inner,
+            offset,
+            total,
+        }
     }
 }
 
@@ -316,7 +340,11 @@ impl EventSink for RebasedSink<'_> {
             // would make the row appear twice and then vanish before the weights
             // had begun.
             DownloadEvent::Started { .. } | DownloadEvent::Completed { .. } => {}
-            DownloadEvent::Progress { downloaded, bytes_per_sec, .. } => {
+            DownloadEvent::Progress {
+                downloaded,
+                bytes_per_sec,
+                ..
+            } => {
                 self.inner.emit(DownloadEvent::Progress {
                     downloaded: self.offset + downloaded,
                     total_bytes: Some(self.total),
@@ -353,9 +381,11 @@ mod tests {
                 .unwrap()
                 .iter()
                 .filter_map(|e| match e {
-                    DownloadEvent::Progress { downloaded, total_bytes, .. } => {
-                        Some((*downloaded, *total_bytes))
-                    }
+                    DownloadEvent::Progress {
+                        downloaded,
+                        total_bytes,
+                        ..
+                    } => Some((*downloaded, *total_bytes)),
                     _ => None,
                 })
                 .collect()
@@ -378,7 +408,11 @@ mod tests {
     }
 
     fn progress(downloaded: u64, total: Option<u64>) -> DownloadEvent {
-        DownloadEvent::Progress { downloaded, total_bytes: total, bytes_per_sec: 1_000 }
+        DownloadEvent::Progress {
+            downloaded,
+            total_bytes: total,
+            bytes_per_sec: 1_000,
+        }
     }
 
     /// The bookkeeping most likely to be off by one file's size: two files must
@@ -401,7 +435,10 @@ mod tests {
             });
             sink.emit(progress(450, Some(MMPROJ)));
             sink.emit(progress(MMPROJ, Some(MMPROJ)));
-            sink.emit(DownloadEvent::Completed { model_id: "m".into(), path: "p".into() });
+            sink.emit(DownloadEvent::Completed {
+                model_id: "m".into(),
+                path: "p".into(),
+            });
         }
         // File 2: the weights, offset by everything already on disk.
         {
@@ -434,7 +471,9 @@ mod tests {
         let out = Recorder::default();
         let sink = RebasedSink::new(&out, 0, 100);
         sink.emit(DownloadEvent::Cancelled);
-        sink.emit(DownloadEvent::Error { message: "boom".into() });
+        sink.emit(DownloadEvent::Error {
+            message: "boom".into(),
+        });
         assert_eq!(out.kinds(), vec!["cancelled", "error"]);
     }
 

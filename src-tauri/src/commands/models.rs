@@ -22,9 +22,12 @@ pub async fn models_download(
     on_event: Channel<DownloadEvent>,
 ) -> Result<(), String> {
     let entry = catalog::find(&model_id).ok_or_else(|| format!("unknown model: {model_id}"))?;
-    let spec = entry
-        .local
-        .ok_or_else(|| format!("{} is an API model — there is nothing to download", entry.label))?;
+    let spec = entry.local.ok_or_else(|| {
+        format!(
+            "{} is an API model — there is nothing to download",
+            entry.label
+        )
+    })?;
     let (repo_id, filename) = (spec.repo_id.to_string(), spec.filename.to_string());
     let file_key = format!("{repo_id}/{filename}");
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
@@ -92,7 +95,10 @@ pub async fn models_delete(app: tauri::AppHandle<Wry>, model_id: String) -> Resu
     let registry_id = match catalog::find(&model_id) {
         Some(entry) => {
             let spec = entry.local.ok_or_else(|| {
-                format!("{} is an API model — there is nothing to delete", entry.label)
+                format!(
+                    "{} is an API model — there is nothing to delete",
+                    entry.label
+                )
             })?;
             registry::model_id(spec.repo_id, spec.filename)
         }
@@ -236,10 +242,7 @@ pub async fn model_load(
 // local engine rejects the call on arg names ("missing required key modelId")
 // instead of reporting the real reason below.
 #[tauri::command(rename_all = "snake_case")]
-pub async fn model_load(
-    _model_id: String,
-    on_event: Channel<LoadEvent>,
-) -> Result<(), String> {
+pub async fn model_load(_model_id: String, on_event: Channel<LoadEvent>) -> Result<(), String> {
     let message = "local inference not available in this build (compile with --features local-llm)";
     let _ = on_event.send(LoadEvent::Error {
         message: message.into(),

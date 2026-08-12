@@ -76,7 +76,10 @@ pub struct CommandClass {
 /// is the honest floor rather than a hole.
 pub fn classify(command: &str) -> CommandClass {
     let Some(segments) = split_segments(command).filter(|s| !s.is_empty()) else {
-        return CommandClass { read_only: false, network: sweep_for_network(command) };
+        return CommandClass {
+            read_only: false,
+            network: sweep_for_network(command),
+        };
     };
     CommandClass {
         read_only: segments.iter().all(segment_is_read_only),
@@ -118,16 +121,32 @@ struct ReadRule {
 }
 
 const fn reads() -> ReadRule {
-    ReadRule { verbs: Verbs::Any, deny_flags: &[], deny_short: "" }
+    ReadRule {
+        verbs: Verbs::Any,
+        deny_flags: &[],
+        deny_short: "",
+    }
 }
 const fn reads_unless(deny_flags: &'static [&'static str], deny_short: &'static str) -> ReadRule {
-    ReadRule { verbs: Verbs::Any, deny_flags, deny_short }
+    ReadRule {
+        verbs: Verbs::Any,
+        deny_flags,
+        deny_short,
+    }
 }
 const fn reads_verbs(verbs: &'static [&'static str]) -> ReadRule {
-    ReadRule { verbs: Verbs::Only(verbs), deny_flags: &[], deny_short: "" }
+    ReadRule {
+        verbs: Verbs::Only(verbs),
+        deny_flags: &[],
+        deny_short: "",
+    }
 }
 const fn reads_verbs_or_bare(verbs: &'static [&'static str]) -> ReadRule {
-    ReadRule { verbs: Verbs::OnlyOrBare(verbs), deny_flags: &[], deny_short: "" }
+    ReadRule {
+        verbs: Verbs::OnlyOrBare(verbs),
+        deny_flags: &[],
+        deny_short: "",
+    }
 }
 
 /// Commands that read local state and change nothing.
@@ -146,64 +165,200 @@ const fn reads_verbs_or_bare(verbs: &'static [&'static str]) -> ReadRule {
 /// machinery than a click is worth.
 static READ_ONLY: &[(&str, ReadRule)] = &[
     // Readers and pure filters.
-    ("ls", reads()), ("cat", reads()), ("head", reads()), ("tail", reads()),
-    ("wc", reads()), ("file", reads()), ("stat", reads()), ("du", reads()),
-    ("df", reads()), ("tree", reads()), ("pwd", reads()), ("basename", reads()),
-    ("dirname", reads()), ("realpath", reads()), ("readlink", reads()),
-    ("grep", reads()), ("egrep", reads()), ("fgrep", reads()), ("rg", reads()),
-    ("sort", reads()), ("uniq", reads()), ("cut", reads()), ("tr", reads()),
-    ("nl", reads()), ("column", reads()), ("fold", reads()), ("rev", reads()),
-    ("diff", reads()), ("cmp", reads()), ("cksum", reads()), ("shasum", reads()),
-    ("md5", reads()), ("sha256sum", reads()), ("xxd", reads()), ("od", reads()),
-    ("strings", reads()), ("echo", reads()), ("printf", reads()),
-    ("true", reads()), ("false", reads()), ("test", reads()), ("seq", reads()),
-    ("date", reads()), ("uptime", reads()), ("whoami", reads()), ("id", reads()),
-    ("groups", reads()), ("hostname", reads()), ("uname", reads()),
-    ("printenv", reads()), ("locale", reads()), ("sw_vers", reads()),
-    ("arch", reads()), ("tty", reads()), ("which", reads()), ("whereis", reads()),
-    ("type", reads()), ("ps", reads()), ("lsof", reads()), ("vm_stat", reads()),
-    ("netstat", reads()), ("ifconfig", reads()), ("sysctl", reads_unless(&["-w"], "")),
+    ("ls", reads()),
+    ("cat", reads()),
+    ("head", reads()),
+    ("tail", reads()),
+    ("wc", reads()),
+    ("file", reads()),
+    ("stat", reads()),
+    ("du", reads()),
+    ("df", reads()),
+    ("tree", reads()),
+    ("pwd", reads()),
+    ("basename", reads()),
+    ("dirname", reads()),
+    ("realpath", reads()),
+    ("readlink", reads()),
+    ("grep", reads()),
+    ("egrep", reads()),
+    ("fgrep", reads()),
+    ("rg", reads()),
+    ("sort", reads()),
+    ("uniq", reads()),
+    ("cut", reads()),
+    ("tr", reads()),
+    ("nl", reads()),
+    ("column", reads()),
+    ("fold", reads()),
+    ("rev", reads()),
+    ("diff", reads()),
+    ("cmp", reads()),
+    ("cksum", reads()),
+    ("shasum", reads()),
+    ("md5", reads()),
+    ("sha256sum", reads()),
+    ("xxd", reads()),
+    ("od", reads()),
+    ("strings", reads()),
+    ("echo", reads()),
+    ("printf", reads()),
+    ("true", reads()),
+    ("false", reads()),
+    ("test", reads()),
+    ("seq", reads()),
+    ("date", reads()),
+    ("uptime", reads()),
+    ("whoami", reads()),
+    ("id", reads()),
+    ("groups", reads()),
+    ("hostname", reads()),
+    ("uname", reads()),
+    ("printenv", reads()),
+    ("locale", reads()),
+    ("sw_vers", reads()),
+    ("arch", reads()),
+    ("tty", reads()),
+    ("which", reads()),
+    ("whereis", reads()),
+    ("type", reads()),
+    ("ps", reads()),
+    ("lsof", reads()),
+    ("vm_stat", reads()),
+    ("netstat", reads()),
+    ("ifconfig", reads()),
+    ("sysctl", reads_unless(&["-w"], "")),
     // Read-only only without an in-place / mutating flag.
     ("sed", reads_unless(&[], "i")),
     ("jq", reads_unless(&["--in-place"], "i")),
     ("yq", reads_unless(&["--inplace"], "i")),
-    ("find", reads_unless(
-        &["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprintf", "-fls"], "")),
-    ("journalctl", reads_unless(
-        &["--vacuum-size", "--vacuum-time", "--vacuum-files", "--rotate", "--flush", "--sync"], "")),
+    (
+        "find",
+        reads_unless(
+            &[
+                "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprintf", "-fls",
+            ],
+            "",
+        ),
+    ),
+    (
+        "journalctl",
+        reads_unless(
+            &[
+                "--vacuum-size",
+                "--vacuum-time",
+                "--vacuum-files",
+                "--rotate",
+                "--flush",
+                "--sync",
+            ],
+            "",
+        ),
+    ),
     // Subcommand tables.
-    ("git", reads_verbs_or_bare(&[
-        "status", "log", "diff", "show", "blame", "shortlog", "describe",
-        "rev-parse", "rev-list", "ls-files", "ls-tree", "ls-remote", "cat-file",
-        "symbolic-ref", "reflog", "whatchanged", "grep", "count-objects", "var",
-    ])),
-    ("docker", reads_verbs(&[
-        "ps", "images", "inspect", "logs", "version", "info", "port", "history",
-        "stats", "top",
-    ])),
-    ("podman", reads_verbs(&[
-        "ps", "images", "inspect", "logs", "version", "info", "port", "history",
-        "stats", "top",
-    ])),
-    ("kubectl", reads_verbs(&[
-        "get", "describe", "logs", "explain", "version", "api-resources",
-        "api-versions", "cluster-info", "top",
-    ])),
-    ("oc", reads_verbs(&["get", "describe", "logs", "explain", "version", "status"])),
-    ("npm", reads_verbs(&["ls", "list", "ll", "la", "outdated", "why", "explain", "root", "prefix"])),
-    ("pnpm", reads_verbs(&["ls", "list", "why", "outdated", "root"])),
-    ("cargo", reads_verbs(&[
-        "metadata", "tree", "verify-project", "locate-project", "pkgid", "read-manifest",
-    ])),
-    ("brew", reads_verbs(&["list", "ls", "info", "deps", "uses", "outdated", "config", "leaves"])),
+    (
+        "git",
+        reads_verbs_or_bare(&[
+            "status",
+            "log",
+            "diff",
+            "show",
+            "blame",
+            "shortlog",
+            "describe",
+            "rev-parse",
+            "rev-list",
+            "ls-files",
+            "ls-tree",
+            "ls-remote",
+            "cat-file",
+            "symbolic-ref",
+            "reflog",
+            "whatchanged",
+            "grep",
+            "count-objects",
+            "var",
+        ]),
+    ),
+    (
+        "docker",
+        reads_verbs(&[
+            "ps", "images", "inspect", "logs", "version", "info", "port", "history", "stats", "top",
+        ]),
+    ),
+    (
+        "podman",
+        reads_verbs(&[
+            "ps", "images", "inspect", "logs", "version", "info", "port", "history", "stats", "top",
+        ]),
+    ),
+    (
+        "kubectl",
+        reads_verbs(&[
+            "get",
+            "describe",
+            "logs",
+            "explain",
+            "version",
+            "api-resources",
+            "api-versions",
+            "cluster-info",
+            "top",
+        ]),
+    ),
+    (
+        "oc",
+        reads_verbs(&["get", "describe", "logs", "explain", "version", "status"]),
+    ),
+    (
+        "npm",
+        reads_verbs(&[
+            "ls", "list", "ll", "la", "outdated", "why", "explain", "root", "prefix",
+        ]),
+    ),
+    (
+        "pnpm",
+        reads_verbs(&["ls", "list", "why", "outdated", "root"]),
+    ),
+    (
+        "cargo",
+        reads_verbs(&[
+            "metadata",
+            "tree",
+            "verify-project",
+            "locate-project",
+            "pkgid",
+            "read-manifest",
+        ]),
+    ),
+    (
+        "brew",
+        reads_verbs(&[
+            "list", "ls", "info", "deps", "uses", "outdated", "config", "leaves",
+        ]),
+    ),
     ("pip", reads_verbs(&["list", "show", "freeze", "check"])),
     ("pip3", reads_verbs(&["list", "show", "freeze", "check"])),
-    ("systemctl", reads_verbs(&[
-        "status", "show", "cat", "is-active", "is-enabled", "is-failed",
-        "list-units", "list-unit-files", "list-timers", "list-dependencies",
-        "get-default",
-    ])),
-    ("defaults", reads_verbs(&["read", "read-type", "domains", "find"])),
+    (
+        "systemctl",
+        reads_verbs(&[
+            "status",
+            "show",
+            "cat",
+            "is-active",
+            "is-enabled",
+            "is-failed",
+            "list-units",
+            "list-unit-files",
+            "list-timers",
+            "list-dependencies",
+            "get-default",
+        ]),
+    ),
+    (
+        "defaults",
+        reads_verbs(&["read", "read-type", "domains", "find"]),
+    ),
     ("apt", reads_verbs(&["list", "show", "policy"])),
     ("apt-get", reads_verbs(&["list", "show", "policy"])),
 ];
@@ -216,13 +371,25 @@ struct NetRule {
 }
 
 const fn net() -> NetRule {
-    NetRule { verbs: Verbs::Any, trigger_flags: &[], trigger_short: "" }
+    NetRule {
+        verbs: Verbs::Any,
+        trigger_flags: &[],
+        trigger_short: "",
+    }
 }
 const fn net_verbs(verbs: &'static [&'static str]) -> NetRule {
-    NetRule { verbs: Verbs::Only(verbs), trigger_flags: &[], trigger_short: "" }
+    NetRule {
+        verbs: Verbs::Only(verbs),
+        trigger_flags: &[],
+        trigger_short: "",
+    }
 }
 const fn net_verbs_or_bare(verbs: &'static [&'static str]) -> NetRule {
-    NetRule { verbs: Verbs::OnlyOrBare(verbs), trigger_flags: &[], trigger_short: "" }
+    NetRule {
+        verbs: Verbs::OnlyOrBare(verbs),
+        trigger_flags: &[],
+        trigger_short: "",
+    }
 }
 
 /// Commands that reach the network.
@@ -236,57 +403,182 @@ const fn net_verbs_or_bare(verbs: &'static [&'static str]) -> NetRule {
 /// the agent has no legitimate use for `sh -c`, and `prompts::AGENT` already
 /// forbids it starting a shell.
 static NETWORK: &[(&str, NetRule)] = &[
-    ("curl", net()), ("wget", net()), ("wget2", net()), ("http", net()),
-    ("https", net()), ("httpie", net()), ("nc", net()), ("ncat", net()),
-    ("netcat", net()), ("socat", net()), ("telnet", net()), ("ftp", net()),
-    ("sftp", net()), ("tftp", net()), ("ssh", net()), ("scp", net()),
-    ("rsync", net()), ("rclone", net()), ("aria2c", net()), ("axel", net()),
-    ("lynx", net()), ("w3m", net()), ("links", net()), ("elinks", net()),
-    ("yt-dlp", net()), ("youtube-dl", net()), ("ping", net()), ("ping6", net()),
-    ("traceroute", net()), ("dig", net()), ("host", net()), ("nslookup", net()),
-    ("whois", net()), ("gh", net()), ("glab", net()), ("aws", net()),
-    ("az", net()), ("gcloud", net()), ("npx", net()), ("bunx", net()),
+    ("curl", net()),
+    ("wget", net()),
+    ("wget2", net()),
+    ("http", net()),
+    ("https", net()),
+    ("httpie", net()),
+    ("nc", net()),
+    ("ncat", net()),
+    ("netcat", net()),
+    ("socat", net()),
+    ("telnet", net()),
+    ("ftp", net()),
+    ("sftp", net()),
+    ("tftp", net()),
+    ("ssh", net()),
+    ("scp", net()),
+    ("rsync", net()),
+    ("rclone", net()),
+    ("aria2c", net()),
+    ("axel", net()),
+    ("lynx", net()),
+    ("w3m", net()),
+    ("links", net()),
+    ("elinks", net()),
+    ("yt-dlp", net()),
+    ("youtube-dl", net()),
+    ("ping", net()),
+    ("ping6", net()),
+    ("traceroute", net()),
+    ("dig", net()),
+    ("host", net()),
+    ("nslookup", net()),
+    ("whois", net()),
+    ("gh", net()),
+    ("glab", net()),
+    ("aws", net()),
+    ("az", net()),
+    ("gcloud", net()),
+    ("npx", net()),
+    ("bunx", net()),
     // Opaque interpreters: their whole purpose is running a string we cannot see.
-    ("sh", net()), ("bash", net()), ("zsh", net()), ("dash", net()),
-    ("ksh", net()), ("fish", net()), ("eval", net()),
+    ("sh", net()),
+    ("bash", net()),
+    ("zsh", net()),
+    ("dash", net()),
+    ("ksh", net()),
+    ("fish", net()),
+    ("eval", net()),
     // Subcommand-scoped: the tool is local, these verbs are not.
-    ("git", net_verbs(&["fetch", "pull", "push", "clone", "ls-remote", "submodule", "archive"])),
-    ("npm", net_verbs(&[
-        "install", "i", "add", "ci", "update", "up", "upgrade", "publish",
-        "audit", "search", "ping", "doctor", "outdated", "view", "info",
-        "whoami", "login", "adduser",
-    ])),
-    ("pnpm", net_verbs(&["install", "i", "add", "update", "publish", "audit", "search", "outdated"])),
-    ("yarn", net_verbs_or_bare(&["install", "add", "up", "upgrade", "publish", "audit", "info"])),
-    ("bun", net_verbs(&["install", "i", "add", "update", "upgrade", "publish", "pm"])),
-    ("pip", net_verbs(&["install", "download", "search", "index", "wheel"])),
-    ("pip3", net_verbs(&["install", "download", "search", "index", "wheel"])),
+    (
+        "git",
+        net_verbs(&[
+            "fetch",
+            "pull",
+            "push",
+            "clone",
+            "ls-remote",
+            "submodule",
+            "archive",
+        ]),
+    ),
+    (
+        "npm",
+        net_verbs(&[
+            "install", "i", "add", "ci", "update", "up", "upgrade", "publish", "audit", "search",
+            "ping", "doctor", "outdated", "view", "info", "whoami", "login", "adduser",
+        ]),
+    ),
+    (
+        "pnpm",
+        net_verbs(&[
+            "install", "i", "add", "update", "publish", "audit", "search", "outdated",
+        ]),
+    ),
+    (
+        "yarn",
+        net_verbs_or_bare(&[
+            "install", "add", "up", "upgrade", "publish", "audit", "info",
+        ]),
+    ),
+    (
+        "bun",
+        net_verbs(&["install", "i", "add", "update", "upgrade", "publish", "pm"]),
+    ),
+    (
+        "pip",
+        net_verbs(&["install", "download", "search", "index", "wheel"]),
+    ),
+    (
+        "pip3",
+        net_verbs(&["install", "download", "search", "index", "wheel"]),
+    ),
     ("uv", net_verbs(&["add", "sync", "pip", "install", "tool"])),
     ("pipx", net_verbs(&["install", "upgrade", "run", "fetch"])),
-    ("brew", net_verbs(&["install", "reinstall", "upgrade", "update", "search", "fetch", "tap", "bundle"])),
-    ("cargo", net_verbs(&["add", "install", "update", "publish", "search", "login", "fetch"])),
+    (
+        "brew",
+        net_verbs(&[
+            "install",
+            "reinstall",
+            "upgrade",
+            "update",
+            "search",
+            "fetch",
+            "tap",
+            "bundle",
+        ]),
+    ),
+    (
+        "cargo",
+        net_verbs(&[
+            "add", "install", "update", "publish", "search", "login", "fetch",
+        ]),
+    ),
     ("go", net_verbs(&["get", "install", "mod", "download"])),
     ("gem", net_verbs(&["install", "update", "fetch", "push"])),
-    ("composer", net_verbs(&["install", "update", "require", "create-project"])),
-    ("apt", net_verbs(&["install", "update", "upgrade", "search", "download", "full-upgrade"])),
-    ("apt-get", net_verbs(&["install", "update", "upgrade", "source", "download"])),
-    ("dnf", net_verbs(&["install", "update", "upgrade", "search", "download"])),
-    ("yum", net_verbs(&["install", "update", "upgrade", "search"])),
+    (
+        "composer",
+        net_verbs(&["install", "update", "require", "create-project"]),
+    ),
+    (
+        "apt",
+        net_verbs(&[
+            "install",
+            "update",
+            "upgrade",
+            "search",
+            "download",
+            "full-upgrade",
+        ]),
+    ),
+    (
+        "apt-get",
+        net_verbs(&["install", "update", "upgrade", "source", "download"]),
+    ),
+    (
+        "dnf",
+        net_verbs(&["install", "update", "upgrade", "search", "download"]),
+    ),
+    (
+        "yum",
+        net_verbs(&["install", "update", "upgrade", "search"]),
+    ),
     ("apk", net_verbs(&["add", "update", "upgrade", "fetch"])),
-    ("zypper", net_verbs(&["install", "update", "refresh", "search"])),
-    ("pacman", NetRule { verbs: Verbs::Only(&[]), trigger_flags: &[], trigger_short: "S" }),
+    (
+        "zypper",
+        net_verbs(&["install", "update", "refresh", "search"]),
+    ),
+    (
+        "pacman",
+        NetRule {
+            verbs: Verbs::Only(&[]),
+            trigger_flags: &[],
+            trigger_short: "S",
+        },
+    ),
     ("docker", net_verbs(&["pull", "push", "login", "build"])),
     ("podman", net_verbs(&["pull", "push", "login", "build"])),
-    ("nix", net()), ("nix-shell", net()), ("nix-env", net()),
-    ("terraform", net_verbs(&["init", "apply", "plan", "refresh"])),
+    ("nix", net()),
+    ("nix-shell", net()),
+    ("nix-env", net()),
+    (
+        "terraform",
+        net_verbs(&["init", "apply", "plan", "refresh"]),
+    ),
     ("openssl", net_verbs(&["s_client"])),
 ];
 
 /// Interpreters whose `-c`/`-e`/`-r` form runs code we cannot read. Treated as
 /// networked because that is the fail-closed direction on this axis.
 static INLINE_SCRIPT: &[(&str, &[&str])] = &[
-    ("python", &["-c"]), ("python3", &["-c"]), ("perl", &["-e", "-E"]),
-    ("ruby", &["-e"]), ("node", &["-e", "-p", "--eval"]), ("php", &["-r"]),
+    ("python", &["-c"]),
+    ("python3", &["-c"]),
+    ("perl", &["-e", "-E"]),
+    ("ruby", &["-e"]),
+    ("node", &["-e", "-p", "--eval"]),
+    ("php", &["-r"]),
     ("deno", &["eval"]),
 ];
 
@@ -296,8 +588,8 @@ static INLINE_SCRIPT: &[(&str, &[&str])] = &[
 /// naive stripping would leave `5` as the head. A segment carrying one of these
 /// is handled by the wrapper sweep instead.
 static WRAPPERS: &[&str] = &[
-    "sudo", "doas", "su", "pkexec", "command", "nohup", "time", "xargs", "env",
-    "timeout", "nice", "stdbuf", "setsid", "script",
+    "sudo", "doas", "su", "pkexec", "command", "nohup", "time", "xargs", "env", "timeout", "nice",
+    "stdbuf", "setsid", "script",
 ];
 
 // ---------------------------------------------------------------------------
@@ -335,7 +627,10 @@ fn split_segments(command: &str) -> Option<Vec<Segment>> {
 
     macro_rules! boundary {
         () => {{
-            segments.push(Segment { text: std::mem::take(&mut text), bare: std::mem::take(&mut bare) });
+            segments.push(Segment {
+                text: std::mem::take(&mut text),
+                bare: std::mem::take(&mut bare),
+            });
         }};
     }
 
@@ -489,11 +784,11 @@ fn head_of(segment: &str) -> Option<Head> {
     loop {
         let word = words.get(i)?;
         let base = word.rsplit('/').next().unwrap_or(word).to_ascii_lowercase();
-        let is_assignment = word
-            .split_once('=')
-            .is_some_and(|(k, _)| !k.is_empty()
+        let is_assignment = word.split_once('=').is_some_and(|(k, _)| {
+            !k.is_empty()
                 && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                && !k.starts_with(|c: char| c.is_ascii_digit()));
+                && !k.starts_with(|c: char| c.is_ascii_digit())
+        });
         if is_assignment || WRAPPERS.contains(&base.as_str()) {
             wrapped = true;
             i += 1;
@@ -506,8 +801,16 @@ fn head_of(segment: &str) -> Option<Head> {
         let rest = &words[i + 1..];
         return Some(Head {
             name: base,
-            verb: rest.iter().find(|w| !w.starts_with('-')).cloned().unwrap_or_default(),
-            flags: rest.iter().filter(|w| w.starts_with('-')).cloned().collect(),
+            verb: rest
+                .iter()
+                .find(|w| !w.starts_with('-'))
+                .cloned()
+                .unwrap_or_default(),
+            flags: rest
+                .iter()
+                .filter(|w| w.starts_with('-'))
+                .cloned()
+                .collect(),
             wrapped,
         });
     }
@@ -568,9 +871,12 @@ fn segment_is_read_only(seg: &Segment) -> bool {
 /// the fetch pipeline `prompts::AGENT_WEB_CURL` teaches single-quotes its URL.
 fn mentions_url(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    ["http://", "https://", "ftp://", "ftps://", "git://", "ssh://", "rsync://", "ws://", "wss://"]
-        .iter()
-        .any(|scheme| lower.contains(scheme))
+    [
+        "http://", "https://", "ftp://", "ftps://", "git://", "ssh://", "rsync://", "ws://",
+        "wss://",
+    ]
+    .iter()
+    .any(|scheme| lower.contains(scheme))
 }
 
 /// Positional-blind fallback: does any WORD name a tool that is networked in
@@ -759,10 +1065,34 @@ mod tests {
     /// future refactor collapses them into one boolean, this fails.
     #[test]
     fn the_axes_are_orthogonal() {
-        assert_eq!(classify("git status"), CommandClass { read_only: true, network: false });
-        assert_eq!(classify("git pull"), CommandClass { read_only: false, network: true });
-        assert_eq!(classify("git ls-remote"), CommandClass { read_only: true, network: true });
-        assert_eq!(classify("rm -rf build"), CommandClass { read_only: false, network: false });
+        assert_eq!(
+            classify("git status"),
+            CommandClass {
+                read_only: true,
+                network: false
+            }
+        );
+        assert_eq!(
+            classify("git pull"),
+            CommandClass {
+                read_only: false,
+                network: true
+            }
+        );
+        assert_eq!(
+            classify("git ls-remote"),
+            CommandClass {
+                read_only: true,
+                network: true
+            }
+        );
+        assert_eq!(
+            classify("rm -rf build"),
+            CommandClass {
+                read_only: false,
+                network: false
+            }
+        );
     }
 
     /// The pipeline `AGENT_WEB_CURL` teaches verbatim. It single-quotes a `>`
@@ -774,14 +1104,22 @@ mod tests {
         let pipeline = "curl -fsSL --max-time 20 'https://x.test/p' | tr '<' '\\n' \
 | grep -viE '^(script|style|/script|/style|!--|link|meta|path|svg)' \
 | sed -e 's/^[^>]*>//' | tr -s '[:space:]' ' ' | head -c 3000";
-        assert!(!writes_file(&split_segments(pipeline).unwrap()[3].bare),
-            "a quoted `>` is not a redirect");
+        assert!(
+            !writes_file(&split_segments(pipeline).unwrap()[3].bare),
+            "a quoted `>` is not a redirect"
+        );
         assert!(network(pipeline), "the pipeline fetches");
 
         // The same pipeline with curl swapped out is pure local filtering, which
         // is what proves the quote handling rather than the curl entry.
-        let filters = pipeline.replace("curl -fsSL --max-time 20 'https://x.test/p'", "cat page.html");
-        assert!(read_only(&filters), "quoted metacharacters must not read as structure");
+        let filters = pipeline.replace(
+            "curl -fsSL --max-time 20 'https://x.test/p'",
+            "cat page.html",
+        );
+        assert!(
+            read_only(&filters),
+            "quoted metacharacters must not read as structure"
+        );
         assert!(!network(&filters), "no fetch left");
 
         // And the prompt still contains the stage this fixture is built from.
@@ -829,7 +1167,10 @@ mod tests {
         // And none of them may be mistaken for a network command, or internet-off
         // would refuse a purely local investigation.
         for cmd in session {
-            assert!(!network(cmd), "purely local, must not read as networked: {cmd}");
+            assert!(
+                !network(cmd),
+                "purely local, must not read as networked: {cmd}"
+            );
         }
     }
 
@@ -837,8 +1178,16 @@ mod tests {
     #[test]
     fn unreadable_input_is_never_read_only() {
         for cmd in [
-            "", "   ", "'unbalanced", "ls \\", "$C url", "a & b", "cat <<EOF",
-            "diff <(ls) <(ls)", "echo `id`", "(ls)",
+            "",
+            "   ",
+            "'unbalanced",
+            "ls \\",
+            "$C url",
+            "a & b",
+            "cat <<EOF",
+            "diff <(ls) <(ls)",
+            "echo `id`",
+            "(ls)",
         ] {
             assert!(!classify(cmd).read_only, "must not be read-only: {cmd:?}");
         }
@@ -853,11 +1202,17 @@ mod tests {
     #[test]
     fn an_unparseable_line_is_swept_rather_than_blanket_refused() {
         for local in ["cat <<EOF", "a & b", "ls \\", "'unbalanced", "", "(ls)"] {
-            assert!(!classify(local).network, "should not read as networked: {local:?}");
+            assert!(
+                !classify(local).network,
+                "should not read as networked: {local:?}"
+            );
         }
         // The sweep still catches what matters: a hidden tool or a URL.
         for reaching in ["$C https://x", "sh -c 'curl x' &", "echo `curl x`"] {
-            assert!(classify(reaching).network, "sweep should catch: {reaching:?}");
+            assert!(
+                classify(reaching).network,
+                "sweep should catch: {reaching:?}"
+            );
         }
     }
 
