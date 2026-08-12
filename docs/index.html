@@ -1,0 +1,1348 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#09090b" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="robots" content="index,follow,max-image-preview:large" />
+
+    <title>VTerminal — The Lean AI Terminal for macOS</title>
+    <meta
+      name="description"
+      content="A lean, AI-powered terminal for macOS. Warp-style command blocks and a multi-step agent, with local models running in-process via llama.cpp — no Ollama, no daemon. Open source, GPL-3.0."
+    />
+    <link rel="canonical" href="https://vterminal.veviad.com/" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="VTerminal" />
+    <meta property="og:locale" content="en_GB" />
+    <meta
+      property="og:title"
+      content="VTerminal — The Lean AI Terminal for macOS"
+    />
+    <meta
+      property="og:description"
+      content="Warp-style command blocks and a multi-step AI agent, with local models running in-process via llama.cpp. No Ollama, no daemon, nothing runs without you."
+    />
+    <meta property="og:url" content="https://vterminal.veviad.com/" />
+    <meta name="twitter:card" content="summary" />
+    <meta
+      name="twitter:title"
+      content="VTerminal — The Lean AI Terminal for macOS"
+    />
+    <meta
+      name="twitter:description"
+      content="Warp-style command blocks and a multi-step AI agent, with local models running in-process via llama.cpp. No Ollama, no daemon, nothing runs without you."
+    />
+
+    <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
+    <link rel="alternate icon" href="assets/favicon.ico" sizes="32x32" />
+    <link rel="apple-touch-icon" href="assets/favicon.svg" />
+
+    <link
+      rel="preload"
+      href="assets/fonts/inter-latin-wght-normal.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin="anonymous"
+    />
+    <link
+      rel="preload"
+      href="assets/fonts/anton-regular.ttf"
+      as="font"
+      type="font/ttf"
+      crossorigin="anonymous"
+    />
+    <link rel="stylesheet" href="assets/site.css" />
+
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "VTerminal",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "macOS (Apple Silicon)",
+        "softwareVersion": "0.1.0",
+        "url": "https://vterminal.veviad.com/",
+        "codeRepository": "https://github.com/Veviad/VTerminal",
+        "license": "https://www.gnu.org/licenses/gpl-3.0.html",
+        "description": "A lean, AI-powered terminal for macOS with Warp-style command blocks and a multi-step agent. Local models run in-process via llama.cpp with Metal acceleration; cloud providers sit behind the same interface.",
+        "author": {
+          "@type": "Organization",
+          "name": "Veviad",
+          "url": "https://veviad.com"
+        },
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "EUR"
+        }
+      }
+    </script>
+  </head>
+
+  <body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+
+    <!-- Icon sprite. Same geometry conventions as veviad.com's Icon.astro:
+         24-unit box, currentColor stroke, 1.8 weight, round joins. -->
+    <svg
+      width="0"
+      height="0"
+      style="position: absolute"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <defs>
+        <symbol id="i-check" viewBox="0 0 24 24">
+          <path d="m5 12 4.2 4.2L19 6.5" />
+        </symbol>
+        <symbol id="i-arrow-right" viewBox="0 0 24 24">
+          <path d="M5 12h14m-5-5 5 5-5 5" />
+        </symbol>
+        <symbol id="i-terminal" viewBox="0 0 24 24">
+          <rect x="3" y="4" width="18" height="16" rx="2" />
+          <path d="m7 10 2.5 2.5L7 15M12.5 15H17" />
+        </symbol>
+        <symbol id="i-blocks" viewBox="0 0 24 24">
+          <rect x="3" y="4" width="18" height="6" rx="1.6" />
+          <rect x="3" y="14" width="18" height="6" rx="1.6" />
+          <path d="M6.5 7h.01M6.5 17h.01" />
+        </symbol>
+        <symbol id="i-gauge" viewBox="0 0 24 24">
+          <path d="M3.5 18a9 9 0 1 1 17 0" />
+          <path d="M12 13.5 16 9" />
+          <circle cx="12" cy="15" r="1.6" />
+        </symbol>
+        <symbol id="i-cpu" viewBox="0 0 24 24">
+          <rect x="6" y="6" width="12" height="12" rx="2" />
+          <path d="M10 10h4v4h-4z" />
+          <path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3" />
+        </symbol>
+        <symbol id="i-cloud" viewBox="0 0 24 24">
+          <path
+            d="M7 18h10a4 4 0 0 0 .6-7.95A5.5 5.5 0 0 0 6.6 10.2A3.9 3.9 0 0 0 7 18Z"
+          />
+        </symbol>
+        <symbol id="i-server" viewBox="0 0 24 24">
+          <rect x="3" y="4" width="18" height="6" rx="1.6" />
+          <rect x="3" y="14" width="18" height="6" rx="1.6" />
+          <path d="M7 7h.01M7 17h.01M11 7h4M11 17h4" />
+        </symbol>
+        <symbol id="i-shield" viewBox="0 0 24 24">
+          <path d="M12 3l7.5 3v5.5c0 4.6-3.1 8.3-7.5 9.5-4.4-1.2-7.5-4.9-7.5-9.5V6Z" />
+          <path d="m8.8 12 2.2 2.2 4.2-4.4" />
+        </symbol>
+        <symbol id="i-lock" viewBox="0 0 24 24">
+          <rect x="4.5" y="10.5" width="15" height="10" rx="2" />
+          <path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5" />
+        </symbol>
+        <symbol id="i-eye" viewBox="0 0 24 24">
+          <path d="M2.5 12S6 5.8 12 5.8 21.5 12 21.5 12 18 18.2 12 18.2 2.5 12 2.5 12Z" />
+          <circle cx="12" cy="12" r="2.8" />
+        </symbol>
+        <symbol id="i-globe-off" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="9" />
+          <path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" />
+          <path d="m4.5 4.5 15 15" />
+        </symbol>
+        <symbol id="i-sparkles" viewBox="0 0 24 24">
+          <path d="M12 3.5 13.7 8l4.5 1.7-4.5 1.7L12 16l-1.7-4.6L5.8 9.7 10.3 8Z" />
+          <path d="M18.5 15.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7Z" />
+        </symbol>
+        <symbol id="i-wand" viewBox="0 0 24 24">
+          <path d="M4 20 15 9M17.5 6.5 20 4M13 4.5l.7 1.8 1.8.7-1.8.7L13 9.5l-.7-1.8-1.8-.7 1.8-.7Z" />
+          <path d="m16.5 10 .5 1.3 1.3.5-1.3.5-.5 1.3-.5-1.3-1.3-.5 1.3-.5Z" />
+        </symbol>
+        <symbol id="i-chat" viewBox="0 0 24 24">
+          <path d="M20.5 12c0 4-3.8 7-8.5 7-1 0-2-.1-2.9-.4L4 20.5l1.3-3.4A6.6 6.6 0 0 1 3.5 12c0-3.9 3.8-7 8.5-7s8.5 3.1 8.5 7Z" />
+        </symbol>
+        <symbol id="i-robot" viewBox="0 0 24 24">
+          <rect x="4" y="8" width="16" height="11" rx="2.5" />
+          <path d="M12 4.5V8M9 13h.01M15 13h.01M9.5 16.2h5" />
+          <path d="M1.8 12v3M22.2 12v3" />
+        </symbol>
+        <symbol id="i-image" viewBox="0 0 24 24">
+          <rect x="3.5" y="4.5" width="17" height="15" rx="2" />
+          <circle cx="9" cy="10" r="1.6" />
+          <path d="m4.5 17 4.6-4.2 3.4 3 2.6-2.4 4.4 4" />
+        </symbol>
+        <symbol id="i-search" viewBox="0 0 24 24">
+          <circle cx="11" cy="11" r="6.5" />
+          <path d="m16 16 4.5 4.5" />
+        </symbol>
+        <symbol id="i-palette" viewBox="0 0 24 24">
+          <path
+            d="M12 3.5a8.5 8.5 0 1 0 0 17c1.5 0 2-1 2-1.8 0-1.6-1.6-1.7-1.6-3 0-1 .9-1.7 2-1.7h1.8a4.3 4.3 0 0 0 4.3-4.3C20.5 6.2 16.7 3.5 12 3.5Z"
+          />
+          <path d="M8 9h.01M12 7.5h.01M15.8 9h.01" />
+        </symbol>
+        <symbol id="i-branch" viewBox="0 0 24 24">
+          <circle cx="7" cy="5.5" r="2.2" />
+          <circle cx="7" cy="18.5" r="2.2" />
+          <circle cx="17" cy="9" r="2.2" />
+          <path d="M7 7.7v8.6M17 11.2c0 3-2.6 4.3-5.6 4.7" />
+        </symbol>
+        <symbol id="i-copy" viewBox="0 0 24 24">
+          <rect x="9" y="9" width="11" height="11" rx="2" />
+          <path d="M15 5.5A1.5 1.5 0 0 0 13.5 4H5.5A1.5 1.5 0 0 0 4 5.5v8A1.5 1.5 0 0 0 5.5 15" />
+        </symbol>
+        <symbol id="i-alert" viewBox="0 0 24 24">
+          <path d="M12 4.5 21 19.5H3Z" />
+          <path d="M12 10v4M12 16.8h.01" />
+        </symbol>
+      </defs>
+    </svg>
+
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="brand-link" href="./" aria-label="VTerminal home">
+          <img
+            class="brand-logo"
+            src="assets/img/veviad-logo-compact-white-v2.svg"
+            width="165"
+            height="40"
+            alt="Veviad"
+          />
+          <span class="brand-divider" aria-hidden="true"></span>
+          <span class="brand-product">VTerminal</span>
+        </a>
+
+        <nav class="desktop-nav" aria-label="Main navigation">
+          <a href="#why">Why</a>
+          <a href="#terminal">Terminal</a>
+          <a href="#ai">AI</a>
+          <a href="#safety">Safety</a>
+          <a href="#models">Models</a>
+          <a href="#install">Install</a>
+        </nav>
+
+        <div class="header-actions">
+          <a
+            class="button button-primary header-cta"
+            href="https://github.com/Veviad/VTerminal"
+            >View on GitHub</a
+          >
+          <button
+            class="menu-toggle"
+            type="button"
+            aria-expanded="false"
+            aria-controls="mobile-menu"
+            aria-label="Open menu"
+            data-menu-toggle
+          >
+            <span></span><span></span><span></span>
+          </button>
+        </div>
+      </div>
+
+      <div class="mobile-menu" id="mobile-menu" data-mobile-menu hidden>
+        <nav aria-label="Main navigation">
+          <a href="#why">Why</a>
+          <a href="#terminal">Terminal</a>
+          <a href="#ai">AI</a>
+          <a href="#safety">Safety</a>
+          <a href="#models">Models</a>
+          <a href="#install">Install</a>
+          <div class="mobile-menu-actions">
+            <a
+              class="button button-primary"
+              href="https://github.com/Veviad/VTerminal"
+              >View on GitHub</a
+            >
+          </div>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main-content">
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero-inner shell">
+          <a
+            class="announcement"
+            href="https://github.com/Veviad/VTerminal/releases"
+            aria-label="Version 0.1.0 — pre-1.0 and developed in the open. See releases."
+          >
+            <span class="announcement-badge">0.1.0</span>
+            <span class="announcement-label"
+              >Pre-1.0, developed in the open</span
+            >
+            <svg class="ui-icon" aria-hidden="true"><use href="#i-arrow-right" /></svg>
+          </a>
+
+          <h1 id="hero-title">
+            The AI Terminal That<br />
+            <em>Stays on Your Mac.</em>
+          </h1>
+
+          <p class="hero-copy">
+            Warp-style command blocks and a multi-step AI agent, without the
+            bulk. Local models run <strong>in-process</strong> with Metal
+            acceleration — no Ollama, no daemon to babysit. Cloud models sit
+            behind the same interface.
+          </p>
+
+          <div class="hero-actions">
+            <a
+              class="button button-primary"
+              href="https://github.com/Veviad/VTerminal"
+              >View on GitHub</a
+            >
+            <a class="button button-secondary" href="#install">Quick start</a>
+          </div>
+
+          <ul class="hero-proof" aria-label="At a glance">
+            <li>
+              <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
+              <span>macOS, Apple Silicon</span>
+            </li>
+            <li>
+              <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
+              <span>Tauri 2 + Rust</span>
+            </li>
+            <li>
+              <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
+              <span>On-device by default</span>
+            </li>
+            <li>
+              <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
+              <span>GPL-3.0</span>
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- The mock reproduces VTerminal's own interface: command blocks with
+           exit badges on the left, the AI panel and its approval gate on the
+           right, in the app's default "Veviad Developer UI" theme. -->
+      <div class="dashboard-bridge shell">
+        <div class="dashboard-frame mock">
+          <div class="mock-chrome">
+            <div class="mock-lights" aria-hidden="true">
+              <span></span><span></span><span></span>
+            </div>
+            <div class="mock-tabs" aria-hidden="true">
+              <span class="mock-tab is-active">veviad_shell</span>
+              <span class="mock-tab">prod-01</span>
+            </div>
+          </div>
+
+          <div class="mock-body">
+            <div class="mock-term" aria-hidden="true">
+              <div class="mock-block is-ok">
+                <div class="mock-block-head">
+                  <span class="mock-cwd">~/veviad_shell</span>
+                  <span class="mock-branch">main</span>
+                  <span class="mock-badge is-ok">0</span>
+                </div>
+                <div class="mock-cmd">git pull --rebase</div>
+                <div class="mock-out">
+                  <span class="is-dim"
+                    >Successfully rebased and updated refs/heads/main.</span
+                  >
+                </div>
+              </div>
+
+              <div class="mock-block is-ok">
+                <div class="mock-block-head">
+                  <span class="mock-cwd">~/veviad_shell</span>
+                  <span class="mock-branch">main</span>
+                  <span class="mock-badge is-ok">0</span>
+                </div>
+                <div class="mock-cmd">cargo test --features local-llm</div>
+                <div class="mock-out">
+                  <span class="is-dim">   Compiling vterminal v0.1.0</span>
+                  <span class="is-dim">    Finished `test` profile in 4.21s</span>
+                  <span class="is-ok">test result: ok. 214 passed; 0 failed</span>
+                </div>
+              </div>
+
+              <div class="mock-block is-fail">
+                <div class="mock-block-head">
+                  <span class="mock-cwd">~/veviad_shell</span>
+                  <span class="mock-branch">main</span>
+                  <span class="mock-badge is-fail">1</span>
+                </div>
+                <div class="mock-cmd">npm run tauri build -- --features local-llm</div>
+                <div class="mock-out">
+                  <span class="is-dim">  Compiling llama-cpp-sys-2 v0.1.154</span>
+                  <span class="is-fail"
+                    >error: failed to run custom build command</span
+                  >
+                  <span class="is-fail">  CMake was not found in PATH</span>
+                </div>
+              </div>
+
+              <div class="mock-block">
+                <div class="mock-block-head">
+                  <span class="mock-cwd">~/veviad_shell</span>
+                  <span class="mock-branch">main</span>
+                </div>
+                <div class="mock-cmd"><span class="mock-caret"></span></div>
+              </div>
+            </div>
+
+            <div class="mock-ai" aria-hidden="true">
+              <div class="mock-ai-head">
+                <span class="mock-ai-title">Agent</span>
+                <span class="mock-chip is-accent">Qwen3.5 9B</span>
+                <span class="mock-chip">medium</span>
+              </div>
+
+              <div class="mock-turn">
+                <div class="mock-turn-user">why did the build fail?</div>
+              </div>
+
+              <div class="mock-think">Thought for 2s</div>
+
+              <p class="mock-answer">
+                The <code>local-llm</code> feature compiles llama.cpp through
+                cmake, which isn't on your PATH. Terminal-only builds don't need
+                it — but this one does.
+              </p>
+
+              <div class="mock-approval">
+                <div class="mock-approval-label">
+                  <svg class="ui-icon" style="width: 1em; height: 1em">
+                    <use href="#i-alert" />
+                  </svg>
+                  Approve command
+                </div>
+                <div class="mock-approval-cmd">brew install cmake</div>
+                <div class="mock-axes">
+                  <span class="mock-axis is-write">Modifies your system</span>
+                  <span class="mock-axis is-net">Reaches the network</span>
+                </div>
+                <div class="mock-actions">
+                  <span class="mock-action is-primary">Approve</span>
+                  <span class="mock-action">Edit</span>
+                  <span class="mock-action">Skip</span>
+                </div>
+                <p class="mock-approval-note">
+                  Runs in the visible terminal, in this tab.
+                </p>
+              </div>
+
+              <div class="mock-modes">
+                <span class="mock-mode is-active">Confirm</span>
+                <span class="mock-mode">Reads</span>
+                <span class="mock-mode">All</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="mock-status" aria-hidden="true">
+            <span>zsh</span>
+            <span class="mock-branch">2 tabs</span>
+            <span class="mock-status-right">
+              <span><span class="mock-key">⌘K</span> commands</span>
+              <span>on-device</span>
+            </span>
+          </div>
+        </div>
+        <p class="mock-caption">
+          Interface mockup of VTerminal's default theme — command blocks with
+          exit-code badges, and the agent's approval gate showing both
+          classification axes.
+        </p>
+      </div>
+
+      <aside class="audience-band shell" aria-labelledby="audience-title">
+        <h2 id="audience-title">Built for People Who Live in a Shell</h2>
+        <ul class="audience-list">
+          <li>Developers</li>
+          <li>Platform &amp; DevOps Engineers</li>
+          <li>SREs on Call</li>
+          <li>Anyone Tired of Electron</li>
+        </ul>
+      </aside>
+
+      <section class="section why-section" id="why" aria-labelledby="why-title">
+        <div class="why-layout shell">
+          <div class="why-intro">
+            <p class="eyebrow">Why VTerminal</p>
+            <h2 class="section-heading" id="why-title">
+              Three Positions the Other AI Terminals Don't Take.
+            </h2>
+            <p class="section-lead">
+              Modern AI terminals tend to be Electron apps that phone home for
+              every completion. VTerminal is a native Tauri app that treats your
+              shell, your machine and your consent as the things that must not
+              be replaced.
+            </p>
+          </div>
+
+          <ol class="why-list">
+            <li>
+              <article class="why-item">
+                <span class="why-item-number" aria-hidden="true">01</span>
+                <div>
+                  <p class="why-item-origin">
+                    <span>Instead of</span> a reimplemented shell
+                  </p>
+                  <div class="why-item-result">
+                    <span class="why-item-icon" aria-hidden="true">
+                      <svg class="ui-icon"><use href="#i-check" /></svg>
+                    </span>
+                    <h3>Your Shell, Not a Lookalike</h3>
+                  </div>
+                  <p class="why-item-copy">
+                    A real <code>zsh -il</code> login shell over a PTY. vim,
+                    htop, tmux and <code>ssh</code> all behave exactly as they do
+                    in Terminal.app, because they are running exactly as they do
+                    in Terminal.app.
+                  </p>
+                </div>
+              </article>
+            </li>
+            <li>
+              <article class="why-item">
+                <span class="why-item-number" aria-hidden="true">02</span>
+                <div>
+                  <p class="why-item-origin">
+                    <span>Instead of</span> cloud round trips
+                  </p>
+                  <div class="why-item-result">
+                    <span class="why-item-icon" aria-hidden="true">
+                      <svg class="ui-icon"><use href="#i-check" /></svg>
+                    </span>
+                    <h3>On-Device by Default</h3>
+                  </div>
+                  <p class="why-item-copy">
+                    The default model is a 9B GGUF running inside the app process
+                    via llama.cpp, Metal-accelerated. Nothing leaves the machine
+                    unless you pick a cloud model — and there is no daemon to
+                    install, start or keep updated.
+                  </p>
+                </div>
+              </article>
+            </li>
+            <li>
+              <article class="why-item">
+                <span class="why-item-number" aria-hidden="true">03</span>
+                <div>
+                  <p class="why-item-origin">
+                    <span>Instead of</span> an agent with free rein
+                  </p>
+                  <div class="why-item-result">
+                    <span class="why-item-icon" aria-hidden="true">
+                      <svg class="ui-icon"><use href="#i-check" /></svg>
+                    </span>
+                    <h3>Nothing Runs Without You</h3>
+                  </div>
+                  <p class="why-item-copy">
+                    Every command a model writes passes an approval gate.
+                    Natural-language suggestions are <em>inserted</em> into your
+                    prompt, never executed. Restored tabs never reconnect on
+                    their own.
+                  </p>
+                </div>
+              </article>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section
+        class="section section-soft"
+        id="terminal"
+        aria-labelledby="terminal-title"
+      >
+        <div class="shell">
+          <div class="lifecycle-header">
+            <div>
+              <p class="eyebrow">The Terminal</p>
+              <h2 class="section-heading section-heading-wide" id="terminal-title">
+                A Fast Terminal First. The AI Is What It Grew.
+              </h2>
+              <p class="section-lead">
+                Shell integration marks every command as a block, so the app
+                knows what you ran, where, and how it ended — which is also
+                exactly the context the model needs.
+              </p>
+            </div>
+
+            <ol class="lifecycle" aria-label="How a block is tracked">
+              <li>
+                <span class="lifecycle-number" aria-hidden="true">01</span>
+                <span>You Type a Command</span>
+              </li>
+              <li>
+                <span class="lifecycle-number" aria-hidden="true">02</span>
+                <span>zsh Marks It via OSC 133</span>
+              </li>
+              <li>
+                <span class="lifecycle-number" aria-hidden="true">03</span>
+                <span>Output Streams Into It</span>
+              </li>
+              <li>
+                <span class="lifecycle-number" aria-hidden="true">04</span>
+                <span>The Exit Code Closes It</span>
+              </li>
+            </ol>
+          </div>
+
+          <div class="feature-grid">
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-terminal" /></svg>
+              </span>
+              <h3>Real zsh, Real TTY</h3>
+              <p>
+                <code>portable-pty</code> spawning <code>zsh -il</code>, rendered
+                by xterm.js 6 with a WebGL renderer. Full TUI support, and saved
+                SSH hosts with one-click connect.
+              </p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-blocks" /></svg>
+              </span>
+              <h3>Command Blocks</h3>
+              <p>
+                Exit-code badges, copy the command or just its output, re-run, or
+                attach a block to the AI as context. Positions come from live
+                terminal markers, so they never drift.
+              </p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-gauge" /></svg>
+              </span>
+              <h3>Flow-Controlled Output</h3>
+              <p>
+                The reader thread blocks above a watermark and the UI
+                acknowledges every 256&nbsp;KB, so <code>cat</code>-ing a
+                gigabyte file won't balloon memory.
+              </p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-search" /></svg>
+              </span>
+              <h3>Tabs, Search, Palette</h3>
+              <p>
+                Tabs with <kbd>⌘1…9</kbd>, in-terminal search, persistent command
+                history, and a <kbd>⌘K</kbd> palette for actions and model
+                switching.
+              </p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-branch" /></svg>
+              </span>
+              <h3>SSH-Aware</h3>
+              <p>
+                Nested sessions are detected by command shape. While you're on a
+                remote host, local paths and git branch are withheld from the
+                model rather than quietly misreported.
+              </p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-palette" /></svg>
+              </span>
+              <h3>Six Themes</h3>
+              <p>
+                Veviad Developer UI (default), Veviad UI, Midnight, Nord,
+                Solarized Dark and Light — each with a matched terminal ANSI
+                palette, not just recoloured chrome.
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section section-dark" id="ai" aria-labelledby="ai-title">
+        <div class="assistant-layout shell">
+          <div>
+            <p class="eyebrow">The AI</p>
+            <h2 class="section-heading" id="ai-title">
+              Six Ways In. One Keystroke Each.
+            </h2>
+            <p class="section-lead">
+              The same <code>Provider</code> trait covers in-process llama.cpp,
+              Anthropic, OpenAI, Mistral and any OpenAI-compatible server you
+              run yourself — so every feature below works the same whichever you
+              pick.
+            </p>
+
+            <aside class="assistant-control">
+              <h3>You Stay in Control</h3>
+              <p>
+                <strong>Suggestions Are Inserted, Not Run.</strong> A
+                natural-language command lands in your prompt without a newline.
+              </p>
+              <p>
+                <strong>Agent Commands Need Approval.</strong> The backend never
+                runs a command without an explicit response from the UI.
+              </p>
+              <p>
+                <strong>Attribution Is per Message.</strong> Each reply is
+                stamped with the model that wrote it, so switching mid-stream
+                never relabels history.
+              </p>
+            </aside>
+          </div>
+
+          <div class="assistant-grid">
+            <article class="assistant-card">
+              <span class="feature-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-wand" /></svg>
+              </span>
+              <h3>Suggest <kbd>⌘I</kbd></h3>
+              <p>
+                Describe the goal — or type <code>#</code> at an empty prompt —
+                and get a command inserted into your prompt, ready to read before
+                you press enter.
+              </p>
+            </article>
+            <article class="assistant-card">
+              <span class="feature-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-sparkles" /></svg>
+              </span>
+              <h3>Explain &amp; Fix</h3>
+              <p>
+                One click on a failed block streams a diagnosis of what went
+                wrong, plus a corrected command you can inspect and run.
+              </p>
+            </article>
+            <article class="assistant-card">
+              <span class="feature-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-chat" /></svg>
+              </span>
+              <h3>Ask <kbd>⌘J</kbd></h3>
+              <p>
+                A chat panel with your blocks, their output and your files as
+                context. Resizable, and it keeps its proportion when you resize
+                the window.
+              </p>
+            </article>
+            <article class="assistant-card">
+              <span class="feature-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-robot" /></svg>
+              </span>
+              <h3>Agent Mode</h3>
+              <p>
+                Multi-step runs that propose commands, execute them in your
+                <em>visible</em> terminal, and read the real output before
+                deciding what to do next.
+              </p>
+            </article>
+            <article class="assistant-card">
+              <span class="feature-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-gauge" /></svg>
+              </span>
+              <h3>Reasoning Effort</h3>
+              <p>
+                <code>off → low → medium → high → max</code>, per model, showing
+                only the rungs a model actually accepts — because a wrong value
+                is a 400, not a downgrade.
+              </p>
+            </article>
+            <article class="assistant-card">
+              <span class="feature-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-image" /></svg>
+              </span>
+              <h3>Images &amp; Files</h3>
+              <p>
+                Drag, paste or pick. An optional on-device vision sidecar
+                transcribes screenshots, so even a non-vision chat model can work
+                with them.
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="safety" aria-labelledby="safety-title">
+        <div class="shell">
+          <p class="eyebrow">Safety</p>
+          <h2 class="section-heading section-heading-wide" id="safety-title">
+            How Command Execution Is Gated.
+          </h2>
+          <p class="section-lead">
+            This matters more in a terminal than anywhere else, so it is worth
+            being precise about what is enforced and what is not.
+          </p>
+
+          <div class="trust-row" role="list" aria-label="Execution guarantees">
+            <span class="trust-badge" role="listitem">
+              <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
+              Two-Axis Classification
+            </span>
+            <span class="trust-badge" role="listitem">
+              <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
+              Per-Session Permission Mode
+            </span>
+            <span class="trust-badge" role="listitem">
+              <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
+              Runs in Your Visible PTY
+            </span>
+            <span class="trust-badge" role="listitem">
+              <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
+              Your Edits Are Yours
+            </span>
+            <span class="trust-badge" role="listitem">
+              <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
+              API Keys Never Reach the UI
+            </span>
+          </div>
+
+          <div class="security-grid">
+            <article class="security-item">
+              <span class="security-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-shield" /></svg>
+              </span>
+              <h3>Classified on Two Axes</h3>
+              <p>
+                Every proposed command is checked for whether it is read-only and
+                whether it reaches the network — independently, since a fetch
+                that writes no file still pulls unreviewed content into a loop
+                that proposes shell commands. Both are shown on the card.
+              </p>
+            </article>
+            <article class="security-item">
+              <span class="security-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-lock" /></svg>
+              </span>
+              <h3>Arming It Is the Authorization</h3>
+              <p>
+                The permission mode is per session, never persisted, and never
+                inherited by a new tab. Auto-run of reads requires read-only
+                <em>and</em> no network — unknown commands fail closed and cost
+                you one click.
+              </p>
+            </article>
+            <article class="security-item">
+              <span class="security-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-eye" /></svg>
+              </span>
+              <h3>In Your Visible Terminal</h3>
+              <p>
+                Approved commands run in the tab you're looking at, not a hidden
+                subprocess — so you see exactly what ran, and it runs wherever
+                that tab is, including over <code>ssh</code>.
+              </p>
+            </article>
+            <article class="security-item">
+              <span class="security-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-globe-off" /></svg>
+              </span>
+              <h3>Web Access Is Withheld, Not Asked</h3>
+              <p>
+                With web access off, the model's fetch tooling is never sent in
+                the first place, and network-shaped commands are refused before
+                an approval card is even drawn.
+              </p>
+            </article>
+            <article class="security-item">
+              <span class="security-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-terminal" /></svg>
+              </span>
+              <h3>Edited Means Yours</h3>
+              <p>
+                A command you rewrite before approving is treated as your own
+                text on your own gesture, not as model output — deliberately not
+                re-classified.
+              </p>
+            </article>
+            <article class="security-item">
+              <span class="security-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-cpu" /></svg>
+              </span>
+              <h3>Nothing Runs at Launch</h3>
+              <p>
+                Restored sessions never replay anything. An <code>ssh</code> tab
+                you had open offers <em>Reconnect</em>; it does not reconnect
+                itself.
+              </p>
+            </article>
+          </div>
+
+          <div class="callout">
+            <span class="callout-icon" aria-hidden="true">
+              <svg class="ui-icon"><use href="#i-alert" /></svg>
+            </span>
+            <div>
+              <h3>This Is a Safety Rail, Not a Sandbox</h3>
+              <p>
+                The command classifier cannot see through a script the agent
+                wrote in an earlier step, an alias in your dotfiles, a
+                base64-decoded one-liner, or <code>python -c</code>. It is
+                documented as best-effort in the app itself and should not be
+                relied on as a security boundary. What actually enforces "no
+                internet" for a capable model is the withheld tool, not the
+                string match.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section
+        class="section section-soft"
+        id="models"
+        aria-labelledby="models-title"
+      >
+        <div class="shell">
+          <p class="eyebrow">Models</p>
+          <h2 class="section-heading" id="models-title">
+            One Interface. On-Device, Cloud, or Your Own Server.
+          </h2>
+          <p class="section-lead">
+            The catalog is a curated allowlist, so every model carries the
+            reasoning-effort rungs it actually accepts and the RAM it actually
+            needs — no runtime surprises, no 400s from a guessed parameter.
+          </p>
+
+          <div class="plans-grid">
+            <article class="package-card is-featured">
+              <div class="package-card__meta">
+                <p class="package-card__kicker">RUNS IN-PROCESS</p>
+                <span class="package-card__badge">DEFAULT</span>
+              </div>
+              <h3 class="package-card__title">On-Device</h3>
+              <p class="package-card__description">
+                GGUF weights running inside the app via llama.cpp with Metal
+                acceleration. Downloads are resumable and range-checked.
+              </p>
+              <ul>
+                <li>
+                  <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
+                  <span>Qwen3.5 4B / 9B</span>
+                </li>
+                <li>
+                  <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
+                  <span>Qwen3.6 27B</span>
+                </li>
+                <li>
+                  <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
+                  <span>Gemma 4 E2B / E4B / 31B</span>
+                </li>
+                <li>
+                  <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
+                  <span>Prompts from each model's own chat template</span>
+                </li>
+              </ul>
+              <p class="package-card__note">
+                Qwen3.5 9B is the default, sized to run on a 32&nbsp;GB M1 Pro.
+              </p>
+            </article>
+
+            <article class="package-card">
+              <div class="package-card__meta">
+                <p class="package-card__kicker">BRING YOUR OWN KEY</p>
+              </div>
+              <h3 class="package-card__title">Cloud</h3>
+              <p class="package-card__description">
+                Frontier models behind the same trait, with per-model effort
+                mapping onto each vendor's own parameter.
+              </p>
+              <ul>
+                <li>
+                  <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
+                  <span>Claude Haiku 4.5, Sonnet 5, Opus 5</span>
+                </li>
+                <li>
+                  <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
+                  <span>GPT-5.6 Luna, Terra, Sol</span>
+                </li>
+                <li>
+                  <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
+                  <span>Mistral Small 4, Magistral Medium, Large 3</span>
+                </li>
+                <li>
+                  <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
+                  <span>Transient 429s and 5xxs retry with backoff</span>
+                </li>
+              </ul>
+              <p class="package-card__note">
+                Keys are stored by the Rust backend and never round-trip to the
+                UI.
+              </p>
+            </article>
+
+            <article class="package-card">
+              <div class="package-card__meta">
+                <p class="package-card__kicker">ON YOUR OWN HARDWARE</p>
+              </div>
+              <h3 class="package-card__title">Self-Hosted</h3>
+              <p class="package-card__description">
+                Point VTerminal at any OpenAI-compatible server, press
+                <strong>Test</strong>, and pick which of the served models to
+                expose.
+              </p>
+              <ul>
+                <li>
+                  <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
+                  <span>Ollama, LM Studio, llama.cpp server</span>
+                </li>
+                <li>
+                  <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
+                  <span>vLLM, LiteLLM</span>
+                </li>
+                <li>
+                  <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
+                  <span>Per-server tokens, optional</span>
+                </li>
+                <li>
+                  <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
+                  <span>Raw <code>&lt;think&gt;</code> traces split out</span>
+                </li>
+              </ul>
+              <p class="package-card__note">
+                Hosts are only contacted behind an explicit Test — never probed
+                in the background.
+              </p>
+            </article>
+
+            <article class="package-card is-enterprise">
+              <div class="package-card__meta">
+                <p class="package-card__kicker">ALSO ON-DEVICE</p>
+                <span class="package-card__badge">OPTIONAL</span>
+              </div>
+              <h3 class="package-card__title">Vision Sidecar</h3>
+              <p class="package-card__description">
+                A second local model loaded beside the chat model, purely to
+                transcribe the images you attach.
+              </p>
+              <ul>
+                <li>
+                  <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
+                  <span>PaddleOCR-VL 1.6</span>
+                </li>
+                <li>
+                  <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
+                  <span>Qwen3-VL 4B / 8B</span>
+                </li>
+                <li>
+                  <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
+                  <span>Decodes greedily, so a transcript is reproducible</span>
+                </li>
+                <li>
+                  <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
+                  <span>Works with a cloud chat model</span>
+                </li>
+              </ul>
+              <p class="package-card__note">
+                Transcribed text is fenced and labelled as data — a screenshot is
+                attacker-controllable by construction.
+              </p>
+            </article>
+          </div>
+
+          <p class="plans-note">
+            Switching models is one keystroke from the <kbd>⌘K</kbd> palette, and
+            every reply keeps the name of the model that wrote it.
+          </p>
+        </div>
+      </section>
+
+      <section
+        class="section section-dark"
+        id="install"
+        aria-labelledby="install-title"
+      >
+        <div class="install-layout shell">
+          <div>
+            <p class="eyebrow">Quick Start</p>
+            <h2 class="section-heading" id="install-title">
+              Build It in Three Commands.
+            </h2>
+            <p class="section-lead">
+              VTerminal is source-first while it's pre-1.0. Clone it, build it,
+              and you have the terminal plus cloud AI immediately.
+            </p>
+
+            <dl class="req-list">
+              <div class="req-row">
+                <dt>OS</dt>
+                <dd>macOS on Apple Silicon (Intel is untested)</dd>
+              </div>
+              <div class="req-row">
+                <dt>Node</dt>
+                <dd>20 or newer</dd>
+              </div>
+              <div class="req-row">
+                <dt>Rust</dt>
+                <dd>pinned by <code>rust-toolchain.toml</code></dd>
+              </div>
+              <div class="req-row">
+                <dt>Xcode CLT</dt>
+                <dd><code>xcode-select --install</code></dd>
+              </div>
+              <div class="req-row">
+                <dt>cmake</dt>
+                <dd>
+                  <code>brew install cmake</code> — only for the
+                  <code>local-llm</code> feature
+                </dd>
+              </div>
+            </dl>
+          </div>
+
+          <ol class="steps">
+            <li class="step">
+              <span class="step-number" aria-hidden="true">1</span>
+              <div class="step-body">
+                <h3>Clone and Install</h3>
+                <div class="code-block">
+                  <code>git clone https://github.com/Veviad/VTerminal.git</code>
+                  <button
+                    class="copy-button"
+                    type="button"
+                    aria-label="Copy command"
+                    data-copy
+                  >
+                    <svg class="ui-icon" aria-hidden="true"><use href="#i-copy" /></svg>
+                  </button>
+                </div>
+                <div class="code-block">
+                  <code>npm install</code>
+                  <button
+                    class="copy-button"
+                    type="button"
+                    aria-label="Copy command"
+                    data-copy
+                  >
+                    <svg class="ui-icon" aria-hidden="true"><use href="#i-copy" /></svg>
+                  </button>
+                </div>
+              </div>
+            </li>
+
+            <li class="step">
+              <span class="step-number" aria-hidden="true">2</span>
+              <div class="step-body">
+                <h3>Run It</h3>
+                <p>
+                  The terminal plus cloud AI, with a fast build that skips the
+                  local inference engine entirely.
+                </p>
+                <div class="code-block">
+                  <code>npm run tauri dev</code>
+                  <button
+                    class="copy-button"
+                    type="button"
+                    aria-label="Copy command"
+                    data-copy
+                  >
+                    <svg class="ui-icon" aria-hidden="true"><use href="#i-copy" /></svg>
+                  </button>
+                </div>
+              </div>
+            </li>
+
+            <li class="step">
+              <span class="step-number" aria-hidden="true">3</span>
+              <div class="step-body">
+                <h3>Add On-Device Inference</h3>
+                <p>
+                  Then open <strong>Settings → Models</strong>, download
+                  <strong>Qwen3.5 9B</strong> (~5.3&nbsp;GB) and press
+                  <strong>Load</strong>.
+                </p>
+                <div class="code-block">
+                  <code>npm run tauri dev -- <span class="nowrap">--features local-llm</span></code>
+                  <button
+                    class="copy-button"
+                    type="button"
+                    aria-label="Copy command"
+                    data-copy
+                  >
+                    <svg class="ui-icon" aria-hidden="true"><use href="#i-copy" /></svg>
+                  </button>
+                </div>
+                <p class="install-note">
+                  The first <code>local-llm</code> build compiles llama.cpp and
+                  its Metal kernels — budget 10–30 minutes. Incremental builds
+                  afterwards are normal speed.
+                </p>
+              </div>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="section" aria-labelledby="keys-title">
+        <div class="shell">
+          <p class="eyebrow">Keyboard</p>
+          <h2 class="section-heading section-heading-wide" id="keys-title">
+            Hands Stay Where They Were.
+          </h2>
+
+          <ul class="keys-grid">
+            <li><kbd>⌘T</kbd> <span>New tab</span></li>
+            <li><kbd>⌘W</kbd> <span>Close tab</span></li>
+            <li><kbd>⌘1…9</kbd> <span>Jump to tab</span></li>
+            <li><kbd>⌘K</kbd> <span>Command palette</span></li>
+            <li><kbd>⌘I</kbd> <span>AI suggestion</span></li>
+            <li><kbd>⌘J</kbd> <span>Toggle AI panel</span></li>
+            <li><kbd>⌘F</kbd> <span>Search terminal</span></li>
+            <li><kbd>⌘,</kbd> <span>Settings</span></li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="section section-dark" aria-labelledby="cta-title">
+        <div class="shell cta-band">
+          <p class="eyebrow">Open Source</p>
+          <h2 class="section-heading" id="cta-title">
+            Built in the Open, Under GPL-3.0.
+          </h2>
+          <p class="section-lead">
+            Issues and pull requests are welcome — please open an issue before
+            starting substantial work so the approach can be agreed first. If you
+            intend to contribute regularly, get in touch: a licensing agreement
+            may be needed to keep future relicensing possible.
+          </p>
+          <div class="cta-actions">
+            <a
+              class="button button-primary"
+              href="https://github.com/Veviad/VTerminal"
+              >View on GitHub</a
+            >
+            <a
+              class="button button-secondary"
+              href="https://github.com/Veviad/VTerminal/issues"
+              >Open an issue</a
+            >
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="footer-grid shell">
+        <div class="footer-brand">
+          <img
+            src="assets/img/veviad-logo-compact-white-v2.svg"
+            width="165"
+            height="40"
+            alt="Veviad"
+          />
+          <p>
+            VTerminal is a Veviad project — a lean, AI-powered terminal for
+            macOS, developed in the open.
+          </p>
+          <a
+            class="social-link"
+            href="https://github.com/Veviad/VTerminal"
+            aria-label="VTerminal on GitHub"
+          >
+            <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <path
+                d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-2.91-.88-2.91-2.9 0-.86.31-1.56.82-2.11-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.4 7.4 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.55.82 1.25.82 2.11 0 2.03-1.13 2.7-2.92 2.9.29.26.55.75.55 1.52 0 1.07-.01 1.94-.01 2.2 0 .21.15.46.55.38A7.98 7.98 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
+              />
+            </svg>
+          </a>
+          <a
+            class="social-link"
+            href="https://www.linkedin.com/company/veviad"
+            aria-label="Veviad on LinkedIn"
+          >
+            <svg viewBox="0 0 448 512" fill="currentColor" aria-hidden="true">
+              <path
+                d="M100.28 448H7.4V148.9h92.88zM53.79 108.1C24.09 108.1 0 83.5 0 53.8a53.79 53.79 0 0 1 107.58 0c0 29.7-24.1 54.3-53.79 54.3zM447.9 448h-92.68V302.4c0-34.7-.7-79.2-48.29-79.2-48.29 0-55.69 37.7-55.69 76.7V448h-92.78V148.9h89.08v40.8h1.3c12.4-23.5 42.69-48.3 87.88-48.3 94 0 111.28 61.9 111.28 142.3V448z"
+              />
+            </svg>
+          </a>
+        </div>
+
+        <div>
+          <h2>Product</h2>
+          <nav aria-label="Product">
+            <a href="#why">Why VTerminal</a>
+            <a href="#terminal">Terminal</a>
+            <a href="#ai">AI</a>
+            <a href="#safety">Safety</a>
+            <a href="#models">Models</a>
+          </nav>
+        </div>
+
+        <div>
+          <h2>Project</h2>
+          <nav aria-label="Project">
+            <a href="https://github.com/Veviad/VTerminal">Repository</a>
+            <a href="https://github.com/Veviad/VTerminal/releases">Releases</a>
+            <a href="https://github.com/Veviad/VTerminal/issues">Issues</a>
+            <a href="https://github.com/Veviad/VTerminal/blob/main/LICENSE"
+              >License (GPL-3.0)</a
+            >
+          </nav>
+        </div>
+
+        <div>
+          <h2>Veviad</h2>
+          <nav aria-label="Veviad">
+            <a href="https://veviad.com">veviad.com</a>
+            <a href="https://veviad.com/impressum/">Impressum</a>
+            <a href="https://veviad.com/datenschutz/">Datenschutz</a>
+          </nav>
+        </div>
+      </div>
+
+      <div class="footer-bottom shell">
+        <small>© 2026 Veviad<sup>®</sup></small>
+        <small>Made with ❤️ and 🥨 in Munich</small>
+      </div>
+    </footer>
+
+    <script>
+      // Mobile menu. Kept to the two things that need JS: the disclosure state
+      // and the scroll lock, both mirrored onto aria-expanded.
+      (function () {
+        const toggle = document.querySelector("[data-menu-toggle]");
+        const menu = document.querySelector("[data-mobile-menu]");
+        if (!toggle || !menu) return;
+
+        const setOpen = (open) => {
+          menu.hidden = !open;
+          toggle.setAttribute("aria-expanded", String(open));
+          toggle.setAttribute("aria-label", open ? "Close menu" : "Open menu");
+          document.body.classList.toggle("menu-open", open);
+        };
+
+        toggle.addEventListener("click", () => {
+          setOpen(menu.hidden);
+        });
+
+        // Every in-page link closes it, or the panel covers the target.
+        menu.addEventListener("click", (event) => {
+          if (event.target.closest("a")) setOpen(false);
+        });
+
+        document.addEventListener("keydown", (event) => {
+          if (event.key === "Escape" && !menu.hidden) {
+            setOpen(false);
+            toggle.focus();
+          }
+        });
+      })();
+
+      // Copy buttons on the install commands. The <code> is the source of
+      // truth, so the copied text can never drift from the rendered text.
+      (function () {
+        for (const button of document.querySelectorAll("[data-copy]")) {
+          button.addEventListener("click", async () => {
+            const code = button.closest(".code-block")?.querySelector("code");
+            if (!code || !navigator.clipboard) return;
+            try {
+              await navigator.clipboard.writeText(code.textContent.trim());
+            } catch {
+              return;
+            }
+            button.dataset.copied = "true";
+            button.setAttribute("aria-label", "Copied");
+            setTimeout(() => {
+              delete button.dataset.copied;
+              button.setAttribute("aria-label", "Copy command");
+            }, 1600);
+          });
+        }
+      })();
+    </script>
+  </body>
+</html>
