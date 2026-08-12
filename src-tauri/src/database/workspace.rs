@@ -182,7 +182,8 @@ pub fn restore(
         let rows = stmt
             .query_map(params![read_gen, max_tabs as i64], row_to_meta)
             .map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?
     };
 
     tx.execute(
@@ -207,7 +208,11 @@ pub fn restore(
 pub fn snapshot(conn: &mut Connection, input: &WorkspaceSnapshotInput) -> Result<(), String> {
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     let gen: i64 = tx
-        .query_row("SELECT generation FROM workspace_state WHERE id = 'default'", [], |r| r.get(0))
+        .query_row(
+            "SELECT generation FROM workspace_state WHERE id = 'default'",
+            [],
+            |r| r.get(0),
+        )
         .map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().to_rfc3339();
 
@@ -373,7 +378,10 @@ mod tests {
 
         let got = restore(&mut conn, true, 24, "test").unwrap();
         assert_eq!(
-            got.sessions.iter().map(|s| s.session_id.as_str()).collect::<Vec<_>>(),
+            got.sessions
+                .iter()
+                .map(|s| s.session_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["a", "b"]
         );
         assert_eq!(got.active_session_id.as_deref(), Some("a"));
@@ -396,7 +404,11 @@ mod tests {
 
         assert_eq!(scrollback(&conn, "a").unwrap().as_deref(), Some("PAYLOAD"));
         let lines: i64 = conn
-            .query_row("SELECT scrollback_lines FROM session_snapshots WHERE session_id='a'", [], |r| r.get(0))
+            .query_row(
+                "SELECT scrollback_lines FROM session_snapshots WHERE session_id='a'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(lines, 42);
     }
@@ -481,8 +493,14 @@ mod tests {
 
         // Two boots in a row that never reach mark_healthy still restore —
         // one bad launch should not cost the user their tabs.
-        assert_eq!(restore(&mut conn, true, 24, "test").unwrap().sessions.len(), 1);
-        assert_eq!(restore(&mut conn, true, 24, "test").unwrap().sessions.len(), 1);
+        assert_eq!(
+            restore(&mut conn, true, 24, "test").unwrap().sessions.len(),
+            1
+        );
+        assert_eq!(
+            restore(&mut conn, true, 24, "test").unwrap().sessions.len(),
+            1
+        );
 
         // The third bails out and clears, so relaunching heals the app.
         let third = restore(&mut conn, true, 24, "test").unwrap();
@@ -564,7 +582,11 @@ mod tests {
     fn max_tabs_bounds_the_restore() {
         let mut conn = mem();
         restore(&mut conn, true, 24, "test").unwrap();
-        snap(&mut conn, (0..10).map(|i| tab(&format!("s{i}"), i)).collect(), "s0");
+        snap(
+            &mut conn,
+            (0..10).map(|i| tab(&format!("s{i}"), i)).collect(),
+            "s0",
+        );
         let got = restore(&mut conn, true, 3, "test").unwrap();
         assert_eq!(got.sessions.len(), 3);
         assert_eq!(got.sessions[0].session_id, "s0");

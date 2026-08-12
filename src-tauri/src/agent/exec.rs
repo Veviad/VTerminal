@@ -161,7 +161,9 @@ pub async fn run_command(
     let duration_ms = started.elapsed().as_millis() as u64;
 
     if timed_out {
-        tail.push_str(&format!("\n[command timed out after {timeout_secs}s and was killed]\n"));
+        tail.push_str(&format!(
+            "\n[command timed out after {timeout_secs}s and was killed]\n"
+        ));
     }
 
     let _ = on_event.send(StreamEvent::CommandResult {
@@ -197,9 +199,17 @@ mod tests {
 
     #[tokio::test]
     async fn captures_output_and_exit_zero() {
-        let r = run_command("/bin/zsh", None, "echo hello-exec", "a1", 30, no_cancel(), &null_channel())
-            .await
-            .unwrap();
+        let r = run_command(
+            "/bin/zsh",
+            None,
+            "echo hello-exec",
+            "a1",
+            30,
+            no_cancel(),
+            &null_channel(),
+        )
+        .await
+        .unwrap();
         assert_eq!(r.exit_code, 0);
         assert!(r.output_tail.contains("hello-exec"));
         assert!(!r.timed_out);
@@ -207,18 +217,34 @@ mod tests {
 
     #[tokio::test]
     async fn reports_nonzero_exit() {
-        let r = run_command("/bin/zsh", None, "exit 3", "a2", 30, no_cancel(), &null_channel())
-            .await
-            .unwrap();
+        let r = run_command(
+            "/bin/zsh",
+            None,
+            "exit 3",
+            "a2",
+            30,
+            no_cancel(),
+            &null_channel(),
+        )
+        .await
+        .unwrap();
         assert_eq!(r.exit_code, 3);
     }
 
     #[tokio::test]
     async fn kills_on_timeout() {
         let started = std::time::Instant::now();
-        let r = run_command("/bin/zsh", None, "sleep 60", "a3", 1, no_cancel(), &null_channel())
-            .await
-            .unwrap();
+        let r = run_command(
+            "/bin/zsh",
+            None,
+            "sleep 60",
+            "a3",
+            1,
+            no_cancel(),
+            &null_channel(),
+        )
+        .await
+        .unwrap();
         assert!(r.timed_out);
         assert!(started.elapsed().as_secs() < 10);
         assert!(r.output_tail.contains("timed out"));
@@ -242,7 +268,10 @@ mod tests {
         .await
         .unwrap();
         assert!(r.timed_out);
-        assert!(started.elapsed().as_secs() < 10, "wait() must not block past the timeout");
+        assert!(
+            started.elapsed().as_secs() < 10,
+            "wait() must not block past the timeout"
+        );
     }
 
     #[tokio::test]
@@ -270,15 +299,26 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(r.exit_code, 0, "binary output must not wedge or error the reader");
+        assert_eq!(
+            r.exit_code, 0,
+            "binary output must not wedge or error the reader"
+        );
         assert!(!r.timed_out);
     }
 
     #[tokio::test]
     async fn respects_cwd() {
-        let r = run_command("/bin/zsh", Some("/tmp"), "pwd", "a5", 30, no_cancel(), &null_channel())
-            .await
-            .unwrap();
+        let r = run_command(
+            "/bin/zsh",
+            Some("/tmp"),
+            "pwd",
+            "a5",
+            30,
+            no_cancel(),
+            &null_channel(),
+        )
+        .await
+        .unwrap();
         assert!(r.output_tail.contains("/tmp"));
     }
 }

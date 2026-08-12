@@ -595,7 +595,11 @@ mod tests {
                     .iter()
                     .filter(|m| m.provider == provider && m.tier == tier)
                     .count();
-                assert_eq!(n, 1, "{:?} should offer exactly one {:?} model", provider, tier);
+                assert_eq!(
+                    n, 1,
+                    "{:?} should offer exactly one {:?} model",
+                    provider, tier
+                );
             }
         }
     }
@@ -704,7 +708,10 @@ mod tests {
     /// around that being the reliable tier.
     #[test]
     fn every_anthropic_model_declares_vision() {
-        for m in CATALOG.iter().filter(|m| m.provider == ProviderId::Anthropic) {
+        for m in CATALOG
+            .iter()
+            .filter(|m| m.provider == ProviderId::Anthropic)
+        {
             assert!(m.supports_vision, "{} should declare vision", m.id);
         }
     }

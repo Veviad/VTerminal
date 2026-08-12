@@ -23,9 +23,14 @@ fn has_control_chars(s: &str) -> bool {
 /// because we type into the user's real interactive shell.
 fn is_host_key_bypass(args: &str) -> bool {
     let lower = args.to_ascii_lowercase();
-    ["stricthostkeychecking", "userknownhostsfile", "checkhostip", "globalknownhostsfile"]
-        .iter()
-        .any(|needle| lower.contains(needle))
+    [
+        "stricthostkeychecking",
+        "userknownhostsfile",
+        "checkhostip",
+        "globalknownhostsfile",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 fn valid_hostname(h: &str) -> bool {
@@ -35,7 +40,9 @@ fn valid_hostname(h: &str) -> bool {
     // Bracketed IPv6, e.g. [2001:db8::1]
     if let Some(inner) = h.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
         return !inner.is_empty()
-            && inner.chars().all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.');
+            && inner
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.');
     }
     // Hostname or IPv4: alphanumeric ends, dots/dashes/underscores inside.
     let bytes = h.as_bytes();
@@ -49,7 +56,9 @@ fn valid_hostname(h: &str) -> bool {
 fn valid_username(u: &str) -> bool {
     !u.is_empty()
         && u.len() <= 32
-        && u.chars().next().is_some_and(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+        && u.chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
         && u.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
 }
@@ -104,7 +113,10 @@ fn validate(h: &mut queries::SshHostInput) -> Result<(), String> {
         return Err("the label is too long (max 64 characters)".into());
     }
     if !valid_hostname(&h.hostname) {
-        return Err(format!("\"{}\" is not a valid hostname or IP address", h.hostname));
+        return Err(format!(
+            "\"{}\" is not a valid hostname or IP address",
+            h.hostname
+        ));
     }
     if let Some(u) = &h.username {
         if !valid_username(u) {
@@ -285,9 +297,7 @@ pub struct SshConfigCandidate {
 }
 
 #[tauri::command]
-pub fn ssh_hosts_scan_config(
-    db: State<'_, DbState>,
-) -> Result<Vec<SshConfigCandidate>, String> {
+pub fn ssh_hosts_scan_config(db: State<'_, DbState>) -> Result<Vec<SshConfigCandidate>, String> {
     let ssh_dir = dirs::home_dir()
         .ok_or_else(|| "cannot locate your home directory".to_string())?
         .join(".ssh");

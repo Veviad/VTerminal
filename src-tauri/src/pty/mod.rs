@@ -11,10 +11,16 @@ use session::PtySession;
 #[derive(Clone, Serialize)]
 #[serde(tag = "type")]
 pub enum PtyEvent {
-    Spawned { pid: u32 },
-    Exit { exit_code: Option<i32> },
+    Spawned {
+        pid: u32,
+    },
+    Exit {
+        exit_code: Option<i32>,
+    },
     #[allow(dead_code)] // part of the wire contract; frontend handles it
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Default)]

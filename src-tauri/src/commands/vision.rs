@@ -8,9 +8,9 @@ use tauri::ipc::Channel;
 use tauri::{Manager, State, Wry};
 
 use crate::commands::settings;
-use crate::models::vision::{self, VisionModel};
 #[cfg(feature = "local-llm")]
 use crate::models::download;
+use crate::models::vision::{self, VisionModel};
 use crate::models::{registry, DownloadEvent, DownloadState, LoadEvent};
 
 /// Decoded ceiling on one image. Above this the sidecar's own token budget would
@@ -46,7 +46,10 @@ fn both_downloaded(dir: &std::path::Path, m: &VisionModel) -> bool {
 #[cfg_attr(not(feature = "local-llm"), allow(dead_code))]
 fn path_of(dir: &std::path::Path, repo_id: &str, filename: &str) -> Option<String> {
     let id = registry::model_id(repo_id, filename);
-    registry::load(dir).into_iter().find(|l| l.id == id).map(|l| l.path)
+    registry::load(dir)
+        .into_iter()
+        .find(|l| l.id == id)
+        .map(|l| l.path)
 }
 
 /// One row of the sidecar picker.
@@ -183,11 +186,13 @@ mod enabled {
 
         // ONE Started for the batch, with the total known from the catalog — so no
         // HEAD is needed and the bar never jumps when the second file begins.
-        on_event.send(DownloadEvent::Started {
-            download_id: download_id.clone(),
-            total_bytes: Some(total),
-            resumed_from: 0,
-        }).ok();
+        on_event
+            .send(DownloadEvent::Started {
+                download_id: download_id.clone(),
+                total_bytes: Some(total),
+                resumed_from: 0,
+            })
+            .ok();
 
         let result = run_pair(
             m,
@@ -255,10 +260,12 @@ mod enabled {
 
         // ONE Completed for the batch, naming the CATALOG id rather than either
         // registry id — that is what the frontend keys its rows on.
-        on_event.send(DownloadEvent::Completed {
-            model_id: m.id.to_string(),
-            path: weights.path,
-        }).ok();
+        on_event
+            .send(DownloadEvent::Completed {
+                model_id: m.id.to_string(),
+                path: weights.path,
+            })
+            .ok();
         Ok(())
     }
 

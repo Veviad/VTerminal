@@ -173,7 +173,11 @@ pub fn scan(ssh_dir: &Path) -> Result<Vec<ParsedHost>, String> {
         // /etc/passwd`, or a symlink planted inside ~/.ssh, turns the importer
         // into an arbitrary-file reader that ships contents to the UI.
         if !canon.starts_with(&root) {
-            log::warn!("skipping ssh config include outside {}: {}", root.display(), canon.display());
+            log::warn!(
+                "skipping ssh config include outside {}: {}",
+                root.display(),
+                canon.display()
+            );
             continue;
         }
         if !seen.insert(canon.clone()) {
@@ -296,20 +300,25 @@ mod tests {
             hosts.iter().map(|h| h.alias.as_str()).collect::<Vec<_>>(),
             vec!["a", "b", "c"]
         );
-        assert!(hosts.iter().all(|h| h.hostname.as_deref() == Some("shared.example.com")));
+        assert!(hosts
+            .iter()
+            .all(|h| h.hostname.as_deref() == Some("shared.example.com")));
         assert!(hosts.iter().all(|h| h.username.as_deref() == Some("root")));
     }
 
     #[test]
     fn skips_wildcard_and_negated_patterns() {
-        let (hosts, _) = parse("Host *\n  User root\n\nHost prod-*\n  User deploy\n\nHost !bad\n  User x\n");
+        let (hosts, _) =
+            parse("Host *\n  User root\n\nHost prod-*\n  User deploy\n\nHost !bad\n  User x\n");
         assert!(hosts.is_empty());
     }
 
     #[test]
     fn a_wildcard_block_does_not_bleed_into_the_next_host() {
         // The state machine's real failure mode: forgetting to reset `skipping`.
-        let (hosts, _) = parse("Host *\n  User root\n  IdentityFile ~/.ssh/global\n\nHost prod\n  HostName p1\n");
+        let (hosts, _) = parse(
+            "Host *\n  User root\n  IdentityFile ~/.ssh/global\n\nHost prod\n  HostName p1\n",
+        );
         assert_eq!(hosts.len(), 1);
         assert_eq!(hosts[0].alias, "prod");
         assert_eq!(hosts[0].hostname.as_deref(), Some("p1"));
@@ -340,19 +349,27 @@ mod tests {
     #[test]
     fn keywords_are_case_insensitive() {
         let (hosts, _) = parse("HOST prod\n  hostname p1\n  HostName p2\n  USER deploy\n");
-        assert_eq!(hosts[0].hostname.as_deref(), Some("p1"), "first value must win");
+        assert_eq!(
+            hosts[0].hostname.as_deref(),
+            Some("p1"),
+            "first value must win"
+        );
         assert_eq!(hosts[0].username.as_deref(), Some("deploy"));
     }
 
     #[test]
     fn keeps_a_quoted_value_whole() {
         let (hosts, _) = parse("Host prod\n  IdentityFile \"~/my keys/id_ed25519\"\n");
-        assert_eq!(hosts[0].identity_file.as_deref(), Some("~/my keys/id_ed25519"));
+        assert_eq!(
+            hosts[0].identity_file.as_deref(),
+            Some("~/my keys/id_ed25519")
+        );
     }
 
     #[test]
     fn ignores_comments_and_blank_lines() {
-        let (hosts, _) = parse("# a comment\n\n   # indented\nHost prod\n  # inner\n  HostName p1\n");
+        let (hosts, _) =
+            parse("# a comment\n\n   # indented\nHost prod\n  # inner\n  HostName p1\n");
         assert_eq!(hosts.len(), 1);
         assert_eq!(hosts[0].hostname.as_deref(), Some("p1"));
     }
@@ -366,7 +383,8 @@ mod tests {
 
     #[test]
     fn includes_are_returned_not_followed() {
-        let (hosts, includes) = parse("Include conf.d/*\nInclude other\nHost prod\n  HostName p1\n");
+        let (hosts, includes) =
+            parse("Include conf.d/*\nInclude other\nHost prod\n  HostName p1\n");
         assert_eq!(includes, vec!["conf.d/*".to_string(), "other".to_string()]);
         assert_eq!(hosts.len(), 1);
     }

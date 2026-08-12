@@ -93,7 +93,8 @@ pub const VISION_CATALOG: &[VisionModel] = &[
     VisionModel {
         id: "vision/paddleocr-vl-1.6",
         label: "PaddleOCR-VL 1.6",
-        description: "Reads text out of screenshots and documents. Smallest, and the best at dense text.",
+        description:
+            "Reads text out of screenshots and documents. Smallest, and the best at dense text.",
         repo_id: "PaddlePaddle/PaddleOCR-VL-1.6-GGUF",
         filename: "PaddleOCR-VL-1.6-GGUF.gguf",
         size_bytes: 935_769_056,
@@ -182,7 +183,11 @@ mod tests {
         }
         // And the reverse, so a future chat entry cannot claim a vision id.
         for m in catalog::CATALOG {
-            assert!(find(m.id).is_none(), "{} resolves in VISION_CATALOG too", m.id);
+            assert!(
+                find(m.id).is_none(),
+                "{} resolves in VISION_CATALOG too",
+                m.id
+            );
         }
     }
 
@@ -192,12 +197,20 @@ mod tests {
     #[test]
     fn every_entry_declares_two_distinct_single_file_ggufs() {
         for m in VISION_CATALOG {
-            assert_ne!(m.filename, m.mmproj_filename, "{}: weights == projector", m.id);
+            assert_ne!(
+                m.filename, m.mmproj_filename,
+                "{}: weights == projector",
+                m.id
+            );
             for f in [m.filename, m.mmproj_filename] {
                 assert!(f.ends_with(".gguf"), "{}: {f} is not a .gguf", m.id);
                 assert!(!hf::is_multipart(f), "{}: {f} is multipart", m.id);
             }
-            assert!(m.size_bytes > 0 && m.mmproj_size_bytes > 0, "{}: zero size", m.id);
+            assert!(
+                m.size_bytes > 0 && m.mmproj_size_bytes > 0,
+                "{}: zero size",
+                m.id
+            );
             assert_eq!(m.total_bytes(), m.size_bytes + m.mmproj_size_bytes);
         }
     }
@@ -223,7 +236,11 @@ mod tests {
     fn default_prompts_are_present_and_specific() {
         for m in VISION_CATALOG {
             assert!(m.default_prompt.len() > 40, "{}: prompt is too vague", m.id);
-            assert!(!m.label.is_empty() && !m.description.is_empty(), "{}: no label", m.id);
+            assert!(
+                !m.label.is_empty() && !m.description.is_empty(),
+                "{}: no label",
+                m.id
+            );
         }
     }
 

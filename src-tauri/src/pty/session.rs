@@ -183,10 +183,7 @@ pub fn spawn(
 
     // Own dup of the master fd for the reader thread. The reader closes it
     // itself on exit, so there is no use-after-close/fd-reuse race with kill().
-    let reader_fd = pair
-        .master
-        .as_raw_fd()
-        .ok_or("master pty has no raw fd")?;
+    let reader_fd = pair.master.as_raw_fd().ok_or("master pty has no raw fd")?;
     let reader_fd = unsafe { libc::dup(reader_fd) };
     if reader_fd < 0 {
         return Err("dup(master fd) failed".into());
@@ -235,7 +232,11 @@ pub fn spawn(
                         break;
                     }
                     let n = unsafe {
-                        libc::read(reader_fd, buf.as_mut_ptr() as *mut libc::c_void, READ_BUF_SIZE)
+                        libc::read(
+                            reader_fd,
+                            buf.as_mut_ptr() as *mut libc::c_void,
+                            READ_BUF_SIZE,
+                        )
                     };
                     match n {
                         n if n > 0 => {

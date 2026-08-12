@@ -272,15 +272,15 @@ pub fn list(conn: &Connection, limit: u32, offset: u32) -> Result<Vec<ArchiveSum
     let rows = stmt
         .query_map(params![limit, offset], row_to_summary)
         .map_err(|e| e.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
 }
 
 /// Metadata + the display transcript. Still no scrollback blob — that is
 /// `scrollback()`, fetched only for the row actually being reopened.
 pub fn get(conn: &Connection, session_id: &str) -> Result<Option<ArchiveDetail>, String> {
-    let sql = format!(
-        "SELECT {SUMMARY_COLS}, NULL FROM archived_sessions a WHERE a.session_id = ?1"
-    );
+    let sql =
+        format!("SELECT {SUMMARY_COLS}, NULL FROM archived_sessions a WHERE a.session_id = ?1");
     let summary = conn
         .query_row(&sql, params![session_id], row_to_summary)
         .optional()
@@ -307,7 +307,9 @@ pub fn get(conn: &Connection, session_id: &str) -> Result<Option<ArchiveDetail>,
                     command: c,
                     output: row.get::<_, Option<String>>(7)?.unwrap_or_default(),
                     exit_code: row.get(8)?,
-                    status: row.get::<_, Option<String>>(9)?.unwrap_or_else(|| "done".into()),
+                    status: row
+                        .get::<_, Option<String>>(9)?
+                        .unwrap_or_else(|| "done".into()),
                     note: row.get(10)?,
                 }),
                 _ => None,
@@ -402,7 +404,9 @@ pub fn transcript(conn: &Connection, session_id: &str) -> Result<Vec<ChatMessage
     match serde_json::from_str::<Vec<ChatMessage>>(&raw) {
         Ok(messages) => Ok(messages),
         Err(e) => {
-            log::warn!("archived transcript for {session_id} is unreadable ({e}) — continuing without it");
+            log::warn!(
+                "archived transcript for {session_id} is unreadable ({e}) — continuing without it"
+            );
             Ok(vec![])
         }
     }
@@ -481,7 +485,10 @@ pub fn put_many(
         let counts = input.messages.as_ref().map(|messages| {
             let start = messages.len().saturating_sub(MAX_MESSAGES);
             let kept = &messages[start..];
-            let commands = kept.iter().filter(|m| m.kind.as_deref() == Some("command")).count();
+            let commands = kept
+                .iter()
+                .filter(|m| m.kind.as_deref() == Some("command"))
+                .count();
             (kept.len() as i64, commands as i64)
         });
 
@@ -567,7 +574,11 @@ pub fn put_many(
                 // Unknown roles/kinds would violate the CHECK and abort the whole
                 // transaction, taking the terminal's scrollback with them. Coerce
                 // instead: a mislabelled message is worth less than the session.
-                let role = if m.role == "user" { "user" } else { "assistant" };
+                let role = if m.role == "user" {
+                    "user"
+                } else {
+                    "assistant"
+                };
                 // clippy reads this as `m.kind.as_deref().unwrap_or("text")`, which
                 // is NOT the same thing and would undo the coercion above: unwrap_or
                 // passes ANY Some(..) through untouched, so an unrecognised kind
@@ -642,9 +653,7 @@ pub fn put_many(
                             a.height,
                         ],
                     )
-                    .map_err(|e| {
-                        format!("archive attachment {j} of message {i}: {e}")
-                    })?;
+                    .map_err(|e| format!("archive attachment {j} of message {i}: {e}"))?;
                 }
             }
         }
@@ -770,7 +779,10 @@ mod tests {
     use super::*;
     use crate::provider::{Role, ToolCall};
 
-    const KEEP_ALL: Retention = Retention { max_sessions: 100, max_age_days: 3650 };
+    const KEEP_ALL: Retention = Retention {
+        max_sessions: 100,
+        max_age_days: 3650,
+    };
 
     fn mem() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -883,7 +895,9 @@ mod tests {
 
         assert_eq!(scrollback(&conn, "a").unwrap().as_deref(), Some("PAYLOAD"));
         let lines: i64 = conn
-            .query_row("SELECT scrollback_lines FROM archived_sessions", [], |r| r.get(0))
+            .query_row("SELECT scrollback_lines FROM archived_sessions", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(lines, 42);
     }
@@ -923,7 +937,11 @@ mod tests {
         assert_eq!(detail.messages.len(), 5);
         assert_eq!(detail.summary.message_count, 5);
         assert_eq!(
-            detail.messages.iter().map(|m| m.sort_order).collect::<Vec<_>>(),
+            detail
+                .messages
+                .iter()
+                .map(|m| m.sort_order)
+                .collect::<Vec<_>>(),
             vec![0, 1, 2, 3, 4]
         );
     }
@@ -979,16 +997,31 @@ mod tests {
     #[test]
     fn prune_keeps_the_newest_n_by_closed_at() {
         let mut conn = mem();
-        for (id, when) in [("old", "2026-08-01"), ("mid", "2026-08-02"), ("new", "2026-08-03")] {
+        for (id, when) in [
+            ("old", "2026-08-01"),
+            ("mid", "2026-08-02"),
+            ("new", "2026-08-03"),
+        ] {
             put(&mut conn, &row(id), KEEP_ALL).unwrap();
             closed_at(&conn, id, &format!("{when}T00:00:00+00:00"));
         }
-        let removed = prune(&conn, Retention { max_sessions: 2, max_age_days: 3650 }).unwrap();
+        let removed = prune(
+            &conn,
+            Retention {
+                max_sessions: 2,
+                max_age_days: 3650,
+            },
+        )
+        .unwrap();
         // The IDS, not just the count: they are what the caller uses to delete the
         // matching attachment directories.
         assert_eq!(removed, vec!["old".to_string()]);
         // Assert WHICH rows survived, not just how many.
-        let ids: Vec<String> = list(&conn, 50, 0).unwrap().into_iter().map(|s| s.session_id).collect();
+        let ids: Vec<String> = list(&conn, 50, 0)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.session_id)
+            .collect();
         assert_eq!(ids, vec!["new".to_string(), "mid".to_string()]);
     }
 
@@ -1000,8 +1033,19 @@ mod tests {
         closed_at(&conn, "ancient", "2020-01-01T00:00:00+00:00");
         put(&mut conn, &row("fresh"), KEEP_ALL).unwrap();
 
-        prune(&conn, Retention { max_sessions: 100, max_age_days: 30 }).unwrap();
-        let ids: Vec<String> = list(&conn, 50, 0).unwrap().into_iter().map(|s| s.session_id).collect();
+        prune(
+            &conn,
+            Retention {
+                max_sessions: 100,
+                max_age_days: 30,
+            },
+        )
+        .unwrap();
+        let ids: Vec<String> = list(&conn, 50, 0)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.session_id)
+            .collect();
         assert_eq!(ids, vec!["fresh".to_string()]);
     }
 
@@ -1014,7 +1058,14 @@ mod tests {
         put(&mut conn, &open, KEEP_ALL).unwrap();
         closed_at(&conn, "live", "2020-01-01T00:00:00+00:00");
 
-        prune(&conn, Retention { max_sessions: 0, max_age_days: 1 }).unwrap();
+        prune(
+            &conn,
+            Retention {
+                max_sessions: 0,
+                max_age_days: 1,
+            },
+        )
+        .unwrap();
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM archived_sessions", [], |r| r.get(0))
             .unwrap();
@@ -1100,7 +1151,10 @@ mod tests {
         put(&mut conn, &r, KEEP_ALL).unwrap();
 
         let detail = get(&conn, "a").unwrap().unwrap();
-        assert_eq!(detail.messages[0].content.chars().count(), MAX_MESSAGE_CONTENT);
+        assert_eq!(
+            detail.messages[0].content.chars().count(),
+            MAX_MESSAGE_CONTENT
+        );
         let out = &detail.messages[1].command.as_ref().unwrap().output;
         assert_eq!(out.chars().count(), MAX_COMMAND_OUTPUT);
     }
@@ -1132,7 +1186,10 @@ mod tests {
         put(&mut conn, &r, KEEP_ALL).unwrap();
 
         let detail = get(&conn, "a").unwrap().unwrap();
-        assert_eq!(detail.messages[0].content.chars().count(), MAX_MESSAGE_CONTENT);
+        assert_eq!(
+            detail.messages[0].content.chars().count(),
+            MAX_MESSAGE_CONTENT
+        );
         assert!(detail.messages[0].content.chars().all(|ch| ch == 'é'));
         let out = &detail.messages[1].command.as_ref().unwrap().output;
         assert!(out.chars().all(|ch| ch == '→'));
@@ -1210,11 +1267,17 @@ mod tests {
             put(&mut conn, &row(&id), KEEP_ALL).unwrap();
             closed_at(&conn, &id, &format!("2026-08-0{}T00:00:00+00:00", i + 1));
         }
-        let first_two: Vec<String> =
-            list(&conn, 2, 0).unwrap().into_iter().map(|s| s.session_id).collect();
+        let first_two: Vec<String> = list(&conn, 2, 0)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.session_id)
+            .collect();
         assert_eq!(first_two, vec!["s4".to_string(), "s3".to_string()]);
-        let next: Vec<String> =
-            list(&conn, 2, 2).unwrap().into_iter().map(|s| s.session_id).collect();
+        let next: Vec<String> = list(&conn, 2, 2)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.session_id)
+            .collect();
         assert_eq!(next, vec!["s2".to_string(), "s1".to_string()]);
     }
 

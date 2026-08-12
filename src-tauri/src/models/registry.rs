@@ -72,7 +72,10 @@ pub fn add(models_dir: &Path, model: LocalModel) -> Result<(), String> {
 pub fn remove(models_dir: &Path, id: &str) -> Result<Option<LocalModel>, String> {
     let _guard = REGISTRY_LOCK.lock().map_err(|_| "registry lock poisoned")?;
     let mut models = load(models_dir);
-    let removed = models.iter().position(|m| m.id == id).map(|i| models.remove(i));
+    let removed = models
+        .iter()
+        .position(|m| m.id == id)
+        .map(|i| models.remove(i));
     save(models_dir, &models)?;
     Ok(removed)
 }
@@ -154,7 +157,10 @@ mod tests {
 
         // 16GiB is the TIGHT configuration, not 32: exactly one combination fits,
         // so the UI must name the pair rather than just say "too big".
-        assert!(pair_fits_in_ram(chat_9b, paddleocr, 16 * GIB), "9B + PaddleOCR on 16GiB");
+        assert!(
+            pair_fits_in_ram(chat_9b, paddleocr, 16 * GIB),
+            "9B + PaddleOCR on 16GiB"
+        );
         assert!(
             !pair_fits_in_ram(chat_9b, qwen_vl_4b, 16 * GIB),
             "9B + Qwen3-VL 4B must NOT fit 16GiB"

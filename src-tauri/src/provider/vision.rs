@@ -146,25 +146,30 @@ impl VisionHost {
             generation
         };
 
-        let _ = on_event.send(LoadEvent::Phase { name: "loading".into() });
+        let _ = on_event.send(LoadEvent::Phase {
+            name: "loading".into(),
+        });
 
-        let build = tokio::task::spawn_blocking(
-            move || -> Result<VisionParts, String> {
-                let backend = backend()?;
-                let params = LlamaModelParams::default().with_n_gpu_layers(u32::MAX);
-                let model = LlamaModel::load_from_file(backend, &gguf_path, &params)
-                    .map_err(|e| format!("vision model load failed: {e}"))?;
-                let template = load_template(&model)?;
-                let context_len = MAX_SIDECAR_CTX.min(model.n_ctx_train()).max(512);
+        let build = tokio::task::spawn_blocking(move || -> Result<VisionParts, String> {
+            let backend = backend()?;
+            let params = LlamaModelParams::default().with_n_gpu_layers(u32::MAX);
+            let model = LlamaModel::load_from_file(backend, &gguf_path, &params)
+                .map_err(|e| format!("vision model load failed: {e}"))?;
+            let template = load_template(&model)?;
+            let context_len = MAX_SIDECAR_CTX.min(model.n_ctx_train()).max(512);
 
-                let mtmd = MtmdContext::init_from_file(&mmproj_path, &model, &mtmd_params(true)?)
-                    .map_err(|e| projector_error(&e.to_string()))?;
-                if !mtmd.support_vision() {
-                    return Err("this projector carries no vision encoder".into());
-                }
-                Ok((Arc::new(model), Arc::new(mtmd), Arc::new(template), context_len))
-            },
-        )
+            let mtmd = MtmdContext::init_from_file(&mmproj_path, &model, &mtmd_params(true)?)
+                .map_err(|e| projector_error(&e.to_string()))?;
+            if !mtmd.support_vision() {
+                return Err("this projector carries no vision encoder".into());
+            }
+            Ok((
+                Arc::new(model),
+                Arc::new(mtmd),
+                Arc::new(template),
+                context_len,
+            ))
+        })
         .await
         .map_err(|e| format!("vision load task failed: {e}"))?;
 
@@ -173,7 +178,9 @@ impl VisionHost {
         if self.generation.load(std::sync::atomic::Ordering::SeqCst) != my_generation {
             *slot = VisionSlot::Empty;
             let message = "load cancelled by unload".to_string();
-            let _ = on_event.send(LoadEvent::Error { message: message.clone() });
+            let _ = on_event.send(LoadEvent::Error {
+                message: message.clone(),
+            });
             return Err(message);
         }
         match build {
@@ -191,7 +198,9 @@ impl VisionHost {
             }
             Err(message) => {
                 *slot = VisionSlot::Empty;
-                let _ = on_event.send(LoadEvent::Error { message: message.clone() });
+                let _ = on_event.send(LoadEvent::Error {
+                    message: message.clone(),
+                });
                 Err(message)
             }
         }
@@ -226,10 +235,7 @@ impl VisionHost {
 ///
 /// Free function so the marker placement is testable against real template
 /// fixtures without a GGUF.
-pub fn build_vision_prompt(
-    template: &ChatTemplate,
-    prompt: &str,
-) -> Result<String, String> {
+pub fn build_vision_prompt(template: &ChatTemplate, prompt: &str) -> Result<String, String> {
     let content = format!("{}\n{}", mtmd_default_marker(), prompt.trim());
     // No tools, and thinking off: a transcriber does not deliberate.
     template.render(&[ChatMessage::user(content)], &[], false)
@@ -571,7 +577,10 @@ mod tests {
     /// adds those itself around the embeddings.
     #[test]
     fn the_marker_appears_once_and_unwrapped() {
-        for name in ["qwen3-vl-chat-template.jinja", "paddleocr-vl-chat-template.jinja"] {
+        for name in [
+            "qwen3-vl-chat-template.jinja",
+            "paddleocr-vl-chat-template.jinja",
+        ] {
             let template = fixture(name);
             let out = build_vision_prompt(&template, "Transcribe this.").unwrap();
             let marker = mtmd_default_marker();
@@ -590,7 +599,10 @@ mod tests {
                     "{name}: template emitted {wrapper} — mtmd would add its own on top"
                 );
             }
-            assert!(out.contains("Transcribe this."), "{name}: prompt text is missing");
+            assert!(
+                out.contains("Transcribe this."),
+                "{name}: prompt text is missing"
+            );
         }
     }
 }

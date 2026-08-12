@@ -16,7 +16,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use vterminal_lib::provider::local::{LocalLlamaCpp, ReadyModel};
 
     let mut args = std::env::args().skip(1);
-    let file = args.next().expect("usage: smoke_agent <file.gguf> [qwen|gemma]");
+    let file = args
+        .next()
+        .expect("usage: smoke_agent <file.gguf> [qwen|gemma]");
     let family = match args.next().as_deref() {
         Some("gemma") => LocalFamily::Gemma,
         _ => LocalFamily::Qwen,
@@ -52,14 +54,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             match v.get("type").and_then(|t| t.as_str()) {
                 Some("Delta") => {
-                    eprint!("{}", v.get("content").and_then(|c| c.as_str()).unwrap_or(""));
+                    eprint!(
+                        "{}",
+                        v.get("content").and_then(|c| c.as_str()).unwrap_or("")
+                    );
                 }
                 // Quiet by default — a thinking trace drowns the events that
                 // matter. `SMOKE_VERBOSE=1` shows it, which is the only way to
                 // tell "the model said nothing" apart from "the model spent the
                 // whole budget reasoning" when a run ends with no tool call.
                 Some("ThinkingDelta") if std::env::var_os("SMOKE_VERBOSE").is_some() => {
-                    eprint!("{}", v.get("content").and_then(|c| c.as_str()).unwrap_or(""));
+                    eprint!(
+                        "{}",
+                        v.get("content").and_then(|c| c.as_str()).unwrap_or("")
+                    );
                 }
                 Some("ThinkingDelta") => {}
                 Some("CommandProposal") => {
@@ -76,17 +84,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
                 Some("CommandOutput") => {
-                    eprintln!("[out] {}", v.get("chunk").and_then(|c| c.as_str()).unwrap_or(""));
+                    eprintln!(
+                        "[out] {}",
+                        v.get("chunk").and_then(|c| c.as_str()).unwrap_or("")
+                    );
                 }
                 Some("CommandResult") => {
-                    eprintln!("[exit {}]", v.get("exit_code").and_then(|c| c.as_i64()).unwrap_or(-1));
+                    eprintln!(
+                        "[exit {}]",
+                        v.get("exit_code").and_then(|c| c.as_i64()).unwrap_or(-1)
+                    );
                     r.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
                 Some("Done") => {
                     d.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
                 Some("Error") => {
-                    eprintln!("\n[error] {}", v.get("message").and_then(|c| c.as_str()).unwrap_or(""));
+                    eprintln!(
+                        "\n[error] {}",
+                        v.get("message").and_then(|c| c.as_str()).unwrap_or("")
+                    );
                 }
                 _ => {}
             }
@@ -168,7 +185,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         saw_done.load(std::sync::atomic::Ordering::SeqCst),
         file_content.trim()
     );
-    assert!(proposal_ok, "expected at least one CommandProposal (tool calling through the GGUF template)");
+    assert!(
+        proposal_ok,
+        "expected at least one CommandProposal (tool calling through the GGUF template)"
+    );
     assert!(result_ok, "expected at least one executed command");
     assert!(
         file_content.trim().contains("hello"),

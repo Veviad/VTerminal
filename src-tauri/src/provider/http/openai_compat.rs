@@ -159,7 +159,10 @@ impl ThinkSplitter {
                 // token, never content, so it is swallowed rather than shown. That
                 // is what a server stripping the opening tag looks like.
                 let open = self.buf.find(THINK_OPEN).map(|at| (at, THINK_OPEN, true));
-                let close = self.buf.find(THINK_CLOSE).map(|at| (at, THINK_CLOSE, false));
+                let close = self
+                    .buf
+                    .find(THINK_CLOSE)
+                    .map(|at| (at, THINK_CLOSE, false));
                 let Some((at, tag, opens)) = [open, close]
                     .into_iter()
                     .flatten()
@@ -417,7 +420,8 @@ impl Provider for OpenAiCompatProvider {
                             entry.1 = name.to_string();
                         }
                     }
-                    if let Some(args) = call.pointer("/function/arguments").and_then(Value::as_str) {
+                    if let Some(args) = call.pointer("/function/arguments").and_then(Value::as_str)
+                    {
                         entry.2.push_str(args);
                     }
                 }
@@ -552,8 +556,14 @@ mod tests {
         let msgs = build_messages(vec![ChatMessage::user_with_images(
             "what is this",
             vec![
-                crate::provider::ImagePart { media_type: "image/png".into(), data: "AAAA".into() },
-                crate::provider::ImagePart { media_type: "image/jpeg".into(), data: "BBBB".into() },
+                crate::provider::ImagePart {
+                    media_type: "image/png".into(),
+                    data: "AAAA".into(),
+                },
+                crate::provider::ImagePart {
+                    media_type: "image/jpeg".into(),
+                    data: "BBBB".into(),
+                },
             ],
         )]);
 
@@ -580,11 +590,12 @@ mod tests {
     fn split(content: Value) -> (String, String) {
         let mut out = Vec::new();
         push_content(&content, &mut out);
-        out.iter().fold((String::new(), String::new()), |(r, t), e| match e {
-            ProviderEvent::ReasoningDelta(s) => (r + s, t),
-            ProviderEvent::TextDelta(s) => (r, t + s),
-            _ => (r, t),
-        })
+        out.iter()
+            .fold((String::new(), String::new()), |(r, t), e| match e {
+                ProviderEvent::ReasoningDelta(s) => (r + s, t),
+                ProviderEvent::TextDelta(s) => (r, t + s),
+                _ => (r, t),
+            })
     }
 
     #[test]
@@ -643,7 +654,13 @@ mod tests {
     fn mistral_only_ever_sends_none_or_high() {
         // Mistral 400s on anything else, so no rung may map elsewhere — not
         // even one the catalog should have clamped away first.
-        for effort in [Effort::Off, Effort::Low, Effort::Medium, Effort::High, Effort::Max] {
+        for effort in [
+            Effort::Off,
+            Effort::Low,
+            Effort::Medium,
+            Effort::High,
+            Effort::Max,
+        ] {
             for id in [
                 "mistral/mistral-small-latest",
                 "mistral/magistral-medium-latest",
@@ -749,7 +766,8 @@ mod tests {
     fn a_multibyte_character_is_never_split() {
         // hold_back counts characters, not bytes; a byte count would slice one of
         // these in half and produce invalid UTF-8 in the middle of the answer.
-        let (text, think) = drain_splitter(&["<think>日本語で考える</think>", "答えは「４２」です"]);
+        let (text, think) =
+            drain_splitter(&["<think>日本語で考える</think>", "答えは「４２」です"]);
         assert_eq!(text, "答えは「４２」です");
         assert_eq!(think, "日本語で考える");
     }
@@ -882,11 +900,21 @@ mod tests {
             }
         }
         assert_eq!(text, "the answer");
-        assert_eq!(think, "weighing it up", "a tag split across frames still splits");
+        assert_eq!(
+            think, "weighing it up",
+            "a tag split across frames still splits"
+        );
         assert_eq!(usage, (7, 11));
 
-        let request = seen.lock().unwrap().clone().expect("the server saw nothing");
-        assert!(request.starts_with("POST /v1/chat/completions"), "{request}");
+        let request = seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the server saw nothing");
+        assert!(
+            request.starts_with("POST /v1/chat/completions"),
+            "{request}"
+        );
         assert!(
             !request.contains("Authorization"),
             "a keyless server must get no header at all: {request}"

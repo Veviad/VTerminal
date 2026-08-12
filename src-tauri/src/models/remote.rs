@@ -276,10 +276,7 @@ pub fn read_servers_from(store: &Store<Wry>) -> Vec<RemoteServer> {
     read_servers_value(store)
 }
 
-pub fn write_servers(
-    app: &tauri::AppHandle<Wry>,
-    servers: &[RemoteServer],
-) -> Result<(), String> {
+pub fn write_servers(app: &tauri::AppHandle<Wry>, servers: &[RemoteServer]) -> Result<(), String> {
     let store = app.store(STORE_NAME).map_err(|e| e.to_string())?;
     store.set(
         SERVERS_KEY,
@@ -354,9 +351,7 @@ pub struct RemoteRowInfo {
 
 /// Every enabled model across every configured server, in list order, each with
 /// the row info the settings UI needs.
-pub fn enabled_models(
-    app: &tauri::AppHandle<Wry>,
-) -> Vec<(&'static CatalogModel, RemoteRowInfo)> {
+pub fn enabled_models(app: &tauri::AppHandle<Wry>) -> Vec<(&'static CatalogModel, RemoteRowInfo)> {
     let mut out = Vec::new();
     for server in read_servers(app) {
         for model in &server.models {
@@ -436,7 +431,10 @@ mod tests {
         let s = server(&["qwen3:8b"]);
         let a = find_in(std::slice::from_ref(&s), &build_id(&s.id, "qwen3:8b")).unwrap();
         let b = find_in(std::slice::from_ref(&s), &build_id(&s.id, "qwen3:8b")).unwrap();
-        assert!(std::ptr::eq(a, b), "the memo should have returned the first");
+        assert!(
+            std::ptr::eq(a, b),
+            "the memo should have returned the first"
+        );
     }
 
     #[test]
