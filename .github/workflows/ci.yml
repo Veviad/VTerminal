@@ -49,6 +49,25 @@ jobs:
       - name: Test
         run: npm test
 
+  # Its own job, on ubuntu, deliberately. rustfmt only parses source: it needs
+  # no macOS, no dist stub and none of the dependency graph, so running it as a
+  # step inside the Rust job would put a one-minute check on the 10x-billed
+  # runner — and, worse, a formatting failure there would abort the job before
+  # clippy or the tests ever ran, hiding every other result behind a whitespace
+  # diff. Separate job means both failures surface in the same run.
+  format:
+    name: Format
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install toolchain
+        run: |
+          rustup show
+          rustup component add rustfmt
+      - run: cargo fmt --all --check
+        working-directory: src-tauri
+
   rust:
     name: Rust
     # Pinned rather than macos-latest: llama-cpp-2 is under
@@ -65,12 +84,12 @@ jobs:
       - uses: actions/checkout@v7
 
       # rust-toolchain.toml (repo root) pins channel 1.97 but declares no
-      # components, so rustfmt and clippy have to be added explicitly.
+      # components, so clippy has to be added explicitly.
       # `rustup show` is what installs the pinned toolchain in the first place.
       - name: Install toolchain
         run: |
           rustup show
-          rustup component add rustfmt clippy
+          rustup component add clippy
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -93,9 +112,6 @@ jobs:
         run: |
           mkdir -p ../dist
           printf '<!doctype html><title>ci stub</title>' > ../dist/index.html
-
-      - name: Format
-        run: cargo fmt --all --check
 
       # Both feature configurations, every time. `default = []`, so a
       # feature-off run skips the entire local inference engine and the #[cfg]
@@ -122,7 +138,7 @@ jobs:
   # both. Add jobs to `needs` and the ruleset keeps working untouched.
   gate:
     name: Quality gate
-    needs: [frontend, rust]
+    needs: [frontend, format, rust]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
