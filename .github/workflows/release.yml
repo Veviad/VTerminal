@@ -63,8 +63,17 @@ jobs:
       #
       # The APPLE_* secrets are the entire signing switch. Tauri's bundler reads
       # them natively and signs + notarizes with hardened runtime once they are
-      # populated; while they do not exist they expand to empty strings and the
-      # bundler produces an unsigned DMG. Adding the secrets needs no edit here.
+      # populated. Adding the secrets needs no edit here.
+      #
+      # The unset case is NOT free, though, and the obvious spelling of it is
+      # wrong: an absent GitHub secret expands to an EMPTY STRING, so the
+      # variable still exists in the environment, and the bundler switches on
+      # presence rather than on content. A keyless build therefore did not fall
+      # back to an unsigned DMG — it tried to import an empty certificate and
+      # died with `SecKeychainItemImport: One or more parameters ... not valid`
+      # AFTER the full llama.cpp compile. Dropping the empties in the same shell
+      # that runs the build is what makes the documented fallback real; `npm run`
+      # inherits this environment, so the unset reaches the bundler.
       - name: Build
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -73,7 +82,12 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: npm run tauri build -- --features local-llm --target aarch64-apple-darwin
+        run: |
+          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD \
+                   APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            [ -n "${!v:-}" ] || unset "$v"
+          done
+          npm run tauri build -- --features local-llm --target aarch64-apple-darwin
 
       # Report what was actually produced, not what secrets were configured.
       # An ad-hoc signature satisfies `codesign --verify` but is still
@@ -127,8 +141,10 @@ jobs:
           : > NOTES.md
           if [ '${{ steps.sign.outputs.signed }}' != 'true' ]; then
             cat >> NOTES.md <<'EOF'
-          > **This build is not signed or notarized.** macOS will refuse to open it
-          > until you clear the quarantine flag:
+          > **This build is not signed or notarized.** Gatekeeper blocks it on first
+          > launch. Either open **System Settings → Privacy & Security** and click
+          > **Open Anyway** (the button only appears for an hour after a blocked
+          > attempt), or clear the quarantine flag the browser set on the download:
           >
           > ```
           > xattr -dr com.apple.quarantine /Applications/VTerminal.app
