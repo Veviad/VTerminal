@@ -337,15 +337,13 @@ a:hover {
   gap: 0.85rem;
 }
 
-.brand-logo {
-  width: auto;
-  height: 2.35rem;
-}
-
-.brand-divider {
-  width: 1px;
-  height: 1.5rem;
-  background: var(--line);
+/* The app's own icon, not the Veviad corporate lockup: this is a product page,
+   and the icon is what the reader already has in their Dock. It doubles as the
+   favicon, so the page ships one file for both. */
+.brand-mark {
+  width: 2rem;
+  height: 2rem;
+  flex: 0 0 auto;
 }
 
 .brand-product {
@@ -1915,6 +1913,162 @@ code {
   gap: 0.9rem;
 }
 
+/* ------------------------------------------------------------ legal page */
+
+.header-back-link {
+  margin-left: auto;
+  color: var(--text-2);
+  font-size: 0.88rem;
+  font-weight: 650;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.header-back-link:hover {
+  color: var(--text);
+}
+
+.legal-main {
+  min-height: calc(100vh - var(--header-height));
+  padding-block: clamp(3rem, 7vw, 5.5rem);
+}
+
+.legal-doc {
+  width: min(calc(100% - 3.5rem), 46rem);
+  margin-inline: auto;
+  overflow-wrap: break-word;
+}
+
+.legal-doc > h1 {
+  margin: 0;
+  color: var(--text);
+  font-size: clamp(2.2rem, 5vw, 3.2rem);
+  letter-spacing: -0.045em;
+  line-height: 1.05;
+}
+
+.legal-updated {
+  margin: 0.7rem 0 0;
+  color: var(--text-3);
+  font-size: 0.8rem;
+}
+
+.legal-toc {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 1.75rem 0 0;
+  list-style: none;
+  padding: 0;
+}
+
+.legal-toc a {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-card);
+  color: var(--text-2);
+  font-size: 0.8rem;
+  font-weight: 700;
+  padding: 0.45rem 0.85rem;
+  text-decoration: none;
+}
+
+.legal-toc a:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.legal-block {
+  margin-top: clamp(2.75rem, 6vw, 4rem);
+}
+
+.legal-block > h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: clamp(1.6rem, 3.4vw, 2.2rem);
+  letter-spacing: -0.03em;
+  line-height: 1.12;
+}
+
+.legal-intro {
+  margin: 0.9rem 0 0;
+  color: var(--text-2);
+  line-height: 1.75;
+}
+
+.legal-section {
+  border-top: 1px solid var(--line-soft);
+  padding-block: 1.35rem;
+}
+
+.legal-section h3 {
+  margin: 0 0 0.6rem;
+  color: var(--text);
+  font-size: 1.02rem;
+}
+
+.legal-section p {
+  margin: 0.6rem 0;
+  color: var(--text-2);
+  font-size: 0.92rem;
+  line-height: 1.75;
+}
+
+.legal-section ul {
+  margin: 0.6rem 0;
+  color: var(--text-2);
+  font-size: 0.92rem;
+  line-height: 1.7;
+  padding-left: 1.1rem;
+}
+
+.legal-section li {
+  margin: 0.35rem 0;
+}
+
+.legal-section li::marker {
+  color: var(--accent);
+}
+
+/* Postal address and similar pre-formatted blocks. */
+.legal-address {
+  margin: 0.6rem 0;
+  color: var(--text-2);
+  font-size: 0.92rem;
+  font-style: normal;
+  line-height: 1.75;
+}
+
+.legal-note {
+  margin-top: 1.35rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  padding: 1.1rem 1.25rem;
+}
+
+.legal-note h3 {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin: 0 0 0.45rem;
+  color: var(--accent);
+  font-size: 0.95rem;
+}
+
+.legal-note .ui-icon {
+  width: 1rem;
+  height: 1rem;
+}
+
+.legal-note p {
+  margin: 0.45rem 0 0;
+  color: var(--text-2);
+  font-size: 0.9rem;
+  line-height: 1.7;
+}
+
 /* ---------------------------------------------------------------- footer */
 
 .site-footer {
@@ -1930,10 +2084,23 @@ code {
   padding-block: 4.5rem 3rem;
 }
 
-.footer-brand img {
-  width: auto;
-  height: 2.4rem;
+.footer-brand-row {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
   margin-bottom: 1rem;
+}
+
+.footer-brand-row img {
+  width: 2.1rem;
+  height: 2.1rem;
+}
+
+.footer-brand-row span {
+  color: var(--text);
+  font-family: "Anton", "Arial Narrow", sans-serif;
+  font-size: 1.15rem;
+  line-height: 1;
 }
 
 .footer-brand p {
@@ -1968,6 +2135,16 @@ code {
 
 .site-footer a:hover {
   color: var(--text);
+}
+
+/* An inline link inside footer prose sits in text of the same colour, so the
+   nav-link treatment above would leave it with no distinguishing feature at
+   all. Underline it rather than rely on colour. */
+.footer-brand p a,
+.footer-bottom a {
+  color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
 }
 
 .social-link {
@@ -2200,18 +2377,13 @@ code {
 }
 
 @media (max-width: 420px) {
-  /* Shrink the lockup rather than dropping "VTerminal" — the header is the only
-     place on the page that names the product above the fold. */
   .brand-link {
     gap: 0.6rem;
   }
 
-  .brand-logo {
-    height: 1.6rem;
-  }
-
-  .brand-divider {
-    height: 1.2rem;
+  .brand-mark {
+    width: 1.7rem;
+    height: 1.7rem;
   }
 
   .brand-product {

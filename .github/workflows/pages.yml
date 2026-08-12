@@ -31,15 +31,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Every asset in index.html is referenced relatively ("assets/…"), so the
-      # page works at the custom domain's root, at the project-page base path
-      # (/VTerminal/, which is what serves if docs/CNAME is ever removed), and
-      # from a plain file:// open. Assert it, or an absolute path added later
-      # would 404 only once deployed.
+      # Every asset is referenced relatively ("assets/…" at the root, "../assets/…"
+      # from docs/legal/), so the site works at the custom domain, at the
+      # project-page base path (/VTerminal/, which is what serves if docs/CNAME is
+      # ever removed), and from a plain file:// open. Assert it across ALL pages,
+      # not just index.html — an absolute path would 404 only once deployed, and
+      # the sub-page is the easier one to get wrong.
       - name: No absolute asset paths
         run: |
-          if grep -nE '(src|href)="/[^/]' docs/index.html; then
-            echo "::error::Absolute asset path found — paths must stay relative so the page survives being served from a base path."
+          if find docs -name '*.html' -print0 | xargs -0 grep -nE '(src|href)="/[^/]'; then
+            echo "::error::Absolute asset path found — paths must stay relative so the site survives being served from a base path."
             exit 1
           fi
 

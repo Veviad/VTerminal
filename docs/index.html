@@ -198,14 +198,15 @@
     <header class="site-header">
       <div class="header-inner">
         <a class="brand-link" href="./" aria-label="VTerminal home">
+          <!-- alt is empty on purpose: the adjacent "VTerminal" text and the
+               link's aria-label already name this, so alt text would repeat. -->
           <img
-            class="brand-logo"
-            src="assets/img/veviad-logo-compact-white-v2.svg"
-            width="165"
-            height="40"
-            alt="Veviad"
+            class="brand-mark"
+            src="assets/favicon.svg"
+            width="32"
+            height="32"
+            alt=""
           />
-          <span class="brand-divider" aria-hidden="true"></span>
           <span class="brand-product">VTerminal</span>
         </a>
 
@@ -1217,15 +1218,13 @@
     <footer class="site-footer">
       <div class="footer-grid shell">
         <div class="footer-brand">
-          <img
-            src="assets/img/veviad-logo-compact-white-v2.svg"
-            width="165"
-            height="40"
-            alt="Veviad"
-          />
+          <div class="footer-brand-row">
+            <img src="assets/favicon.svg" width="34" height="34" alt="" />
+            <span>VTerminal</span>
+          </div>
           <p>
-            VTerminal is a Veviad project — a lean, AI-powered terminal for
-            macOS, developed in the open.
+            A lean, AI-powered terminal for macOS, developed in the open by
+            <a href="https://veviad.com">Veviad</a>.
           </p>
           <a
             class="social-link"
@@ -1275,11 +1274,11 @@
         </div>
 
         <div>
-          <h2>Veviad</h2>
-          <nav aria-label="Veviad">
+          <h2>Legal</h2>
+          <nav aria-label="Legal">
+            <a href="legal/#imprint">Imprint</a>
+            <a href="legal/#privacy">Privacy</a>
             <a href="https://veviad.com">veviad.com</a>
-            <a href="https://veviad.com/impressum/">Impressum</a>
-            <a href="https://veviad.com/datenschutz/">Datenschutz</a>
           </nav>
         </div>
       </div>
