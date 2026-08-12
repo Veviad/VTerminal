@@ -87,6 +87,26 @@ jobs:
                    APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
             [ -n "${!v:-}" ] || unset "$v"
           done
+          # With no Developer ID, AD-HOC sign rather than ship an unsigned
+          # bundle. `-` is Tauri's documented pseudo-identity and needs no
+          # certificate, no Apple ID and no paid membership, so this arm is what
+          # every keyless build gets.
+          #
+          # It is not cosmetic. Without it the bundler skips codesign entirely
+          # and the .app carries only the LINKER's implicit ad-hoc mark on the
+          # Mach-O: `Sealed Resources=none`, no _CodeSignature, and a placeholder
+          # identifier. `codesign --verify` then rejects it outright ("code has
+          # no resources but signature indicates they must be present"), which is
+          # an INVALID signature rather than an untrusted one — macOS reports
+          # that as "damaged and can't be opened", with no Open Anyway button to
+          # recover with. Ad-hoc signing seals the bundle, restores the real
+          # com.veviad.terminal identifier, and puts the app back on the ordinary
+          # unidentified-developer path the release notes describe.
+          #
+          # Notarization is untouched: it keys off APPLE_ID/APPLE_PASSWORD/
+          # APPLE_TEAM_ID, which stay unset here.
+          : "${APPLE_SIGNING_IDENTITY:=-}"
+          export APPLE_SIGNING_IDENTITY
           npm run tauri build -- --features local-llm --target aarch64-apple-darwin
 
       # Report what was actually produced, not what secrets were configured.
@@ -96,11 +116,24 @@ jobs:
         id: sign
         run: |
           app=src-tauri/target/aarch64-apple-darwin/release/bundle/macos/VTerminal.app
+
+          # Validity FIRST, and it is a hard failure. 0.1.0 shipped a bundle
+          # whose signature did not verify at all, and nothing here caught it
+          # because this step only ever asked whether the signature was
+          # TRUSTED. Those are different questions: untrusted is the expected,
+          # recoverable state for a keyless build, whereas invalid means macOS
+          # calls the download damaged and offers no way to open it.
+          if ! codesign --verify --strict "$app" 2>&1; then
+            echo "::error::Bundle signature does not verify — see the ad-hoc signing note in the Build step."
+            codesign -dvv "$app" 2>&1 || true
+            exit 1
+          fi
+
           if codesign -dvv "$app" 2>&1 | grep -q '^Authority=Developer ID Application'; then
             echo 'signed=true' >> "$GITHUB_OUTPUT"
           else
             echo 'signed=false' >> "$GITHUB_OUTPUT"
-            echo '::warning::DMG is unsigned — add the APPLE_* secrets to sign and notarize.'
+            echo '::warning::DMG is ad-hoc signed but not notarized — add the APPLE_* secrets for Developer ID signing.'
           fi
 
       - name: Collect artifacts
