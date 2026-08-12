@@ -110,7 +110,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         v.get("steps").and_then(|c| c.as_i64()).unwrap_or(-1),
                         v.get("limit").and_then(|c| c.as_i64()).unwrap_or(-1),
                         v.get("context_used").and_then(|c| c.as_i64()).unwrap_or(-1),
-                        v.get("context_limit").and_then(|c| c.as_i64()).unwrap_or(-1),
+                        v.get("context_limit")
+                            .and_then(|c| c.as_i64())
+                            .unwrap_or(-1),
                     );
                 }
                 Some("Error") => {
