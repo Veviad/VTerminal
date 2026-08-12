@@ -62,7 +62,7 @@ export type AiMode = "ask" | "explain" | "agent";
 
 export interface AiStreamState {
   mode: AiMode;
-  status: "idle" | "streaming" | "awaiting_approval" | "executing" | "error";
+  status: "idle" | "streaming" | "awaiting_approval" | "executing" | "error" | "paused";
   requestId: string | null;
   messages: AiMessage[];
   streamingContent: string;
@@ -95,6 +95,17 @@ export interface AiStreamState {
    *  `newAiConversation`. Widened from a boolean `autoAccept`; the safety
    *  property is unchanged, a fresh tab is still never pre-armed. */
   permissionMode: PermissionMode;
+  /** Set when the run stopped at a guard rail instead of finishing.
+   *
+   *  Deliberately separate from `lastError`: the transcript is intact,
+   *  tool-pair-complete and already resumable, so this renders as a calm banner
+   *  with a Continue button rather than the red error line. Cleared by
+   *  `initAiStream`, which the Continue itself goes through.
+   *
+   *  Not a synthetic transcript message and not archived, for the same reason
+   *  `restoredAt` is neither — and a restored Continue button would offer to
+   *  dispatch a run against a transcript the user has not looked at. */
+  pause: { reason: "step_limit" | "context_limit"; steps: number; limit: number } | null;
   /** Steering messages typed mid-run that the backend has NOT yet confirmed
    *  delivering. Only StreamEvent::SteerDelivered removes an entry, so anything
    *  left here is something the model never saw. */
@@ -166,6 +177,7 @@ export function emptyAiStream(): AiStreamState {
     restoredAt: null,
     pendingProposal: null,
     permissionMode: "ask",
+    pause: null,
     steerQueue: [],
     attachedBlockIds: [],
     pendingAttachments: [],
@@ -250,6 +262,13 @@ export interface AppState {
   finishAiStream(
     sessionId: string,
     error?: string,
+    usage?: { prompt: number; completion: number },
+  ): void;
+  /** Settle a run that stopped at a guard rail rather than finishing. Leaves
+   *  `lastError` null and the transcript resumable — see `AiStreamState.pause`. */
+  pauseAiStream(
+    sessionId: string,
+    pause: NonNullable<AiStreamState["pause"]>,
     usage?: { prompt: number; completion: number },
   ): void;
   /** Record which model is serving the in-flight request. */
@@ -602,6 +621,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         // mailbox on the backend and would never be handed them.
         steerQueue: [],
         lastError: null,
+        // Clearing this is what retires the Continue button, and it matters that
+        // it happens HERE: the Continue path dispatches through initAiStream, so
+        // a second click cannot resume the same pause twice.
+        pause: null,
       })),
     ),
 
@@ -627,6 +650,12 @@ export const useAppStore = create<AppState>((set, get) => ({
         pendingProposal: null,
         // permissionMode stays "ask" — per-session, never persisted, never
         // inherited. A restored transcript must not arrive pre-armed.
+        //
+        // Same stance for the pause: a Continue button surviving a restore would
+        // offer to resume a finished run against a transcript the user has only
+        // just reopened and has not read.
+        pause: null,
+        lastError: null,
         restoredAt: capturedAt,
       })),
     ),
@@ -866,6 +895,35 @@ export const useAppStore = create<AppState>((set, get) => ({
           messages: flushed.messages.map((m) => {
             // Anything the loop never confirmed is something the model never
             // saw. Say so rather than leaving it looking delivered.
+            if (m.steer === "queued") return { ...m, steer: "undelivered" as const };
+            return m.command?.status === "running"
+              ? { ...m, command: { ...m.command, status: "done" as const } }
+              : m;
+          }),
+        };
+      }),
+    ),
+
+  /** The run stopped at a guard rail. A near-copy of `finishAiStream` on purpose:
+   *  everything about settling a run is identical, and only the outcome differs. */
+  pauseAiStream: (sessionId, pause, usage) =>
+    set((state) =>
+      withAiStream(state, sessionId, (s) => {
+        // Same flush as the finish path, or the model's last text never lands in
+        // the panel.
+        const flushed = flushStreaming(s, usage);
+        return {
+          ...flushed,
+          status: "paused",
+          requestId: null,
+          pendingProposal: null,
+          // Stays null — this is the whole point. The red banner keys off it.
+          lastError: null,
+          pause,
+          attachedBlockIds: [],
+          messages: flushed.messages.map((m) => {
+            // Identical to the finish path: past the hard cap the loop leaves a
+            // steer in the mailbox precisely so it can be reported as unseen.
             if (m.steer === "queued") return { ...m, steer: "undelivered" as const };
             return m.command?.status === "running"
               ? { ...m, command: { ...m.command, status: "done" as const } }

@@ -88,6 +88,21 @@ export const S = {
     newChatDiscard: "Archiving is off — click again to discard this chat",
     newChatFailed: "Could not archive this chat, so it was left in place",
     errorPrefix: "Error",
+    // A run that stopped at a guard rail. Both numbers are shown because the
+    // reported figure has to be one the user can actually find in Settings —
+    // reporting only the steer-extended budget named a limit that appears nowhere.
+    pausedStepLimit: (steps: number, limit: number) =>
+      steps > limit
+        ? `Paused after ${steps} steps — your limit is ${limit}, extended because you sent a message mid-run.`
+        : `Paused after ${steps} steps, the limit set in Settings → Agent.`,
+    pausedContextLimit: (steps: number) =>
+      `Paused after ${steps} steps — the conversation is close to filling the model's context window.`,
+    pausedHint: "Nothing was lost. Continue picks up where it stopped, or type to redirect it.",
+    pausedContinue: "Continue",
+    /** Sent to the MODEL verbatim as the resumed turn's goal, and shown in the
+     *  transcript as the user turn it is. Editing this changes what the agent is
+     *  told, not just what the panel says. */
+    continueGoal: "Continue from where you stopped.",
     cancel: "Cancel",
     run: "Run",
     skip: "Skip",
@@ -450,8 +465,11 @@ export const S = {
       intro:
         "Agent commands run in your visible terminal, in whatever shell the selected tab is currently in — including a remote host you are SSH'd into.",
       maxIterations: "Max steps per run",
+      // Says "pauses", not "stops": nothing is lost and Continue picks it up. The
+      // steer clause is here because a mid-run message re-grants the allowance, so
+      // a paused run can legitimately report more steps than this number.
       maxIterationsHint:
-        "How many commands the agent may chain before stopping. 1–100 — type a value or step by 5.",
+        "How many commands the agent may chain before it pauses to check in. Nothing is lost — you can continue from where it stopped. Sending a message mid-run grants a fresh allowance. 1–100 — type a value or step by 5.",
       commandTimeout: "Command timeout",
       commandTimeoutHint:
         "How long to wait for a command before moving on. It is never killed — the agent is told it is still running.",

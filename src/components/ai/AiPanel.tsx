@@ -91,7 +91,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const detachFileFromAi = useAppStore((s) => s.detachFileFromAi);
   const setAiMode = useAppStore((s) => s.setAiMode);
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
-  const { ask, startAgent, steer, respondToProposal, cancel } = useAiStream();
+  const { ask, startAgent, continueRun, steer, respondToProposal, cancel } = useAiStream();
   const chatIsKept = useAppStore(selectArchiveWillKeepChats);
   const [input, setInput] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);
@@ -395,6 +395,27 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             askedBecause={askReason(permissionMode, pendingProposal)}
             onRespond={(decision, edited) => void respondToProposal(sessionId, decision, edited)}
           />
+        )}
+        {/* A guard rail, not a failure: the transcript is intact and resumable, so
+            this gets the neutral treatment and a real control rather than the red
+            error line. Mutually exclusive with the error banner by construction —
+            `pauseAiStream` leaves `lastError` null. */}
+        {stream?.pause && sessionId && !busy && (
+          <div className="rounded-lg border border-border-subtle px-3 py-2 text-[11px] text-text-muted">
+            <p>
+              {stream.pause.reason === "context_limit"
+                ? S.aiPanel.pausedContextLimit(stream.pause.steps)
+                : S.aiPanel.pausedStepLimit(stream.pause.steps, stream.pause.limit)}
+            </p>
+            <p className="mt-0.5">{S.aiPanel.pausedHint}</p>
+            <button
+              type="button"
+              onClick={() => void continueRun(sessionId)}
+              className="mt-1.5 rounded-md bg-accent px-3 py-1 text-[11px] font-medium text-bg-primary transition-colors duration-150 hover:bg-accent-hover"
+            >
+              {S.aiPanel.pausedContinue}
+            </button>
+          </div>
         )}
         {stream?.lastError && (
           <p className="rounded-lg bg-error-subtle px-3 py-2 text-[11px] text-error">
