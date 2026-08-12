@@ -75,6 +75,12 @@ impl Effort {
 pub enum ProviderId {
     Local,
     Anthropic,
+    /// Renamed by hand. `rename_all = "snake_case"` emits "open_ai", which is
+    /// neither what `as_str()` says nor what `BuiltInProviderId` in
+    /// `src/lib/types.ts` matches on — and the frontend groups the settings rows
+    /// by this string, so the mismatch deleted the entire OpenAI section (heading,
+    /// API-key field and all three models) with no error anywhere.
+    #[serde(rename = "openai")]
     OpenAi,
     Mistral,
     /// A server the user configured themselves — Ollama, LM Studio, or anything
@@ -579,6 +585,40 @@ mod tests {
             CATALOG.iter().all(|m| m.provider != ProviderId::Remote),
             "remote models are built from settings at runtime, never listed here"
         );
+    }
+
+    /// The serialized name IS the frontend's `BuiltInProviderId`
+    /// (`src/lib/types.ts`), because `CatalogEntry` flattens `CatalogModel` over
+    /// IPC and the settings page groups its rows by that string. `rename_all =
+    /// "snake_case"` mangles any multi-word variant — it emitted "open_ai" for a
+    /// while, and the failure mode is not an error but a whole settings section
+    /// rendering as nothing. `as_str()` is the single spelling both sides agree on,
+    /// so every variant is pinned to it rather than to a literal list that would
+    /// go stale.
+    #[test]
+    fn every_provider_serializes_as_its_own_str() {
+        // The literals are pinned rather than derived, exactly as
+        // `the_stored_kind_keeps_its_wire_spelling` pins `ServerKind`'s: this list
+        // must read as `BuiltInProviderId | "remote"` does in src/lib/types.ts, and
+        // asserting only `to_value == as_str()` would let both sides move together
+        // while the frontend stayed behind.
+        for (provider, wire) in [
+            (ProviderId::Local, "local"),
+            (ProviderId::Anthropic, "anthropic"),
+            (ProviderId::OpenAi, "openai"),
+            (ProviderId::Mistral, "mistral"),
+            (ProviderId::Remote, "remote"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(provider).unwrap(),
+                serde_json::json!(wire),
+                "{provider:?} serializes as something the frontend does not match on"
+            );
+            // `as_str()` is the same name spelled a second way — it namespaces
+            // every catalog id and answers `Provider::id()`, so a divergence would
+            // give one provider two names on one wire.
+            assert_eq!(provider.as_str(), wire);
+        }
     }
 
     #[test]

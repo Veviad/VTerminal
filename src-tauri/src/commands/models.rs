@@ -289,3 +289,35 @@ pub async fn model_status() -> Result<ModelStatus, String> {
         available: false,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The payload the settings page actually parses.
+    ///
+    /// `models_catalog` needs an `AppHandle`, so the row is built by hand — but the
+    /// `#[serde(flatten)]` is the part worth pinning: `provider` reaches the
+    /// frontend through it, and the frontend GROUPS rows by that value, so a
+    /// misspelling deletes a whole section rather than raising anything.
+    /// `catalog::every_provider_serializes_as_its_own_str` pins the enum; this pins
+    /// that the flatten still puts it where `CatalogEntry` in src/lib/types.ts
+    /// looks for it.
+    #[test]
+    fn a_cloud_row_carries_the_provider_the_frontend_groups_by() {
+        let entry = CatalogEntry {
+            model: catalog::find("openai/gpt-5.6-terra").unwrap(),
+            fits: true,
+            downloaded: false,
+            configured: false,
+            effort: catalog::Effort::Medium,
+            remote: None,
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["provider"], "openai");
+        // Flattened siblings, so a regression in one is visible in the others.
+        assert_eq!(json["id"], "openai/gpt-5.6-terra");
+        assert_eq!(json["configured"], false);
+        assert!(json["local"].is_null(), "a cloud row has no local spec");
+    }
+}
