@@ -195,11 +195,20 @@ mod tests {
     /// user's real shell.
     #[test]
     fn web_curl_tier_pins_its_safety_rules() {
-        assert!(AGENT_WEB_CURL.contains("| sh"), "must forbid piping downloads into a shell");
-        assert!(AGENT_WEB_CURL.contains("UNTRUSTED DATA"), "fetched pages must be framed as data");
+        assert!(
+            AGENT_WEB_CURL.contains("| sh"),
+            "must forbid piping downloads into a shell"
+        );
+        assert!(
+            AGENT_WEB_CURL.contains("UNTRUSTED DATA"),
+            "fetched pages must be framed as data"
+        );
         // The output harvest runs BACKWARD from the end of the command's
         // output under an 8KB budget, so an uncapped page yields its footer.
-        assert!(AGENT_WEB_CURL.contains("head -c"), "the output cap is a correctness rule");
+        assert!(
+            AGENT_WEB_CURL.contains("head -c"),
+            "the output cap is a correctness rule"
+        );
     }
 
     /// The exact pipeline, verified under /bin/sh against a real minified page.
@@ -225,7 +234,10 @@ mod tests {
     /// then refuses — the two halves have to agree.
     #[test]
     fn web_off_tier_refuses_instead_of_teaching_a_fetch() {
-        assert!(AGENT_WEB_NONE.contains("BLOCKED"), "must say the block is real");
+        assert!(
+            AGENT_WEB_NONE.contains("BLOCKED"),
+            "must say the block is real"
+        );
         assert!(
             AGENT_WEB_NONE.contains("Allow internet access"),
             "must name the setting so the model can tell the user how to lift it"
@@ -246,11 +258,17 @@ mod tests {
         assert!(AGENT_WEB_NONE.contains("You have no web tool"));
         // Only the curl tier may hand over a fetch pipeline.
         for (name, tier) in [("native", AGENT_WEB_NATIVE), ("none", AGENT_WEB_NONE)] {
-            assert!(!tier.contains("| tr '<'"), "{name} tier must not carry the pipeline");
+            assert!(
+                !tier.contains("| tr '<'"),
+                "{name} tier must not carry the pipeline"
+            );
         }
         // The base prompt stays tier-agnostic, or the match arms cannot control
         // what the model believes about the web.
-        assert!(!AGENT.contains("curl"), "AGENT itself must not mention fetching");
+        assert!(
+            !AGENT.contains("curl"),
+            "AGENT itself must not mention fetching"
+        );
     }
 
     /// Ask mode has no tools at all, so it must not offer to read a link.
@@ -258,6 +276,9 @@ mod tests {
     fn ask_mode_declines_urls_instead_of_inventing_them() {
         assert!(ASK_WEB_NONE.contains("cannot open a URL"));
         assert!(ASK_WEB_NATIVE.contains("UNTRUSTED DATA"));
-        assert!(AGENT_WEB_NATIVE.contains("| sh"), "native tier must forbid pipe-to-shell too");
+        assert!(
+            AGENT_WEB_NATIVE.contains("| sh"),
+            "native tier must forbid pipe-to-shell too"
+        );
     }
 }

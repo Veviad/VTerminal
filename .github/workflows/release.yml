@@ -1,0 +1,173 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  # Manual re-run. Dispatched from a branch it builds and uploads a workflow
+  # artifact but publishes nothing; dispatched from a tag it behaves like a
+  # tag push.
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write # create the release and upload assets
+
+jobs:
+  macos:
+    name: macOS (Apple Silicon)
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # __BUILD_NUMBER__, see vite.config.ts
+
+      # Before anything expensive. A tag that disagrees with the manifests
+      # should cost seconds, not a 40-minute llama.cpp build.
+      - name: Version consistency
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            ./scripts/check-version.sh "$GITHUB_REF_NAME"
+          else
+            ./scripts/check-version.sh
+          fi
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      - name: Install toolchain
+        run: |
+          rustup show
+          rustup target add aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+          # Distinct from CI's debug-profile cache.
+          key: release
+          cache-on-failure: true
+
+      # No separate frontend build: tauri.conf.json already sets
+      # beforeBuildCommand: "npm run build". --target is explicit so the bundle
+      # path is deterministic regardless of what the runner's host arch is.
+      #
+      # Apple Silicon only, matching the README ("Intel is untested") — a
+      # universal binary would compile llama.cpp and its Metal kernels twice.
+      #
+      # The APPLE_* secrets are the entire signing switch. Tauri's bundler reads
+      # them natively and signs + notarizes with hardened runtime once they are
+      # populated; while they do not exist they expand to empty strings and the
+      # bundler produces an unsigned DMG. Adding the secrets needs no edit here.
+      - name: Build
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: npm run tauri build -- --features local-llm --target aarch64-apple-darwin
+
+      # Report what was actually produced, not what secrets were configured.
+      # An ad-hoc signature satisfies `codesign --verify` but is still
+      # quarantined, so the authority line is the thing worth matching.
+      - name: Inspect signature
+        id: sign
+        run: |
+          app=src-tauri/target/aarch64-apple-darwin/release/bundle/macos/VTerminal.app
+          if codesign -dvv "$app" 2>&1 | grep -q '^Authority=Developer ID Application'; then
+            echo 'signed=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'signed=false' >> "$GITHUB_OUTPUT"
+            echo '::warning::DMG is unsigned — add the APPLE_* secrets to sign and notarize.'
+          fi
+
+      - name: Collect artifacts
+        run: |
+          set -euo pipefail
+          # Without nullglob an empty bundle dir leaves the pattern literal and
+          # cp fails with a confusing error instead of the clear one below.
+          shopt -s nullglob
+          mkdir -p release-assets
+          found=0
+          for f in src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg; do
+            # Tauri leaves rw.*.dmg scratch images beside the real one.
+            case "$(basename "$f")" in rw.*) continue ;; esac
+            cp "$f" release-assets/
+            found=$((found + 1))
+          done
+          if [ "$found" -ne 1 ]; then
+            echo "error: expected exactly one .dmg, found $found" >&2
+            ls -la src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/ >&2 || true
+            exit 1
+          fi
+          cd release-assets
+          shasum -a 256 *.dmg > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      # Uploaded before the release step, so a failure there still leaves the
+      # build downloadable rather than throwing away 40 minutes.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vterminal-macos-aarch64
+          path: release-assets/
+          if-no-files-found: error
+
+      - name: Compose release notes
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          : > NOTES.md
+          if [ '${{ steps.sign.outputs.signed }}' != 'true' ]; then
+            cat >> NOTES.md <<'EOF'
+          > **This build is not signed or notarized.** macOS will refuse to open it
+          > until you clear the quarantine flag:
+          >
+          > ```
+          > xattr -dr com.apple.quarantine /Applications/VTerminal.app
+          > ```
+
+          EOF
+          fi
+          cat >> NOTES.md <<'EOF'
+          Verify your download against `SHA256SUMS.txt`:
+
+          ```
+          shasum -a 256 -c SHA256SUMS.txt
+          ```
+          EOF
+
+      # `view ||` covers both flows: a tag pushed from the CLI (this creates the
+      # release) and a release drafted in the GitHub UI (this only attaches to
+      # it). Created as a draft so the notes can be edited before anyone can
+      # download — delete --draft to publish on tag instead.
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            # Built as a non-empty array and appended to. An empty array
+            # expanded under `set -u` is an unbound-variable error on the
+            # bash 3.2 that ships with macOS.
+            #
+            # --notes, not --notes-file: only --notes is documented to prepend
+            # to the auto-generated changelog when --generate-notes is also set.
+            create=(gh release create "$TAG"
+              --draft
+              --title "VTerminal $TAG"
+              --notes "$(cat NOTES.md)"
+              --generate-notes)
+            case "$TAG" in *-*) create+=(--prerelease) ;; esac
+            "${create[@]}"
+          fi
+          gh release upload "$TAG" release-assets/* --clobber

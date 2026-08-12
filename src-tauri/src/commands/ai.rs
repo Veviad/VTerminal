@@ -105,22 +105,19 @@ pub async fn resolve_provider(app: &tauri::AppHandle<Wry>) -> Result<Resolved, S
         })?;
 
     let provider: Box<dyn Provider> = match model.provider {
-        ProviderId::Anthropic => Box::new(crate::provider::http::anthropic::AnthropicProvider {
+        ProviderId::Anthropic => {
+            Box::new(crate::provider::http::anthropic::AnthropicProvider { model, api_key })
+        }
+        _ => Box::new(crate::provider::http::openai_compat::OpenAiCompatProvider {
             model,
-            api_key,
+            endpoint: crate::provider::http::openai_compat::vendor_endpoint(model.provider)
+                .ok_or_else(|| format!("{} has no endpoint", model.provider.label()))?
+                .to_string(),
+            api_key: Some(api_key),
+            // The vendors never emit raw `<think>` tags, and splitting them
+            // would eat a literal one out of a legitimate answer.
+            split_think_tags: false,
         }),
-        _ => Box::new(
-            crate::provider::http::openai_compat::OpenAiCompatProvider {
-                model,
-                endpoint: crate::provider::http::openai_compat::vendor_endpoint(model.provider)
-                    .ok_or_else(|| format!("{} has no endpoint", model.provider.label()))?
-                    .to_string(),
-                api_key: Some(api_key),
-                // The vendors never emit raw `<think>` tags, and splitting them
-                // would eat a literal one out of a legitimate answer.
-                split_think_tags: false,
-            },
-        ),
     };
     Ok(Resolved {
         provider,
@@ -214,11 +211,7 @@ pub async fn ai_suggest(
 ) -> Result<(), String> {
     let messages = vec![
         ChatMessage::system(prompts::SUGGEST),
-        ChatMessage::user(format!(
-            "{}\nRequest: {}",
-            context.render(),
-            prompt.trim()
-        )),
+        ChatMessage::user(format!("{}\nRequest: {}", context.render(), prompt.trim())),
     ];
     // Composer suggestions are always thinking-OFF regardless of the model's
     // configured effort: instant beats deliberate for NL→command.
@@ -255,7 +248,17 @@ pub async fn ai_explain(
         )),
     ];
     // Explain reads output already on screen — nothing to fetch.
-    run_chat(&app, &ai_state, request_id, messages, on_event, Some(1024), None, false).await
+    run_chat(
+        &app,
+        &ai_state,
+        request_id,
+        messages,
+        on_event,
+        Some(1024),
+        None,
+        false,
+    )
+    .await
 }
 
 #[derive(serde::Deserialize)]
@@ -342,7 +345,11 @@ pub async fn ai_ask(
     let mut messages = vec![ChatMessage::system(format!(
         "{}{}\n\nCurrent terminal context:\n{}",
         prompts::ASK,
-        if native_web { prompts::ASK_WEB_NATIVE } else { prompts::ASK_WEB_NONE },
+        if native_web {
+            prompts::ASK_WEB_NATIVE
+        } else {
+            prompts::ASK_WEB_NONE
+        },
         context.render()
     ))];
     for h in history.iter().rev().take(12).rev() {
@@ -361,8 +368,21 @@ pub async fn ai_ask(
         });
     }
     let (images, note) = gate_images(model, images.unwrap_or_default());
-    messages.push(ChatMessage::user_with_images(with_note(prompt, note), images));
-    run_chat(&app, &ai_state, request_id, messages, on_event, Some(2048), None, true).await
+    messages.push(ChatMessage::user_with_images(
+        with_note(prompt, note),
+        images,
+    ));
+    run_chat(
+        &app,
+        &ai_state,
+        request_id,
+        messages,
+        on_event,
+        Some(2048),
+        None,
+        true,
+    )
+    .await
 }
 
 /// Collapse whatever the model produced into something that fits a tab label,
@@ -379,7 +399,13 @@ fn sanitize_title(raw: &str) -> Result<String, String> {
         .unwrap_or("");
     let cleaned = line
         .trim_matches(|c: char| {
-            c == '"' || c == '\'' || c == '`' || c == '*' || c == '.' || c == ':' || c.is_whitespace()
+            c == '"'
+                || c == '\''
+                || c == '`'
+                || c == '*'
+                || c == '.'
+                || c == ':'
+                || c.is_whitespace()
         })
         // Control characters would corrupt the label (and the snapshot
         // fingerprint, which uses them as separators).
@@ -424,7 +450,10 @@ pub async fn ai_name_session(
         ChatMessage::system(prompts::NAME_SESSION),
         // Fenced, so a digest containing something that looks like an
         // instruction reads as quoted data rather than as part of the prompt.
-        ChatMessage::user(format!("Terminal tab summary:\n```\n{}\n```", digest.trim())),
+        ChatMessage::user(format!(
+            "Terminal tab summary:\n```\n{}\n```",
+            digest.trim()
+        )),
     ];
 
     let cancel_rx = ai_state.register(&request_id);
@@ -440,8 +469,11 @@ pub async fn ai_name_session(
         web_access: false,
     };
 
-    let stream_task =
-        tokio::spawn(async move { provider.chat_stream(messages, Vec::new(), params, cancel_rx, tx).await });
+    let stream_task = tokio::spawn(async move {
+        provider
+            .chat_stream(messages, Vec::new(), params, cancel_rx, tx)
+            .await
+    });
 
     // Hybrid-reasoning models emit <think> blocks even with thinking disabled.
     let mut filter = ThinkFilter::new();
@@ -602,8 +634,7 @@ pub async fn agent_start(
         request_id: request_id.clone(),
         shell,
         cwd: context.cwd.clone(),
-        temperature: crate::commands::settings::read_f64_opt(&app, "temperature")
-            .map(|t| t as f32),
+        temperature: crate::commands::settings::read_f64_opt(&app, "temperature").map(|t| t as f32),
         effort: resolved.effort,
         // Clamped on READ as well as on write: `save_settings` bounds this to
         // 1..=100 but `read_u32` returns a hand-edited `settings.json` verbatim,
@@ -807,8 +838,7 @@ async fn run_chat(
     let provider = resolved.provider;
     let effort = effort_override.unwrap_or(resolved.effort);
 
-    let temperature =
-        crate::commands::settings::read_f64_opt(app, "temperature").map(|t| t as f32);
+    let temperature = crate::commands::settings::read_f64_opt(app, "temperature").map(|t| t as f32);
     let cancel_rx = ai_state.register(&request_id);
 
     let _ = on_event.send(StreamEvent::Started {
@@ -955,7 +985,10 @@ mod title_tests {
 
     #[test]
     fn accepts_a_plain_label() {
-        assert_eq!(sanitize_title("deploy debugging").unwrap(), "deploy debugging");
+        assert_eq!(
+            sanitize_title("deploy debugging").unwrap(),
+            "deploy debugging"
+        );
     }
 
     #[test]
@@ -975,7 +1008,10 @@ mod title_tests {
 
     #[test]
     fn lowercases_and_collapses_whitespace() {
-        assert_eq!(sanitize_title("  Deploy   Debugging  ").unwrap(), "deploy debugging");
+        assert_eq!(
+            sanitize_title("  Deploy   Debugging  ").unwrap(),
+            "deploy debugging"
+        );
     }
 
     #[test]

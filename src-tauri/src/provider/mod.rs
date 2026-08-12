@@ -69,8 +69,7 @@ pub struct ImagePart {
 
 /// Media types an image part may declare. A provider answers anything else with a
 /// 400, and the value originates from bytes the user dropped in.
-pub const ALLOWED_IMAGE_TYPES: &[&str] =
-    &["image/png", "image/jpeg", "image/gif", "image/webp"];
+pub const ALLOWED_IMAGE_TYPES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -120,7 +119,11 @@ impl ChatMessage {
             tool_call_id: None,
             // Empty stays None so every downstream `is_some()` means "there are
             // actually images here".
-            images: if images.is_empty() { None } else { Some(images) },
+            images: if images.is_empty() {
+                None
+            } else {
+                Some(images)
+            },
         }
     }
     pub fn assistant(content: impl Into<String>) -> Self {
@@ -254,7 +257,10 @@ mod tests {
     use super::*;
 
     fn png(data: &str) -> ImagePart {
-        ImagePart { media_type: "image/png".into(), data: data.into() }
+        ImagePart {
+            media_type: "image/png".into(),
+            data: data.into(),
+        }
     }
 
     /// `skip_serializing_if` means a message with no images emits no `images` key

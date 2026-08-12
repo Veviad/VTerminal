@@ -23,7 +23,10 @@ pub fn history_record(
 }
 
 #[tauri::command]
-pub fn history_recent(db: State<'_, DbState>, limit: u32) -> Result<Vec<queries::HistoryEntry>, String> {
+pub fn history_recent(
+    db: State<'_, DbState>,
+    limit: u32,
+) -> Result<Vec<queries::HistoryEntry>, String> {
     let conn = db.0.lock().map_err(|_| "db poisoned")?;
     queries::recent_history(&conn, limit.clamp(1, 500))
 }

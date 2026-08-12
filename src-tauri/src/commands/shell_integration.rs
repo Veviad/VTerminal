@@ -129,8 +129,11 @@ pub fn ensure_zdotdir(app: &tauri::AppHandle<Wry>) -> Result<PathBuf, String> {
         .unwrap_or(true);
     if needs_write {
         let write = |name: &str, content: &str| {
-            std::fs::write(dir.join(name), content.replace("__VERSION__", SCRIPT_VERSION))
-                .map_err(|e| format!("write {name}: {e}"))
+            std::fs::write(
+                dir.join(name),
+                content.replace("__VERSION__", SCRIPT_VERSION),
+            )
+            .map_err(|e| format!("write {name}: {e}"))
         };
         write("vterminal.zsh", VTERMINAL_ZSH)?;
         write(".zshenv", ZSHENV)?;
@@ -141,10 +144,14 @@ pub fn ensure_zdotdir(app: &tauri::AppHandle<Wry>) -> Result<PathBuf, String> {
 }
 
 #[tauri::command]
-pub fn shell_integration_status(app: tauri::AppHandle<Wry>) -> Result<ShellIntegrationInfo, String> {
+pub fn shell_integration_status(
+    app: tauri::AppHandle<Wry>,
+) -> Result<ShellIntegrationInfo, String> {
     let enabled = super::settings::read_bool(&app, "shell_integration_enabled", true);
     let zdotdir_path = if enabled {
-        ensure_zdotdir(&app).ok().map(|p| p.to_string_lossy().into_owned())
+        ensure_zdotdir(&app)
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
     } else {
         None
     };

@@ -181,7 +181,8 @@ pub fn remote_servers_delete(app: tauri::AppHandle<Wry>, id: String) -> Result<(
     remote::write_servers(&app, &servers)?;
     remote::write_token(&app, &id, "")?;
 
-    let active = crate::commands::settings::read_string(&app, "active_model_id").unwrap_or_default();
+    let active =
+        crate::commands::settings::read_string(&app, "active_model_id").unwrap_or_default();
     if remote::owns_model_id(&removed, &active) {
         crate::commands::settings::write_active_model_id(
             &app,
@@ -221,7 +222,8 @@ pub fn remote_servers_set_models(
 
     // Unticking the selected model orphans it the same way deleting the server
     // does, so it gets the same reset.
-    let active = crate::commands::settings::read_string(&app, "active_model_id").unwrap_or_default();
+    let active =
+        crate::commands::settings::read_string(&app, "active_model_id").unwrap_or_default();
     let dropped = remote::parse_id(&active).is_some_and(|(server_id, wire_model)| {
         server_id == servers[at].id && !cleaned.iter().any(|m| m.wire_model == wire_model)
     });
@@ -292,7 +294,10 @@ mod tests {
         ];
         for mut case in cases {
             let described = format!("{case:?}");
-            assert!(validate(&mut case).is_err(), "{described} should be rejected");
+            assert!(
+                validate(&mut case).is_err(),
+                "{described} should be rejected"
+            );
         }
     }
 
@@ -309,7 +314,10 @@ mod tests {
     #[test]
     fn clean_models_fills_a_missing_label_and_clamps_context() {
         let out = clean_models(vec![model("qwen3:8b", 0)]).unwrap();
-        assert_eq!(out[0].label, "qwen3:8b", "a row with no label is unreadable");
+        assert_eq!(
+            out[0].label, "qwen3:8b",
+            "a row with no label is unreadable"
+        );
         assert_eq!(out[0].context_tokens, 512);
         let out = clean_models(vec![model("m", u32::MAX)]).unwrap();
         assert_eq!(out[0].context_tokens, 2_000_000);

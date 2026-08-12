@@ -4,9 +4,9 @@ pub mod history;
 // The agent loop is provider-agnostic — it drives the `Provider` trait, so it
 // works against a cloud model in a build with no local engine compiled in.
 pub mod policy;
+pub mod prompts;
 pub mod pty_exec;
 pub mod run;
-pub mod prompts;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -338,7 +338,9 @@ impl SteerState {
             .get_mut(request_id)
             .ok_or("that agent run has already finished")?;
         if queue.len() >= MAX_STEERS_PENDING {
-            return Err("too many queued messages — wait for the agent to pick them up".to_string());
+            return Err(
+                "too many queued messages — wait for the agent to pick them up".to_string(),
+            );
         }
         queue.push(Steer { id, text });
         Ok(())
@@ -440,12 +442,16 @@ mod steer_tests {
     fn text_is_trimmed_and_the_queue_is_capped() {
         let state = SteerState::default();
         state.register("req-1");
-        state.push("req-1", "s0".into(), "  padded  ".into()).unwrap();
+        state
+            .push("req-1", "s0".into(), "  padded  ".into())
+            .unwrap();
         assert_eq!(state.drain("req-1")[0].text, "padded");
 
         for i in 0..MAX_STEERS_PENDING {
             state.push("req-1", format!("s{i}"), "msg".into()).unwrap();
         }
-        assert!(state.push("req-1", "overflow".into(), "msg".into()).is_err());
+        assert!(state
+            .push("req-1", "overflow".into(), "msg".into())
+            .is_err());
     }
 }

@@ -14,7 +14,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut args = std::env::args().skip(1);
-    let file = args.next().expect("usage: smoke_llm <file.gguf> [qwen|gemma]");
+    let file = args
+        .next()
+        .expect("usage: smoke_llm <file.gguf> [qwen|gemma]");
     let family = match args.next().as_deref() {
         Some("gemma") => LocalFamily::Gemma,
         _ => LocalFamily::Qwen,
@@ -79,7 +81,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "\n---\ngenerated {completion_tokens} tokens in {secs:.1}s ({:.1} tok/s)",
         completion_tokens as f32 / secs.max(0.001)
     );
-    assert!(text.contains("```"), "expected a fenced command in the reply");
+    assert!(
+        text.contains("```"),
+        "expected a fenced command in the reply"
+    );
     eprintln!("SMOKE OK");
     Ok(())
 }

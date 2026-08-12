@@ -243,7 +243,9 @@ mod tests {
         let steer = messages.pop().unwrap();
         messages.insert(messages.len() - 1, steer);
 
-        let out = gemma().render(&messages, &[run_command_tool()], true).unwrap();
+        let out = gemma()
+            .render(&messages, &[run_command_tool()], true)
+            .unwrap();
         assert!(
             !out.contains("TOOL_RESULT_MARKER"),
             "Gemma now survives mid-round injection — re-verify before relaxing the rule:\n{out}"
@@ -282,11 +284,17 @@ mod tests {
         let tools = [run_command_tool()];
 
         let q = qwen().render(&convo(), &tools, false).unwrap();
-        assert!(q.contains("<tools>"), "qwen should build its own tools block: {q}");
+        assert!(
+            q.contains("<tools>"),
+            "qwen should build its own tools block: {q}"
+        );
         assert!(q.contains("run_command"), "{q}");
 
         let g = gemma().render(&convo(), &tools, false).unwrap();
-        assert!(g.contains("run_command"), "gemma should render the tool: {g}");
+        assert!(
+            g.contains("run_command"),
+            "gemma should render the tool: {g}"
+        );
     }
 
     #[test]

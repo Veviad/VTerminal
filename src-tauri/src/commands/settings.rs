@@ -166,7 +166,11 @@ pub fn save_settings(
         // Negative clears the override back to "use the model's own".
         store.set(
             "temperature",
-            if v < 0.0 { Value::Null } else { json!(v.clamp(0.0, 2.0)) },
+            if v < 0.0 {
+                Value::Null
+            } else {
+                json!(v.clamp(0.0, 2.0))
+            },
         );
     }
     if let Some(v) = max_context_tokens {
