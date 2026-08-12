@@ -1,0 +1,66 @@
+name: Pages
+
+# The project page is hand-written static HTML under docs/ — no build step, so
+# this workflow only uploads the directory. Deliberately NOT wired into ci.yml's
+# `gate`: a docs-only change must not wait on a 10x-billed macOS Rust job, and a
+# red Rust job must not block a typo fix on the page.
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/**
+      - .github/workflows/pages.yml
+  # Lets a deploy be re-run from the Actions tab without an empty commit.
+  workflow_dispatch:
+
+concurrency:
+  # Pages has a single live deployment, so queue rather than cancel — cancelling
+  # in-progress would be the one case where a half-finished deploy is published.
+  group: pages
+  cancel-in-progress: false
+
+# Read-only by default; the deploy job widens this for itself.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      # Every asset in index.html is referenced relatively ("assets/…"), so the
+      # page works at the custom domain's root, at the project-page base path
+      # (/VTerminal/, which is what serves if docs/CNAME is ever removed), and
+      # from a plain file:// open. Assert it, or an absolute path added later
+      # would 404 only once deployed.
+      - name: No absolute asset paths
+        run: |
+          if grep -nE '(src|href)="/[^/]' docs/index.html; then
+            echo "::error::Absolute asset path found — paths must stay relative so the page survives being served from a base path."
+            exit 1
+          fi
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: docs
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Required by deploy-pages: it mints an OIDC token to publish the artifact.
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

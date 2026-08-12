@@ -2,6 +2,8 @@
 
 A lean, AI-powered terminal for macOS — Warp-style command blocks and an AI agent, without the bulk. Local models run **in-process** with Metal acceleration: no Ollama, no vLLM, no daemon to babysit. Cloud models sit behind the same interface, so switching between on-device and frontier models is one keystroke.
 
+**[vterminal.veviad.com](https://vterminal.veviad.com)** — project page
+
 ![platform](https://img.shields.io/badge/macOS-Apple%20Silicon-black)
 ![stack](https://img.shields.io/badge/Tauri%202-Rust-informational)
 ![ui](https://img.shields.io/badge/React%2019-Tailwind%204-informational)
@@ -158,6 +160,8 @@ cd src-tauri && cargo check && cargo check --features local-llm
 ```
 
 Headless smoke examples live in `src-tauri/examples/` and exercise inference, the agent loop, the vision sidecar, and shutdown behaviour against a real GGUF.
+
+The project page at [vterminal.veviad.com](https://vterminal.veviad.com) is hand-written static HTML in `docs/` — no build step and no dependencies. Preview it with `npx vite docs`; pushing a change to `docs/` on `main` deploys it.
 
 ## Contributing
 
