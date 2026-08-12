@@ -1,0 +1,7 @@
+# Skip Metal kernel AOT precompilation — the host's Xcode lacks the Metal
+# Toolchain component (`xcodebuild -downloadComponent MetalToolchain` would
+# install it). Kernels compile at runtime on first use instead; first
+# inference after model load is a few seconds slower, nothing else changes.
+[env]
+MISTRALRS_METAL_PRECOMPILE = "0"
+MISTRALRS_METAL_PLATFORMS = "macos"

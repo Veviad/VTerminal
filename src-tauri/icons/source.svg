@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- VTerminal app icon — macOS icon grid: 824x824 body inset 100px in a 1024px canvas,
+       continuous ("squircle") corners, r=185.4 = 22.5% of the body, smoothing 0.6.
+       Mark + cursor are the designer's 16-unit master (kept verbatim at public/favicon.svg,
+       which keeps the pixel-staircase tile for web/favicon use) scaled to 0.94 of the
+       body so the cursor block clears the rounded bottom edge. No baked drop shadow —
+       current macOS applies its own. Regenerate the raster set with:
+         npx tauri icon src-tauri/icons/source.svg -->
+  <defs>
+    <linearGradient id="coolCore" gradientUnits="userSpaceOnUse" x1="1.65" y1="0.91" x2="14.5" y2="15.3">
+      <stop offset="0%" stop-color="#ffffff"/><stop offset="10%" stop-color="#dcefff"/><stop offset="24%" stop-color="#fff1cb"/><stop offset="40%" stop-color="#f8fbff"/><stop offset="56%" stop-color="#78adff"/><stop offset="70%" stop-color="#23294d"/><stop offset="83%" stop-color="#f2f5ff"/><stop offset="92%" stop-color="#ffae73"/><stop offset="100%" stop-color="#ffffff"/>
+    </linearGradient>
+    <linearGradient id="coolSheen" gradientUnits="userSpaceOnUse" x1="2.24" y1="1.76" x2="13.65" y2="6.83">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.95"/><stop offset="35%" stop-color="#ffffff" stop-opacity="0.56"/><stop offset="72%" stop-color="#ffffff" stop-opacity="0.12"/><stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="coolEdge" gradientUnits="userSpaceOnUse" x1="3.09" y1="14.4" x2="14.35" y2="4.8">
+      <stop offset="0%" stop-color="#1a1f49" stop-opacity="0.58"/><stop offset="34%" stop-color="#2f3f89" stop-opacity="0.38"/><stop offset="64%" stop-color="#6ea3ff" stop-opacity="0.18"/><stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="cursorGrad" gradientUnits="userSpaceOnUse" x1="6" y1="13" x2="10" y2="15">
+      <stop offset="0%" stop-color="#ffffff"/><stop offset="55%" stop-color="#cfe0ff"/><stop offset="100%" stop-color="#7aa6e8"/>
+    </linearGradient>
+    <clipPath id="mark" clipPathUnits="userSpaceOnUse">
+      <path transform="translate(1.886 0.388) scale(0.020372)" d="M299.832031 431.203125C379.664062 385.238281 457.90625 340.136719 538.882812 293.5L538.882812 431.984375C460.867188 477.140625 381.0625 523.300781 300.421875 569.992188L59.582031 431.59375L59.582031 154.683594C97.726562 132.691406 136.144531 110.5625 178.085938 86.363281L178.085938 360.789062C219.472656 384.707031 259.039062 407.589844 299.863281 431.175781Z"/>
+      <path transform="translate(1.886 0.388) scale(0.020372)" d="M301.679688 30.03125C381.621094 75.96875 459.164062 120.539062 540.417969 167.257812C459.636719 213.949219 382.179688 258.714844 301.679688 305.265625Z"/>
+    </clipPath>
+  </defs>
+  <g>
+    <g transform="translate(100 100)">
+      <path d="M 296.64 0 L 527.36 0 c 103.8337 0 155.7506 0 195.4098 20.2074 a 185.4 185.4 0 0 1 81.0228 81.0228 c 20.2074 39.6592 20.2074 91.5761 20.2074 195.4098 L 824 527.36 c 0 103.8337 0 155.7506 -20.2074 195.4098 a 185.4 185.4 0 0 1 -81.0228 81.0228 c -39.6592 20.2074 -91.5761 20.2074 -195.4098 20.2074 L 296.64 824 c -103.8337 0 -155.7506 0 -195.4098 -20.2074 a 185.4 185.4 0 0 1 -81.0228 -81.0228 c -20.2074 -39.6592 -20.2074 -91.5761 -20.2074 -195.4098 L 0 296.64 c 0 -103.8337 0 -155.7506 20.2074 -195.4098 a 185.4 185.4 0 0 1 81.0228 -81.0228 c 39.6592 -20.2074 91.5761 -20.2074 195.4098 -20.2074 Z" fill="#1b1836"/>
+      <g transform="scale(51.5)">
+        <g transform="translate(8 8) scale(0.94) translate(-8 -8)">
+      <g clip-path="url(#mark)">
+        <rect x="0" y="0" width="16" height="16" fill="url(#coolCore)"/>
+        <rect x="0" y="0" width="16" height="16" fill="url(#coolSheen)" opacity=".92"/>
+        <rect x="0" y="0" width="16" height="16" fill="url(#coolEdge)"/>
+      </g>
+      <rect x="6" y="13" width="4" height="2" fill="url(#cursorGrad)"/>
+        </g>
+      </g>
+    </g>
+  </g>
+</svg>

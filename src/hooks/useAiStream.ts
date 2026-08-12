@@ -1,0 +1,516 @@
+import { useCallback } from "react";
+import * as api from "../lib/tauri";
+import { useAppStore } from "../stores/appStore";
+import { getTerm } from "../lib/termRegistry";
+import { readLineRange, readScreenTail } from "../lib/terminalSnapshot";
+import { abortSession, runInTerminal, type PtyExecOutcome } from "../lib/ptyExec";
+import { nameSession } from "../lib/sessionNaming";
+import { markTranscriptDirty } from "../lib/sessionPersistence";
+import { setAiPanelOpen } from "../lib/aiPanel";
+import {
+  buildOutgoing,
+  ocrAvailable,
+  persistAttachments,
+  transcribeImages,
+} from "../lib/attachInput";
+import { S } from "../lib/strings";
+import { autoRuns } from "../lib/permissionMode";
+import type { AiMessage, Block, StreamEvent, TerminalContext } from "../lib/types";
+
+let requestCounter = 1;
+
+function newRequestId(): string {
+  return `req-${Date.now()}-${requestCounter++}`;
+}
+
+let steerCounter = 1;
+
+function newSteerId(): string {
+  return `st-${Date.now()}-${steerCounter++}`;
+}
+
+const OUTPUT_TAIL_LIMIT = 2048;
+/** Blocks whose output tails ride along with every request. Kept small: the
+ *  local model's context window is the binding constraint. */
+const CONTEXT_BLOCKS = 3;
+
+/** Read a block's output tail from the live xterm buffer. Uses the LIVE
+ *  markers (lines shift with scrollback trimming/reflow); the end marker sits
+ *  on the next prompt's row, so it is treated as EXCLUSIVE. */
+export function readBlockOutput(sessionId: string, block: Block, limit = OUTPUT_TAIL_LIMIT): string {
+  const entry = getTerm(sessionId);
+  if (!entry) return "";
+  const markers = entry.blockMarkers.get(block.id);
+  const startLine =
+    markers && !markers.start.isDisposed ? markers.start.line : block.startLine;
+  const endLine = markers?.end && !markers.end.isDisposed ? markers.end.line : block.endLine;
+  if (endLine === null || endLine === undefined) return "";
+  return readLineRange(sessionId, startLine, endLine - 1, { limit }).trim();
+}
+
+export function buildTerminalContext(sessionId: string): TerminalContext {
+  const s = useAppStore.getState();
+  const ui = s.sessionUi[sessionId];
+  const session = s.sessions.find((x) => x.id === sessionId);
+  const remote = ui?.remote ?? null;
+  const recentBlocks = (ui?.blocks ?? [])
+    // Agent-run commands are already in the model's own message history; sending
+    // them back as "recent commands" just doubles them up.
+    .filter((b) => b.state === "done" && b.command.trim() && b.origin !== "agent")
+    .slice(-CONTEXT_BLOCKS)
+    .map((b) => ({
+      command: b.command,
+      exit_code: b.exitCode,
+      output_tail: readBlockOutput(sessionId, b),
+    }));
+  if (!s.sendContextToAi) {
+    return {
+      session_id: sessionId,
+      cwd: null,
+      shell: session?.shell ?? "/bin/zsh",
+      git_branch: null,
+      os: "macOS",
+      recent_blocks: [],
+      remote: null,
+      screen_tail: "",
+      shell_integration: false,
+    };
+  }
+  return {
+    session_id: sessionId,
+    // While nested, the last OSC 7 report describes the LOCAL machine and the
+    // remote cwd is unknown. Sending the stale local path is worse than null:
+    // the model would reason confidently about the wrong filesystem.
+    cwd: remote ? null : (ui?.cwd ?? null),
+    shell: session?.shell ?? "/bin/zsh",
+    git_branch: remote ? null : (ui?.gitBranch ?? null),
+    os: remote ? "unknown (remote host)" : "macOS",
+    recent_blocks: recentBlocks,
+    remote,
+    screen_tail: readScreenTail(sessionId),
+    shell_integration: (ui?.integrationActive ?? false) && !remote,
+  };
+}
+
+export function useAiStream() {
+  /** NL→command in the composer: streams into composerProposal, never runs anything. */
+  const generateCommand = useCallback(async (sessionId: string, prompt: string) => {
+    const store = useAppStore.getState();
+    const requestId = newRequestId();
+    store.updateSessionUi(sessionId, {
+      composerStatus: "generating",
+      composerProposal: null,
+      composerError: null,
+      composerRequestId: requestId,
+    });
+    let accumulated = "";
+    // Drop events from an abandoned request (user closed the composer and the
+    // cancel raced) — otherwise a stale proposal resurrects into a fresh UI.
+    const isCurrent = () =>
+      useAppStore.getState().sessionUi[sessionId]?.composerRequestId === requestId;
+    try {
+      await api.aiSuggest(requestId, prompt, buildTerminalContext(sessionId), (e: StreamEvent) => {
+        if (!isCurrent()) return;
+        if (e.type === "Delta") {
+          accumulated += e.content;
+          const parsed = parseSuggestion(accumulated);
+          useAppStore.getState().updateSessionUi(sessionId, { composerProposal: parsed });
+        } else if (e.type === "Done") {
+          const parsed = parseSuggestion(accumulated);
+          useAppStore.getState().updateSessionUi(sessionId, {
+            composerStatus: parsed.command ? "proposal" : "error",
+            composerProposal: parsed,
+            composerError: parsed.command ? null : "No command in model response",
+          });
+        } else if (e.type === "Error") {
+          useAppStore.getState().updateSessionUi(sessionId, {
+            composerStatus: "error",
+            composerError: e.message,
+          });
+        } else if (e.type === "Cancelled") {
+          useAppStore.getState().updateSessionUi(sessionId, { composerStatus: "idle" });
+        }
+      });
+    } catch (err) {
+      if (isCurrent()) {
+        useAppStore.getState().updateSessionUi(sessionId, {
+          composerStatus: "error",
+          composerError: String(err),
+        });
+      }
+    }
+    return requestId;
+  }, []);
+
+  /** Explain a failed block in the AI panel. */
+  const explainBlock = useCallback(async (sessionId: string, block: Block) => {
+    const store = useAppStore.getState();
+    if (isSessionBusy(sessionId)) return; // never clobber an in-flight run
+    const requestId = newRequestId();
+    setAiPanelOpen(true);
+    store.setAiMode(sessionId, "explain");
+    const userMsg: AiMessage = {
+      id: `msg-${Date.now()}`,
+      role: "user",
+      content: `Explain why this failed (exit ${block.exitCode}):\n\`\`\`\n${block.command}\n\`\`\``,
+      createdAt: new Date().toISOString(),
+    };
+    store.pushAiMessage(sessionId, userMsg);
+    store.initAiStream(sessionId, "explain", requestId);
+    const outputTail = readBlockOutput(sessionId, block);
+    try {
+      await api.aiExplain(
+        requestId,
+        block.command,
+        outputTail,
+        block.exitCode ?? 1,
+        buildTerminalContext(sessionId),
+        (e) => dispatchPanelEvent(sessionId, requestId, e),
+      );
+    } catch (err) {
+      useAppStore.getState().finishAiStream(sessionId, String(err));
+    }
+  }, []);
+
+  /** Free-form ask in the AI panel (with optional attached blocks as context). */
+  const ask = useCallback(async (sessionId: string, prompt: string) => {
+    const store = useAppStore.getState();
+    if (isSessionBusy(sessionId)) return;
+    const requestId = newRequestId();
+    const stream = store.aiStreams[sessionId];
+    // Resolve attached blocks into the context
+    const context = buildTerminalContext(sessionId);
+    if (stream?.attachedBlockIds.length) {
+      const ui = store.sessionUi[sessionId];
+      for (const blockId of stream.attachedBlockIds) {
+        const block = ui?.blocks.find((b) => b.id === blockId);
+        if (block) {
+          const tail = readBlockOutput(sessionId, block);
+          context.recent_blocks.push({
+            command: block.command,
+            exit_code: block.exitCode,
+            output_tail: tail,
+          });
+        }
+      }
+    }
+    // `image_count`, not the images: an image rides only on the turn it was
+    // attached to, and Rust turns the count back into a note so a replayed turn
+    // does not read as if nothing had been attached.
+    const history = (stream?.messages ?? []).map((m) => ({
+      role: m.role,
+      content: m.content,
+      image_count: (m.attachments ?? []).filter((a) => a.kind === "image").length,
+    }));
+
+    const staged = await persistAttachments(sessionId, stream?.pendingAttachments ?? []);
+    let outgoing = buildOutgoing(prompt, staged);
+
+    // The chat model cannot see, but a sidecar is loaded: transcribe on-device and
+    // send TEXT. The panel blocks Send when there is no sidecar, so reaching here
+    // with images and no vision means one is ready.
+    const canSee = store.catalog.find((m) => m.id === store.activeModelId)?.supports_vision;
+    if (outgoing.images.length > 0 && !canSee) {
+      if (!ocrAvailable()) return;
+      // Stream FIRST, transcription second. On-device OCR is seconds on a large
+      // screenshot, and without this the panel sits inert with no Stop button —
+      // indistinguishable from a hang. `vision_describe` registers on the same
+      // cancel registry as a chat turn, so Stop really reaches it.
+      store.initAiStream(sessionId, "ask", requestId);
+      const folded = await transcribeImages(requestId, outgoing.prompt, staged);
+      if (folded === null) {
+        // Deliberately NOT sent, and the stream is closed again: an answer about
+        // an image the model never received is indistinguishable from one about an
+        // image it did. The files stay staged so the user can retry.
+        useAppStore.getState().finishAiStream(sessionId, S.vision.readFailed);
+        return;
+      }
+      outgoing = { prompt: folded, images: [] };
+    }
+    store.pushAiMessage(sessionId, {
+      id: `msg-${Date.now()}`,
+      role: "user",
+      // The FOLDED prompt, so the transcript shows exactly what the model was
+      // given rather than a version with the file contents hidden.
+      content: outgoing.prompt,
+      attachments: staged.length > 0 ? staged : undefined,
+      createdAt: new Date().toISOString(),
+    });
+    // Idempotent when the OCR branch above already ran; required otherwise.
+    store.initAiStream(sessionId, "ask", requestId);
+    // Only now, once the files are on the outgoing message: clearing any earlier
+    // would let a send that never starts eat them.
+    if (staged.length > 0) store.clearPendingAttachments(sessionId);
+    try {
+      await api.aiAsk(
+        requestId,
+        outgoing.prompt,
+        history,
+        outgoing.images,
+        context,
+        (e) => dispatchPanelEvent(sessionId, requestId, e),
+      );
+    } catch (err) {
+      useAppStore.getState().finishAiStream(sessionId, String(err));
+    }
+  }, []);
+
+  /** Agent mode: the model proposes commands one at a time; each is gated by
+   *  a Run/Skip/Stop card (or auto-accepted when the toggle is armed). */
+  const startAgent = useCallback(async (sessionId: string, goal: string) => {
+    const store = useAppStore.getState();
+    if (isSessionBusy(sessionId)) return;
+    const requestId = newRequestId();
+    const staged = await persistAttachments(
+      sessionId,
+      store.aiStreams[sessionId]?.pendingAttachments ?? [],
+    );
+    const outgoing = buildOutgoing(goal, staged);
+    store.pushAiMessage(sessionId, {
+      id: `msg-${Date.now()}`,
+      role: "user",
+      content: outgoing.prompt,
+      attachments: staged.length > 0 ? staged : undefined,
+      createdAt: new Date().toISOString(),
+    });
+    store.initAiStream(sessionId, "agent", requestId);
+    if (staged.length > 0) store.clearPendingAttachments(sessionId);
+    // Read at dispatch time, not captured earlier: a reopened session's archived
+    // transcript is written into the store asynchronously, and this is what turns
+    // agent mode from single-shot into an actual conversation.
+    const history = useAppStore.getState().aiStreams[sessionId]?.modelTranscript ?? [];
+    try {
+      const transcript = await api.agentStart(
+        requestId,
+        outgoing.prompt,
+        buildTerminalContext(sessionId),
+        history,
+        outgoing.images,
+        (e) => dispatchPanelEvent(sessionId, requestId, e),
+      );
+      useAppStore.getState().setModelTranscript(sessionId, transcript);
+    } catch (err) {
+      useAppStore.getState().finishAiStream(sessionId, String(err));
+    }
+  }, []);
+
+  /** Redirect an agent run that is already going, without cancelling it.
+   *
+   *  The message is QUEUED, not injected: the backend appends it at the next
+   *  round boundary, since a user turn between an assistant's tool_calls and
+   *  their results is a 400 on OpenAI and Anthropic and is silently dropped by
+   *  Gemma 4's template. While the run is parked on an approval card or a long
+   *  command it therefore waits — the panel says so rather than pretending
+   *  otherwise. */
+  const steer = useCallback(
+    async (sessionId: string, text: string) => {
+      const body = text.trim();
+      if (!body) return;
+      const stream = useAppStore.getState().aiStreams[sessionId];
+      // Nothing to steer — this is an ordinary Send. Covers the race where the
+      // run ended between the panel rendering and the user hitting Enter.
+      if (!stream?.requestId || stream.mode !== "agent") {
+        void startAgent(sessionId, body);
+        return;
+      }
+      const steerId = newSteerId();
+      useAppStore.getState().queueSteer(sessionId, steerId, body);
+      try {
+        await api.agentSteer(stream.requestId, steerId, body);
+      } catch {
+        // The run ended between the check and the call, or the backend refused
+        // it (too long, too many queued). The message stays in the transcript
+        // flagged undelivered with its own Send button, rather than vanishing.
+        useAppStore.getState().markSteerUndelivered(sessionId, steerId);
+      }
+    },
+    [startAgent],
+  );
+
+  const respondToProposal = useCallback(
+    async (sessionId: string, decision: "run" | "skip" | "stop", editedCommand?: string) => {
+      const stream = useAppStore.getState().aiStreams[sessionId];
+      const proposal = stream?.pendingProposal;
+      if (!proposal) return;
+      if (decision === "skip") {
+        useAppStore.getState().setPendingProposal(sessionId, null, "streaming");
+      } else if (decision === "stop") {
+        useAppStore.getState().setPendingProposal(sessionId, null, "streaming");
+      }
+      await api.respondToApproval(proposal.approvalId, decision, editedCommand).catch(() => {});
+    },
+    [],
+  );
+
+  const cancel = useCallback(async (sessionId: string) => {
+    const stream = useAppStore.getState().aiStreams[sessionId];
+    // Release a command we are still awaiting in the terminal. This never
+    // interrupts the command itself — it is running in the user's own shell,
+    // in front of them, and killing it is their decision.
+    abortSession(sessionId, "cancelled");
+    if (stream?.requestId) {
+      await api.aiCancel(stream.requestId).catch(() => {});
+    }
+  }, []);
+
+  return { generateCommand, explainBlock, ask, startAgent, steer, respondToProposal, cancel };
+}
+
+function isSessionBusy(sessionId: string): boolean {
+  const status = useAppStore.getState().aiStreams[sessionId]?.status;
+  return status === "streaming" || status === "awaiting_approval" || status === "executing";
+}
+
+function dispatchPanelEvent(sessionId: string, requestId: string, e: StreamEvent): void {
+  const store = useAppStore.getState();
+  // Ownership check: drop events from a superseded/cancelled request so a
+  // stale stream can never mutate a newer run's state.
+  if (store.aiStreams[sessionId]?.requestId !== requestId) return;
+  switch (e.type) {
+    case "Delta":
+      store.appendAiDelta(sessionId, e.content);
+      break;
+    case "SteerDelivered":
+      // The only thing that clears a "queued" badge: the loop has appended
+      // these to the transcript, so the model is about to see them.
+      store.markSteersDelivered(sessionId, e.ids);
+      break;
+    case "ThinkingDelta":
+      store.appendThinking(sessionId, e.content);
+      break;
+    case "CommandProposal": {
+      const mode = store.aiStreams[sessionId]?.permissionMode ?? "ask";
+      const verdict = { readOnly: e.read_only, network: e.network };
+      if (autoRuns(mode, verdict)) {
+        // Auto-run is frontend sugar over the same gate: respond instantly. The
+        // command still surfaces, and its explanation is not lost — the backend
+        // repeats it on RunInTerminal / CommandStarted, which is the only event
+        // an auto-run command reaches the transcript through.
+        void api.respondToApproval(e.approval_id, "run").catch(() => {});
+      } else {
+        store.setPendingProposal(
+          sessionId,
+          {
+            approvalId: e.approval_id,
+            command: e.command,
+            explanation: e.explanation,
+            readOnly: e.read_only,
+            network: e.network,
+          },
+          "awaiting_approval",
+        );
+      }
+      break;
+    }
+    case "CommandBlocked":
+      store.noteBlockedCommand(sessionId, e.command, e.reason);
+      break;
+    case "CommandStarted":
+      store.beginCommand(sessionId, e.approval_id, e.command, e.explanation);
+      break;
+    case "RunInTerminal": {
+      // A stale run must never drive a different tab's shell.
+      if (e.session_id && e.session_id !== sessionId) break;
+      store.beginCommand(sessionId, e.approval_id, e.command, e.explanation);
+      // Fire-and-forget: this dispatcher is the Channel callback and must return
+      // synchronously. The command is awaited on its own timeline and reported
+      // back through submitCommandResult exactly once.
+      void runInTerminal(sessionId, e.approval_id, e.command, {
+        timeoutMs: e.timeout_secs * 1000,
+      })
+        .then((outcome) => {
+          const s = useAppStore.getState();
+          if (s.aiStreams[sessionId]?.requestId === requestId) {
+            s.setCommandOutput(sessionId, e.approval_id, outcome.output);
+            s.finishCommand(
+              sessionId,
+              e.approval_id,
+              outcome.exitCode,
+              cardStatus(outcome),
+              outcome.note,
+            );
+          }
+          return api.submitCommandResult(
+            e.approval_id,
+            outcome.exitCode,
+            modelResult(outcome),
+            outcome.durationMs,
+            outcome.error ?? null,
+          );
+        })
+        .catch(() => {});
+      break;
+    }
+    case "CommandOutput":
+      store.appendCommandOutput(sessionId, e.approval_id, e.chunk);
+      break;
+    case "CommandResult":
+      store.finishCommand(sessionId, e.approval_id, e.exit_code);
+      break;
+    case "Started":
+      // Previously dropped on the floor, which is why switching models
+      // relabelled the whole scrollback: attribution has to be recorded when
+      // the request starts, not read from settings at render time.
+      store.setAiStreamModel(sessionId, e.model);
+      break;
+    case "Done":
+      store.finishAiStream(sessionId, undefined, {
+        prompt: e.prompt_tokens,
+        completion: e.completion_tokens,
+      });
+      // A completed exchange is the first moment there is anything worth naming
+      // a tab after. Debounced and heavily gated (see lib/sessionNaming.ts) —
+      // and deliberately after finishAiStream, so the session reads as idle and
+      // the naming call cannot queue behind the answer the user is waiting for.
+      nameSession(sessionId);
+      markTranscriptDirty(sessionId);
+      break;
+    case "Cancelled":
+      store.finishAiStream(sessionId);
+      markTranscriptDirty(sessionId);
+      break;
+    case "Error":
+      store.finishAiStream(sessionId, e.message);
+      // Archived on failure too: a run that errored halfway still did real work
+      // in the terminal, and that is exactly the transcript worth reopening.
+      markTranscriptDirty(sessionId);
+      break;
+  }
+}
+
+/** Card badge for a PTY outcome. */
+function cardStatus(o: PtyExecOutcome): "done" | "timeout" | "blocked" {
+  // "still running" is literally true for both: a command we could not kill, and
+  // a full-screen program that refused every rung of the interrupt ladder.
+  if (o.error === "timeout" || o.error === "interrupt_failed") return "timeout";
+  // Never executed at all — the card must not imply the command ran.
+  if (
+    o.error === "terminal_busy" ||
+    o.error === "unsafe_command" ||
+    o.error === "not_a_shell" ||
+    o.error === "terminal_closed"
+  ) {
+    return "blocked";
+  }
+  return "done";
+}
+
+/** What the model sees: the note (if any) explains an unknown exit code. */
+function modelResult(o: PtyExecOutcome): string {
+  const where = o.mode && o.mode !== "integrated" ? "(ran in the nested/remote shell) " : "";
+  if (o.note) return `${where}${o.note}\n${o.output}`.trim();
+  return `${where}${o.output}`.trim();
+}
+
+// The suggest prompt asks the model for a fenced command plus a one-line
+// rationale; parse both out of the streamed text.
+export function parseSuggestion(text: string): { command: string; explanation: string } {
+  const fence = text.match(/```(?:\w+)?\n([\s\S]*?)(?:```|$)/);
+  const command = fence ? fence[1].trim().split("\n")[0].trim() : "";
+  const explanation = text
+    .replace(/```(?:\w+)?\n[\s\S]*?(?:```|$)/, "")
+    .trim()
+    .split("\n")[0]
+    .slice(0, 200);
+  return { command, explanation };
+}
