@@ -1,0 +1,6 @@
+# Pin project-locally so the global default toolchain stays untouched. The pin
+# outlived its original reason (mistral.rs needed >= 1.94) but is kept
+# deliberately: the machine default is older, and dropping it would silently
+# build the project on an older compiler.
+[toolchain]
+channel = "1.97"

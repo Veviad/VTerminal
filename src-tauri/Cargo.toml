@@ -1,0 +1,91 @@
+[package]
+name = "vterminal"
+version = "0.1.0"
+description = "VTerminal — lean AI-powered terminal"
+authors = ["Shawn Maholick"]
+edition = "2021"
+
+[lib]
+name = "vterminal_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[features]
+default = []
+# Pulls in llama.cpp + Metal kernel compilation (slow clean build).
+# Terminal-only dev builds stay fast without it.
+local-llm = ["dep:llama-cpp-2", "dep:encoding_rs", "dep:minijinja", "dep:minijinja-contrib"]
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-store = "2"
+tauri-plugin-log = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+tokio = { version = "1", features = ["full"] }
+portable-pty = "0.9.0"
+reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], default-features = false }
+# Already in the lock file via reqwest, so this is free to compile. Used by
+# `models::remote_probe` to normalize whatever address a user types for a remote
+# inference server — the policy there is subtle enough (default ports, path
+# prefixes, credentials) that hand-rolled parsing would be the wrong economy.
+url = "2"
+futures = "0.3"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5"
+log = "0.4"
+thiserror = "2"
+async-trait = "0.1"
+sysinfo = "0.33"
+sha2 = "0.10"
+# Chat attachments cross the IPC boundary as base64 (a `Vec<u8>` argument
+# serializes as a JSON number array, ~7x the size) and are decoded once here
+# before being written to disk.
+base64 = "0.22"
+tauri-plugin-single-instance = "2.4.3"
+# llama.cpp hands back token pieces that can split a multibyte character; its
+# detokenizer takes an incremental decoder to stitch them back together.
+encoding_rs = { version = "0.8", optional = true }
+# Renders each GGUF's OWN Jinja chat template, the way llama.cpp's
+# common/chat.cpp does with minja. The legacy C `llama_chat_apply_template`
+# picks a renderer by substring-matching the template and returns -1 when
+# nothing matches — which is exactly how Gemma 4 failed.
+minijinja = { version = "2", features = ["json"], optional = true }
+# Hugging Face templates are written against Python's Jinja2 and freely call
+# Python methods — Qwen uses `str.split/.strip/.lstrip`, Gemma 4 uses
+# `dict.get`. `pycompat` supplies exactly those; without it both templates fail
+# to render with "unknown method".
+minijinja-contrib = { version = "2", features = ["pycompat"], optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Safe wrappers over core llama.h. Chosen over mistral.rs because its GGUF
+# architecture coverage is a strict superset (Gemma 4 and Qwen3.5/3.6 do not
+# load in mistral.rs) and it returns load errors instead of panicking on an
+# unknown architecture. Default features pull in openmp; Metal is all we want.
+# `mtmd` is llama.cpp's multimodal layer (vision projectors). Folded into this one
+# dependency rather than gated behind a THIRD cargo feature: toggling a feature on
+# llama-cpp-sys-2 invalidates that crate, which re-runs the whole cmake llama.cpp +
+# Metal build, so a separate feature would mean paying that cost on every flip. It
+# also keeps the #[cfg] matrix two-valued — see the `local-llm` stub arms in
+# commands/models.rs, which have already been a source of bugs.
+#
+# Build cost is bounded and does NOT touch cmake: llama-cpp-sys-2's build.rs
+# compiles tools/mtmd as a standalone cc::Build target.
+llama-cpp-2 = { version = "0.1.154", default-features = false, features = ["metal", "mtmd"], optional = true }
+
+# Metal kernels are unusably slow at opt-level 0
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+strip = true

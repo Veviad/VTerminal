@@ -1,0 +1,64 @@
+# ---------- dependencies ----------
+node_modules
+.npm
+*.tgz
+
+# ---------- frontend build ----------
+dist
+dist-ssr
+.vite
+*.tsbuildinfo
+
+# ---------- Rust / Tauri ----------
+# Cargo.lock IS committed: VTerminal is an application, not a library.
+src-tauri/target
+src-tauri/gen/schemas
+
+# Release bundles, in case a build is ever pointed at the source tree
+*.app
+*.dmg
+*.pkg
+
+# ---------- local overrides ----------
+# Matches .env.local, settings.local.json is listed separately below.
+*.local
+.env
+.env.*
+!.env.example
+
+# ---------- model weights ----------
+# Models are downloaded into app data at runtime; these only appear when a
+# GGUF is dropped in the source tree to drive the smoke examples.
+*.gguf
+*.safetensors
+*.bin
+
+# ---------- tests / coverage ----------
+coverage
+.nyc_output
+test-results
+
+# ---------- editors ----------
+.idea
+*.swp
+*.swo
+.vscode/*
+!.vscode/extensions.json
+
+# ---------- macOS ----------
+.DS_Store
+._*
+.AppleDouble
+.LSOverride
+.Spotlight-V100
+.Trashes
+
+# ---------- logs ----------
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ---------- AI assistant tooling (local, not shared) ----------
+CLAUDE.md
+.claude/
