@@ -1,0 +1,134 @@
+name: CI
+
+# Runs on every PR into main, and on main itself. The push-to-main run is not
+# redundant: it is the only run allowed to SAVE the cargo cache, so it is what
+# makes subsequent PRs fast (see `save-if` below).
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  # Supersede in-flight PR runs, but never cancel a main run — that is the one
+  # populating the cache every PR restores from.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # vite.config.ts derives __BUILD_NUMBER__ from `git rev-list --count
+          # HEAD` and falls back to "0" silently on a shallow clone.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      - name: Version consistency
+        run: ./scripts/check-version.sh
+
+      # `tsc && vite build`. Deliberately the full build rather than a bare
+      # `tsc --noEmit`: bundling catches what typechecking cannot, and
+      # tsconfig.json already sets strict + noUnusedLocals + noUnusedParameters.
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+  rust:
+    name: Rust
+    # Pinned rather than macos-latest: llama-cpp-2 is under
+    # cfg(target_os = "macos"), and the image should not shift underneath the
+    # cargo cache. cmake and the Xcode CLT are preinstalled on this image.
+    runs-on: macos-15
+    # A hung job would otherwise run to the 6h default — at the 10x macOS
+    # billing multiplier on a private repo that is 3600 billable minutes.
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@v7
+
+      # rust-toolchain.toml (repo root) pins channel 1.97 but declares no
+      # components, so rustfmt and clippy have to be added explicitly.
+      # `rustup show` is what installs the pinned toolchain in the first place.
+      - name: Install toolchain
+        run: |
+          rustup show
+          rustup component add rustfmt clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+          # Restore-only on PRs so parallel PRs cannot thrash the cache; only
+          # main writes it. This cache holds the llama.cpp cmake + Metal build
+          # under target/debug/build/llama-cpp-sys-2-*/out, which is the
+          # difference between a 30-minute job and a 6-minute one.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # Keep that build even when a lint step fails, or a red main run
+          # throws away half an hour of compilation.
+          cache-on-failure: true
+
+      # tauri::generate_context!() (src/lib.rs) embeds frontendDist at COMPILE
+      # time, and dist/ is gitignored — without this the crate does not build at
+      # all. A stub is enough: these steps never run the app, and a real
+      # `vite build` here would be minutes of 10x-billed runner time to produce
+      # bytes nothing reads. The frontend job builds dist for real.
+      - name: Stub frontend assets
+        run: |
+          mkdir -p ../dist
+          printf '<!doctype html><title>ci stub</title>' > ../dist/index.html
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      # Both feature configurations, every time. `default = []`, so a
+      # feature-off run skips the entire local inference engine and the #[cfg]
+      # stub arms in commands/models.rs; a feature-on run is the only one that
+      # compiles examples/ for real rather than as #[cfg(not(...))] stubs.
+      # The smoke examples are compiled but never executed — each needs a real
+      # .gguf passed as argv.
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Clippy (local-llm)
+        run: cargo clippy --all-targets --locked --features local-llm -- -D warnings
+
+      - name: Test (local-llm)
+        run: cargo test --locked --features local-llm
+
+  # The single required status check. Naming `frontend` and `rust` directly in
+  # the branch ruleset would mean editing repo settings every time a job is
+  # added or renamed — and a required check that never runs leaves a PR stuck
+  # on "Expected — waiting for status" forever. One stable aggregator avoids
+  # both. Add jobs to `needs` and the ruleset keeps working untouched.
+  gate:
+    name: Quality gate
+    needs: [frontend, rust]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail unless every job succeeded
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
+        run: |
+          echo '${{ toJSON(needs) }}'
+          exit 1
