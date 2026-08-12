@@ -2,7 +2,9 @@
 
 A lean, AI-powered terminal for macOS — Warp-style command blocks and an AI agent, without the bulk. Local models run **in-process** with Metal acceleration: no Ollama, no vLLM, no daemon to babysit. Cloud models sit behind the same interface, so switching between on-device and frontier models is one keystroke.
 
-**[vterminal.veviad.com](https://vterminal.veviad.com)** — project page
+**[Download 0.1.0 for macOS](https://github.com/Veviad/VTerminal/releases/latest)** (Apple Silicon, 10 MB) · **[vterminal.veviad.com](https://vterminal.veviad.com)**
+
+The sections below build from source. If you just want to run the app, take the download above — it already includes on-device inference, and a locally built app is the one case that skips the Gatekeeper prompt.
 
 ![platform](https://img.shields.io/badge/macOS-Apple%20Silicon-black)
 ![stack](https://img.shields.io/badge/Tauri%202-Rust-informational)

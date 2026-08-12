@@ -184,6 +184,10 @@
           <circle cx="17" cy="9" r="2.2" />
           <path d="M7 7.7v8.6M17 11.2c0 3-2.6 4.3-5.6 4.7" />
         </symbol>
+        <symbol id="i-download" viewBox="0 0 24 24">
+          <path d="M12 3.5v11m0 0 4-4m-4 4-4-4" />
+          <path d="M4.5 16.5v2a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-2" />
+        </symbol>
         <symbol id="i-copy" viewBox="0 0 24 24">
           <rect x="9" y="9" width="11" height="11" rx="2" />
           <path d="M15 5.5A1.5 1.5 0 0 0 13.5 4H5.5A1.5 1.5 0 0 0 4 5.5v8A1.5 1.5 0 0 0 5.5 15" />
@@ -216,14 +220,14 @@
           <a href="#ai">AI</a>
           <a href="#safety">Safety</a>
           <a href="#models">Models</a>
-          <a href="#install">Install</a>
+          <a href="#download">Install</a>
         </nav>
 
         <div class="header-actions">
           <a
             class="button button-primary header-cta"
-            href="https://github.com/Veviad/VTerminal"
-            >View on GitHub</a
+            href="https://github.com/Veviad/VTerminal/releases/download/v0.1.0/VTerminal_0.1.0_aarch64.dmg"
+            >Download</a
           >
           <button
             class="menu-toggle"
@@ -245,10 +249,15 @@
           <a href="#ai">AI</a>
           <a href="#safety">Safety</a>
           <a href="#models">Models</a>
-          <a href="#install">Install</a>
+          <a href="#download">Install</a>
           <div class="mobile-menu-actions">
             <a
               class="button button-primary"
+              href="https://github.com/Veviad/VTerminal/releases/download/v0.1.0/VTerminal_0.1.0_aarch64.dmg"
+              >Download for macOS</a
+            >
+            <a
+              class="button button-outline"
               href="https://github.com/Veviad/VTerminal"
               >View on GitHub</a
             >
@@ -262,13 +271,11 @@
         <div class="hero-inner shell">
           <a
             class="announcement"
-            href="https://github.com/Veviad/VTerminal/releases"
-            aria-label="Version 0.1.0 — pre-1.0 and developed in the open. See releases."
+            href="https://github.com/Veviad/VTerminal/releases/tag/v0.1.0"
+            aria-label="Version 0.1.0 is out. Read the release notes."
           >
             <span class="announcement-badge">0.1.0</span>
-            <span class="announcement-label"
-              >Pre-1.0, developed in the open</span
-            >
+            <span class="announcement-label">Read the release notes</span>
             <svg class="ui-icon" aria-hidden="true"><use href="#i-arrow-right" /></svg>
           </a>
 
@@ -284,14 +291,28 @@
             behind the same interface.
           </p>
 
+          <!-- Versioned asset URL rather than /releases/latest/download/…: the
+               filename carries the version, so a "latest" path 404s the moment
+               0.1.1 ships. Two places to update per release — here and the
+               download section. -->
           <div class="hero-actions">
             <a
               class="button button-primary"
+              href="https://github.com/Veviad/VTerminal/releases/download/v0.1.0/VTerminal_0.1.0_aarch64.dmg"
+            >
+              <svg class="ui-icon" aria-hidden="true"><use href="#i-download" /></svg>
+              Download for macOS
+            </a>
+            <a
+              class="button button-secondary"
               href="https://github.com/Veviad/VTerminal"
               >View on GitHub</a
             >
-            <a class="button button-secondary" href="#install">Quick start</a>
           </div>
+          <p class="download-meta hero-download-meta">
+            0.1.0 · Apple Silicon · 10 MB ·
+            <a href="#download">unsigned, see setup</a>
+          </p>
 
           <ul class="hero-proof" aria-label="At a glance">
             <li>
@@ -1043,110 +1064,139 @@
 
       <section
         class="section section-dark"
-        id="install"
-        aria-labelledby="install-title"
+        id="download"
+        aria-labelledby="download-title"
       >
         <div class="install-layout shell">
           <div>
-            <p class="eyebrow">Quick Start</p>
-            <h2 class="section-heading" id="install-title">
-              Build It in Three Commands.
+            <p class="eyebrow">Download</p>
+            <h2 class="section-heading" id="download-title">
+              A Disk Image. Drag It Across.
             </h2>
             <p class="section-lead">
-              VTerminal is source-first while it's pre-1.0. Clone it, build it,
-              and you have the terminal plus cloud AI immediately.
+              One 10&nbsp;MB download with on-device inference already compiled
+              in — llama.cpp and its Metal kernels ship inside the app, so there
+              is nothing to build and no daemon to install.
             </p>
 
             <dl class="req-list">
               <div class="req-row">
-                <dt>OS</dt>
-                <dd>macOS on Apple Silicon (Intel is untested)</dd>
+                <dt>macOS</dt>
+                <dd>13 Ventura or newer</dd>
               </div>
               <div class="req-row">
-                <dt>Node</dt>
-                <dd>20 or newer</dd>
+                <dt>Chip</dt>
+                <dd>Apple Silicon — Intel is not built</dd>
               </div>
               <div class="req-row">
-                <dt>Rust</dt>
-                <dd>pinned by <code>rust-toolchain.toml</code></dd>
+                <dt>Download</dt>
+                <dd>10&nbsp;MB disk image</dd>
               </div>
               <div class="req-row">
-                <dt>Xcode CLT</dt>
-                <dd><code>xcode-select --install</code></dd>
-              </div>
-              <div class="req-row">
-                <dt>cmake</dt>
+                <dt>Signature</dt>
                 <dd>
-                  <code>brew install cmake</code> — only for the
-                  <code>local-llm</code> feature
+                  unsigned for now — one extra step on first launch, see step 3
+                </dd>
+              </div>
+              <div class="req-row">
+                <dt>Local models</dt>
+                <dd>
+                  fetched from inside the app when you want them — the default
+                  Qwen3.5 9B is ~5.3&nbsp;GB
                 </dd>
               </div>
             </dl>
+
+            <p class="install-note">
+              Prefer to build it yourself? The
+              <a href="https://github.com/Veviad/VTerminal#quick-start">README</a>
+              covers the source build, and building also sidesteps the Gatekeeper
+              step entirely, since a locally built app is never quarantined.
+            </p>
           </div>
 
           <ol class="steps">
             <li class="step">
               <span class="step-number" aria-hidden="true">1</span>
               <div class="step-body">
-                <h3>Clone and Install</h3>
-                <div class="code-block">
-                  <code>git clone https://github.com/Veviad/VTerminal.git</code>
-                  <button
-                    class="copy-button"
-                    type="button"
-                    aria-label="Copy command"
-                    data-copy
+                <h3>Download the Disk Image</h3>
+                <div class="download-cta">
+                  <a
+                    class="button button-primary"
+                    href="https://github.com/Veviad/VTerminal/releases/download/v0.1.0/VTerminal_0.1.0_aarch64.dmg"
                   >
-                    <svg class="ui-icon" aria-hidden="true"><use href="#i-copy" /></svg>
-                  </button>
+                    <svg class="ui-icon" aria-hidden="true">
+                      <use href="#i-download" />
+                    </svg>
+                    VTerminal 0.1.0
+                  </a>
+                  <span class="download-meta">
+                    <code>VTerminal_0.1.0_aarch64.dmg</code><br />
+                    10&nbsp;MB ·
+                    <a
+                      href="https://github.com/Veviad/VTerminal/releases/tag/v0.1.0"
+                      >release notes</a
+                    >
+                  </span>
                 </div>
-                <div class="code-block">
-                  <code>npm install</code>
-                  <button
-                    class="copy-button"
-                    type="button"
-                    aria-label="Copy command"
-                    data-copy
-                  >
-                    <svg class="ui-icon" aria-hidden="true"><use href="#i-copy" /></svg>
-                  </button>
-                </div>
+                <dl class="checksum">
+                  <dt>SHA-256</dt>
+                  <dd>
+                    d13fca76d2aa9e4aa8f0c7785f3e9fdcc484a158c25b55929933dd4e9ade79f9
+                  </dd>
+                </dl>
+                <p>
+                  Since the build is unsigned, this is how you confirm you got
+                  the file we published. Compare it with
+                  <code>shasum -a 256</code> on the downloaded image.
+                </p>
               </div>
             </li>
 
             <li class="step">
               <span class="step-number" aria-hidden="true">2</span>
               <div class="step-body">
-                <h3>Run It</h3>
+                <h3>Drag VTerminal to Applications</h3>
                 <p>
-                  The terminal plus cloud AI, with a fast build that skips the
-                  local inference engine entirely.
+                  Open the disk image and drag the app across, as usual. Then
+                  eject the image.
                 </p>
-                <div class="code-block">
-                  <code>npm run tauri dev</code>
-                  <button
-                    class="copy-button"
-                    type="button"
-                    aria-label="Copy command"
-                    data-copy
-                  >
-                    <svg class="ui-icon" aria-hidden="true"><use href="#i-copy" /></svg>
-                  </button>
-                </div>
               </div>
             </li>
 
             <li class="step">
               <span class="step-number" aria-hidden="true">3</span>
               <div class="step-body">
-                <h3>Add On-Device Inference</h3>
+                <h3>Allow It on First Launch</h3>
                 <p>
-                  Then open <strong>Settings → Models</strong>, download
-                  <strong>Qwen3.5 9B</strong> (~5.3&nbsp;GB) and press
-                  <strong>Load</strong>.
+                  This build is <strong>not signed or notarized</strong>, so
+                  Gatekeeper blocks it the first time. That is not an App Store
+                  restriction — you can run apps from anywhere. It needs a
+                  Developer ID certificate, which requires a paid Apple Developer
+                  account this project does not have yet. Either route below works,
+                  once.
+                </p>
+
+                <p class="route">
+                  <strong>From System Settings</strong>
+                  Try to open VTerminal, then go to <strong>Privacy &amp;
+                  Security</strong>, scroll to Security and click
+                  <strong>Open Anyway</strong>. On macOS 15 and later the old
+                  Control-click → Open shortcut no longer works, and on macOS 26
+                  the button only appears for an hour after a blocked launch.
+                </p>
+
+                <p class="route">
+                  <strong>Or from a terminal</strong>
+                  Clear the quarantine flag your browser attached, which skips the
+                  dialog entirely.
                 </p>
                 <div class="code-block">
-                  <code>npm run tauri dev -- <span class="nowrap">--features local-llm</span></code>
+                  <!-- No .nowrap here, unlike the flag pair elsewhere: at 320px
+                       the path alone (218px) exceeds the line, so pinning it
+                       would overflow the box instead of wrapping. A path broken
+                       mid-token still reads unambiguously. -->
+                  <code>xattr -dr com.apple.quarantine /Applications/VTerminal.app</code>
                   <button
                     class="copy-button"
                     type="button"
@@ -1156,16 +1206,12 @@
                     <svg class="ui-icon" aria-hidden="true"><use href="#i-copy" /></svg>
                   </button>
                 </div>
-                <p class="install-note">
-                  The first <code>local-llm</code> build compiles llama.cpp and
-                  its Metal kernels — budget 10–30 minutes. Incremental builds
-                  afterwards are normal speed.
-                </p>
               </div>
             </li>
           </ol>
         </div>
       </section>
+
 
       <section class="section" aria-labelledby="keys-title">
         <div class="shell">
@@ -1202,6 +1248,11 @@
           <div class="cta-actions">
             <a
               class="button button-primary"
+              href="https://github.com/Veviad/VTerminal/releases/download/v0.1.0/VTerminal_0.1.0_aarch64.dmg"
+              >Download for macOS</a
+            >
+            <a
+              class="button button-outline"
               href="https://github.com/Veviad/VTerminal"
               >View on GitHub</a
             >
