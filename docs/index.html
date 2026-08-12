@@ -311,7 +311,7 @@
           </div>
           <p class="download-meta hero-download-meta">
             0.1.0 · Apple Silicon · 10 MB ·
-            <a href="#download">unsigned, see setup</a>
+            <a href="#download">not notarized, see setup</a>
           </p>
 
           <ul class="hero-proof" aria-label="At a glance">
@@ -1095,7 +1095,8 @@
               <div class="req-row">
                 <dt>Signature</dt>
                 <dd>
-                  unsigned for now — one extra step on first launch, see step 3
+                  ad-hoc signed, not notarized — one extra step on first
+                  launch, see step 3
                 </dd>
               </div>
               <div class="req-row">
@@ -1139,17 +1140,31 @@
                     >
                   </span>
                 </div>
-                <dl class="checksum">
-                  <dt>SHA-256</dt>
-                  <dd>
-                    d13fca76d2aa9e4aa8f0c7785f3e9fdcc484a158c25b55929933dd4e9ade79f9
-                  </dd>
-                </dl>
+                <!-- The SHA-256 was inlined here as 64 literal hex characters
+                     and went stale the first time the release was rebuilt. A
+                     wrong checksum is worse than none: it tells someone their
+                     download was tampered with when it was not. Pointing at the
+                     published SHA256SUMS.txt cannot drift, and it is the command
+                     the release notes already give. -->
                 <p>
-                  Since the build is unsigned, this is how you confirm you got
-                  the file we published. Compare it with
-                  <code>shasum -a 256</code> on the downloaded image.
+                  The build is not notarized, so verify it if you like. Download
+                  <a
+                    href="https://github.com/Veviad/VTerminal/releases/download/v0.1.0/SHA256SUMS.txt"
+                    >SHA256SUMS.txt</a
+                  >
+                  next to the image and run:
                 </p>
+                <div class="code-block">
+                  <code>shasum -a 256 -c SHA256SUMS.txt</code>
+                  <button
+                    class="copy-button"
+                    type="button"
+                    aria-label="Copy command"
+                    data-copy
+                  >
+                    <svg class="ui-icon" aria-hidden="true"><use href="#i-copy" /></svg>
+                  </button>
+                </div>
               </div>
             </li>
 
@@ -1169,7 +1184,7 @@
               <div class="step-body">
                 <h3>Allow It on First Launch</h3>
                 <p>
-                  This build is <strong>not signed or notarized</strong>, so
+                  This build is <strong>not notarized</strong>, so
                   Gatekeeper blocks it the first time. That is not an App Store
                   restriction — you can run apps from anywhere. It needs a
                   Developer ID certificate, which requires a paid Apple Developer
