@@ -70,6 +70,12 @@ pub struct LoadedVision {
     context_len: u32,
 }
 
+/// What the blocking half of `load` carries back across the thread boundary:
+/// the four `LoadedVision` fields that only exist once the weights are resident.
+/// `model_id` and `arch` are known before the spawn, so they stay on the async
+/// side rather than making the round trip.
+type VisionParts = (Arc<LlamaModel>, Arc<MtmdContext>, Arc<ChatTemplate>, u32);
+
 /// Cloned out from under the host lock so a transcription never holds it.
 pub struct ReadyVision {
     pub model_id: String,
@@ -143,7 +149,7 @@ impl VisionHost {
         let _ = on_event.send(LoadEvent::Phase { name: "loading".into() });
 
         let build = tokio::task::spawn_blocking(
-            move || -> Result<(Arc<LlamaModel>, Arc<MtmdContext>, Arc<ChatTemplate>, u32), String> {
+            move || -> Result<VisionParts, String> {
                 let backend = backend()?;
                 let params = LlamaModelParams::default().with_n_gpu_layers(u32::MAX);
                 let model = LlamaModel::load_from_file(backend, &gguf_path, &params)

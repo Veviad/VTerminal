@@ -568,6 +568,12 @@ pub fn put_many(
                 // transaction, taking the terminal's scrollback with them. Coerce
                 // instead: a mislabelled message is worth less than the session.
                 let role = if m.role == "user" { "user" } else { "assistant" };
+                // clippy reads this as `m.kind.as_deref().unwrap_or("text")`, which
+                // is NOT the same thing and would undo the coercion above: unwrap_or
+                // passes ANY Some(..) through untouched, so an unrecognised kind
+                // would reach the CHECK constraint and abort the transaction. The
+                // arms are deliberately an allowlist, not a null-default.
+                #[allow(clippy::manual_unwrap_or)]
                 let kind = match m.kind.as_deref() {
                     Some(k @ ("command" | "compaction")) => k,
                     _ => "text",
