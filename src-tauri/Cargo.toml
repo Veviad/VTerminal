@@ -12,6 +12,16 @@ crate-type = ["lib", "cdylib", "staticlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[lints.clippy]
+# A #[tauri::command]'s arity IS the IPC contract, mirrored argument-for-argument
+# in src/lib/tauri.ts. Every current offender is either a command (ai_ask,
+# agent_start, pty_spawn) or the internal function a command delegates to
+# (run_chat), so the count is dictated from outside the crate — collapsing them
+# into structs would change the wire shape and every TypeScript call site to
+# satisfy a lint about Rust ergonomics. Off crate-wide rather than five
+# #[allow]s that would need re-adding with each new command.
+too_many_arguments = "allow"
+
 [features]
 default = []
 # Pulls in llama.cpp + Metal kernel compilation (slow clean build).

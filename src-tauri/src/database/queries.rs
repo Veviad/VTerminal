@@ -28,7 +28,11 @@ pub struct HistoryEntry {
     pub ended_at: Option<String>,
 }
 
-pub fn insert_history(conn: &Connection, entry: &HistoryEntryInput, shell: &str) -> Result<String, String> {
+pub fn insert_history(
+    conn: &Connection,
+    entry: &HistoryEntryInput,
+    shell: &str,
+) -> Result<String, String> {
     let id = uuid::Uuid::new_v4().to_string();
     let ended_at = chrono::Utc::now().to_rfc3339();
     conn.execute(
@@ -83,7 +87,8 @@ pub fn recent_history(conn: &Connection, limit: u32) -> Result<Vec<HistoryEntry>
     let rows = stmt
         .query_map(params![limit], row_to_entry)
         .map_err(|e| e.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
 }
 
 pub fn search_history(
@@ -110,7 +115,8 @@ pub fn search_history(
     let rows = stmt
         .query_map(params![pattern, limit, offset], row_to_entry)
         .map_err(|e| e.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
 }
 
 pub fn clear_history(conn: &Connection) -> Result<(), String> {
@@ -217,14 +223,19 @@ pub fn list_ssh_hosts(conn: &Connection) -> Result<Vec<SshHost>, String> {
          ORDER BY use_count DESC, COALESCE(last_used_at, '') DESC, label COLLATE NOCASE ASC"
     );
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-    let rows = stmt.query_map([], row_to_ssh_host).map_err(|e| e.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    let rows = stmt
+        .query_map([], row_to_ssh_host)
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
 }
 
 pub fn get_ssh_host(conn: &Connection, id: &str) -> Result<Option<SshHost>, String> {
     let sql = format!("SELECT {SSH_HOST_COLS} FROM ssh_hosts WHERE id = ?1");
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-    let mut rows = stmt.query_map(params![id], row_to_ssh_host).map_err(|e| e.to_string())?;
+    let mut rows = stmt
+        .query_map(params![id], row_to_ssh_host)
+        .map_err(|e| e.to_string())?;
     match rows.next() {
         Some(row) => Ok(Some(row.map_err(|e| e.to_string())?)),
         None => Ok(None),
@@ -326,7 +337,8 @@ pub fn find_ssh_host_duplicate(
         let mut stmt = conn
             .prepare("SELECT id FROM ssh_hosts WHERE config_alias = ?1 COLLATE NOCASE LIMIT 1")
             .map_err(|e| e.to_string())?;
-        let mut rows = stmt.query_map(params![alias], |r| r.get::<_, String>(0))
+        let mut rows = stmt
+            .query_map(params![alias], |r| r.get::<_, String>(0))
             .map_err(|e| e.to_string())?;
         if let Some(row) = rows.next() {
             return Ok(Some(row.map_err(|e| e.to_string())?));
@@ -414,7 +426,10 @@ mod tests {
         insert_ssh_host(&conn, &host("Prod", "a")).unwrap();
         let err = insert_ssh_host(&conn, &host("prod", "b")).unwrap_err();
         assert!(err.contains("already exists"), "got: {err}");
-        assert!(!err.contains("UNIQUE constraint"), "raw sqlite error leaked: {err}");
+        assert!(
+            !err.contains("UNIQUE constraint"),
+            "raw sqlite error leaked: {err}"
+        );
     }
 
     #[test]
@@ -481,7 +496,11 @@ mod tests {
         touch_ssh_host(&conn, &c).unwrap();
         touch_ssh_host(&conn, &a).unwrap();
 
-        let labels: Vec<_> = list_ssh_hosts(&conn).unwrap().into_iter().map(|h| h.label).collect();
+        let labels: Vec<_> = list_ssh_hosts(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|h| h.label)
+            .collect();
         // Charlie (2 uses), Alpha (1), then unused Bravo alphabetically last.
         assert_eq!(labels, vec!["Charlie", "Alpha", "Bravo"]);
     }
@@ -510,7 +529,10 @@ mod tests {
             find_ssh_host_duplicate(&conn, None, "prod-01", Some("deploy"), Some(22)).unwrap(),
             None
         );
-        assert_eq!(find_ssh_host_duplicate(&conn, None, "nope", None, None).unwrap(), None);
+        assert_eq!(
+            find_ssh_host_duplicate(&conn, None, "nope", None, None).unwrap(),
+            None
+        );
     }
 
     #[test]

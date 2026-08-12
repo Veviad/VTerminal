@@ -240,9 +240,15 @@ mod tests {
         assert_eq!(backoff(2, None), Duration::from_millis(1000));
         assert_eq!(backoff(3, None), Duration::from_millis(2000));
         // The server's own number wins when it sends one...
-        assert_eq!(backoff(1, Some(Duration::from_secs(7))), Duration::from_secs(7));
+        assert_eq!(
+            backoff(1, Some(Duration::from_secs(7))),
+            Duration::from_secs(7)
+        );
         // ...but cannot wedge the UI for minutes.
-        assert_eq!(backoff(1, Some(Duration::from_secs(600))), Duration::from_secs(30));
+        assert_eq!(
+            backoff(1, Some(Duration::from_secs(600))),
+            Duration::from_secs(30)
+        );
     }
 
     #[test]

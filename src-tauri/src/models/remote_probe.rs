@@ -152,8 +152,7 @@ fn explicit_port(url: &str) -> Option<&str> {
             .map(|i| bracket + 1 + i)?,
         None => authority.find(':')?,
     };
-    Some(&authority[colon + 1..])
-        .filter(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+    Some(&authority[colon + 1..]).filter(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// What a server said it serves. Every candidate is returned, including ones the
@@ -453,7 +452,10 @@ async fn get_json(url: &str, token: Option<&str>) -> Result<Value, ProbeError> {
 }
 
 async fn post_json(url: &str, token: Option<&str>, body: &Value) -> Result<Value, ProbeError> {
-    let mut req = client().map_err(ProbeError::Transport)?.post(url).json(body);
+    let mut req = client()
+        .map_err(ProbeError::Transport)?
+        .post(url)
+        .json(body);
     if let Some(t) = token.map(str::trim).filter(|t| !t.is_empty()) {
         req = req.bearer_auth(t);
     }
@@ -520,7 +522,11 @@ mod tests {
             // Bare IPv6 literal: the colons inside the brackets are not a port.
             ("http://[::1]", OLLAMA, "http://[::1]:11434"),
             // The generic kind guesses no port, so the scheme default stands.
-            ("https://api.example.com", GENERIC, "https://api.example.com"),
+            (
+                "https://api.example.com",
+                GENERIC,
+                "https://api.example.com",
+            ),
             // A non-API path prefix is legitimate — a proxied LiteLLM.
             (
                 "https://gw.example.com/llm/v1",
@@ -667,10 +673,7 @@ mod tests {
         let mut m = parse_v1_models(&v1_models(&["snowflake-arctic"]), OLLAMA, &[]).remove(0);
         // Name gives nothing away, so `capabilities` is the only signal.
         assert_eq!(m.role, "chat");
-        apply_ollama_show(
-            &mut m,
-            &serde_json::json!({"capabilities": ["embedding"]}),
-        );
+        apply_ollama_show(&mut m, &serde_json::json!({"capabilities": ["embedding"]}));
         assert_eq!(m.role, "embedding");
         assert!(!m.supports_tools, "no tools means agent mode cannot work");
     }
@@ -800,8 +803,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_keyless_probe_sends_no_authorization_header() {
-        let (base, seen) =
-            fake_server(vec![("/v1/models", r#"{"data":[{"id":"m"}]}"#)], 2).await;
+        let (base, seen) = fake_server(vec![("/v1/models", r#"{"data":[{"id":"m"}]}"#)], 2).await;
         probe(LMS, &base, None, &[]).await.unwrap();
         let requests = seen.lock().unwrap().clone();
         assert!(
@@ -814,17 +816,17 @@ mod tests {
     async fn enrichment_that_404s_still_returns_a_usable_list() {
         // The failure mode that must never be fatal: the list endpoint is generic,
         // the metadata one is not, so picking the wrong kind still has to work.
-        let (base, _) = fake_server(
-            vec![("/v1/models", r#"{"data":[{"id":"qwen3:8b"}]}"#)],
-            2,
-        )
-        .await;
+        let (base, _) =
+            fake_server(vec![("/v1/models", r#"{"data":[{"id":"qwen3:8b"}]}"#)], 2).await;
         let result = probe(OLLAMA, &base, None, &[]).await.unwrap();
         assert_eq!(result.models.len(), 1);
         assert!(!result.models[0].enriched);
         assert_eq!(result.models[0].context_tokens, OLLAMA.default_context());
         assert!(
-            result.warnings.iter().any(|w| w.contains("OpenAI-compatible")),
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("OpenAI-compatible")),
             "the wrong-kind hint should be free: {:?}",
             result.warnings
         );

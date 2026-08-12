@@ -33,8 +33,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         std::process::exit(2);
     }
-    let (model_path, mmproj_path, image_path) =
-        (positional[0].as_str(), positional[1].as_str(), positional[2].as_str());
+    let (model_path, mmproj_path, image_path) = (
+        positional[0].as_str(),
+        positional[1].as_str(),
+        positional[2].as_str(),
+    );
 
     // Infer the family from the filename so the right default prompt is used —
     // "transcribe this" and "describe this" are different jobs.

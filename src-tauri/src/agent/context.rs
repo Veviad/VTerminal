@@ -159,8 +159,14 @@ mod tests {
             ..base()
         };
         let rendered = ctx.render();
-        assert!(!rendered.contains("/Users/me/app"), "local cwd leaked into a remote session");
-        assert!(!rendered.contains("main"), "local branch leaked into a remote session");
+        assert!(
+            !rendered.contains("/Users/me/app"),
+            "local cwd leaked into a remote session"
+        );
+        assert!(
+            !rendered.contains("main"),
+            "local branch leaked into a remote session"
+        );
         assert!(rendered.contains("ssh prod-01"));
         assert!(rendered.contains("NOT to the local machine"));
     }
@@ -173,13 +179,19 @@ mod tests {
         };
         let rendered = ctx.render();
         assert!(rendered.contains("Currently visible on screen"));
-        assert!(rendered.contains('…'), "oversized screen tail must be truncated");
+        assert!(
+            rendered.contains('…'),
+            "oversized screen tail must be truncated"
+        );
         assert!(rendered.len() < MAX_SCREEN_CHARS + 1000);
     }
 
     #[test]
     fn describe_handles_missing_target() {
-        let r = RemoteContext { kind: "docker".into(), target: None };
+        let r = RemoteContext {
+            kind: "docker".into(),
+            target: None,
+        };
         assert_eq!(r.describe(), "docker");
     }
 }

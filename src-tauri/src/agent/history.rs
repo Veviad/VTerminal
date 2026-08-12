@@ -117,9 +117,7 @@ fn rescue_orphaned_tool_results(history: &mut Vec<ChatMessage>) {
     // A rescued result with nothing in it carries no information at all — but an
     // image-only user turn is NOT empty. "Drag a screenshot in and press enter"
     // produces exactly that shape, and testing `content` alone deleted it.
-    history.retain(|m| {
-        m.role != Role::User || !m.content.trim().is_empty() || m.images.is_some()
-    });
+    history.retain(|m| m.role != Role::User || !m.content.trim().is_empty() || m.images.is_some());
 }
 
 /// Prune calls nobody answered, and the empty turns that leaves behind.
@@ -309,9 +307,11 @@ mod tests {
         messages.iter().map(|m| m.role).collect()
     }
 
-
     fn png(data: &str) -> crate::provider::ImagePart {
-        crate::provider::ImagePart { media_type: "image/png".into(), data: data.into() }
+        crate::provider::ImagePart {
+            media_type: "image/png".into(),
+            data: data.into(),
+        }
     }
 
     fn user_with_image(text: &str, data: &str) -> ChatMessage {
@@ -335,7 +335,9 @@ mod tests {
         // did not see.
         let notes: Vec<&str> = messages.iter().map(|m| m.content.as_str()).collect();
         assert!(
-            notes.iter().any(|c| c.contains("1 image") && c.contains("attached")),
+            notes
+                .iter()
+                .any(|c| c.contains("1 image") && c.contains("attached")),
             "expected a stub note, got {notes:?}"
         );
     }
@@ -346,11 +348,17 @@ mod tests {
     fn merging_two_user_turns_keeps_both_turns_images() {
         // Straight at the merge, bypassing the strip: this is about not LOSING
         // data during the fold, which the strip would otherwise mask.
-        let mut messages = vec![user_with_image("first", "AAAA"), user_with_image("second", "BBBB")];
+        let mut messages = vec![
+            user_with_image("first", "AAAA"),
+            user_with_image("second", "BBBB"),
+        ];
         merge_adjacent_same_role(&mut messages);
 
         assert_eq!(messages.len(), 1);
-        let images = messages[0].images.as_ref().expect("images survived the merge");
+        let images = messages[0]
+            .images
+            .as_ref()
+            .expect("images survived the merge");
         assert_eq!(images.len(), 2);
         assert_eq!(images[0].data, "AAAA");
         assert_eq!(images[1].data, "BBBB");
@@ -370,7 +378,10 @@ mod tests {
         let before = history.len();
         trim_to_budget(&mut history);
 
-        assert!(history.len() < before, "an over-budget image turn must be evicted");
+        assert!(
+            history.len() < before,
+            "an over-budget image turn must be evicted"
+        );
         assert!(
             history.iter().all(|m| m.images.is_none()),
             "the image-bearing turn is what should have gone"
@@ -381,8 +392,10 @@ mod tests {
     /// the eviction above was caused by the image bytes and nothing else.
     #[test]
     fn the_same_turn_without_an_image_is_not_evicted() {
-        let mut history =
-            vec![ChatMessage::user("look at this"), ChatMessage::assistant("noted")];
+        let mut history = vec![
+            ChatMessage::user("look at this"),
+            ChatMessage::assistant("noted"),
+        ];
         trim_to_budget(&mut history);
         assert_eq!(history.len(), 2);
     }
@@ -404,7 +417,9 @@ mod tests {
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].data, "NEW");
         assert!(
-            messages[..messages.len() - 1].iter().all(|m| m.images.is_none()),
+            messages[..messages.len() - 1]
+                .iter()
+                .all(|m| m.images.is_none()),
             "history turns must not carry images"
         );
     }
@@ -417,7 +432,11 @@ mod tests {
             "exactly one system message"
         );
         assert_eq!(messages[0].role, Role::System, "system must be first");
-        assert_eq!(messages.last().unwrap().role, Role::User, "goal must be last");
+        assert_eq!(
+            messages.last().unwrap().role,
+            Role::User,
+            "goal must be last"
+        );
 
         let mut seen: Vec<&str> = Vec::new();
         for m in messages {
@@ -436,7 +455,11 @@ mod tests {
             .collect();
         for m in messages {
             for c in m.tool_calls.iter().flatten() {
-                assert!(answered.contains(&c.id.as_str()), "call {} unanswered", c.id);
+                assert!(
+                    answered.contains(&c.id.as_str()),
+                    "call {} unanswered",
+                    c.id
+                );
             }
         }
     }
@@ -468,7 +491,14 @@ mod tests {
         assert_wire_valid(&messages);
         assert_eq!(
             roles(&messages),
-            vec![Role::System, Role::User, Role::Assistant, Role::Tool, Role::Assistant, Role::User]
+            vec![
+                Role::System,
+                Role::User,
+                Role::Assistant,
+                Role::Tool,
+                Role::Assistant,
+                Role::User
+            ]
         );
         // The tool call and its id survive verbatim — this is what gives the
         // model continuity rather than a summary of continuity.
@@ -594,8 +624,14 @@ mod tests {
         assert_wire_valid(&messages);
         assert_eq!(roles(&messages), vec![Role::System, Role::User]);
         let note = &messages[1].content;
-        assert!(note.contains("from earlier in this session"), "got {note:?}");
-        assert!(note.contains("output of cut_away"), "the output must survive: {note:?}");
+        assert!(
+            note.contains("from earlier in this session"),
+            "got {note:?}"
+        );
+        assert!(
+            note.contains("output of cut_away"),
+            "the output must survive: {note:?}"
+        );
         // Merged with the goal, so there is exactly one user turn.
         assert!(note.ends_with("the goal"), "got {note:?}");
     }
@@ -675,7 +711,11 @@ mod tests {
         normalize(&mut messages);
         assert_wire_valid(&messages);
         // system + <= ceiling + goal, and the merge can only shrink it further.
-        assert!(messages.len() <= MAX_HISTORY_MESSAGES + 2, "got {}", messages.len());
+        assert!(
+            messages.len() <= MAX_HISTORY_MESSAGES + 2,
+            "got {}",
+            messages.len()
+        );
         // The NEWEST survive.
         assert!(messages.iter().any(|m| m.content.contains("a79")));
         assert!(!messages.iter().any(|m| m.content.contains("q0")));
@@ -697,7 +737,10 @@ mod tests {
         ]);
         normalize(&mut messages);
         assert_wire_valid(&messages);
-        assert_eq!(roles(&messages), vec![Role::System, Role::User, Role::Assistant, Role::User]);
+        assert_eq!(
+            roles(&messages),
+            vec![Role::System, Role::User, Role::Assistant, Role::User]
+        );
         assert_eq!(messages[1].content, "first\n\nsecond");
     }
 
@@ -731,7 +774,10 @@ mod tests {
     fn a_history_with_no_goal_is_still_normalized() {
         // Defensive: normalize must not panic or lose the system prompt if it is
         // ever called on something that does not end in a user turn.
-        let mut messages = vec![ChatMessage::system("AGENT PROMPT"), ChatMessage::assistant("hi")];
+        let mut messages = vec![
+            ChatMessage::system("AGENT PROMPT"),
+            ChatMessage::assistant("hi"),
+        ];
         normalize(&mut messages);
         assert_eq!(messages[0].role, Role::System);
         assert_eq!(messages.len(), 2);
@@ -749,8 +795,13 @@ mod tests {
         let mut twice = once.clone();
         normalize(&mut twice);
         assert_eq!(
-            once.iter().map(|m| (m.role, m.content.clone())).collect::<Vec<_>>(),
-            twice.iter().map(|m| (m.role, m.content.clone())).collect::<Vec<_>>()
+            once.iter()
+                .map(|m| (m.role, m.content.clone()))
+                .collect::<Vec<_>>(),
+            twice
+                .iter()
+                .map(|m| (m.role, m.content.clone()))
+                .collect::<Vec<_>>()
         );
     }
 }
