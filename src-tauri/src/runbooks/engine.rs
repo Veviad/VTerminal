@@ -3282,7 +3282,7 @@ fn unwrap_terminal_guards(command: &str) -> Option<String> {
 }
 
 fn unwrap_runbook_environment(command: &str) -> Option<String> {
-    let words = shell_words::split(command).ok()?;
+    let words = shlex::split(command)?;
     let clean_prefix = [
         "/usr/bin/env",
         "-i",
@@ -3312,8 +3312,7 @@ fn unwrap_runbook_environment(command: &str) -> Option<String> {
 }
 
 fn runbook_network_ambiguous_command(command: &str) -> bool {
-    let first = shell_words::split(command)
-        .ok()
+    let first = shlex::split(command)
         .and_then(|words| words.into_iter().next())
         .unwrap_or_default()
         .rsplit('/')
@@ -3338,7 +3337,7 @@ fn runbook_network_ambiguous_command(command: &str) -> bool {
 }
 
 fn command_is_privileged(command: &str) -> bool {
-    shell_words::split(command)
+    shlex::split(command)
         .unwrap_or_default()
         .iter()
         .any(|token| {
