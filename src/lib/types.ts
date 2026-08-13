@@ -777,11 +777,13 @@ export interface Settings {
   /** null = use the chosen model's own default_prompt. */
   vision_prompt: string | null;
   vision_auto_load_on_start: boolean;
-  hf_token: string | null;
+  /** Presence only; the token is write-only and never crosses IPC. */
+  has_hf_token: boolean;
   models_dir: string | null;
   has_anthropic_api_key: boolean;
   has_openai_api_key: boolean;
   has_mistral_api_key: boolean;
+  credential_store_status: "ready" | "blocked";
   history_enabled: boolean;
   history_capture_output: boolean;
   send_context_to_ai: boolean;

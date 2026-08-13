@@ -20,9 +20,8 @@
 //!    metadata a probe found, so app start (and `models_catalog`) reads settings
 //!    only. Discovery lives in `remote_probe`, behind an explicit user gesture.
 //!
-//! Tokens are stored in `settings.json`, in plaintext, in the app data directory
-//! — the same file and the same exposure as `hf_token` and the three vendor API
-//! keys. There is no Keychain integration; nobody should assume otherwise.
+//! Tokens are stored only in macOS Keychain, keyed by this record's immutable
+//! UUID. The JSON store contains presence-free metadata only.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -35,8 +34,6 @@ use crate::models::catalog::{CatalogModel, Effort, ProviderId, Tier};
 
 /// Store key holding the server list.
 const SERVERS_KEY: &str = "remote_servers";
-/// Store key holding `{ "<server id>": "<token>" }`, write-only.
-const TOKENS_KEY: &str = "remote_server_tokens";
 
 /// Which product is on the other end.
 ///
@@ -286,18 +283,19 @@ pub fn write_servers(app: &tauri::AppHandle<Wry>, servers: &[RemoteServer]) -> R
 }
 
 /// The stored token, if any. Never crosses the IPC boundary.
-pub fn read_token(app: &tauri::AppHandle<Wry>, server_id: &str) -> Option<String> {
-    let store = app.store(STORE_NAME).ok()?;
-    store
-        .get(TOKENS_KEY)?
-        .get(server_id)
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-        .filter(|t| !t.trim().is_empty())
+pub fn read_token(
+    app: &tauri::AppHandle<Wry>,
+    server_id: &str,
+) -> Result<Option<crate::credentials::Secret>, String> {
+    crate::credentials::state(app).get(&crate::credentials::CredentialId::RemoteServer(
+        server_id.into(),
+    ))
 }
 
-pub fn has_token(app: &tauri::AppHandle<Wry>, server_id: &str) -> bool {
-    read_token(app, server_id).is_some()
+pub fn has_token(app: &tauri::AppHandle<Wry>, server_id: &str) -> Result<bool, String> {
+    crate::credentials::state(app).has(&crate::credentials::CredentialId::RemoteServer(
+        server_id.into(),
+    ))
 }
 
 /// Write or clear one server's token. An empty string clears — the same sentinel
@@ -308,18 +306,10 @@ pub fn write_token(
     server_id: &str,
     token: &str,
 ) -> Result<(), String> {
-    let store = app.store(STORE_NAME).map_err(|e| e.to_string())?;
-    let mut map = store
-        .get(TOKENS_KEY)
-        .and_then(|v| v.as_object().cloned())
-        .unwrap_or_default();
-    if token.trim().is_empty() {
-        map.remove(server_id);
-    } else {
-        map.insert(server_id.to_string(), serde_json::json!(token));
-    }
-    store.set(TOKENS_KEY, serde_json::Value::Object(map));
-    store.save().map_err(|e| e.to_string())
+    crate::credentials::state(app).set_or_clear(
+        &crate::credentials::CredentialId::RemoteServer(server_id.into()),
+        token.to_owned(),
+    )
 }
 
 // ------------------------------------------------------------------ lookup

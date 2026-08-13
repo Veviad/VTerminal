@@ -408,7 +408,7 @@ export const S = {
         "This build was compiled without the on-device engine, so nothing below can be downloaded or loaded. The API models still work — add a key under Anthropic, OpenAI or Mistral.",
       noEngineTag: "Not in this build",
       apiKey: "API key",
-      apiKeyStored: "Stored — type to replace, clear to remove",
+      apiKeyStored: "Stored in Keychain — type to replace",
       hfToken: "Hugging Face token (optional)",
       hfTokenHint:
         "Raises Hugging Face download rate limits, and is the only way in if a model repo later starts requiring sign-in. Not needed for any model listed above.",

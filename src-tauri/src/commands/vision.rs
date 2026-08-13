@@ -144,7 +144,8 @@ mod enabled {
     ) -> Result<(), String> {
         let m = spec(&model_id)?;
         let dir = models_dir(&app)?;
-        let hf_token = settings::read_string(&app, "hf_token");
+        let hf_token =
+            settings::read_credential(&app, crate::credentials::CredentialId::HuggingFace)?;
         let total = m.total_bytes();
 
         // Per-FILE guards, matching models_download: download_id is caller-chosen
@@ -221,7 +222,7 @@ mod enabled {
     async fn run_pair(
         m: &'static VisionModel,
         dir: &std::path::Path,
-        hf_token: Option<String>,
+        hf_token: Option<crate::credentials::Secret>,
         download_id: &str,
         on_event: &Channel<DownloadEvent>,
         total: u64,
