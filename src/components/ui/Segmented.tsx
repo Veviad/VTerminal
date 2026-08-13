@@ -9,6 +9,12 @@
  *
  * `tone` picks the active-segment colour: `accent` for a neutral choice,
  * `warning` for one the user should notice they are in.
+ *
+ * **Choosing between this and `Dropdown`.** They take the same `SegmentedOption`s, so the
+ * choice is about room, not behaviour: this shows every option at once and belongs
+ * anywhere with horizontal space (Settings rows), while `Dropdown` shows only the current
+ * value and belongs in the AI panel header, which is a fixed-height row inside a panel
+ * that floors at 320px. `EffortPicker` renders through both, picked by its `layout` prop.
  */
 export interface SegmentedOption<T extends string> {
   value: T;

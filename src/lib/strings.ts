@@ -122,6 +122,15 @@ export const S = {
         "Commands that only read run straight away. Anything that writes — or reaches the network — still waits for you.",
       auto_all: "Every command runs without asking, including writes and network access",
     },
+    // Document buckets. Deliberately says the agent "can search" rather than "will
+    // read": attaching a bucket grants a lookup tool, it does not put the documents
+    // into the conversation.
+    docsLabel: "Docs",
+    docsHint:
+      "Buckets the agent can search this session. Passages it finds are quoted to it as reference material, not as instructions.",
+    docsChipHint: (label: string, chunks: number) =>
+      `${label} — ${chunks} passage${chunks === 1 ? "" : "s"} the agent can search`,
+    docsDetach: (label: string) => `Detach ${label}`,
     autoAllWarning:
       "Auto-accept is ON — commands run in your terminal, on the host it is connected to, without asking",
     autoReadNote:
@@ -228,6 +237,12 @@ export const S = {
     // something the reader has to work through — the same call `thinking` makes.
     blockTranscript: "Read from image",
     blockFile: "Attached file",
+    // Retired: a passage block carries no text label at all. These labels render
+    // uppercase with `tracking-widest`, so even one word cost ~75px, and a passage row
+    // already has three things competing for the width — icon, source filename, page.
+    // The book icon distinguishes it from a file or a transcript on its own.
+    // Kept out of the object rather than left unused; if a label is ever wanted back,
+    // the icon is at AiPanel's FoldedBlockSection.
     blockReadBy: (model: string) => `by ${model}`,
     // The archive caps a message at 16KB, so a large attached log loses its tail
     // on the way to disk. Say so rather than presenting a half file as whole.
@@ -287,6 +302,7 @@ export const S = {
     tabs: {
       models: "Models",
       agent: "Agent",
+      docs: "Docs",
       appearance: "Appearance",
       terminal: "Terminal",
       hosts: "SSH hosts",
@@ -479,6 +495,100 @@ export const S = {
       // an earlier step, or through an alias in your own dotfiles.
       webAccessHint:
         "Off: the agent's commands may not reach the network (curl, wget, git fetch/pull/clone, package installs, ssh), and models with a built-in web tool stop being offered one. Chat and models keep working. Command blocking is best-effort — a script the agent wrote earlier can still reach out.",
+    },
+    docs: {
+      title: "Documents",
+      // The honesty clause, in the same spirit as `webAccessHint` above: the fencing
+      // and labelling of retrieved passages are real and tested, but no framing forces
+      // a model to obey them, and saying otherwise would be a promise the app cannot
+      // keep.
+      intro:
+        "Index your own PDFs, markdown, HTML and images into buckets, then attach a bucket to a chat so the agent can search it instead of guessing. Retrieved passages are quoted to the model as reference material, clearly marked as data rather than instructions — that marking is best-effort, so treat a bucket as documents you trust.",
+      enable: "Enable document buckets",
+      enableHint:
+        "Experimental. While this is off there is no document search: the agent is offered no such tool, nothing is indexed, and no index file exists on disk.",
+      disabledNotice:
+        "Turn this on to create buckets. Nothing is indexed and no index file is written until you do.",
+      addBucket: "New bucket",
+      bucketNamePlaceholder: "e.g. Runbooks, API reference",
+      addFiles: "Add files…",
+      addFolder: "Add folder…",
+      reindex: "Re-index",
+      reindexHint: "Re-reads every file. Unchanged files cost nothing.",
+      indexNow: "Index now",
+      cancel: "Stop",
+      remove: "Remove",
+      rename: "Rename",
+      deleteBucket: "Delete bucket",
+      deleteBucketConfirm: (label: string) =>
+        `Delete "${label}"? The indexed text is removed. Your original files are not touched.`,
+      empty: "No buckets yet.",
+      noFiles: "No files in this bucket yet — add a folder or pick files.",
+      // Counts, phrased so zero reads naturally.
+      fileCount: (n: number) => (n === 1 ? "1 file" : `${n} files`),
+      chunkCount: (n: number) => (n === 1 ? "1 passage" : `${n} passages`),
+      neverIndexed: "not indexed yet",
+      indexing: (done: number, total: number, current: string | null) =>
+        current
+          ? `Indexing ${done + 1} of ${total} — ${current}`
+          : `Indexing ${done} of ${total}…`,
+      indexed: (r: { indexed: number; unchanged: number; failed: number }) =>
+        [
+          r.indexed > 0 ? `${r.indexed} indexed` : null,
+          r.unchanged > 0 ? `${r.unchanged} unchanged` : null,
+          r.failed > 0 ? `${r.failed} failed` : null,
+        ]
+          .filter(Boolean)
+          .join(", ") || "nothing to do",
+      cancelled: "Stopped. Files already indexed were kept.",
+      // Per-file state labels.
+      state: {
+        pending: "not indexed",
+        indexed: "indexed",
+        stale: "changed on disk",
+        missing: "file not found",
+        failed: "could not be read",
+      } as Record<string, string>,
+      // What a scan refused, and why. Reported rather than silently dropped: a skip
+      // the user cannot see reads as "everything was indexed".
+      scanSummary: (s: {
+        added: number;
+        skipped_secret: number;
+        skipped_noise: number;
+        skipped_unsupported: number;
+        skipped_symlink: number;
+        skipped_too_large: number;
+        truncated: number;
+      }) =>
+        [
+          `Added ${s.added}.`,
+          s.skipped_secret > 0
+            ? `Skipped ${s.skipped_secret} as private keys or credentials.`
+            : null,
+          s.skipped_symlink > 0 ? `Skipped ${s.skipped_symlink} symlinks.` : null,
+          s.skipped_unsupported > 0
+            ? `Skipped ${s.skipped_unsupported} of unsupported types.`
+            : null,
+          s.skipped_noise > 0
+            ? `Skipped ${s.skipped_noise} hidden or generated items.`
+            : null,
+          s.skipped_too_large > 0 ? `Skipped ${s.skipped_too_large} as too large.` : null,
+          s.truncated > 0 ? `${s.truncated} beyond the per-scan limit were not examined.` : null,
+        ]
+          .filter(Boolean)
+          .join(" "),
+      testSearch: "Try a search",
+      testSearchPlaceholder: "What would you ask?",
+      noResults: "No passages matched.",
+      // Extraction failures, written so each names something the user can act on.
+      pdfLocked: "this PDF is password-protected",
+      pdfInvalid: "this file could not be read as a PDF",
+      pdfNoText: (pages: number) =>
+        `this PDF has no text layer (${pages} page${pages === 1 ? "" : "s"}) — it is a scan`,
+      imageNeedsReader: "images need an on-device reader — set one up under Settings → Models",
+      imageEmpty: "the on-device reader found no text in this image",
+      notText: "this file is not UTF-8 text",
+      noTextInFile: "this file has no text in it",
     },
     about: {
       version: "Version",

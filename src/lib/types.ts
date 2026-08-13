@@ -803,7 +803,87 @@ export interface Settings {
    *  for models that have one, picks the agent/ask web prompt tier, and makes
    *  `agent::policy` refuse network commands before they are proposed. */
   ai_web_access: boolean;
+  /** Document buckets, EXPERIMENTAL and off by default. Enforced in Rust: while
+   *  false the agent is offered no `search_docs` tool and every `docs_*` command
+   *  refuses, so this is the capability gate rather than a UI preference. */
+  docs_enabled: boolean;
   log_level: string;
+}
+
+// ---------- Document buckets (experimental) ----------
+
+/** Per-file indexing state. Mirrors the CHECK constraint in `docs.db` v1.
+ *
+ *  `stale` and `missing` are ordinary states, not errors: sources are referenced by
+ *  path, so files WILL be edited, moved and deleted, and the UI reports that rather
+ *  than failing an operation the user did not perform. */
+export type DocFileState = "pending" | "indexed" | "stale" | "missing" | "failed";
+
+export interface DocBucket {
+  id: string;
+  label: string;
+  created_at: number;
+  indexed_at: number | null;
+  /** `null` until an embedding model indexes it. Stage 1 buckets are keyword-only. */
+  embed_model_id: string | null;
+  chunk_chars: number;
+  chunk_overlap: number;
+  /** Folders and exact file paths the bucket may read — its confinement boundary. */
+  roots: string[];
+  file_count: number;
+  chunk_count: number;
+  pending_count: number;
+  stale_count: number;
+  missing_count: number;
+  failed_count: number;
+}
+
+export interface DocFile {
+  id: string;
+  bucket_id: string;
+  path: string;
+  name: string;
+  media_type: string;
+  size_bytes: number;
+  mtime_ms: number;
+  state: DocFileState;
+  state_reason: string | null;
+  page_count: number | null;
+  chunk_count: number;
+  indexed_at: number | null;
+}
+
+/** What a scan found and, just as importantly, what it refused. Every count is
+ *  surfaced: a silent skip reads as "everything was indexed". */
+export interface DocScanSummary {
+  added: number;
+  found: number;
+  skipped_secret: number;
+  skipped_symlink: number;
+  skipped_noise: number;
+  skipped_unsupported: number;
+  skipped_too_large: number;
+  skipped_unreadable: number;
+  truncated: number;
+}
+
+export type DocPutOutcome =
+  | { kind: "unchanged" }
+  | { kind: "indexed"; chunks: number };
+
+export interface DocSearchPreview {
+  file_name: string;
+  page: number | null;
+  heading: string | null;
+  text: string;
+  score: number;
+}
+
+/** One page of extracted text on its way to Rust. `page` is null for formats with
+ *  no page structure (markdown, text, HTML). */
+export interface DocPutPage {
+  page: number | null;
+  text: string;
 }
 
 export interface SettingsPatch {
@@ -844,5 +924,6 @@ export interface SettingsPatch {
   agent_max_iterations: number;
   agent_command_timeout_secs: number;
   ai_web_access: boolean;
+  docs_enabled: boolean;
   log_level: string;
 }

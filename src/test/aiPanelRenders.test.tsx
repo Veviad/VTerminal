@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { emptyAiStream, useAppStore } from "../stores/appStore";
 import { AiPanel } from "../components/ai/AiPanel";
+import { S } from "../lib/strings";
 import type { CatalogEntry, Session } from "../lib/types";
 
 // The AI panel is unmounted entirely when `settingsLoaded` is false, so a bug in
@@ -79,8 +80,15 @@ describe("AiPanel renders", () => {
     render(<AiPanel sessionId="s1" />);
     // Mode switcher present => the panel body rendered, not the collapsed rail.
     expect(screen.getByRole("button", { name: /agent/i })).toBeTruthy();
-    // Effort picker driven by the model's own ladder.
-    expect(screen.getByRole("radio", { name: "Max" })).toBeTruthy();
+    // Effort picker driven by the model's own ladder. It is a dropdown in this header
+    // (five rungs do not fit beside the mode tabs, the permission control and Docs), so
+    // the trigger shows the current rung and the ladder is one click away.
+    const effort = screen.getByRole("button", { name: S.effort.label });
+    expect(effort.textContent).toContain(S.effort.high);
+    fireEvent.click(effort);
+    for (const rung of [S.effort.off, S.effort.medium, S.effort.max]) {
+      expect(screen.getByRole("option", { name: new RegExp(rung) })).toBeTruthy();
+    }
   });
 
   /** The permission control is agent-only: in ask mode there is nothing to
@@ -91,7 +99,7 @@ describe("AiPanel renders", () => {
       aiStreams: { s1: { ...emptyAiStream(), mode: "ask" } },
     });
     render(<AiPanel sessionId="s1" />);
-    expect(screen.queryByRole("radio", { name: "Confirm" })).toBeNull();
+    expect(screen.queryByRole("button", { name: S.aiPanel.permissionLabel })).toBeNull();
   });
 
   it("offers three permission modes in agent mode, defaulting to the safe one", () => {
@@ -100,11 +108,58 @@ describe("AiPanel renders", () => {
       aiStreams: { s1: { ...emptyAiStream(), mode: "agent" } },
     });
     render(<AiPanel sessionId="s1" />);
-    for (const label of ["Confirm", "Reads", "All"]) {
-      expect(screen.getByRole("radio", { name: label })).toBeTruthy();
+    // The state is visible WITHOUT opening the menu. This is the assertion that keeps a
+    // safety control safe to collapse: hiding the options is fine, hiding which mode is
+    // armed is not.
+    const trigger = screen.getByRole("button", { name: S.aiPanel.permissionLabel });
+    expect(trigger.textContent).toContain(S.aiPanel.permission.ask);
+
+    fireEvent.click(trigger);
+    for (const label of [
+      S.aiPanel.permission.ask,
+      S.aiPanel.permission.auto_read,
+      S.aiPanel.permission.auto_all,
+    ]) {
+      expect(screen.getByRole("option", { name: new RegExp(label) })).toBeTruthy();
     }
-    expect(screen.getByRole("radio", { name: "Confirm" }).getAttribute("aria-checked")).toBe("true");
-    expect(screen.getByRole("radio", { name: "All" }).getAttribute("aria-checked")).toBe("false");
+    expect(
+      screen.getByRole("option", { name: new RegExp(S.aiPanel.permission.ask) })
+        .getAttribute("aria-selected"),
+    ).toBe("true");
+    expect(
+      screen.getByRole("option", { name: new RegExp(S.aiPanel.permission.auto_all) })
+        .getAttribute("aria-selected"),
+    ).toBe("false");
+  });
+
+  /** THE condition on collapsing a safety control into a dropdown.
+   *
+   *  The permission modes moved behind a trigger because three segmented controls do not
+   *  fit a 420px panel. That is only acceptable while the ARMED MODE is legible without
+   *  opening anything — CLAUDE.md's stance is that arming auto-accept is a deliberate,
+   *  visible act, and a control that shows "Confirm" while running everything would break
+   *  it. Asserted for each mode, closed, plus the warning styling that makes `All` read
+   *  differently from the other two at a glance. */
+  it("shows which permission mode is armed without opening the menu", () => {
+    for (const [mode, label] of [
+      ["ask", S.aiPanel.permission.ask],
+      ["auto_read", S.aiPanel.permission.auto_read],
+      ["auto_all", S.aiPanel.permission.auto_all],
+    ] as const) {
+      useAppStore.setState({
+        sessions: [session("s1")],
+        aiStreams: { s1: { ...emptyAiStream(), mode: "agent", permissionMode: mode } },
+      });
+      const { unmount } = render(<AiPanel sessionId="s1" />);
+      const trigger = screen.getByRole("button", { name: S.aiPanel.permissionLabel });
+
+      expect(trigger.textContent).toContain(label);
+      // Closed: the options are not in the document at all.
+      expect(screen.queryAllByRole("option")).toHaveLength(0);
+      // And the one mode that runs writes unattended is the one that looks different.
+      expect(trigger.className.includes("warning")).toBe(mode === "auto_all");
+      unmount();
+    }
   });
 
   /** Each auto mode states what it will do unattended, and the two banners make

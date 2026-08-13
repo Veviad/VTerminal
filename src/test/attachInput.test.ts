@@ -1,15 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  DOC_INJECT_MAX_CHARS,
   buildOutgoing,
+  foldRetrievedPassages,
   inputsFromClipboard,
   inputsFromFileList,
   ocrAvailable,
   splitFoldedBlocks,
+  stripDocBlocks,
   transcribeImages,
 } from "../lib/attachInput";
 import { useAppStore } from "../stores/appStore";
 import * as api from "../lib/tauri";
-import type { Attachment } from "../lib/types";
+import type { Attachment, DocSearchPreview } from "../lib/types";
 
 vi.mock("../lib/tauri", () => ({ visionDescribe: vi.fn() }));
 
@@ -292,5 +295,124 @@ describe("splitFoldedBlocks", () => {
     const out = splitFoldedBlocks(folded.prompt);
     expect(out.prompt).toBe("");
     expect(out.blocks[0].body).toBe("contents");
+  });
+});
+
+function hit(over: Partial<DocSearchPreview> = {}): DocSearchPreview {
+  return {
+    file_name: "runbook.pdf",
+    page: 12,
+    heading: "Deploys > Rolling back",
+    text: "To revert a release, run vv rollback --to <tag>.",
+    score: 1,
+    ...over,
+  };
+}
+
+describe("foldRetrievedPassages", () => {
+  it("returns the prompt untouched when nothing matched", () => {
+    expect(foldRetrievedPassages("how do I roll back", [])).toEqual({
+      prompt: "how do I roll back",
+      count: 0,
+    });
+  });
+
+  /** The label is what `prompts::ASK_DOCS` refers to and what the panel renders, so its
+   *  shape is a contract on both sides. */
+  it("labels each passage with its file, page and heading", () => {
+    const out = foldRetrievedPassages("q", [hit()]);
+    expect(out.count).toBe(1);
+    expect(out.prompt).toContain("[docs: runbook.pdf — p.12 — Deploys > Rolling back]");
+    expect(out.prompt).toContain("vv rollback --to");
+  });
+
+  it("omits the locator entirely for a source with neither page nor heading", () => {
+    const out = foldRetrievedPassages("q", [hit({ page: null, heading: null })]);
+    expect(out.prompt).toContain("[docs: runbook.pdf]");
+    expect(out.prompt).not.toContain(" — ]");
+  });
+
+  /** Why `fenceFor` is reused rather than a fixed ```. Documentation is full of code
+   *  blocks; a passage able to close its own fence would let the remainder read as the
+   *  user's own words — the same failure the file path guards against. */
+  it("grows the fence past a backtick run inside the passage", () => {
+    const nasty = "before\n```sh\nrm -rf /\n```\nafter";
+    const out = foldRetrievedPassages("q", [hit({ text: nasty })]);
+    expect(out.prompt).toContain("````\n" + nasty + "\n````");
+  });
+
+  it("stops once the per-turn character budget is spent", () => {
+    const big = "x".repeat(DOC_INJECT_MAX_CHARS);
+    const out = foldRetrievedPassages("q", [hit({ text: big }), hit(), hit()]);
+    expect(out.count).toBe(1);
+    expect(out.prompt.length).toBeLessThan(DOC_INJECT_MAX_CHARS * 2);
+  });
+
+  it("survives a round trip through splitFoldedBlocks", () => {
+    const out = foldRetrievedPassages("how do I roll back", [hit()]);
+    const back = splitFoldedBlocks(out.prompt);
+    expect(back.prompt).toBe("how do I roll back");
+    expect(back.blocks).toHaveLength(1);
+    expect(back.blocks[0]).toMatchObject({
+      kind: "docs",
+      name: "runbook.pdf",
+      locator: "p.12 — Deploys > Rolling back",
+      truncated: false,
+    });
+    expect(back.blocks[0].body).toBe(hit().text);
+  });
+});
+
+describe("stripDocBlocks", () => {
+  /** THE property. Passages arrive on every ask turn and ask mode replays 12 of them, so
+   *  leaving them in history would compound into the whole context budget. */
+  it("removes doc blocks and counts them", () => {
+    const folded = foldRetrievedPassages("q", [hit(), hit({ page: 6 })]);
+    const out = stripDocBlocks(folded.prompt);
+    expect(out.count).toBe(2);
+    expect(out.content).toBe("q");
+    expect(out.content).not.toContain("vv rollback");
+  });
+
+  /** The other half, and the one a careless implementation breaks: an attached file must
+   *  KEEP riding along, because someone who attached a log to turn one expects a
+   *  follow-up about it to work. */
+  it("leaves attached files untouched", () => {
+    const withFile = buildOutgoing("q", [text("t1", "line one\nline two")]);
+    const both = foldRetrievedPassages(withFile.prompt, [hit()]);
+
+    const out = stripDocBlocks(both.prompt);
+    expect(out.count).toBe(1);
+    expect(out.content).toContain("Attached file — t1.log:");
+    expect(out.content).toContain("line one\nline two");
+    expect(out.content).not.toContain("[docs:");
+    expect(out.content).not.toContain("vv rollback");
+  });
+
+  it("is a no-op on a message that never had passages", () => {
+    const plain = buildOutgoing("just a question", []);
+    expect(stripDocBlocks(plain.prompt)).toEqual({ content: "just a question", count: 0 });
+  });
+
+  /** Kept blocks are re-emitted verbatim rather than rebuilt: the fence width is
+   *  `fenceFor`'s decision about that body, and reconstructing could pick a different
+   *  one — after which the block would no longer parse back out. */
+  it("preserves a kept block's own longer fence", () => {
+    const withFence = buildOutgoing("q", [text("t1", "a ``` b")]);
+    const both = foldRetrievedPassages(withFence.prompt, [hit()]);
+    const out = stripDocBlocks(both.prompt);
+
+    const back = splitFoldedBlocks(out.content);
+    expect(back.blocks).toHaveLength(1);
+    expect(back.blocks[0].kind).toBe("file");
+    expect(back.blocks[0].body).toBe("a ``` b");
+  });
+
+  /** Prose that merely looks like a label is not one — the existing rule for file and
+   *  transcript labels, which doc labels must obey too, or a user who types
+   *  `[docs: something]` silently loses that line from their message. */
+  it("leaves a label-shaped line alone when no fence follows", () => {
+    const content = "what does [docs: runbook.pdf — p.1] mean\nplain tail";
+    expect(stripDocBlocks(content)).toEqual({ content, count: 0 });
   });
 });

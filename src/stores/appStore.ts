@@ -6,6 +6,7 @@ import type {
   CatalogEntry,
   ChatMessage,
   CommandStall,
+  DocBucket,
   Effort,
   LocalModel,
   ModelState,
@@ -111,6 +112,25 @@ export interface AiStreamState {
    *  left here is something the model never saw. */
   steerQueue: { id: string; text: string }[];
   attachedBlockIds: string[];
+  /** Document buckets attached to this session.
+   *
+   *  Standing context like `attachedBlockIds`, not per-message like
+   *  `pendingAttachments`: a bucket stays attached across every turn until the user
+   *  detaches it, and an EMPTY list is what stops the run being offered `search_docs`
+   *  at all.
+   *
+   *  In-memory and never persisted, so a reopened session starts with nothing attached
+   *  — `restoreAiTranscript` runs on a session `createSession` just made, so there is
+   *  nothing to carry over and nothing to reset. `newAiConversation` clears it along
+   *  with everything else by spreading `emptyAiStream()`.
+   *
+   *  Worth being clear about how this differs from `permissionMode`, since both are
+   *  per-session and both change what a run can do. Arming a permission mode decides
+   *  which commands skip a human; attaching a bucket grants a lookup tool and no
+   *  authority whatsoever — every command the model proposes still goes through the
+   *  same approval path, whatever it read. That is why this needs no equivalent of the
+   *  "must not arrive pre-armed" rule. */
+  attachedBucketIds: string[];
   /** Files staged for the NEXT turn.
    *
    *  Deliberately unlike `attachedBlockIds`: a block is standing context and
@@ -180,6 +200,7 @@ export function emptyAiStream(): AiStreamState {
     pause: null,
     steerQueue: [],
     attachedBlockIds: [],
+    attachedBucketIds: [],
     pendingAttachments: [],
     attachError: null,
     attachStatus: null,
@@ -297,6 +318,8 @@ export interface AppState {
   newAiConversation(sessionId: string): void;
   attachBlockToAi(sessionId: string, blockId: string): void;
   detachBlockFromAi(sessionId: string, blockId: string): void;
+  attachBucketToAi(sessionId: string, bucketId: string): void;
+  detachBucketFromAi(sessionId: string, bucketId: string): void;
   /** Stage files for the next turn. Silently caps at `MAX_ATTACHMENTS` and sets
    *  `attachError` when it does — dropping files without saying so is worse. */
   attachFilesToAi(sessionId: string, attachments: Attachment[]): void;
@@ -371,6 +394,29 @@ export interface AppState {
   agentMaxIterations: number;
   agentCommandTimeoutSecs: number;
   aiWebAccess: boolean;
+  /** Document buckets, EXPERIMENTAL. A mirror of the setting for rendering only —
+   *  the capability itself is gated in Rust, which withholds the `search_docs`
+   *  tool and refuses every `docs_*` command while it is false. Flipping this
+   *  frontend-side therefore reveals UI, never a capability. */
+  docsEnabled: boolean;
+  /** The bucket list, refreshed from Rust. Global rather than per-session: a bucket
+   *  exists once and is attached by reference. */
+  docBuckets: DocBucket[];
+  /** Progress of an in-flight indexing pass, keyed by bucket id. Absent means idle.
+   *  `cancel` flips to true to stop the loop between files — never mid-file, so a
+   *  cancelled pass leaves no half-written bucket. */
+  docsIndexing: Record<
+    string,
+    { done: number; total: number; current: string | null; cancel: boolean }
+  >;
+  docsError: string | null;
+  setDocBuckets(buckets: DocBucket[]): void;
+  setDocsIndexing(
+    bucketId: string,
+    progress: { done: number; total: number; current: string | null } | null,
+  ): void;
+  cancelDocsIndexing(bucketId: string): void;
+  setDocsError(message: string | null): void;
   hydrateSettings(patch: Partial<AppState>): void;
   setTheme(theme: string): void;
   setFontSize(px: number): void;
@@ -951,6 +997,24 @@ export const useAppStore = create<AppState>((set, get) => ({
       })),
     ),
 
+  attachBucketToAi: (sessionId, bucketId) =>
+    set((state) =>
+      withAiStream(state, sessionId, (s) => ({
+        ...s,
+        attachedBucketIds: s.attachedBucketIds.includes(bucketId)
+          ? s.attachedBucketIds
+          : [...s.attachedBucketIds, bucketId],
+      })),
+    ),
+
+  detachBucketFromAi: (sessionId, bucketId) =>
+    set((state) =>
+      withAiStream(state, sessionId, (s) => ({
+        ...s,
+        attachedBucketIds: s.attachedBucketIds.filter((id) => id !== bucketId),
+      })),
+    ),
+
   attachFilesToAi: (sessionId, attachments) =>
     set((state) =>
       withAiStream(state, sessionId, (s) => {
@@ -1054,6 +1118,33 @@ export const useAppStore = create<AppState>((set, get) => ({
   agentMaxIterations: 10,
   agentCommandTimeoutSecs: 120,
   aiWebAccess: true,
+  docsEnabled: false,
+  docBuckets: [],
+  docsIndexing: {},
+  docsError: null,
+  setDocBuckets: (docBuckets) => set({ docBuckets }),
+  setDocsIndexing: (bucketId, progress) =>
+    set((state) => {
+      const next = { ...state.docsIndexing };
+      if (progress === null) {
+        delete next[bucketId];
+      } else {
+        // Preserve a cancel that arrived between two files: the loop reads this flag
+        // after each file, and a progress update must not clear a stop the user asked
+        // for.
+        next[bucketId] = { ...progress, cancel: next[bucketId]?.cancel ?? false };
+      }
+      return { docsIndexing: next };
+    }),
+  cancelDocsIndexing: (bucketId) =>
+    set((state) => {
+      const current = state.docsIndexing[bucketId];
+      if (!current) return state;
+      return {
+        docsIndexing: { ...state.docsIndexing, [bucketId]: { ...current, cancel: true } },
+      };
+    }),
+  setDocsError: (docsError) => set({ docsError }),
   hydrateSettings: (patch) => set({ ...patch, settingsLoaded: true }),
   setTheme: (theme) => set({ theme }),
   setFontSize: (px) => set({ fontSize: Math.min(20, Math.max(10, px)) }),

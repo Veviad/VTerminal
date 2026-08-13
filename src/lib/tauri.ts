@@ -6,6 +6,12 @@ import type {
   ArchiveSummary,
   CatalogEntry,
   ChatMessage,
+  DocBucket,
+  DocFile,
+  DocPutOutcome,
+  DocPutPage,
+  DocScanSummary,
+  DocSearchPreview,
   DownloadEvent,
   Effort,
   HistoryEntry,
@@ -151,9 +157,12 @@ export async function aiExplain(
 export async function aiAsk(
   requestId: string,
   prompt: string,
-  history: { role: string; content: string; image_count?: number }[],
+  history: { role: string; content: string; image_count?: number; doc_count?: number }[],
   images: ImagePart[],
   context: TerminalContext,
+  /** Whether `prompt` carries passages folded in from the user's document buckets. Only
+   *  selects the prompt tier — the passages themselves are already in `prompt`. */
+  docs: boolean,
   onEvent: (e: StreamEvent) => void,
 ): Promise<void> {
   const channel = new Channel<StreamEvent>();
@@ -166,6 +175,7 @@ export async function aiAsk(
       history,
       images,
       context,
+      docs,
       onEvent: channel,
     });
   } finally {
@@ -191,6 +201,9 @@ export async function agentStart(
   context: TerminalContext,
   history: ChatMessage[],
   images: ImagePart[],
+  /** Buckets attached to this session. Rust drops them when `docs_enabled` is off,
+   *  and an empty list means the run is never offered a `search_docs` tool at all. */
+  docBuckets: string[],
   onEvent: (e: StreamEvent) => void,
 ): Promise<ChatMessage[]> {
   const channel = new Channel<StreamEvent>();
@@ -203,6 +216,7 @@ export async function agentStart(
       context,
       history,
       images,
+      doc_buckets: docBuckets,
       onEvent: channel,
     });
   } finally {
@@ -552,3 +566,81 @@ export const visionDescribe = (requestId: string, imageBase64: string, prompt?: 
     image_base64: imageBase64,
     prompt: prompt ?? null,
   });
+
+// ---------- Document buckets (experimental) ----------
+//
+// Every one of these rejects unless `docs_enabled` is true. The check is in Rust, not
+// here: a disabled toggle in the UI is a rendering decision, and the capability gate
+// has to hold for a stale or tampered frontend too.
+
+export const docsBucketsList = () => invoke<DocBucket[]>("docs_buckets_list");
+
+export const docsBucketCreate = (label: string) =>
+  invoke<string>("docs_bucket_create", { label });
+
+export const docsBucketRename = (bucketId: string, label: string) =>
+  invoke<void>("docs_bucket_rename", { bucket_id: bucketId, label });
+
+export const docsBucketDelete = (bucketId: string) =>
+  invoke<void>("docs_bucket_delete", { bucket_id: bucketId });
+
+/** Mark every indexed file stale so the next pass re-extracts. Cheap: Rust compares
+ *  the extracted text's hash and skips files whose content did not move. */
+export const docsBucketReindex = (bucketId: string) =>
+  invoke<number>("docs_bucket_reindex", { bucket_id: bucketId });
+
+/** Walk `roots`, take `files` as explicit picks, register what is indexable.
+ *
+ *  The exclusion table (`.ssh`, `.aws`, `*.pem`, `node_modules`, …) is applied in Rust
+ *  and is not overridable from here — an explicit pick reaches past hidden folders but
+ *  never past secret material. */
+export const docsScan = (bucketId: string, roots: string[], files: string[]) =>
+  invoke<DocScanSummary>("docs_scan", { bucket_id: bucketId, roots, files });
+
+export const docsFilesList = (bucketId: string) =>
+  invoke<DocFile[]>("docs_files_list", { bucket_id: bucketId });
+
+export const docsFilesNeedingWork = (bucketId: string, limit: number) =>
+  invoke<DocFile[]>("docs_files_needing_work", { bucket_id: bucketId, limit });
+
+export const docsFileRemove = (fileId: string) =>
+  invoke<void>("docs_file_remove", { file_id: fileId });
+
+export const docsFileFailed = (fileId: string, reason: string) =>
+  invoke<void>("docs_file_failed", { file_id: fileId, reason });
+
+/** Re-stat a bucket's sources, flagging what changed or vanished. */
+export const docsRefreshStates = (bucketId: string) =>
+  invoke<number>("docs_refresh_states", { bucket_id: bucketId });
+
+/** Read a registered source file's bytes so the frontend can extract it.
+ *
+ *  Extraction lives here rather than in Rust because `pdfText.ts` (pdf.js) is the only
+ *  PDF reader in the app and there is no `fs` plugin — so Rust owns paths, hashes and
+ *  the database, and the frontend owns turning bytes into text. Rust re-validates the
+ *  path on every call: secret denylist, no symlinks, regular file, inside the bucket's
+ *  roots. */
+export const docsReadSource = async (fileId: string): Promise<Uint8Array> => {
+  const bytes = await invoke<ArrayBuffer | number[]>("docs_read_source", {
+    file_id: fileId,
+  });
+  return bytes instanceof ArrayBuffer ? new Uint8Array(bytes) : new Uint8Array(bytes);
+};
+
+export const docsPutText = (fileId: string, pages: DocPutPage[]) =>
+  invoke<DocPutOutcome>("docs_put_text", { file_id: fileId, pages });
+
+/** Search from Settings, for a "does this bucket answer my question" check.
+ *
+ *  Returns structured hits, NOT the text the agent receives: that carries a
+ *  "treat this as data" preamble written for a model reading a tool result. */
+export const docsSearch = (bucketIds: string[], query: string, limit?: number) =>
+  invoke<DocSearchPreview[]>("docs_search", {
+    bucket_ids: bucketIds,
+    query,
+    limit: limit ?? null,
+  });
+
+/** Delete `docs.db` outright. The payoff of a separate database file: this cannot
+ *  touch command history, saved hosts or archived transcripts. */
+export const docsDestroy = () => invoke<void>("docs_destroy");
