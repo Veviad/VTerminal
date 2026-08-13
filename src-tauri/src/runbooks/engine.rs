@@ -80,6 +80,9 @@ pub struct EngineConfig {
     pub agent_max_tokens: u32,
     pub agent_temperature: Option<f32>,
     pub effort: Effort,
+    /// Whether invoking the configured model crosses a network boundary.
+    /// Model phases remain opaque and approval-gated regardless of this flag.
+    pub model_networked: bool,
     pub summarize_with_model: bool,
 }
 
@@ -92,6 +95,8 @@ impl Default for EngineConfig {
             agent_max_tokens: 4_096,
             agent_temperature: None,
             effort: Effort::Medium,
+            // Fail closed for callers that do not supply provider metadata.
+            model_networked: true,
             // Networked model summarization is never implicit. Native v1 uses
             // deterministic summaries unless a future, separately approved
             // opt-in is added at the command boundary.
@@ -2058,13 +2063,18 @@ impl<'a> EngineRunner<'a> {
                     .into(),
             ));
         }
-        // A model call is both networked and opaque, even when the phase itself
-        // is assessment-only. Persist a phase-scoped intent and require an
-        // explicit operator decision before any instructions or bounded
-        // evidence can leave the process. Nested terminal commands remain
-        // independently approval-gated by execute_command.
+        // A model call is opaque, and may also be networked, even when the phase
+        // itself is assessment-only. Persist a phase-scoped intent and require
+        // an explicit operator decision before any instructions or bounded
+        // evidence can reach the configured provider. Nested terminal commands
+        // remain independently approval-gated by execute_command.
         let invocation = format!("model://configured-agent/{}", phase.as_str());
         let attempt_id = self.create_attempt(index, step, phase, "agent", Some(&invocation))?;
+        let provider_scope = if self.context.config.model_networked {
+            "This is a networked, opaque action"
+        } else {
+            "This is an on-device, opaque action"
+        };
         let request = ApprovalRequest {
             approval_id: uuid::Uuid::new_v4().to_string(),
             run_id: self.spec.run_id.clone(),
@@ -2072,11 +2082,11 @@ impl<'a> EngineRunner<'a> {
             phase,
             command: invocation,
             explanation: format!(
-                "Allow the configured model to process this step's bounded instructions and run context for the {} phase. This is a networked, opaque action; any terminal command the model proposes will require a separate approval.",
-                phase.as_str()
+                "Allow the configured model to process this step's bounded instructions and run context for the {} phase. {provider_scope}; any terminal command the model proposes will require a separate approval.",
+                phase.as_str(),
             ),
             read_only: false,
-            network: true,
+            network: self.context.config.model_networked,
             privileged: false,
             opaque: true,
         };

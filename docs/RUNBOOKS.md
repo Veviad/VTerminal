@@ -132,6 +132,9 @@ the same terminal concurrently.
 - Networked, privileged, or opaque checks and verifies require approval and are
   reported as phase deviations.
 - Runbooks never honor the ordinary agent panel's `Auto all` setting.
+- Model phases are always treated as opaque and require their own approval.
+  On-device models are reported as local; cloud and user-configured remote
+  providers are additionally reported as networked.
 - The proposed and executed commands are both retained when an operator edits a
   command.
 - Visible-terminal shell checks and verification are reported as
@@ -172,6 +175,11 @@ Every terminal outcome—successful, exceptional, failed, or cancelled—produce
 canonical `report.json`. `report.md` is generated only from that validated JSON.
 Exports contain both reports and eligible evidence artifacts. Removing a package
 registration never deletes its historical runs.
+
+Step and executive summaries are derived from the engine-fixed statuses and
+bounded structured evidence. Native v1 uses deterministic summaries by default;
+it never sends report evidence to a model merely to improve prose. Agent action
+summaries returned during an explicitly approved model phase are retained.
 
 ## Versioning guidance
 

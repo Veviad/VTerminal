@@ -1830,8 +1830,13 @@ fn engine_config(
         agent_temperature: crate::commands::settings::read_f64_opt(app, "temperature")
             .map(|value| value.clamp(0.0, 2.0) as f32),
         effort: crate::commands::settings::read_effort(app, model),
+        model_networked: provider_invocation_is_networked(model.provider),
         ..EngineConfig::default()
     }
+}
+
+fn provider_invocation_is_networked(provider: crate::models::catalog::ProviderId) -> bool {
+    provider != crate::models::catalog::ProviderId::Local
 }
 
 fn value_to_inputs(value: &Value) -> Result<BTreeMap<String, Value>, String> {
@@ -2460,6 +2465,21 @@ spec:
         assert!(validate_identifier("run-123", "id").is_ok());
         assert!(validate_identifier("../../run", "id").is_err());
         assert!(validate_identifier("run\n123", "id").is_err());
+    }
+
+    #[test]
+    fn model_phase_network_label_matches_provider_boundary() {
+        use crate::models::catalog::ProviderId;
+
+        assert!(!provider_invocation_is_networked(ProviderId::Local));
+        for provider in [
+            ProviderId::Anthropic,
+            ProviderId::OpenAi,
+            ProviderId::Mistral,
+            ProviderId::Remote,
+        ] {
+            assert!(provider_invocation_is_networked(provider));
+        }
     }
 
     #[test]

@@ -360,6 +360,11 @@ spec:
                 setting. Edited commands are retained as deviations.
               </li>
               <li>
+                Model phases are opaque and require their own approval.
+                On-device models are reported as local; cloud and configured
+                remote providers are additionally reported as networked.
+              </li>
+              <li>
                 Each approval shows the immutable target and asks you to attest
                 that the visible row is a POSIX prompt on the intended
                 host/container, and that its shell, functions, aliases and
@@ -435,6 +440,13 @@ spec:
               deviations; evidence metadata; agent summaries; comments;
               exceptions and unresolved risks. Removing a package registration
               does not erase its historical runs.
+            </p>
+            <p>
+              Step and executive summaries use the engine-fixed outcomes and
+              bounded structured evidence. They are deterministic by default,
+              so report evidence is not sent to a model merely to improve the
+              prose. A summary returned by an explicitly approved agent phase
+              is retained.
             </p>
             <p>
               Credential-shaped content and private-key blocks are redacted
