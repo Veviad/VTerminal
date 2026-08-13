@@ -19,6 +19,7 @@ import {
 import { S } from "../lib/strings";
 import { autoRuns } from "../lib/permissionMode";
 import type { AiMessage, Block, StreamEvent, TerminalContext } from "../lib/types";
+import { normalizeKnowledgeBucketRef } from "../lib/knowledge";
 
 let requestCounter = 1;
 
@@ -251,15 +252,34 @@ export function useAiStream() {
     // meaningless, while missing passages just make it a normal ungrounded answer — and
     // refusing to send would strand the user's message over an optional lookup.
     let docsUsed = 0;
-    const bucketIds = stream?.attachedBucketIds ?? [];
-    if (bucketIds.length > 0) {
+    const bucketRefs =
+      stream?.attachedBucketRefs ??
+      (stream?.attachedBucketIds ?? []).map(normalizeKnowledgeBucketRef);
+    store.setKnowledgeWarning(sessionId, null);
+    if (bucketRefs.length > 0) {
       try {
-        const hits = await api.docsSearch(bucketIds, prompt, DOC_INJECT_LIMIT);
-        const folded = foldRetrievedPassages(outgoing.prompt, hits);
+        const response = await api.knowledgeSearchDetailed(
+          bucketRefs,
+          prompt,
+          DOC_INJECT_LIMIT,
+        );
+        const folded = foldRetrievedPassages(outgoing.prompt, response.hits);
         outgoing = { ...outgoing, prompt: folded.prompt };
         docsUsed = folded.count;
+        if (response.partial) {
+          const details = response.warnings.map((warning) => warning.message).join(" · ");
+          store.setKnowledgeWarning(
+            sessionId,
+            details
+              ? `Some attached knowledge could not be searched: ${details}`
+              : "Some attached knowledge could not be searched for this turn.",
+          );
+        }
       } catch {
-        // Swallowed on purpose — see above. The turn still goes.
+        store.setKnowledgeWarning(
+          sessionId,
+          "Attached knowledge could not be searched for this turn. The answer may be ungrounded.",
+        );
       }
     }
 
@@ -319,7 +339,10 @@ export function useAiStream() {
     // Read at dispatch time for the same reason as `history`: the user may attach or
     // detach a bucket between turns, and each turn is a fresh run whose tool vector is
     // decided from this list.
-    const docBuckets = useAppStore.getState().aiStreams[sessionId]?.attachedBucketIds ?? [];
+    const activeStream = useAppStore.getState().aiStreams[sessionId];
+    const docBuckets =
+      activeStream?.attachedBucketRefs ??
+      (activeStream?.attachedBucketIds ?? []).map(normalizeKnowledgeBucketRef);
     try {
       const transcript = await api.agentStart(
         requestId,

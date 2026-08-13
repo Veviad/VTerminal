@@ -43,6 +43,11 @@ pub struct BucketView {
     pub created_at: i64,
     pub indexed_at: Option<i64>,
     pub embed_model_id: Option<String>,
+    pub embed_dim: Option<u32>,
+    pub embedding_profile_id: Option<String>,
+    pub embedding_fingerprint: Option<String>,
+    pub embedding_state: String,
+    pub embedding_error: Option<String>,
     pub chunk_chars: u32,
     pub chunk_overlap: u32,
     pub roots: Vec<String>,
@@ -165,6 +170,9 @@ pub fn rename_bucket(conn: &Connection, id: &str, label: &str) -> Result<(), Str
 pub fn delete_bucket(conn: &Connection, id: &str) -> Result<(), String> {
     conn.execute("DELETE FROM doc_buckets WHERE id = ?1", [id])
         .map_err(|e| e.to_string())?;
+    if let Err(error) = super::semantic::prune_vector_indexes(conn) {
+        log::warn!("could not prune the rebuildable semantic index: {error}");
+    }
     Ok(())
 }
 
@@ -172,6 +180,8 @@ pub fn list_buckets(conn: &Connection) -> Result<Vec<BucketView>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT b.id, b.label, b.created_at, b.indexed_at, b.embed_model_id,
+                    b.embed_dim, b.embedding_profile_id, b.embedding_fingerprint,
+                    b.embedding_state, b.embedding_error,
                     b.chunk_chars, b.chunk_overlap,
                     (SELECT count(*) FROM doc_files f WHERE f.bucket_id = b.id),
                     (SELECT coalesce(sum(f.chunk_count), 0) FROM doc_files f WHERE f.bucket_id = b.id),
@@ -192,15 +202,20 @@ pub fn list_buckets(conn: &Connection) -> Result<Vec<BucketView>, String> {
                 created_at: r.get(2)?,
                 indexed_at: r.get(3)?,
                 embed_model_id: r.get(4)?,
-                chunk_chars: r.get::<_, i64>(5)? as u32,
-                chunk_overlap: r.get::<_, i64>(6)? as u32,
+                embed_dim: r.get::<_, Option<i64>>(5)?.map(|v| v as u32),
+                embedding_profile_id: r.get(6)?,
+                embedding_fingerprint: r.get(7)?,
+                embedding_state: r.get(8)?,
+                embedding_error: r.get(9)?,
+                chunk_chars: r.get::<_, i64>(10)? as u32,
+                chunk_overlap: r.get::<_, i64>(11)? as u32,
                 roots: Vec::new(),
-                file_count: r.get::<_, i64>(7)? as u32,
-                chunk_count: r.get::<_, i64>(8)? as u32,
-                pending_count: r.get::<_, i64>(9)? as u32,
-                stale_count: r.get::<_, i64>(10)? as u32,
-                missing_count: r.get::<_, i64>(11)? as u32,
-                failed_count: r.get::<_, i64>(12)? as u32,
+                file_count: r.get::<_, i64>(12)? as u32,
+                chunk_count: r.get::<_, i64>(13)? as u32,
+                pending_count: r.get::<_, i64>(14)? as u32,
+                stale_count: r.get::<_, i64>(15)? as u32,
+                missing_count: r.get::<_, i64>(16)? as u32,
+                failed_count: r.get::<_, i64>(17)? as u32,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -300,6 +315,9 @@ pub fn add_files(conn: &mut Connection, bucket_id: &str, found: &[Found]) -> Res
 pub fn remove_file(conn: &Connection, file_id: &str) -> Result<(), String> {
     conn.execute("DELETE FROM doc_files WHERE id = ?1", [file_id])
         .map_err(|e| e.to_string())?;
+    if let Err(error) = super::semantic::prune_vector_indexes(conn) {
+        log::warn!("could not prune the rebuildable semantic index: {error}");
+    }
     Ok(())
 }
 
@@ -465,6 +483,9 @@ pub fn put_text(
     )
     .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
+    if let Err(error) = super::semantic::prune_vector_indexes(conn) {
+        log::warn!("could not prune the rebuildable semantic index: {error}");
+    }
 
     Ok(PutOutcome::Indexed {
         chunks: chunks.len() as u32,

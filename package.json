@@ -8,6 +8,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
+    "check:e5-manifest": "node scripts/embedding-models/check-e5-manifest.mjs",
     "tauri": "tauri",
     "build:mac": "tauri build --features local-llm && ./scripts/dmg-icon.sh",
     "test": "vitest --run"

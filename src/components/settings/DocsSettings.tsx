@@ -1,15 +1,39 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { FileText, FolderOpen, Plus, RefreshCw, Search, Trash2, X } from "lucide-react";
+import {
+  FileText,
+  FolderOpen,
+  Loader2,
+  Plus,
+  RefreshCw,
+  Search,
+  Terminal,
+  Trash2,
+  X,
+} from "lucide-react";
 
 import { useAppStore } from "../../stores/appStore";
 import { useSettings } from "../../hooks/useSettings";
 import { S } from "../../lib/strings";
 import * as api from "../../lib/tauri";
-import { indexBucket, refreshBuckets } from "../../lib/docsIndex";
+import { indexBucket, refreshBuckets, refreshKnowledgeBuckets } from "../../lib/docsIndex";
 import { formatAttachmentBytes } from "../../lib/attachments";
+import { compatibilityLabel, knowledgeBucketKey } from "../../lib/knowledge";
 import { Toggle, inputClass } from "../ui/Row";
-import type { DocBucket, DocFile, DocSearchPreview } from "../../lib/types";
+import type {
+  DocBucket,
+  DocFile,
+  DocSearchPreview,
+  KnowledgeBucketDescriptor,
+  EmbeddingProfile,
+  KnowledgeJob,
+} from "../../lib/types";
+import { KnowledgeModelsSection } from "./KnowledgeModelsSection";
+import { QdrantConnectionsSection } from "./QdrantConnectionsSection";
+import { RemoteDocumentsPanel } from "./RemoteDocumentsPanel";
+import { TurboQuantPanel } from "./TurboQuantPanel";
+import { QdrantImportWizard } from "./QdrantImportWizard";
+import { AddKnowledgeWizard } from "./AddKnowledgeWizard";
 
 /** The Docs tab.
  *
@@ -25,21 +49,50 @@ import type { DocBucket, DocFile, DocSearchPreview } from "../../lib/types";
 export function DocsSettings() {
   const docsEnabled = useAppStore((s) => s.docsEnabled);
   const buckets = useAppStore((s) => s.docBuckets);
+  const knowledgeBuckets = useAppStore((s) => s.knowledgeBuckets);
   const docsError = useAppStore((s) => s.docsError);
   const { save } = useSettings();
   const [newLabel, setNewLabel] = useState("");
+  const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null);
+  const [focusBucketId, setFocusBucketId] = useState<string | null>(null);
+
+  const readyProfiles = useMemo(() => {
+    const byId = new Map<string, EmbeddingProfile>();
+    for (const bucket of knowledgeBuckets) {
+      if (bucket.profile?.available) byId.set(bucket.profile.id, bucket.profile);
+    }
+    return [...byId.values()];
+  }, [knowledgeBuckets]);
+
+  const refreshKnowledge = useCallback(async () => {
+    await refreshBuckets();
+    await refreshKnowledgeBuckets();
+  }, []);
 
   useEffect(() => {
-    if (docsEnabled) void refreshBuckets();
-  }, [docsEnabled]);
+    if (docsEnabled) void refreshKnowledge();
+  }, [docsEnabled, refreshKnowledge]);
+
+  // A profile is immutable and backend-persisted. When Settings is reopened, restore
+  // the first runnable profile already bound to a bucket instead of presenting every
+  // card as unselected and asking cloud users to run the provider preflight again.
+  useEffect(() => {
+    if (!selectedProfileId && readyProfiles[0]) {
+      setSelectedProfileId(readyProfiles[0].id);
+    }
+  }, [readyProfiles, selectedProfileId]);
 
   const create = async () => {
     const label = newLabel.trim();
     if (!label) return;
     try {
-      await api.docsBucketCreate(label);
+      if (selectedProfileId) {
+        await api.knowledgeBucketCreate(label, { profileId: selectedProfileId });
+      } else {
+        await api.docsBucketCreate(label);
+      }
       setNewLabel("");
-      await refreshBuckets();
+      await refreshKnowledge();
     } catch (e) {
       useAppStore.getState().setDocsError(String(e));
     }
@@ -75,7 +128,51 @@ export function DocsSettings() {
             </p>
           )}
 
-          <section className="space-y-2">
+          <AddKnowledgeWizard
+            buckets={knowledgeBuckets}
+            onCreateBucket={() =>
+              document.getElementById("knowledge-buckets-title")?.scrollIntoView({ behavior: "smooth" })
+            }
+            onOpenBucket={(bucket) => {
+              if (bucket.ref.source === "local") {
+                setFocusBucketId(bucket.ref.bucket_id);
+                document
+                  .getElementById(`knowledge-local-${bucket.ref.bucket_id}`)
+                  ?.scrollIntoView({ behavior: "smooth", block: "center" });
+              }
+            }}
+            onChanged={refreshKnowledge}
+          />
+
+          <KnowledgeModelsSection
+            selectedProfileId={selectedProfileId}
+            onSelectProfile={setSelectedProfileId}
+            readyProfiles={readyProfiles}
+          />
+
+          <div className="border-t border-border-subtle" />
+
+          <QdrantConnectionsSection
+            buckets={knowledgeBuckets}
+            selectedProfileId={selectedProfileId}
+            onChanged={refreshKnowledge}
+          />
+
+          <div className="border-t border-border-subtle" />
+
+          <section className="space-y-3" aria-labelledby="knowledge-buckets-title">
+            <div>
+              <h3
+                id="knowledge-buckets-title"
+                className="text-[10px] font-semibold uppercase tracking-widest text-text-muted"
+              >
+                Knowledge buckets
+              </h3>
+              <p className="mt-1 text-[11px] leading-relaxed text-text-muted">
+                Local buckets and compatible Qdrant collections can be attached together.
+                Each semantic bucket keeps the embedding profile it was created with.
+              </p>
+            </div>
             <div className="flex items-center gap-2">
               <input
                 className={inputClass}
@@ -97,29 +194,69 @@ export function DocsSettings() {
                 {S.settings.docs.addBucket}
               </button>
             </div>
+            <p className="text-[9px] text-text-muted">
+              {selectedProfileId
+                ? "New local buckets use the selected semantic embedding profile."
+                : "No embedding profile selected: new local buckets start with keyword search and can be upgraded later."}
+            </p>
           </section>
 
-          {buckets.length === 0 ? (
+          {buckets.length === 0 && knowledgeBuckets.every((bucket) => bucket.ref.source !== "qdrant") ? (
             <p className="text-[11px] text-text-muted">{S.settings.docs.empty}</p>
           ) : (
             <div className="space-y-4">
               {buckets.map((b) => (
-                <BucketCard key={b.id} bucket={b} />
+                <BucketCard
+                  key={b.id}
+                  bucket={b}
+                  knowledgeBucket={knowledgeBuckets.find(
+                    (candidate) =>
+                      candidate.ref.source === "local" && candidate.ref.bucket_id === b.id,
+                  )}
+                  selectedProfileId={selectedProfileId}
+                  onChanged={refreshKnowledge}
+                  focused={focusBucketId === b.id}
+                />
               ))}
+              {knowledgeBuckets
+                .filter((bucket) => bucket.ref.source === "qdrant")
+                .map((bucket) => (
+                  <RemoteBucketCard
+                    key={knowledgeBucketKey(bucket.ref)}
+                    bucket={bucket}
+                    onChanged={refreshKnowledge}
+                  />
+                ))}
             </div>
           )}
+
+          <KnowledgeCliInstall />
         </>
       )}
     </div>
   );
 }
 
-function BucketCard({ bucket }: { bucket: DocBucket }) {
+function BucketCard({
+  bucket,
+  knowledgeBucket,
+  selectedProfileId,
+  onChanged,
+  focused,
+}: {
+  bucket: DocBucket;
+  knowledgeBucket?: KnowledgeBucketDescriptor;
+  selectedProfileId: string | null;
+  onChanged: () => Promise<void>;
+  focused: boolean;
+}) {
   const progress = useAppStore((s) => s.docsIndexing[bucket.id]);
   const [files, setFiles] = useState<DocFile[] | null>(null);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<DocSearchPreview[] | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  const [embeddingJob, setEmbeddingJob] = useState<KnowledgeJob | null>(null);
+  const [semanticError, setSemanticError] = useState<string | null>(null);
 
   const loadFiles = useCallback(async () => {
     try {
@@ -155,8 +292,40 @@ function BucketCard({ bucket }: { bucket: DocBucket }) {
     setNote(null);
     const report = await indexBucket(bucket.id);
     setNote(report.cancelled ? S.settings.docs.cancelled : S.settings.docs.indexed(report));
+    if (!report.cancelled && knowledgeBucket?.profile) {
+      try {
+        setEmbeddingJob(await api.knowledgeBucketEmbed(bucket.id));
+      } catch (reason) {
+        setNote(`${S.settings.docs.indexed(report)} · Embedding failed to start: ${String(reason)}`);
+      }
+    }
     await loadFiles();
   };
+
+  const enableSemantic = async () => {
+    if (!selectedProfileId) return;
+    setSemanticError(null);
+    try {
+      setEmbeddingJob(await api.knowledgeBucketSemanticEnable(bucket.id, selectedProfileId));
+      await onChanged();
+    } catch (reason) {
+      setSemanticError(String(reason));
+    }
+  };
+
+  useEffect(() => {
+    if (!embeddingJob || !["queued", "running"].includes(embeddingJob.status)) return;
+    const timer = window.setInterval(() => {
+      void api
+        .knowledgeJobsList()
+        .then((jobs) => {
+          const next = jobs.find((job) => job.id === embeddingJob.id);
+          if (next) setEmbeddingJob(next);
+        })
+        .catch(() => {});
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [embeddingJob]);
 
   const reindex = async () => {
     try {
@@ -190,7 +359,10 @@ function BucketCard({ bucket }: { bucket: DocBucket }) {
   const needsWork = bucket.pending_count + bucket.stale_count;
 
   return (
-    <section className="space-y-2 rounded-md border border-border-subtle bg-bg-card p-3">
+    <section
+      id={`knowledge-local-${bucket.id}`}
+      className={`space-y-2 rounded-md border bg-bg-card p-3 ${focused ? "border-accent ring-1 ring-accent/20" : "border-border-subtle"}`}
+    >
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <p className="truncate text-[13px] font-medium text-text-primary">{bucket.label}</p>
@@ -246,6 +418,25 @@ function BucketCard({ bucket }: { bucket: DocBucket }) {
         )}
       </div>
 
+      {!knowledgeBucket?.profile && bucket.chunk_count > 0 && (
+        <div className="rounded border border-border-subtle bg-bg-elevated p-2">
+          <p className="text-[10px] text-text-secondary">This bucket currently uses keyword search.</p>
+          <button
+            type="button"
+            disabled={!selectedProfileId}
+            onClick={() => void enableSemantic()}
+            title={selectedProfileId ? undefined : "Select a ready embedding profile above first"}
+            className="mt-1.5 flex items-center gap-1 rounded-md border border-border-subtle px-2 py-1 text-[10px] text-text-secondary hover:bg-bg-hover disabled:opacity-50"
+          >
+            <Plus size={10} /> Add semantic search
+          </button>
+          {!selectedProfileId && (
+            <p className="mt-1 text-[9px] text-text-muted">Select a ready embedding profile above first.</p>
+          )}
+          {semanticError && <p className="mt-1 text-[9px] text-error">{semanticError}</p>}
+        </div>
+      )}
+
       {progress && (
         <p className="flex items-center gap-1.5 text-[11px] text-text-muted">
           <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
@@ -253,6 +444,9 @@ function BucketCard({ bucket }: { bucket: DocBucket }) {
         </p>
       )}
       {note && !progress && <p className="text-[11px] text-text-muted">{note}</p>}
+      {embeddingJob && (
+        <KnowledgeJobProgress job={embeddingJob} label="Semantic embedding" />
+      )}
 
       {files && files.length > 0 && (
         <ul className="max-h-56 space-y-0.5 overflow-y-auto">
@@ -342,6 +536,162 @@ function BucketCard({ bucket }: { bucket: DocBucket }) {
   );
 }
 
+function RemoteBucketCard({
+  bucket,
+  onChanged,
+}: {
+  bucket: KnowledgeBucketDescriptor;
+  onChanged: () => Promise<void>;
+}) {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<DocSearchPreview[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  if (bucket.ref.source !== "qdrant") return null;
+  const remoteRef = bucket.ref;
+
+  const search = async () => {
+    if (!query.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      setResults(await api.knowledgeSearch([bucket.ref], query));
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    if (!bucket.manageable) return;
+    const typed = window.prompt(
+      `Delete Qdrant collection “${bucket.label}” and every document in it? Type the collection name to confirm.`,
+    );
+    if (typed !== remoteRef.collection) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.knowledgeBucketDelete(bucket.ref);
+      await onChanged();
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="space-y-2 rounded-md border border-border-subtle bg-bg-card p-3">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="flex flex-wrap items-center gap-1.5 text-[13px] font-medium text-text-primary">
+            <span className="truncate">{bucket.label}</span>
+            <span className="rounded bg-bg-elevated px-1 py-0.5 text-[8px] uppercase tracking-wide text-text-muted">
+              Qdrant · {bucket.connection_label ?? bucket.ref.connection_id}
+            </span>
+          </p>
+          <p className="mt-0.5 text-[10px] text-text-muted">
+            {bucket.file_count} document{bucket.file_count === 1 ? "" : "s"} · {bucket.chunk_count}{" "}
+            passages · {bucket.profile?.label ?? "Unknown embedding profile"}
+          </p>
+          <p
+            className={`mt-1 text-[10px] ${
+              bucket.attachable
+                ? "text-accent"
+                : bucket.compatibility === "incompatible" || bucket.compatibility === "unreadable"
+                  ? "text-error"
+                  : "text-warning"
+            }`}
+          >
+            {compatibilityLabel(bucket.compatibility)}
+            {bucket.compatibility_reason ? ` — ${bucket.compatibility_reason}` : ""}
+          </p>
+        </div>
+        {bucket.manageable && (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void remove()}
+            aria-label={`Delete Qdrant collection ${bucket.label}`}
+            title="Delete remote collection"
+            className="shrink-0 rounded p-1 text-text-muted hover:bg-bg-hover hover:text-error disabled:opacity-50"
+          >
+            <Trash2 size={13} />
+          </button>
+        )}
+      </div>
+
+      <div className="flex flex-wrap gap-1.5 text-[9px] text-text-muted">
+        <span className="rounded bg-bg-elevated px-1.5 py-0.5">
+          {bucket.writable || bucket.write_capability === "read_write"
+            ? "Documents: read & write"
+            : bucket.write_capability === "unknown"
+              ? "Write access tested on first upload"
+              : "Documents: read only"}
+        </span>
+        <span className="rounded bg-bg-elevated px-1.5 py-0.5">
+          {bucket.manageable ? "Collection: manage" : "Collection: no manage access"}
+        </span>
+        {bucket.stale && <span className="rounded bg-warning/10 px-1.5 py-0.5 text-warning">Stale status</span>}
+      </div>
+
+      {bucket.error && <p className="text-[10px] text-error">{bucket.error}</p>}
+      {error && <p className="text-[10px] text-error">{error}</p>}
+
+      <RemoteDocumentsPanel bucket={bucket} onChanged={onChanged} />
+
+      <QdrantImportWizard bucket={bucket} onChanged={onChanged} />
+
+      <TurboQuantPanel bucket={bucket} onChanged={onChanged} />
+
+      {bucket.attachable && bucket.chunk_count > 0 && (
+        <div className="space-y-1.5 border-t border-border-subtle pt-2">
+          <div className="flex items-center gap-2">
+            <input
+              className={inputClass}
+              value={query}
+              placeholder={S.settings.docs.testSearchPlaceholder}
+              aria-label={`Search ${bucket.label}`}
+              onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") void search();
+              }}
+            />
+            <button
+              type="button"
+              disabled={busy || query.trim().length === 0}
+              onClick={() => void search()}
+              className="flex shrink-0 items-center gap-1 rounded-md border border-border-subtle px-2 py-1 text-[11px] text-text-primary hover:bg-bg-hover disabled:opacity-50"
+            >
+              <Search size={12} /> {busy ? "Searching…" : S.settings.docs.testSearch}
+            </button>
+          </div>
+          {results && results.length === 0 && (
+            <p className="text-[11px] text-text-muted">{S.settings.docs.noResults}</p>
+          )}
+          {results && results.length > 0 && (
+            <ul className="space-y-1.5">
+              {results.map((result, index) => (
+                <li key={index} className="rounded border border-border-subtle p-1.5">
+                  <p className="text-[10px] text-text-muted">
+            Qdrant / {bucket.connection_label ?? remoteRef.connection_id} / {bucket.label} /{" "}
+                    {result.file_name}
+                    {result.page !== null ? ` — p.${result.page}` : ""}
+                  </p>
+                  <p className="mt-0.5 line-clamp-3 text-[11px] text-text-secondary">
+                    {result.text}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function ActionButton({
   icon,
   onClick,
@@ -363,5 +713,86 @@ function ActionButton({
       {icon}
       {children}
     </button>
+  );
+}
+
+function KnowledgeJobProgress({ job, label }: { job: KnowledgeJob; label: string }) {
+  const total = job.total_items;
+  const pct = total && total > 0 ? Math.min(100, (job.completed_items / total) * 100) : 0;
+  return (
+    <div
+      className={`rounded border px-2 py-1.5 text-[10px] ${
+        job.status === "failed"
+          ? "border-error/30 bg-error/10 text-error"
+          : "border-border-subtle bg-bg-elevated text-text-muted"
+      }`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="flex min-w-0 items-center gap-1.5 truncate">
+          {(job.status === "queued" || job.status === "running" || job.status === "cancelling") && (
+            <Loader2 size={10} className="shrink-0 animate-spin" />
+          )}
+          {label} · {job.stage.replaceAll("_", " ")} · {job.status}
+        </span>
+        {(job.status === "queued" || job.status === "running") && (
+          <button
+            type="button"
+            onClick={() => void api.knowledgeJobCancel(job.id)}
+            className="shrink-0 hover:text-error"
+          >
+            Cancel
+          </button>
+        )}
+      </div>
+      <div className="mt-1 h-px bg-bg-card">
+        <div
+          className={`h-px ${job.status === "failed" ? "bg-error" : "bg-accent"}`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      {job.error && <p className="mt-1">{job.error}</p>}
+    </div>
+  );
+}
+
+function KnowledgeCliInstall() {
+  const [busy, setBusy] = useState(false);
+  const [target, setTarget] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  return (
+    <section className="space-y-2 border-t border-border-subtle pt-4">
+      <h3 className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">
+        Command-line access
+      </h3>
+      <p className="text-[10px] leading-relaxed text-text-muted">
+        Install the bundled <code className="font-mono">vterminal-docs</code> command into{" "}
+        <code className="font-mono">~/.local/bin</code>. This never edits shell profiles; if that
+        directory is not on PATH, the result shows the exact executable location.
+      </p>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => {
+          setBusy(true);
+          setError(null);
+          void api
+            .knowledgeCliInstall()
+            .then(setTarget)
+            .catch((reason) => setError(String(reason)))
+            .finally(() => setBusy(false));
+        }}
+        className="flex items-center gap-1 rounded-md border border-border-subtle px-2 py-1 text-[10px] text-text-secondary hover:bg-bg-hover disabled:opacity-50"
+      >
+        {busy ? <Loader2 size={10} className="animate-spin" /> : <Terminal size={10} />}
+        Install CLI
+      </button>
+      {target && (
+        <p className="rounded border border-accent/30 bg-accent/10 px-2 py-1.5 font-mono text-[9px] text-accent">
+          Installed: {target}
+        </p>
+      )}
+      {error && <p className="text-[9px] text-error">{error}</p>}
+    </section>
   );
 }

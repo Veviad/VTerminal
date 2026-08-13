@@ -49,7 +49,7 @@ pub struct AgentConfig {
     /// EMPTY MEANS NO TOOL. `search_docs` is omitted from the tool vector entirely
     /// when this is empty, rather than offered and then answered with "nothing is
     /// attached" — a tool the model can see is a tool it will spend a round calling.
-    pub doc_buckets: Vec<String>,
+    pub doc_buckets: Vec<crate::knowledge::KnowledgeBucketRef>,
     pub exec_target: ExecTarget,
 }
 
@@ -258,6 +258,9 @@ pub async fn run_agent(
     approvals: &ApprovalState,
     pty_exec: &PtyExecState,
     steers: &SteerState,
+    // App-scoped connection credentials and embedding hosts. `None` only for
+    // headless smoke callers, which never attach knowledge buckets.
+    app: Option<&tauri::AppHandle<tauri::Wry>>,
     // The document index, when the run has buckets attached. `None` for headless
     // callers (`examples/smoke_agent.rs`), which have no app data directory — and a
     // `None` here means `search_docs` answers with an error rather than panicking,
@@ -682,27 +685,29 @@ pub async fn run_agent(
                         .clamp(1, crate::docs::search::MAX_LIMIT as u64)
                         as usize;
 
-                    let rendered = match docs {
-                        None => "Error: the document index is unavailable in this run.".to_string(),
-                        Some(docs) => {
-                            let found = docs.with(|conn| {
-                                crate::docs::search::search_bm25(
-                                    conn,
-                                    &config.doc_buckets,
-                                    &query,
-                                    max_results,
-                                )
-                            });
-                            match found {
-                                // Every passage is labelled and fenced by
-                                // `render_results` — see its doc comment for why that
-                                // framing is the point rather than presentation.
-                                Ok(hits) => {
-                                    crate::docs::search::render_results(&query, &hits, None)
+                    let rendered = match (app, docs) {
+                        (Some(app), Some(docs)) => {
+                            match crate::knowledge::search::search_knowledge(
+                                app,
+                                docs,
+                                &config.doc_buckets,
+                                &query,
+                                max_results,
+                            )
+                            .await
+                            {
+                                // Every local or remote passage is source-labelled and
+                                // dynamically fenced; failed providers remain visible as
+                                // partial-search warnings.
+                                Ok(response) => crate::knowledge::search::render_search_response(
+                                    &query, &response,
+                                ),
+                                Err(error) => {
+                                    format!("Error: the knowledge search failed: {error}")
                                 }
-                                Err(e) => format!("Error: the document search failed: {e}"),
                             }
                         }
+                        _ => "Error: the knowledge service is unavailable in this run.".to_string(),
                     };
                     messages.push(tool_result(&call.id, &rendered));
                 }
@@ -864,7 +869,13 @@ fn tool_result(tool_call_id: &str, content: &str) -> ChatMessage {
 mod tests {
     use super::*;
 
-    fn config_with_buckets(buckets: Vec<String>) -> AgentConfig {
+    fn local_bucket(id: &str) -> crate::knowledge::KnowledgeBucketRef {
+        crate::knowledge::KnowledgeBucketRef::Local {
+            bucket_id: id.into(),
+        }
+    }
+
+    fn config_with_buckets(buckets: Vec<crate::knowledge::KnowledgeBucketRef>) -> AgentConfig {
         AgentConfig {
             request_id: "test".into(),
             shell: "/bin/zsh".into(),
@@ -900,7 +911,7 @@ mod tests {
 
     #[test]
     fn an_attached_bucket_adds_exactly_one_tool() {
-        let names: Vec<String> = tools(&config_with_buckets(vec!["b1".into()]))
+        let names: Vec<String> = tools(&config_with_buckets(vec![local_bucket("b1")]))
             .into_iter()
             .map(|t| t.name)
             .collect();
@@ -920,7 +931,7 @@ mod tests {
     /// drift back.
     #[test]
     fn the_unknown_tool_error_lists_the_tools_actually_sent() {
-        for buckets in [vec![], vec!["b1".to_string()]] {
+        for buckets in [vec![], vec![local_bucket("b1")]] {
             let sent = tools(&config_with_buckets(buckets.clone()));
             let listed = tool_names(&sent);
             for tool in &sent {
@@ -944,11 +955,11 @@ mod tests {
     /// cached prefix for every remaining round of the run.
     #[test]
     fn tool_descriptions_do_not_vary_with_the_attached_buckets() {
-        let one = tools(&config_with_buckets(vec!["alpha".into()]));
+        let one = tools(&config_with_buckets(vec![local_bucket("alpha")]));
         let many = tools(&config_with_buckets(vec![
-            "beta".into(),
-            "gamma".into(),
-            "delta".into(),
+            local_bucket("beta"),
+            local_bucket("gamma"),
+            local_bucket("delta"),
         ]));
         assert_eq!(one.len(), many.len());
         for (a, b) in one.iter().zip(many.iter()) {
@@ -968,7 +979,7 @@ mod tests {
     /// whatever is added next.
     #[test]
     fn every_tool_parameter_is_a_string() {
-        for tool in tools(&config_with_buckets(vec!["b1".into()])) {
+        for tool in tools(&config_with_buckets(vec![local_bucket("b1")])) {
             let props = tool.parameters["properties"]
                 .as_object()
                 .unwrap_or_else(|| panic!("{} has no properties object", tool.name));

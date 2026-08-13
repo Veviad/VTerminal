@@ -13,14 +13,31 @@ import type {
   DocScanSummary,
   DocSearchPreview,
   DownloadEvent,
+  EmbeddingInstallEvent,
+  EmbeddingCatalogEntry,
+  EmbeddingModelStatus,
   Effort,
   HistoryEntry,
   HistoryEntryInput,
   ImagePart,
+  KnowledgeBucketDescriptor,
+  KnowledgeBucketRef,
+  KnowledgeDocumentIngestInput,
+  KnowledgeDocumentMetadataUpdate,
+  KnowledgeDocumentPage,
+  KnowledgeJob,
+  KnowledgePointId,
+  KnowledgeSearchHit,
+  KnowledgeSearchResponse,
   LoadEvent,
   LocalModel,
   ModelStatus,
   PtyEvent,
+  QdrantConnection,
+  QdrantConnectionConfig,
+  QdrantConnectionInput,
+  QdrantImportInput,
+  QdrantImportInspection,
   RemoteModel,
   RemoteProbeResult,
   RemoteServer,
@@ -32,12 +49,14 @@ import type {
   SshHostInput,
   StreamEvent,
   TerminalContext,
+  TurboQuantConfig,
   UpdateDownloadEvent,
   UpdateMetadata,
   VisionCatalogEntry,
   WorkspaceRestore,
   WorkspaceSnapshotInput,
 } from "./types";
+import { localBucketDescriptor, normalizeKnowledgeBucketRef } from "./knowledge";
 
 // RETAINED-CHANNEL GOTCHA (same as Cowork's realtimeChannels map):
 // a Channel must stay referenced for as long as Rust will send on it, or GC
@@ -49,6 +68,11 @@ const aiChannels = new Map<string, Channel<StreamEvent>>();
 const downloadChannels = new Map<string, Channel<DownloadEvent>>();
 const loadChannels = new Map<string, Channel<LoadEvent>>();
 const updateChannels = new Set<Channel<UpdateDownloadEvent>>();
+const embeddingInstallChannels = new Map<
+  string,
+  Channel<EmbeddingInstallEvent | DownloadEvent>
+>();
+const embeddingDownloadIds = new Map<string, string>();
 
 // ---------- PTY ----------
 
@@ -206,7 +230,7 @@ export async function agentStart(
   images: ImagePart[],
   /** Buckets attached to this session. Rust drops them when `docs_enabled` is off,
    *  and an empty list means the run is never offered a `search_docs` tool at all. */
-  docBuckets: string[],
+  docBuckets: KnowledgeBucketRef[],
   onEvent: (e: StreamEvent) => void,
 ): Promise<ChatMessage[]> {
   const channel = new Channel<StreamEvent>();
@@ -662,6 +686,257 @@ export const docsSearch = (bucketIds: string[], query: string, limit?: number) =
     query,
     limit: limit ?? null,
   });
+
+// ---------- Unified knowledge ----------
+
+/** During the staged migration, production builds may still expose only the v1 local
+ * document commands. Fall back only when the command itself is absent; a real backend
+ * error (including a Qdrant permission failure) must reach the user unchanged. */
+function commandIsUnavailable(error: unknown): boolean {
+  const message = String(error).toLowerCase();
+  return (
+    message.includes("unknown command") ||
+    message.includes("command not found") ||
+    message.includes("not registered")
+  );
+}
+
+export async function knowledgeBucketsList(): Promise<KnowledgeBucketDescriptor[]> {
+  try {
+    return await invoke<KnowledgeBucketDescriptor[]>("knowledge_buckets_list");
+  } catch (error) {
+    if (!commandIsUnavailable(error)) throw error;
+    return (await docsBucketsList()).map(localBucketDescriptor);
+  }
+}
+
+export async function knowledgeSearch(
+  buckets: Array<string | KnowledgeBucketRef>,
+  query: string,
+  limit?: number,
+): Promise<Array<DocSearchPreview | KnowledgeSearchHit>> {
+  const refs = buckets.map(normalizeKnowledgeBucketRef);
+  try {
+    return await invoke<KnowledgeSearchHit[]>("knowledge_search", {
+      buckets: refs,
+      query,
+      limit: limit ?? null,
+    });
+  } catch (error) {
+    if (!commandIsUnavailable(error) || refs.some((ref) => ref.source !== "local")) throw error;
+    return docsSearch(
+      refs.map((ref) => (ref.source === "local" ? ref.bucket_id : "")),
+      query,
+      limit,
+    );
+  }
+}
+
+export async function knowledgeSearchDetailed(
+  buckets: Array<string | KnowledgeBucketRef>,
+  query: string,
+  limit?: number,
+): Promise<KnowledgeSearchResponse> {
+  const refs = buckets.map(normalizeKnowledgeBucketRef);
+  try {
+    return await invoke<KnowledgeSearchResponse>("knowledge_search_detailed", {
+      buckets: refs,
+      query,
+      limit: limit ?? null,
+    });
+  } catch (error) {
+    if (!commandIsUnavailable(error)) throw error;
+    const hits = await knowledgeSearch(refs, query, limit);
+    return { hits: hits as KnowledgeSearchHit[], warnings: [], partial: false };
+  }
+}
+
+export async function knowledgeBucketCreate(
+  name: string,
+  options: { connectionId?: string; profileId?: string } = {},
+): Promise<KnowledgeBucketDescriptor | string> {
+  try {
+    return await invoke<KnowledgeBucketDescriptor>("knowledge_buckets_create", {
+      name,
+      connection_id: options.connectionId ?? null,
+      profile_id: options.profileId ?? null,
+    });
+  } catch (error) {
+    if (!commandIsUnavailable(error) || options.connectionId || options.profileId) throw error;
+    return docsBucketCreate(name);
+  }
+}
+
+export const knowledgeBucketDelete = (bucket: KnowledgeBucketRef) =>
+  invoke<void>("knowledge_buckets_delete", {
+    bucket,
+    confirmation: bucket.source === "qdrant" ? bucket.collection : null,
+  });
+
+export const knowledgeEmbeddingModelsList = () =>
+  invoke<EmbeddingCatalogEntry[]>("knowledge_embedding_catalog");
+
+/** Download, checksum-verify, load, and probe a catalogued embedding artifact. The
+ * retained channel is essential: install continues after `invoke` has begun yielding
+ * events, and allowing it to be collected loses the final Ready/Error transition. */
+export async function knowledgeEmbeddingModelInstall(
+  modelId: string,
+  onEvent: (event: EmbeddingInstallEvent | DownloadEvent) => void,
+  licenseAccepted = false,
+): Promise<void> {
+  const downloadId = `embedding-${modelId.replace(/[^a-z0-9]+/gi, "-")}-${Date.now()}`;
+  const channel = new Channel<EmbeddingInstallEvent | DownloadEvent>();
+  channel.onmessage = onEvent;
+  embeddingInstallChannels.set(downloadId, channel);
+  embeddingDownloadIds.set(modelId, downloadId);
+  try {
+    await invoke<void>("knowledge_embedding_model_download", {
+      download_id: downloadId,
+      model_id: modelId,
+      license_accepted: licenseAccepted,
+      on_event: channel,
+    });
+  } finally {
+    embeddingInstallChannels.delete(downloadId);
+    embeddingDownloadIds.delete(modelId);
+  }
+}
+
+export const knowledgeEmbeddingModelCancel = (modelId: string) => {
+  const downloadId = embeddingDownloadIds.get(modelId);
+  return downloadId
+    ? invoke<void>("knowledge_embedding_model_cancel", { download_id: downloadId })
+    : Promise.resolve();
+};
+
+export const knowledgeEmbeddingModelDelete = (modelId: string) =>
+  invoke<void>("knowledge_embedding_model_delete", { model_id: modelId });
+
+export const knowledgeEmbeddingModelStatus = () =>
+  invoke<EmbeddingModelStatus[]>("knowledge_embedding_model_status");
+
+export const knowledgeEmbeddingProfileCreateCloud = (
+  provider: "openai" | "mistral",
+  model: string,
+  dimensions?: number,
+) =>
+  invoke<string>("knowledge_embedding_profile_create_cloud", {
+    provider,
+    model,
+    dimensions: dimensions ?? null,
+  });
+
+export const knowledgeQdrantConnectionsList = () =>
+  invoke<QdrantConnection[]>("knowledge_connections_list");
+
+export async function knowledgeQdrantConnectionSave(
+  input: QdrantConnectionInput,
+): Promise<string> {
+  const connection: QdrantConnectionConfig = {
+    label: input.label,
+    url: input.url,
+    allow_insecure: input.allow_insecure,
+  };
+  if (input.id) {
+    await invoke<void>("knowledge_connections_update", {
+      id: input.id,
+      connection,
+      api_key: input.api_key ?? null,
+    });
+    return input.id;
+  }
+  return invoke<string>("knowledge_connections_create", {
+    connection,
+    api_key: input.api_key ?? null,
+  });
+}
+
+export const knowledgeQdrantConnectionTest = (connectionId: string) =>
+  invoke<QdrantConnection>("knowledge_connections_refresh", { id: connectionId });
+
+export const knowledgeQdrantConnectionDelete = (connectionId: string) =>
+  invoke<void>("knowledge_connections_delete", { id: connectionId });
+
+export const knowledgeQdrantConnectionClearKey = (connectionId: string) =>
+  invoke<void>("knowledge_connections_set_api_key", { id: connectionId, api_key: "" });
+
+export const knowledgeDocumentsList = (
+  bucket: KnowledgeBucketRef,
+  cursor?: KnowledgePointId | null,
+  limit = 50,
+) =>
+  invoke<KnowledgeDocumentPage>("knowledge_documents_list", {
+    bucket,
+    cursor: cursor ?? null,
+    limit,
+  });
+
+export const knowledgeDocumentIngest = (input: KnowledgeDocumentIngestInput) =>
+  invoke<KnowledgeJob>("knowledge_document_ingest", {
+    bucket: input.bucket,
+    document: {
+      document_id: input.document_id ?? null,
+      source_id: input.source_id ?? null,
+      title: input.title,
+      source_uri: input.source_uri,
+      mime_type: input.mime_type,
+      size_bytes: input.size_bytes ?? null,
+      mtime_ms: input.mtime_ms ?? null,
+    },
+    pages: input.pages,
+  });
+
+export const knowledgeDocumentUpdate = (
+  bucket: KnowledgeBucketRef,
+  documentId: string,
+  update: KnowledgeDocumentMetadataUpdate,
+) =>
+  invoke<void>("knowledge_document_update", {
+    bucket,
+    document_id: documentId,
+    update,
+  });
+
+export const knowledgeDocumentDelete = (bucket: KnowledgeBucketRef, documentId: string) =>
+  invoke<void>("knowledge_document_delete", {
+    bucket,
+    document_id: documentId,
+  });
+
+export const knowledgeJobsList = () => invoke<KnowledgeJob[]>("knowledge_jobs_list");
+
+export const knowledgeJobCancel = (jobId: string) =>
+  invoke<KnowledgeJob>("knowledge_jobs_cancel", { id: jobId });
+
+export const knowledgeJobRetry = (jobId: string) =>
+  invoke<KnowledgeJob>("knowledge_jobs_retry", { id: jobId });
+
+export const knowledgeBucketEmbed = (bucketId: string) =>
+  invoke<KnowledgeJob>("knowledge_bucket_embed", { bucket_id: bucketId });
+
+export const knowledgeBucketSemanticEnable = (bucketId: string, profileId: string) =>
+  invoke<KnowledgeJob>("knowledge_bucket_semantic_enable", {
+    bucket_id: bucketId,
+    profile_id: profileId,
+  });
+
+export const knowledgeQdrantTurboQuantSet = (
+  bucket: KnowledgeBucketRef,
+  config: TurboQuantConfig | null,
+) => invoke<void>("knowledge_qdrant_turbo_quant_set", { bucket, config });
+
+export const knowledgeQdrantImportInspect = (bucket: KnowledgeBucketRef, limit = 8) =>
+  invoke<QdrantImportInspection>("knowledge_qdrant_import_inspect", { bucket, limit });
+
+export const knowledgeQdrantImportSave = (
+  bucket: KnowledgeBucketRef,
+  input: QdrantImportInput,
+) => invoke<void>("knowledge_qdrant_import_save", { bucket, input });
+
+export const knowledgeQdrantImportRemove = (bucket: KnowledgeBucketRef) =>
+  invoke<void>("knowledge_qdrant_import_remove", { bucket });
+
+export const knowledgeCliInstall = () => invoke<string>("knowledge_cli_install");
 
 /** Delete `docs.db` outright. The payoff of a separate database file: this cannot
  *  touch command history, saved hosts or archived transcripts. */

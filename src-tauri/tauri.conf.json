@@ -27,6 +27,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "externalBin": [
+      "binaries/vterminal-docs"
+    ],
     "publisher": "Veviad®",
     "copyright": "Copyright © 2026 Veviad®. All rights reserved.",
     "icon": [

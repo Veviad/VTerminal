@@ -55,6 +55,11 @@ pub enum DownloadEvent {
 /// `DownloadRow` all stay exactly as they were.
 pub trait EventSink: Send + Sync {
     fn emit(&self, event: DownloadEvent);
+
+    /// Optional lifecycle hook for drivers that expose verification separately
+    /// from transfer progress. Existing chat/vision sinks deliberately ignore
+    /// it; the embedding installer maps it to its richer UI event contract.
+    fn phase(&self, _phase: &'static str) {}
 }
 
 impl EventSink for tauri::ipc::Channel<DownloadEvent> {

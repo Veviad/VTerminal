@@ -49,6 +49,11 @@ import * as api from "../../lib/tauri";
 import { AttachmentChip } from "./AttachmentChip";
 import { thumbnailSrc } from "../../lib/attachments";
 import {
+  knowledgeBucketKey,
+  normalizeKnowledgeBucketRef,
+  sameKnowledgeBucket,
+} from "../../lib/knowledge";
+import {
   inputsFromClipboard,
   inputsFromFileList,
   splitFoldedBlocks,
@@ -92,7 +97,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const modelEffort = useAppStore((s) => s.modelEffort);
   const detachBlockFromAi = useAppStore((s) => s.detachBlockFromAi);
   const detachBucketFromAi = useAppStore((s) => s.detachBucketFromAi);
-  const docBuckets = useAppStore((s) => s.docBuckets);
+  const knowledgeBuckets = useAppStore((s) => s.knowledgeBuckets);
   const detachFileFromAi = useAppStore((s) => s.detachFileFromAi);
   const setAiMode = useAppStore((s) => s.setAiMode);
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
@@ -140,11 +145,15 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const pendingAttachments = stream?.pendingAttachments ?? NO_ATTACHMENTS;
   // Resolved against the live bucket list, so a bucket deleted in Settings while it was
   // attached simply stops rendering instead of showing a chip for something gone.
-  const attachedBuckets = (stream?.attachedBucketIds ?? [])
-    .map((id) => docBuckets.find((b) => b.id === id))
+  const attachedBucketRefs =
+    stream?.attachedBucketRefs ??
+    (stream?.attachedBucketIds ?? []).map(normalizeKnowledgeBucketRef);
+  const attachedBuckets = attachedBucketRefs
+    .map((ref) => knowledgeBuckets.find((bucket) => sameKnowledgeBucket(bucket.ref, ref)))
     .filter((b) => b !== undefined);
   const attachError = stream?.attachError ?? null;
   const attachStatus = stream?.attachStatus ?? null;
+  const knowledgeWarning = stream?.knowledgeWarning ?? null;
   const hasChat = streamHasConversation(stream);
 
   // Text files cost nothing special on any model — they are folded into the
@@ -492,7 +501,8 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
         attachedBuckets.length > 0 ||
         pendingAttachments.length > 0 ||
         attachError ||
-        attachStatus) &&
+        attachStatus ||
+        knowledgeWarning) &&
         sessionId && (
         <div className="flex flex-wrap items-center gap-1.5 border-t border-border-subtle px-3 py-2">
           {attachedBlocks.map((b) => (
@@ -504,10 +514,12 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
           ))}
           {attachedBuckets.map((b) => (
             <BucketChip
-              key={b.id}
+              key={knowledgeBucketKey(b.ref)}
               label={b.label}
+              source={b.ref.source}
+              connectionLabel={b.connection_label}
               chunkCount={b.chunk_count}
-              onRemove={() => detachBucketFromAi(sessionId, b.id)}
+              onRemove={() => detachBucketFromAi(sessionId, b.ref)}
             />
           ))}
           {pendingAttachments.map((a) => (
@@ -526,6 +538,9 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             </span>
           )}
           {attachError && <span className="w-full text-[10px] text-error">{attachError}</span>}
+          {knowledgeWarning && (
+            <span className="w-full text-[10px] text-warning">{knowledgeWarning}</span>
+          )}
         </div>
       )}
 

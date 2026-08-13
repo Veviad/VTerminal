@@ -8,7 +8,7 @@ import {
 import * as api from "./tauri";
 import { useAppStore } from "../stores/appStore";
 import { S } from "./strings";
-import type { Attachment, DocSearchPreview, ImagePart } from "./types";
+import type { Attachment, DocSearchPreview, ImagePart, KnowledgeSearchHit } from "./types";
 
 /** The three ways a file gets into the chat — drop, paste, picker — reduced to
  *  one shape before anything is decoded.
@@ -154,6 +154,26 @@ export const DOC_INJECT_LIMIT = 3;
 /** Total characters of retrieved text folded into one turn. Bounds the per-turn cost so
  *  a bucket of 1000-char chunks cannot quietly triple the size of every message. */
 export const DOC_INJECT_MAX_CHARS = 4000;
+
+/** Remote collection metadata is untrusted prompt input too. Keep citation fields
+ *  readable and multilingual, but prevent them from ending the `[docs: ...]` marker,
+ *  starting a Markdown fence, or adding a second prompt line. The byte cap also stops
+ *  an oversized title/heading from consuming the passage budget outside the fence. */
+const DOC_LABEL_FIELD_MAX_BYTES = 160;
+
+function sanitizeDocLabelField(value: string | null | undefined): string {
+  if (!value) return "";
+  const oneLine = value
+    // Cc covers ASCII controls; Cf also removes bidi/zero-width formatting controls,
+    // while Zl/Zp catches Unicode line separators which `split("\n")` would not see.
+    .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ")
+    .replaceAll("[", "(")
+    .replaceAll("]", ")")
+    .replaceAll("`", "'")
+    .replace(/\s+/gu, " ")
+    .trim();
+  return fitUtf8(oneLine, DOC_LABEL_FIELD_MAX_BYTES, "start").text.trimEnd();
+}
 
 const FILE_LABEL = /^Attached file — (.+):$/;
 const TRANSCRIPT_LABEL = /^\[image: (.+) — transcribed on-device by (.+)\]$/;
@@ -305,7 +325,7 @@ export function stripDocBlocks(content: string): { content: string; count: numbe
  */
 export function foldRetrievedPassages(
   prompt: string,
-  hits: DocSearchPreview[],
+  hits: Array<DocSearchPreview | KnowledgeSearchHit>,
 ): { prompt: string; count: number } {
   if (hits.length === 0) return { prompt, count: 0 };
 
@@ -318,12 +338,23 @@ export function foldRetrievedPassages(
     // A passage trimmed to nothing is worse than absent: the label would promise
     // content the model cannot see.
     if (text.trim().length === 0) break;
-    const locator = [hit.page !== null ? `p.${hit.page}` : null, hit.heading]
+    const heading = sanitizeDocLabelField(hit.heading);
+    const locator = [hit.page !== null ? `p.${hit.page}` : null, heading || null]
       .filter(Boolean)
       .join(" — ");
+    const fileName = sanitizeDocLabelField(hit.file_name) || "Untitled document";
+    const source =
+      "bucket" in hit
+        ? hit.bucket.source === "local"
+          ? `Local / ${sanitizeDocLabelField(hit.bucket_label) || "Unnamed bucket"}`
+          : `Qdrant / ${
+              sanitizeDocLabelField(hit.connection_label ?? hit.bucket.connection_id) ||
+              "Unknown connection"
+            } / ${sanitizeDocLabelField(hit.bucket_label) || "Unnamed bucket"}`
+        : null;
     const fence = fenceFor(text);
     parts.push(
-      `[docs: ${hit.file_name}${locator ? ` — ${locator}` : ""}]\n${fence}\n${text}\n${fence}`,
+      `[docs: ${source ? `${source} / ` : ""}${fileName}${locator ? ` — ${locator}` : ""}]\n${fence}\n${text}\n${fence}`,
     );
     budget -= text.length;
     count += 1;

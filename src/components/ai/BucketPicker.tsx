@@ -1,54 +1,48 @@
-import { useEffect, useRef, useState } from "react";
-import { BookOpen, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { BookOpen, Cloud, HardDrive, X } from "lucide-react";
 
 import { useAppStore } from "../../stores/appStore";
 import { S } from "../../lib/strings";
-import { refreshBuckets } from "../../lib/docsIndex";
+import { refreshBuckets, refreshKnowledgeBuckets } from "../../lib/docsIndex";
+import {
+  knowledgeBucketKey,
+  normalizeKnowledgeBucketRef,
+  sameKnowledgeBucket,
+} from "../../lib/knowledge";
+import type { KnowledgeBucketDescriptor, KnowledgeBucketRef } from "../../lib/types";
 
-/** Per-session document-bucket picker, rendered beside the permission mode.
- *
- *  Multi-select, so this is a checkbox popover rather than a `Segmented` — a bucket set
- *  is not a set of mutually exclusive modes, and `Segmented` stops fitting past three
- *  options anyway. The closest existing precedent for a checkbox list is the model
- *  picker in `RemoteServersSection`.
- *
- *  Renders nothing unless the feature is on AND at least one bucket exists, the same
- *  way `VisionSection` returns null on an empty backend list and `EffortPicker` returns
- *  null below two rungs: a control with nothing to control is noise.
- */
-/** Shared empty array for the selector below.
- *
- *  NOT a cosmetic detail. `useAppStore((s) => … ?? [])` allocates a new array on every
- *  call, and zustand compares snapshots with `Object.is` — so a fresh literal reads as
- *  "changed" every time and `useSyncExternalStore` re-renders until React gives up with
- *  "Maximum update depth exceeded". `AiPanel` keeps `NO_ATTACHMENTS` for exactly this. */
-const NO_BUCKETS: string[] = [];
+const NO_REFS: KnowledgeBucketRef[] = [];
 
+async function refreshPickerBuckets(): Promise<void> {
+  await refreshBuckets();
+  await refreshKnowledgeBuckets();
+}
+
+/** Source-aware knowledge picker. Only proven-compatible, non-empty buckets are
+ * attachable here; every accessible but incompatible collection remains visible in
+ * Settings where the user can inspect or import it deliberately. */
 export function BucketPicker({ sessionId }: { sessionId: string }) {
   const docsEnabled = useAppStore((s) => s.docsEnabled);
-  const buckets = useAppStore((s) => s.docBuckets);
-  const attached = useAppStore((s) => s.aiStreams[sessionId]?.attachedBucketIds) ?? NO_BUCKETS;
+  const buckets = useAppStore((s) => s.knowledgeBuckets);
+  const stream = useAppStore((s) => s.aiStreams[sessionId]);
+  const attached =
+    stream?.attachedBucketRefs ??
+    stream?.attachedBucketIds?.map(normalizeKnowledgeBucketRef) ??
+    NO_REFS;
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
-  // The list is loaded by the Settings tab, which the user may never have opened in
-  // this session. Fetch once when the feature is on so the picker can appear at all.
-  //
-  // Guarded on `docsEnabled` before anything reaches IPC: this component now mounts in
-  // ask mode too, which is the panel's default, so an unguarded fetch here would put a
-  // Tauri call on the render path of every session — something `aiPanelRenders.test.tsx`
-  // explicitly relies on not happening.
   useEffect(() => {
-    if (docsEnabled && buckets.length === 0) void refreshBuckets();
+    if (docsEnabled && buckets.length === 0) void refreshPickerBuckets();
   }, [docsEnabled, buckets.length]);
 
   useEffect(() => {
     if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    const onDown = (event: MouseEvent) => {
+      if (ref.current && !ref.current.contains(event.target as Node)) setOpen(false);
     };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
     };
     document.addEventListener("mousedown", onDown);
     document.addEventListener("keydown", onKey);
@@ -58,7 +52,24 @@ export function BucketPicker({ sessionId }: { sessionId: string }) {
     };
   }, [open]);
 
-  if (!docsEnabled || buckets.length === 0) return null;
+  const attachable = useMemo(
+    // Qdrant's indexed_vectors_count remains zero for small, fully searchable
+    // collections below the HNSW indexing threshold. The backend's attachable
+    // verdict uses actual non-emptiness plus exact profile compatibility.
+    () => buckets.filter((bucket) => bucket.attachable),
+    [buckets],
+  );
+  const groups = useMemo(() => groupBuckets(attachable), [attachable]);
+  const selectedBuckets = attached
+    .map((attachedRef) => buckets.find((bucket) => sameKnowledgeBucket(bucket.ref, attachedRef)))
+    .filter((bucket): bucket is KnowledgeBucketDescriptor => bucket !== undefined);
+  const localProfileCount = new Set(
+    selectedBuckets
+      .filter((bucket) => bucket.profile?.provider === "local")
+      .map((bucket) => bucket.profile?.fingerprint),
+  ).size;
+
+  if (!docsEnabled || attachable.length === 0) return null;
 
   const attach = useAppStore.getState().attachBucketToAi;
   const detach = useAppStore.getState().detachBucketFromAi;
@@ -67,7 +78,7 @@ export function BucketPicker({ sessionId }: { sessionId: string }) {
     <div className="relative" ref={ref}>
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => setOpen((value) => !value)}
         aria-label={S.aiPanel.docsLabel}
         title={S.aiPanel.docsHint}
         aria-expanded={open}
@@ -82,65 +93,103 @@ export function BucketPicker({ sessionId }: { sessionId: string }) {
       </button>
 
       {open && (
-        <div className="absolute right-0 z-20 mt-1 w-56 rounded-md border border-border-subtle bg-bg-card p-1 shadow-lg">
+        <div className="absolute right-0 z-20 mt-1 max-h-80 w-72 overflow-y-auto rounded-md border border-border-subtle bg-bg-card p-1 shadow-lg">
           <p className="px-1.5 py-1 text-[10px] leading-snug text-text-muted">
             {S.aiPanel.docsHint}
           </p>
-          {buckets.map((b) => {
-            const on = attached.includes(b.id);
-            // A bucket with nothing indexed would contribute no passages, so it is
-            // shown but not offerable — silently listing it as attachable invites the
-            // conclusion that retrieval is broken.
-            const empty = b.chunk_count === 0;
-            return (
-              <label
-                key={b.id}
-                className={
-                  empty
-                    ? "flex cursor-not-allowed items-center gap-1.5 rounded px-1.5 py-1 text-[11px] text-text-muted opacity-60"
-                    : "flex cursor-pointer items-center gap-1.5 rounded px-1.5 py-1 text-[11px] text-text-primary hover:bg-bg-hover"
-                }
-              >
-                <input
-                  type="checkbox"
-                  checked={on}
-                  disabled={empty}
-                  onChange={() => (on ? detach(sessionId, b.id) : attach(sessionId, b.id))}
-                />
-                <span className="min-w-0 flex-1 truncate">{b.label}</span>
-                <span className="shrink-0 text-[10px] text-text-muted">
-                  {empty ? S.settings.docs.neverIndexed : b.chunk_count}
-                </span>
-              </label>
-            );
-          })}
+          {groups.map((group) => (
+            <div key={group.key} className="mt-1 border-t border-border-subtle pt-1 first:border-0">
+              <p className="flex items-center gap-1 px-1.5 py-1 text-[9px] font-semibold uppercase tracking-wide text-text-muted">
+                {group.source === "local" ? <HardDrive size={10} /> : <Cloud size={10} />}
+                {group.label}
+              </p>
+              {group.buckets.map((bucket) => {
+                const on = attached.some((candidate) => sameKnowledgeBucket(candidate, bucket.ref));
+                return (
+                  <label
+                    key={knowledgeBucketKey(bucket.ref)}
+                    className="flex cursor-pointer items-center gap-1.5 rounded px-1.5 py-1 text-[11px] text-text-primary hover:bg-bg-hover"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={on}
+                      onChange={() =>
+                        on ? detach(sessionId, bucket.ref) : attach(sessionId, bucket.ref)
+                      }
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate">{bucket.label}</span>
+                      <span className="block truncate text-[9px] text-text-muted">
+                        {bucket.profile?.label ?? "Keyword search"}
+                      </span>
+                    </span>
+                    <span className="shrink-0 text-[10px] text-text-muted">
+                      {bucket.chunk_count}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          ))}
+          {localProfileCount > 1 && (
+            <p className="mt-1 rounded border border-warning/30 bg-warning/10 px-1.5 py-1 text-[9px] leading-relaxed text-warning">
+              These buckets need {localProfileCount} local embedding models. Searching may switch
+              models and add latency or memory pressure.
+            </p>
+          )}
         </div>
       )}
     </div>
   );
 }
 
-/** An attached bucket in the shared context strip, alongside block and file chips. */
+function groupBuckets(buckets: KnowledgeBucketDescriptor[]) {
+  const groups = new Map<
+    string,
+    { key: string; label: string; source: "local" | "qdrant"; buckets: KnowledgeBucketDescriptor[] }
+  >();
+  for (const bucket of buckets) {
+    const source = bucket.ref.source;
+    const key = source === "local" ? "local" : `qdrant:${bucket.ref.connection_id}`;
+    const label = source === "local" ? "Local" : bucket.connection_label || bucket.ref.connection_id;
+    const group = groups.get(key) ?? { key, label, source, buckets: [] };
+    group.buckets.push(bucket);
+    groups.set(key, group);
+  }
+  return Array.from(groups.values());
+}
+
+/** An attached knowledge source in the shared context strip. */
 export function BucketChip({
   label,
+  source,
+  connectionLabel,
   chunkCount,
   onRemove,
 }: {
   label: string;
+  source: "local" | "qdrant";
+  connectionLabel?: string | null;
   chunkCount: number;
   onRemove: () => void;
 }) {
+  const qualified =
+    source === "local" ? `Local / ${label}` : `Qdrant / ${connectionLabel ?? "Remote"} / ${label}`;
   return (
     <span
-      className="flex max-w-[180px] items-center gap-1 rounded-md border border-border-subtle bg-bg-elevated px-1.5 py-0.5 text-[10px] text-text-secondary"
-      title={S.aiPanel.docsChipHint(label, chunkCount)}
+      className="flex max-w-[220px] items-center gap-1 rounded-md border border-border-subtle bg-bg-elevated px-1.5 py-0.5 text-[10px] text-text-secondary"
+      title={S.aiPanel.docsChipHint(qualified, chunkCount)}
     >
-      <BookOpen size={10} className="shrink-0 text-text-muted" />
-      <span className="min-w-0 truncate">{label}</span>
+      {source === "local" ? (
+        <HardDrive size={10} className="shrink-0 text-text-muted" />
+      ) : (
+        <Cloud size={10} className="shrink-0 text-text-muted" />
+      )}
+      <span className="min-w-0 truncate">{qualified}</span>
       <button
         type="button"
         onClick={onRemove}
-        aria-label={S.aiPanel.docsDetach(label)}
+        aria-label={S.aiPanel.docsDetach(qualified)}
         className="shrink-0 rounded text-text-muted hover:text-error"
       >
         <X size={10} />

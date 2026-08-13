@@ -53,6 +53,7 @@ impl DocsDb {
     ) -> Result<T, String> {
         let mut guard = self.inner.lock().map_err(|_| "docs db poisoned")?;
         if guard.is_none() {
+            register_sqlite_vec();
             let conn = crate::database::open_hardened(&self.app_data_dir, DOCS_DB_FILE)?;
             migrate(&conn)?;
             *guard = Some(conn);
@@ -89,6 +90,24 @@ impl DocsDb {
     }
 }
 
+/// Register the statically linked sqlite-vec entry point once, before opening the
+/// first docs connection. `sqlite3_auto_extension` copies the function pointer and
+/// invokes it for subsequent connections; the symbol lives for the process lifetime.
+pub(crate) fn register_sqlite_vec() {
+    static REGISTER: std::sync::Once = std::sync::Once::new();
+    REGISTER.call_once(|| unsafe {
+        type ExtensionEntry = unsafe extern "C" fn(
+            *mut rusqlite::ffi::sqlite3,
+            *mut *mut std::os::raw::c_char,
+            *const rusqlite::ffi::sqlite3_api_routines,
+        ) -> std::os::raw::c_int;
+        let entry = std::mem::transmute::<*const (), ExtensionEntry>(
+            sqlite_vec::sqlite3_vec_init as *const (),
+        );
+        rusqlite::ffi::sqlite3_auto_extension(Some(entry));
+    });
+}
+
 // APPEND-ONLY, for the same reason `database::migrations` is: once a migration has
 // run anywhere, editing it is a no-op for every database that already recorded its
 // version. Add a `migrate_vN` instead.
@@ -114,8 +133,133 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
     if version < 2 {
         migrate_v2(conn)?;
     }
+    if version < 3 {
+        migrate_v3(conn)?;
+    }
+    if version < 4 {
+        migrate_v4(conn)?;
+    }
 
     Ok(())
+}
+
+/// Add the durable knowledge-layer state without changing existing keyword buckets.
+///
+/// Profiles are stored as canonical JSON rather than split over columns because the
+/// fingerprint covers provider-specific semantics (pooling, prefixes, revisions and
+/// normalization), and those fields do not have one useful relational shape.  The
+/// searchable columns stay on `doc_buckets`; the JSON is the immutable audit record.
+fn migrate_v3(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        BEGIN;
+
+        ALTER TABLE doc_buckets ADD COLUMN embedding_profile_id TEXT;
+        ALTER TABLE doc_buckets ADD COLUMN embedding_fingerprint TEXT;
+        ALTER TABLE doc_buckets ADD COLUMN embedding_state TEXT NOT NULL DEFAULT 'keyword'
+            CHECK (embedding_state IN ('keyword','pending','ready','failed'));
+        ALTER TABLE doc_buckets ADD COLUMN embedding_error TEXT;
+
+        CREATE TABLE knowledge_embedding_profiles (
+            id               TEXT PRIMARY KEY,
+            fingerprint      TEXT NOT NULL UNIQUE,
+            profile_json     TEXT NOT NULL,
+            created_at       INTEGER NOT NULL,
+            last_verified_at INTEGER,
+            status           TEXT NOT NULL DEFAULT 'ready'
+                             CHECK (status IN ('ready','unavailable','needs_key','failed')),
+            error            TEXT
+        );
+
+        -- A local binding is enough to make an existing, unmarked Qdrant collection
+        -- reproducible without mutating that external collection during discovery.
+        CREATE TABLE knowledge_qdrant_bindings (
+            connection_id       TEXT NOT NULL,
+            collection_name     TEXT NOT NULL,
+            profile_id          TEXT NOT NULL,
+            vector_name         TEXT,
+            payload_mapping_json TEXT NOT NULL,
+            ownership           TEXT NOT NULL DEFAULT 'external'
+                                CHECK (ownership IN ('exclusive','external')),
+            compatibility       TEXT NOT NULL DEFAULT 'attach_only',
+            updated_at          INTEGER NOT NULL,
+            PRIMARY KEY (connection_id, collection_name)
+        );
+
+        -- Jobs survive closing Settings or restarting the app. `payload_json` holds
+        -- only resumable, non-secret inputs; credentials are resolved by id at run time.
+        CREATE TABLE knowledge_jobs (
+            id              TEXT PRIMARY KEY,
+            kind            TEXT NOT NULL,
+            target_ref_json TEXT NOT NULL,
+            payload_json    TEXT NOT NULL,
+            stage           TEXT NOT NULL,
+            status          TEXT NOT NULL
+                            CHECK (status IN ('queued','running','completed','failed','cancelled')),
+            completed_items INTEGER NOT NULL DEFAULT 0,
+            total_items     INTEGER,
+            error           TEXT,
+            created_at      INTEGER NOT NULL,
+            updated_at      INTEGER NOT NULL
+        );
+        CREATE INDEX idx_knowledge_jobs_status ON knowledge_jobs(status, updated_at);
+
+        INSERT INTO schema_version (version) VALUES (3);
+        COMMIT;
+        "#,
+    )
+    .map_err(|e| format!("docs migrate v3: {e}"))
+}
+
+/// Serialize durable work per bucket/document and add an acknowledged
+/// cancellation state. Rebuilding this small metadata table is required because
+/// SQLite cannot extend an existing CHECK constraint in place.
+fn migrate_v4(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        BEGIN;
+
+        ALTER TABLE knowledge_jobs RENAME TO knowledge_jobs_v3;
+        CREATE TABLE knowledge_jobs (
+            id              TEXT PRIMARY KEY,
+            kind            TEXT NOT NULL,
+            target_ref_json TEXT NOT NULL,
+            payload_json    TEXT NOT NULL,
+            resource_key    TEXT,
+            stage           TEXT NOT NULL,
+            status          TEXT NOT NULL
+                            CHECK (status IN ('queued','running','completed','failed','cancelling','cancelled')),
+            completed_items INTEGER NOT NULL DEFAULT 0,
+            total_items     INTEGER,
+            error           TEXT,
+            created_at      INTEGER NOT NULL,
+            updated_at      INTEGER NOT NULL
+        );
+        INSERT INTO knowledge_jobs
+            (id,kind,target_ref_json,payload_json,resource_key,stage,status,
+             completed_items,total_items,error,created_at,updated_at)
+        SELECT id,kind,target_ref_json,payload_json,NULL,stage,
+               CASE WHEN status IN ('queued','running') THEN 'failed' ELSE status END,
+               completed_items,total_items,
+               CASE
+                 WHEN status IN ('queued','running')
+                 THEN 'Knowledge job storage was upgraded while this job was active. Retry the job to resume safely.'
+                 ELSE error
+               END,
+               created_at,updated_at
+          FROM knowledge_jobs_v3;
+        DROP TABLE knowledge_jobs_v3;
+        CREATE INDEX idx_knowledge_jobs_status ON knowledge_jobs(status, updated_at);
+        CREATE UNIQUE INDEX idx_knowledge_jobs_active_resource
+            ON knowledge_jobs(resource_key)
+         WHERE resource_key IS NOT NULL
+           AND status IN ('queued','running','cancelling');
+
+        INSERT INTO schema_version (version) VALUES (4);
+        COMMIT;
+        "#,
+    )
+    .map_err(|e| format!("docs migrate v4: {e}"))
 }
 
 fn migrate_v1(conn: &Connection) -> Result<(), String> {
@@ -267,7 +411,7 @@ mod tests {
 
     /// The head version, asserted so adding a migration forces this to be updated
     /// alongside it.
-    const HEAD: i64 = 2;
+    const HEAD: i64 = 4;
 
     fn mem() -> Connection {
         let conn = Connection::open_in_memory().expect("open in-memory db");
@@ -325,6 +469,54 @@ mod tests {
         migrate(&conn).expect("second run");
         migrate(&conn).expect("third run");
         assert_eq!(version(&conn), HEAD);
+    }
+
+    #[test]
+    fn v4_marks_legacy_active_jobs_failed_instead_of_resuming_them_unlocked() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys=ON;
+             CREATE TABLE schema_version (version INTEGER PRIMARY KEY);",
+        )
+        .unwrap();
+        migrate_v1(&conn).unwrap();
+        migrate_v2(&conn).unwrap();
+        migrate_v3(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO knowledge_jobs
+               (id,kind,target_ref_json,payload_json,stage,status,created_at,updated_at)
+             VALUES (?1,'document_ingest','{}','{}','embed',?2,1,1)",
+            rusqlite::params!["running-job", "running"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO knowledge_jobs
+               (id,kind,target_ref_json,payload_json,stage,status,created_at,updated_at)
+             VALUES (?1,'document_ingest','{}','{}','done',?2,1,1)",
+            rusqlite::params!["completed-job", "completed"],
+        )
+        .unwrap();
+
+        migrate_v4(&conn).unwrap();
+
+        let (status, error, resource_key): (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT status,error,resource_key FROM knowledge_jobs WHERE id='running-job'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "failed");
+        assert!(error.unwrap().contains("Retry"));
+        assert!(resource_key.is_none());
+        let completed: String = conn
+            .query_row(
+                "SELECT status FROM knowledge_jobs WHERE id='completed-job'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(completed, "completed");
     }
 
     /// The whole delete story. Chunks cascade from the file, and the FTS rows go
