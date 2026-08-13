@@ -60,19 +60,74 @@ describe("canSentinel", () => {
 });
 
 describe("hardenCommand", () => {
-  it("suppresses the pager and closes stdin on a simple command", () => {
+  it("leaves ordinary commands free of environment guards while closing stdin", () => {
+    for (const command of [
+      "ping -c 2 8.8.8.8",
+      "networksetup -getairportnetwork en0",
+      "ipconfig getifaddr en0",
+    ]) {
+      expect(hardenCommand(command)).toEqual({
+        line: `${command} < /dev/null`,
+        applied: ["stdin"],
+      });
+    }
+  });
+
+  it("does not prefix a compound network diagnostic command", () => {
+    const command =
+      "networksetup -getairportnetwork en0 < /dev/null; ipconfig getifaddr en0; ping -c 2 8.8.8.8 < /dev/null";
+    expect(hardenCommand(command)).toEqual({ line: command, applied: [] });
+  });
+
+  it("uses only the systemd pager guard", () => {
     const { line, applied } = hardenCommand("systemctl status sshd");
-    expect(line).toBe(
-      "PAGER=cat GIT_PAGER=cat SYSTEMD_PAGER=cat SYSTEMD_PAGELESS=1 LESS=FRX " +
-        "DEBIAN_FRONTEND=noninteractive systemctl status sshd < /dev/null",
-    );
+    expect(line).toBe("SYSTEMD_PAGER=cat systemctl status sshd < /dev/null");
     expect(applied).toEqual(["pager", "stdin"]);
   });
 
-  // The env prefix binds to the pipeline's FIRST stage, which is the one that
-  // could page: later stages have no TTY on stdout, so they never would.
-  it("covers a pipeline with the pager guard only", () => {
-    const { applied } = hardenCommand("journalctl -u sshd | grep -i fail");
+  it("classifies known systemd tools", () => {
+    for (const command of [
+      "busctl",
+      "coredumpctl list",
+      "hostnamectl status",
+      "journalctl -u sshd",
+      "localectl status",
+      "loginctl list-sessions",
+      "machinectl list",
+      "networkctl status",
+      "resolvectl status",
+      "systemctl status sshd",
+      "systemd-analyze blame",
+      "timedatectl status",
+    ]) {
+      expect(hardenCommand(command).line).toBe(`SYSTEMD_PAGER=cat ${command} < /dev/null`);
+    }
+  });
+
+  it("uses the git pager guard for direct commands and absolute paths", () => {
+    expect(hardenCommand("git log").line).toBe("GIT_PAGER=cat git log < /dev/null");
+    expect(hardenCommand("/usr/bin/git status").line).toBe(
+      "GIT_PAGER=cat /usr/bin/git status < /dev/null",
+    );
+  });
+
+  it("uses the Debian frontend only for Debian package tools", () => {
+    for (const command of [
+      "apt install -y curl",
+      "apt-get update",
+      "aptitude install -y curl",
+      "dpkg -i package.deb",
+      "debconf-show openssh-server",
+    ]) {
+      expect(hardenCommand(command).line).toBe(
+        `DEBIAN_FRONTEND=noninteractive ${command} < /dev/null`,
+      );
+    }
+  });
+
+  it("covers the first pipeline stage with its relevant guard only", () => {
+    const { line, applied } = hardenCommand("journalctl -u sshd | grep -i fail");
+    expect(line).toBe("SYSTEMD_PAGER=cat journalctl -u sshd | grep -i fail");
     expect(applied).toEqual(["pager"]);
   });
 
@@ -94,10 +149,21 @@ describe("hardenCommand", () => {
     }
   });
 
-  // `A=1 if …` is a syntax error, and the same for a compound command's braces.
-  it("refuses to prefix a shell keyword or a compound command", () => {
-    for (const cmd of ["if true; then echo a; fi", "for f in *; do echo $f; done", "{ echo a; }", "(echo a)"]) {
+  // `A=1 if …` is a syntax error, and a guard before a command list would bind
+  // to only its first branch. Leave all shell control forms untouched.
+  it("refuses to prefix shell keywords, groups, lists, and background jobs", () => {
+    for (const cmd of [
+      "if true; then git log; fi",
+      "for f in *; do git status $f; done",
+      "{ git log; }",
+      "(git log)",
+      "git log; echo done",
+      "git log && echo done",
+      "git log || true",
+      "git log &",
+    ]) {
       expect(hardenCommand(cmd).applied).not.toContain("pager");
+      expect(hardenCommand(cmd).line).not.toContain("GIT_PAGER");
     }
   });
 
@@ -106,6 +172,13 @@ describe("hardenCommand", () => {
   it("refuses to prefix a command that opens with its own assignment", () => {
     expect(hardenCommand("FOO=bar").applied).not.toContain("pager");
     expect(hardenCommand("GIT_PAGER=less git log").applied).not.toContain("pager");
+  });
+
+  it("does not pretend an environment guard will survive sudo", () => {
+    expect(hardenCommand("sudo git log").line).toBe("sudo git log < /dev/null");
+    expect(hardenCommand("sudo systemctl status sshd").line).toBe(
+      "sudo systemctl status sshd < /dev/null",
+    );
   });
 
   // In `a && b < /dev/null` the redirect binds to `b`, not the whole chain, so a
