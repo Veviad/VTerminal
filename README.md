@@ -6,6 +6,8 @@ A lean, AI-powered terminal for macOS — Warp-style command blocks and an AI ag
 
 The sections below build from source. If you just want to run the app, take the download above — it already includes on-device inference, and a locally built app is the one case that skips the Gatekeeper prompt.
 
+Upgrading from an older build? Quit VTerminal completely before replacing `/Applications/VTerminal.app`, eject any older VTerminal disk images, then launch the copy in Applications. Otherwise macOS can reopen the old running or mounted copy even though the new app was installed.
+
 ![platform](https://img.shields.io/badge/macOS-Apple%20Silicon-black)
 ![stack](https://img.shields.io/badge/Tauri%202-Rust-informational)
 ![ui](https://img.shields.io/badge/React%2019-Tailwind%204-informational)
