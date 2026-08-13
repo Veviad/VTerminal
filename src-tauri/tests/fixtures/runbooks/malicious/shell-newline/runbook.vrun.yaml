@@ -1,0 +1,21 @@
+apiVersion: runbooks.veviad.com/v1alpha1
+kind: Runbook
+metadata:
+  id: malicious-shell-newline
+  version: 1.0.0
+  title: Multiline command fixture
+spec:
+  target:
+    kind: active-terminal
+  steps:
+    - id: hidden-second-command
+      title: Reject a multiline command
+      check:
+        uses: shell
+        with:
+          command: |
+            uname -s
+            printf hidden
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]

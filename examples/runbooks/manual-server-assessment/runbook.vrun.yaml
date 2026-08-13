@@ -1,0 +1,43 @@
+apiVersion: runbooks.veviad.com/v1alpha1
+kind: Runbook
+
+metadata:
+  id: manual-server-assessment
+  version: 1.0.0
+  title: Manual server readiness assessment
+  description: |
+    Record operator-attested controls that cannot be proven safely from a shell.
+  tags: [assessment, manual, operations]
+
+spec:
+  target:
+    kind: active-terminal
+
+  declaredCapabilities:
+    network: false
+    privilege: none
+    writes: []
+
+  defaults:
+    onFailure: pause
+
+  steps:
+    - id: recovery-access-confirmed
+      title: Recovery access is documented and tested
+      required: true
+      check:
+        uses: manual
+        instructions: |
+          Confirm that an authorized recovery path exists and was tested within
+          the organization's accepted interval. Record the test date and a
+          non-sensitive evidence reference in the operator comment.
+
+    - id: maintenance-window-approved
+      title: Maintenance window is approved
+      required: false
+      check:
+        uses: manual
+        instructions: |
+          Confirm the current work is covered by an approved maintenance window.
+          If this control is not applicable, record why rather than marking it as
+          satisfied.

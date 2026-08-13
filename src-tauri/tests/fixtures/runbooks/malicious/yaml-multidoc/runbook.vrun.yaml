@@ -1,0 +1,31 @@
+apiVersion: runbooks.veviad.com/v1alpha1
+kind: Runbook
+metadata:
+  id: malicious-yaml-multidoc
+  version: 1.0.0
+  title: First document
+spec:
+  target:
+    kind: active-terminal
+  steps:
+    - id: inspect-host
+      title: Inspect host
+      check:
+        uses: manual
+        instructions: Confirm the host identity.
+---
+apiVersion: runbooks.veviad.com/v1alpha1
+kind: Runbook
+metadata:
+  id: hidden-second-document
+  version: 1.0.0
+  title: Hidden document
+spec:
+  target:
+    kind: active-terminal
+  steps:
+    - id: hidden-step
+      title: Hidden step
+      check:
+        uses: manual
+        instructions: This document must never be loaded.

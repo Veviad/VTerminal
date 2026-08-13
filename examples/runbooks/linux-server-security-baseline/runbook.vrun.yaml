@@ -1,0 +1,84 @@
+apiVersion: runbooks.veviad.com/v1alpha1
+kind: Runbook
+
+metadata:
+  id: linux-server-security-baseline
+  version: 1.0.0
+  title: Linux server security baseline
+  description: |
+    Assess a visible Linux terminal and remediate two common baseline controls.
+
+    Each mutation is proposed separately and is complete only after verification.
+  tags: [linux, security, ssh]
+
+spec:
+  target:
+    kind: active-terminal
+
+  inputs:
+    sshdConfig:
+      type: path
+      description: Absolute path to the OpenSSH server configuration.
+      default: /etc/ssh/sshd_config
+
+  declaredCapabilities:
+    network: false
+    privilege: root
+    writes: [/etc/ssh/sshd_config]
+
+  defaults:
+    onFailure: pause
+
+  steps:
+    - id: ssh-root-login-disabled
+      title: Direct root SSH login is disabled
+      required: true
+      check:
+        uses: shell
+        with:
+          command: "sshd -T -f \"$VRUN_SSHD_CONFIG\" | grep -q '^permitrootlogin no$'"
+          env:
+            VRUN_SSHD_CONFIG: sshdConfig
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]
+      apply:
+        uses: agent
+        instructions: |
+          Make the smallest safe change that disables direct root SSH login.
+          Use the resolved `sshdConfig` input as the configuration path, preserve
+          a recoverable backup where appropriate, and validate the OpenSSH
+          configuration before proposing any reload.
+      verify:
+        uses: shell
+        with:
+          command: "sshd -T -f \"$VRUN_SSHD_CONFIG\" | grep -q '^permitrootlogin no$'"
+          env:
+            VRUN_SSHD_CONFIG: sshdConfig
+        passExitCodes: [0]
+
+    - id: ssh-password-authentication-disabled
+      title: SSH password authentication is disabled
+      required: true
+      check:
+        uses: shell
+        with:
+          command: "sshd -T -f \"$VRUN_SSHD_CONFIG\" | grep -q '^passwordauthentication no$'"
+          env:
+            VRUN_SSHD_CONFIG: sshdConfig
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]
+      apply:
+        uses: agent
+        instructions: |
+          Disable SSH password authentication with the smallest safe change.
+          Confirm that a working key-based administrative path exists before
+          proposing the mutation, then validate the OpenSSH configuration.
+      verify:
+        uses: shell
+        with:
+          command: "sshd -T -f \"$VRUN_SSHD_CONFIG\" | grep -q '^passwordauthentication no$'"
+          env:
+            VRUN_SSHD_CONFIG: sshdConfig
+        passExitCodes: [0]

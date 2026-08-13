@@ -811,6 +811,9 @@ export interface Settings {
    *  false the agent is offered no `search_docs` tool and every `docs_*` command
    *  refuses, so this is the capability gate rather than a UI preference. */
   docs_enabled: boolean;
+  /** Reusable Runbooks, EXPERIMENTAL and off by default. Rust gates every
+   *  runbook command; this value is not merely a visibility preference. */
+  runbooks_enabled: boolean;
   log_level: string;
 }
 
@@ -1212,6 +1215,7 @@ export interface SettingsPatch {
   ai_web_access: boolean;
   auto_update_enabled: boolean;
   docs_enabled: boolean;
+  runbooks_enabled: boolean;
   log_level: string;
 }
 

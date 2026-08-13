@@ -23,7 +23,13 @@ vi.mock("../lib/termRegistry", () => ({
   },
 }));
 
-const { runInTerminal, abortSession, interruptJob, resetSessionMode } = await import("../lib/ptyExec");
+const {
+  runInTerminal,
+  abortSession,
+  captureApprovalPromptBinding,
+  interruptJob,
+  resetSessionMode,
+} = await import("../lib/ptyExec");
 const { hardenCommand } = await import("../lib/ptyExecShell");
 const { useAppStore } = await import("../stores/appStore");
 
@@ -40,11 +46,18 @@ interface FakeEntry {
   disposed: boolean;
   lastDataAt: number;
   lastUserInputAt: number;
+  registeredMarkers: FakeMarker[];
   blockMarkers: Map<string, { start: { line: number; isDisposed: boolean }; end: { line: number; isDisposed: boolean } | null }>;
-  tracker: { isAtEmptyPrompt: () => boolean; isAtPromptColumn: () => boolean };
+  tracker: {
+    isAtEmptyPrompt: () => boolean;
+    isAtPromptColumn: () => boolean;
+    beginRunbookOutputIsolation: () => void;
+    endRunbookOutputIsolation: () => void;
+  };
   term: {
     rows: number;
     focus: () => void;
+    registerMarker: (offset?: number) => FakeMarker;
     buffer: {
       active: {
         type: string;
@@ -58,30 +71,70 @@ interface FakeEntry {
   };
 }
 
+interface FakeMarker {
+  line: number;
+  isDisposed: boolean;
+  dispose: () => void;
+  onDispose: (callback: () => void) => { dispose(): void };
+}
+
+function makeMarker(line: number): FakeMarker {
+  const listeners = new Set<() => void>();
+  const marker: FakeMarker = {
+    line,
+    isDisposed: false,
+    dispose: vi.fn(() => {
+      if (marker.isDisposed) return;
+      marker.isDisposed = true;
+      marker.line = -1;
+      for (const listener of [...listeners]) listener();
+      listeners.clear();
+    }),
+    onDispose: (callback) => {
+      listeners.add(callback);
+      return { dispose: () => listeners.delete(callback) };
+    },
+  };
+  return marker;
+}
+
 function makeEntry(lines: string[], opts: Partial<{ atPrompt: boolean; bufferType: string }> = {}): FakeEntry {
   const atPrompt = opts.atPrompt ?? true;
+  const registeredMarkers: FakeMarker[] = [];
+  const active = {
+    type: opts.bufferType ?? "normal",
+    baseY: 0,
+    cursorX: 2,
+    cursorY: lines.length - 1,
+    length: lines.length,
+    getLine: (y: number) =>
+      lines[y] === undefined
+        ? undefined
+        : { translateToString: () => lines[y], isWrapped: false },
+  };
   return {
     disposed: false,
     lastDataAt: 0,
     lastUserInputAt: 0,
+    registeredMarkers,
     blockMarkers: new Map(),
-    tracker: { isAtEmptyPrompt: () => atPrompt, isAtPromptColumn: () => atPrompt },
+    tracker: {
+      isAtEmptyPrompt: () => atPrompt,
+      isAtPromptColumn: () => atPrompt,
+      beginRunbookOutputIsolation: () => {},
+      endRunbookOutputIsolation: () => {},
+    },
     term: {
       rows: 24,
       // A password prompt brings the tab forward so the user can just type.
       focus: () => {},
+      registerMarker: (offset = 0) => {
+        const marker = makeMarker(active.baseY + active.cursorY + offset);
+        registeredMarkers.push(marker);
+        return marker;
+      },
       buffer: {
-        active: {
-          type: opts.bufferType ?? "normal",
-          baseY: 0,
-          cursorX: 2,
-          cursorY: lines.length - 1,
-          length: lines.length,
-          getLine: (y: number) =>
-            lines[y] === undefined
-              ? undefined
-              : { translateToString: () => lines[y], isWrapped: false },
-        },
+        active,
       },
     },
   };
@@ -160,6 +213,20 @@ describe("runInTerminal — integrated session", () => {
     expect((await promise).exitCode).toBe(127);
   });
 
+  it("marks output as truncated when the bound block was trimmed", async () => {
+    entry = makeEntry(["$ ", "retained tail", "$ "]);
+    const promise = runInTerminal("s1", "ap1", "echo lots", { timeoutMs: 5000 });
+    await flush();
+    entry.blockMarkers.set("b1", {
+      start: { line: 1, isDisposed: false },
+      end: { line: 2, isDisposed: false },
+    });
+    emit({ type: "blockStart", blockId: "b1", command: typed("echo lots") });
+    emit({ type: "blockTrimmed", blockId: "b1" });
+    emit({ type: "blockEnd", blockId: "b1", exitCode: 0, endLine: 2 });
+    expect((await promise).outputTruncated).toBe(true);
+  });
+
   // The user may hit Enter at the same instant; OSC 6973 gives us the exact
   // command they ran, so the two are always distinguishable.
   it("ignores a block the user started and binds to its own", async () => {
@@ -188,9 +255,198 @@ describe("runInTerminal — integrated session", () => {
     expect(outcome.error).toBe("command_not_observed");
     expect(outcome.exitCode).toBeNull();
   });
+
+  it("uses a fresh nonce when deterministic callers reject forgeable shell markers", async () => {
+    entry = makeEntry(["$ ", "hostile output", "$ "]);
+    const promise = runInTerminal("s1", "runbook-attempt", "cat hostile.bin", {
+      timeoutMs: 5_000,
+      nonceCompletion: true,
+    });
+    await flush();
+
+    const written = ptyWrite.mock.calls[0][1];
+    const nonce = /;([a-z0-9]+)\\007/.exec(written)?.[1];
+    expect(nonce).toBeTruthy();
+    // Both ordinary integrated markers and a replayed private token are
+    // untrusted for this job. Neither may settle the result.
+    entry.blockMarkers.set("forged", {
+      start: { line: 1, isDisposed: false },
+      end: { line: 2, isDisposed: false },
+    });
+    emit({ type: "blockStart", blockId: "forged", command: typed("cat hostile.bin") });
+    emit({ type: "blockEnd", blockId: "forged", exitCode: 0, endLine: 2 });
+    emit({ type: "osc", payload: "RD;0;forged-output" });
+    let settled = false;
+    void promise.then(() => (settled = true));
+    await flush();
+    expect(settled).toBe(false);
+
+    emit({ type: "osc", payload: `RD;7;${nonce}` });
+    const outcome = await promise;
+    expect(outcome.exitCode).toBe(7);
+    expect(outcome.mode).toBe("sentinel");
+  });
+
+  it("marks sentinel output truncated when xterm disposes its dispatch anchor", async () => {
+    const lines = ["$ "];
+    entry = makeEntry(lines);
+    const promise = runInTerminal("s1", "runbook-attempt", "printf lots", {
+      timeoutMs: 5_000,
+      nonceCompletion: true,
+    });
+    await flush();
+
+    const written = ptyWrite.mock.calls[0][1];
+    const nonce = /;([a-z0-9]+)\\007/.exec(written)?.[1];
+    const marker = entry.registeredMarkers[0];
+    expect(nonce).toBeTruthy();
+    expect(marker).toBeDefined();
+
+    // Model a low-scrollback terminal dropping the prompt and early output.
+    // Only the retained tail remains observable when the private token arrives.
+    lines.splice(0, lines.length, "retained α");
+    entry.term.buffer.active.cursorY = 0;
+    entry.term.buffer.active.length = 1;
+    marker.dispose();
+    emit({ type: "osc", payload: `RD;0;${nonce}` });
+
+    const outcome = await promise;
+    const retainedBytes = new TextEncoder().encode("retained α").length;
+    expect(outcome.output).toBe("retained α");
+    expect(outcome.outputTruncated).toBe(true);
+    expect(outcome.outputObservedBytes).toBe(retainedBytes);
+    expect(outcome.outputCapturedBytes).toBe(retainedBytes);
+  });
+
+  it("harvests sentinel output from the marker's shifted live line", async () => {
+    const lines = ["old history", "$ "];
+    entry = makeEntry(lines);
+    const promise = runInTerminal("s1", "runbook-attempt", "printf kept", {
+      timeoutMs: 5_000,
+      nonceCompletion: true,
+    });
+    await flush();
+
+    const written = ptyWrite.mock.calls[0][1];
+    const nonce = /;([a-z0-9]+)\\007/.exec(written)?.[1];
+    const marker = entry.registeredMarkers[0];
+    expect(marker.line).toBe(1);
+
+    // xterm shifts live markers as history ahead of them is trimmed. The old
+    // integer row is now outside this buffer range, but no command output was
+    // lost because the dispatch marker itself remains live.
+    lines.splice(0, lines.length, "$ ", "kept");
+    marker.line = 0;
+    entry.term.buffer.active.cursorY = 1;
+    entry.term.buffer.active.length = 2;
+    emit({ type: "osc", payload: `RD;0;${nonce}` });
+
+    const outcome = await promise;
+    expect(outcome.output).toBe("kept");
+    expect(outcome.outputTruncated).toBe(false);
+    expect(outcome.outputObservedBytes).toBe(4);
+    expect(outcome.outputCapturedBytes).toBe(4);
+  });
+
+  it("disposes a sentinel anchor after complete capture without claiming truncation", async () => {
+    const lines = ["$ "];
+    entry = makeEntry(lines);
+    const promise = runInTerminal("s1", "runbook-attempt", "printf done", {
+      timeoutMs: 5_000,
+      nonceCompletion: true,
+    });
+    await flush();
+
+    const written = ptyWrite.mock.calls[0][1];
+    const nonce = /;([a-z0-9]+)\\007/.exec(written)?.[1];
+    const marker = entry.registeredMarkers[0];
+    lines.push("done");
+    entry.term.buffer.active.cursorY = 1;
+    entry.term.buffer.active.length = 2;
+    emit({ type: "osc", payload: `RD;0;${nonce}` });
+
+    const outcome = await promise;
+    expect(outcome.output).toBe("done");
+    expect(outcome.outputTruncated).toBe(false);
+    expect(outcome.outputObservedBytes).toBe(4);
+    expect(outcome.outputCapturedBytes).toBe(4);
+    expect(marker.dispose).toHaveBeenCalledOnce();
+    expect(marker.isDisposed).toBe(true);
+  });
+
+  it("does not probe or install hooks before a runbook dispatch lease", async () => {
+    useAppStore.getState().updateSessionUi("s1", {
+      remote: { kind: "ssh", target: "prod-01" },
+    });
+    entry = makeEntry(["remote$ "]);
+    let releaseClaim: ((allowed: boolean) => void) | undefined;
+    const beforeWrite = vi.fn(
+      () => new Promise<boolean>((resolve) => { releaseClaim = resolve; }),
+    );
+    const promise = runInTerminal("s1", "runbook-attempt", "true", {
+      timeoutMs: 5_000,
+      nonceCompletion: true,
+      beforeWrite,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(beforeWrite).toHaveBeenCalledTimes(1);
+    expect(ptyWrite).not.toHaveBeenCalled();
+
+    releaseClaim?.(false);
+    expect((await promise).error).toBe("cancelled");
+    expect(ptyWrite).not.toHaveBeenCalled();
+  });
 });
 
 describe("runInTerminal — refusing to type", () => {
+  it("binds a Runbook approval click to the exact unchanged terminal epoch", async () => {
+    entry = makeEntry(["remote$ "]);
+    const binding = captureApprovalPromptBinding("s1");
+    expect(binding).not.toBeNull();
+    entry.lastUserInputAt = Date.now();
+
+    const outcome = await runInTerminal("s1", "approval-bound", "touch /tmp/nope", {
+      nonceCompletion: true,
+      approvalPromptBinding: binding!,
+      beforeWrite: vi.fn(() => true),
+    });
+
+    expect(outcome.error).toBe("target_changed");
+    expect(ptyWrite).not.toHaveBeenCalled();
+  });
+
+  it("revalidates the shell prompt after an asynchronous dispatch claim", async () => {
+    entry = makeEntry(["$ "]);
+    let releaseClaim!: (allowed: boolean) => void;
+    let claimStarted!: () => void;
+    const started = new Promise<void>((resolve) => (claimStarted = resolve));
+    const promise = runInTerminal("s1", "ap1", "touch /tmp/nope", {
+      beforeWrite: () => new Promise<boolean>((resolve) => {
+        releaseClaim = resolve;
+        claimStarted();
+      }),
+    });
+    await started;
+    // Model the operator pressing Enter or starting ssh while the backend claim
+    // response is in flight. No JavaScript callback runs between the final
+    // revalidation and ptyWrite, so this is the adversarial boundary.
+    entry.lastUserInputAt = Date.now();
+    releaseClaim(true);
+
+    const outcome = await promise;
+    expect(outcome.error).toBe("target_changed");
+    expect(ptyWrite).not.toHaveBeenCalled();
+  });
+
+  it("rechecks the caller's target guard immediately before writing", async () => {
+    entry = makeEntry(["$ "]);
+    const outcome = await runInTerminal("s1", "ap1", "touch /tmp/nope", {
+      canWrite: () => false,
+    });
+    expect(outcome.error).toBe("target_changed");
+    expect(ptyWrite).not.toHaveBeenCalled();
+  });
+
   it("never writes when the prompt is busy", async () => {
     vi.useFakeTimers();
     entry = makeEntry(["$ running"], { atPrompt: false });
@@ -254,6 +510,16 @@ describe("runInTerminal — timeout and cancellation", () => {
     const outcome = await promise;
     expect(outcome.error).toBe("cancelled");
     expect(ptyWrite.mock.calls.length).toBe(writesBefore);
+  });
+
+  it("does not abort another feature's command when an owner id is supplied", async () => {
+    entry = makeEntry(["$ "]);
+    const promise = runInTerminal("s1", "ai-command", "sleep 999", { timeoutMs: 60_000 });
+    await flush();
+
+    expect(abortSession("s1", "cancelled", "runbook-attempt")).toBe(false);
+    expect(abortSession("s1", "cancelled", "ai-command")).toBe(true);
+    expect((await promise).error).toBe("cancelled");
   });
 
   it("closing the terminal releases a pending command", async () => {
@@ -441,7 +707,7 @@ describe("runInTerminal — remote session", () => {
 
     const written = ptyWrite.mock.calls[1][1];
     // The sentinel goes AFTER the hardening, so `$?` is still the command's.
-    expect(written).toContain(`${typed("id")}; printf`);
+    expect(written).toContain(`${typed("id")}; /usr/bin/printf`);
     const nonce = /;([a-z0-9]+)\\007/.exec(written)?.[1];
 
     // A token from some other command must not resolve this one.

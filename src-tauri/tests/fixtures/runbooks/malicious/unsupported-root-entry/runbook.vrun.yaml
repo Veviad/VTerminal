@@ -1,0 +1,15 @@
+apiVersion: runbooks.veviad.com/v1alpha1
+kind: Runbook
+metadata:
+  id: malicious-root-payload
+  version: 1.0.0
+  title: Unsupported package payload fixture
+spec:
+  target:
+    kind: active-terminal
+  steps:
+    - id: inspect-host
+      title: Inspect host
+      check:
+        uses: manual
+        instructions: Confirm the host identity.

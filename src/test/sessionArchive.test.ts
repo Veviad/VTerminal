@@ -15,6 +15,10 @@ vi.mock("../lib/termRegistry", () => ({
 import { archiveOnClose, buildArchiveRow, toArchiveMessages } from "../lib/sessionArchive";
 import { emptyAiStream, emptySessionUi, useAppStore } from "../stores/appStore";
 import type { AiMessage, ArchiveSessionInput, Session } from "../lib/types";
+import {
+  protectRunbookTerminal,
+  resetRunbookTerminalPrivacyForTests,
+} from "../lib/runbookTerminalPrivacy";
 
 function makeSession(id: string, over: Partial<Session> = {}): Session {
   return {
@@ -69,6 +73,7 @@ const cardMsg = (id: string): AiMessage => ({
 });
 
 beforeEach(() => {
+  resetRunbookTerminalPrivacyForTests();
   archivePutMock.mockClear();
   archivePutMock.mockResolvedValue(undefined);
   serializeMock.mockClear();
@@ -213,6 +218,21 @@ describe("buildArchiveRow", () => {
     expect(row.close_reason).toBe("closed");
     expect(row.opened_at).toBe("2026-08-01T00:00:00.000Z");
     expect(row.cols).toBe(120);
+  });
+
+  it("never archives raw scrollback from a runbook-bound terminal", () => {
+    seed(makeSession("a"), [textMsg("m1", "user")]);
+    protectRunbookTerminal("a");
+    const row = buildArchiveRow("a", {
+      isOpen: false,
+      closeReason: "closed",
+      withScrollback: true,
+      withTranscript: true,
+    })!;
+    expect(row.scrollback).toBe("");
+    expect(row.scrollback_lines).toBe(0);
+    expect(serializeMock).not.toHaveBeenCalled();
+    expect(row.messages).toHaveLength(1);
   });
 
   it("sends null rather than empty for whatever it does not carry", () => {

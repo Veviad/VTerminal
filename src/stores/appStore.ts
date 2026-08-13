@@ -418,6 +418,8 @@ export interface AppState {
    *  tool and refuses every `docs_*` command while it is false. Flipping this
    *  frontend-side therefore reveals UI, never a capability. */
   docsEnabled: boolean;
+  /** Experimental Runbooks capability mirror. Enforcement lives in Rust. */
+  runbooksEnabled: boolean;
   /** The bucket list, refreshed from Rust. Global rather than per-session: a bucket
    *  exists once and is attached by reference. */
   docBuckets: DocBucket[];
@@ -1170,6 +1172,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   aiWebAccess: true,
   autoUpdateEnabled: false,
   docsEnabled: false,
+  runbooksEnabled: false,
   docBuckets: [],
   knowledgeBuckets: [],
   docsIndexing: {},

@@ -10,6 +10,8 @@ import { useAppStore } from "../../stores/appStore";
 import { useGlobalShortcuts } from "../../hooks/useGlobalShortcuts";
 import { S } from "../../lib/strings";
 import { Kbd } from "../ui/Kbd";
+import { RunbooksWorkspace } from "../runbooks";
+import { useRunbookStore } from "../../stores/runbookStore";
 
 export function AppShell() {
   const sessions = useAppStore((s) => s.sessions);
@@ -18,6 +20,8 @@ export function AppShell() {
   const paletteOpen = useAppStore((s) => s.paletteOpen);
   const sessionBrowserOpen = useAppStore((s) => s.sessionBrowserOpen);
   const settingsOpen = useAppStore((s) => s.settingsOpen);
+  const runbooksEnabled = useAppStore((s) => s.runbooksEnabled);
+  const runbooksOpen = useRunbookStore((s) => s.workspaceOpen);
   useGlobalShortcuts();
 
   return (
@@ -33,7 +37,11 @@ export function AppShell() {
         {/* Gated on settingsLoaded, not on the open flag: the store defaults to
             open, so rendering before hydration would flash the panel open for
             anyone who left it collapsed. AiPanel itself renders the rail. */}
-        {settingsLoaded && <AiPanel sessionId={activeSessionId} />}
+        {settingsLoaded && runbooksEnabled && runbooksOpen ? (
+          <RunbooksWorkspace sessionId={activeSessionId} />
+        ) : (
+          settingsLoaded && <AiPanel sessionId={activeSessionId} />
+        )}
         {/* Settings is an overlay, NOT an early return — terminals must stay mounted. */}
         {settingsOpen && (
           <div className="absolute inset-0 z-40 bg-bg-primary">
