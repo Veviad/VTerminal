@@ -36,7 +36,7 @@ tauri-plugin-dialog = "2"
 tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 tokio = { version = "1", features = ["full"] }
 portable-pty = "0.9.0"
 reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], default-features = false }
@@ -48,16 +48,16 @@ url = "2"
 futures = "0.3"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
-dirs = "5"
+dirs = "6"
 log = "0.4"
 thiserror = "2"
 async-trait = "0.1"
-sysinfo = "0.33"
-sha2 = "0.10"
+sysinfo = "0.39"
+sha2 = "0.11"
 # Chat attachments cross the IPC boundary as base64 (a `Vec<u8>` argument
 # serializes as a JSON number array, ~7x the size) and are decoded once here
 # before being written to disk.
-base64 = "0.22"
+base64 = "0.23"
 tauri-plugin-single-instance = "2.4.3"
 tauri-plugin-updater = "2"
 semver = "1"
