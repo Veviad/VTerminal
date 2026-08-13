@@ -5,6 +5,7 @@ import { AiPanel } from "../ai/AiPanel";
 import { CommandPalette } from "../palette/CommandPalette";
 import { SessionBrowser } from "../sessions/SessionBrowser";
 import { SettingsPage } from "../settings/SettingsPage";
+import { UpdateModal } from "../updates/UpdateModal";
 import { useAppStore } from "../../stores/appStore";
 import { useGlobalShortcuts } from "../../hooks/useGlobalShortcuts";
 import { S } from "../../lib/strings";
@@ -47,6 +48,7 @@ export function AppShell() {
           header clickable), this is a modal and must cover the header and status
           bar too. It supplies its own backdrop at z-50. */}
       {sessionBrowserOpen && <SessionBrowser />}
+      <UpdateModal />
     </div>
   );
 }

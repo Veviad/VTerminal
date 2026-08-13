@@ -54,6 +54,18 @@ jobs:
           key: release
           cache-on-failure: true
 
+      # Updater signatures are mandatory and are unrelated to Apple's optional
+      # Developer ID signature. Fail before the expensive local-LLM compile if
+      # the repository has not been provisioned with the generated private key.
+      - name: Verify updater signing key
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::Missing TAURI_SIGNING_PRIVATE_KEY repository secret."
+            exit 1
+          fi
+
       # No separate frontend build: tauri.conf.json already sets
       # beforeBuildCommand: "npm run build". --target is explicit so the bundle
       # path is deterministic regardless of what the runner's host arch is.
@@ -82,6 +94,8 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD \
                    APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
@@ -107,7 +121,7 @@ jobs:
           # APPLE_TEAM_ID, which stay unset here.
           : "${APPLE_SIGNING_IDENTITY:=-}"
           export APPLE_SIGNING_IDENTITY
-          npm run tauri build -- --features local-llm --target aarch64-apple-darwin
+          npm run tauri build -- --features local-llm --target aarch64-apple-darwin --config src-tauri/tauri.updater.conf.json
 
       # Report what was actually produced, not what secrets were configured.
       # An ad-hoc signature satisfies `codesign --verify` but is still
@@ -155,6 +169,14 @@ jobs:
             ls -la src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/ >&2 || true
             exit 1
           fi
+
+          updater=(src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz)
+          if [ "${#updater[@]}" -ne 1 ] || [ ! -f "${updater[0]}.sig" ]; then
+            echo "error: expected one signed macOS updater bundle" >&2
+            ls -la src-tauri/target/aarch64-apple-darwin/release/bundle/macos/ >&2 || true
+            exit 1
+          fi
+          cp "${updater[0]}" "${updater[0]}.sig" release-assets/
           cd release-assets
           shasum -a 256 *.dmg > SHA256SUMS.txt
           cat SHA256SUMS.txt
@@ -197,7 +219,7 @@ jobs:
       # release) and a release drafted in the GitHub UI (this only attaches to
       # it). Created as a draft so the notes can be edited before anyone can
       # download — delete --draft to publish on tag instead.
-      - name: Publish release
+      - name: Create draft release
         if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -219,4 +241,35 @@ jobs:
             case "$TAG" in *-*) create+=(--prerelease) ;; esac
             "${create[@]}"
           fi
-          gh release upload "$TAG" release-assets/* --clobber
+
+      - name: Generate updater manifest
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          updater=(release-assets/*.app.tar.gz)
+          [ "${#updater[@]}" -eq 1 ] || { echo "error: expected exactly one updater bundle" >&2; exit 1; }
+          signature=$(cat "${updater[0]}.sig")
+          notes=$(gh release view "$TAG" --json body --jq .body)
+          asset=$(basename "${updater[0]}")
+          url="https://github.com/Veviad/VTerminal/releases/download/$TAG/$asset"
+          jq -n \
+            --arg version "${TAG#v}" \
+            --arg notes "$notes" \
+            --arg signature "$signature" \
+            --arg url "$url" \
+            '{version: $version, notes: $notes, platforms: {"darwin-aarch64": {signature: $signature, url: $url}}}' \
+            > release-assets/latest.json
+          jq -e \
+            '.version != "" and .platforms["darwin-aarch64"].signature != "" and (.platforms["darwin-aarch64"].url | startswith("https://"))' \
+            release-assets/latest.json >/dev/null
+
+      - name: Upload release assets
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release upload "$TAG" release-assets/* --clobber

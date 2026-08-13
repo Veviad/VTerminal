@@ -803,6 +803,8 @@ export interface Settings {
    *  for models that have one, picks the agent/ask web prompt tier, and makes
    *  `agent::policy` refuse network commands before they are proposed. */
   ai_web_access: boolean;
+  /** Opt-in experimental release checks. Installation always remains explicit. */
+  auto_update_enabled: boolean;
   /** Document buckets, EXPERIMENTAL and off by default. Enforced in Rust: while
    *  false the agent is offered no `search_docs` tool and every `docs_*` command
    *  refuses, so this is the capability gate rather than a UI preference. */
@@ -924,6 +926,22 @@ export interface SettingsPatch {
   agent_max_iterations: number;
   agent_command_timeout_secs: number;
   ai_web_access: boolean;
+  auto_update_enabled: boolean;
   docs_enabled: boolean;
   log_level: string;
 }
+
+// ---------- Application updates ----------
+
+export interface UpdateMetadata {
+  current_version: string;
+  version: string;
+  notes: string;
+  published_at: string | null;
+  prerelease: boolean;
+}
+
+export type UpdateDownloadEvent =
+  | { event: "Started"; data: { contentLength: number | null } }
+  | { event: "Progress"; data: { chunkLength: number } }
+  | { event: "Finished" };

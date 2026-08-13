@@ -21,6 +21,12 @@ fn parse_log_level(level: &str) -> log::LevelFilter {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Normal quits deliberately use `_exit` below to skip llama.cpp's unsafe
+    // static destructors. An updater restart is different: Tauri must get past
+    // the callback so it can spawn the newly installed binary. Remember the
+    // restart exit code without widening the lifetime of any application state.
+    let restarting = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let restart_event = std::sync::Arc::clone(&restarting);
     tauri::Builder::default()
         // Must be registered FIRST. Two instances would each hold their own
         // SQLite connection and race last-write-wins on the session snapshot,
@@ -33,6 +39,7 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_store::Builder::new().build())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(
@@ -74,6 +81,7 @@ pub fn run() {
             app.manage(agent::PtyExecState::default());
             app.manage(agent::SteerState::default());
             app.manage(models::DownloadState::default());
+            app.manage(commands::updates::UpdateState::default());
             #[cfg(feature = "local-llm")]
             {
                 // ONE permit shared by the chat host and the vision sidecar. Two
@@ -117,6 +125,10 @@ pub fn run() {
             commands::settings::get_model_effort,
             commands::settings::set_model_effort,
             commands::settings::get_system_info,
+            // application updates
+            commands::updates::update_check,
+            commands::updates::update_install,
+            commands::updates::app_restart,
             // pty
             commands::pty::pty_spawn,
             commands::pty::pty_write,
@@ -213,7 +225,7 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|_app, event| {
+        .run(move |_app, event| {
             // Leave the process BEFORE libc runs C++ static destructors.
             //
             // llama.cpp's Metal backend keeps its devices in a static
@@ -239,8 +251,16 @@ pub fn run() {
             // `RunEvent::Exit` covers both quit paths: tao's event loop, and
             // AppKit's `-[NSApplication terminate:]`, which reaches it through
             // `applicationWillTerminate` before calling `exit()` itself.
-            if let tauri::RunEvent::Exit = event {
-                unsafe { libc::_exit(0) };
+            match event {
+                tauri::RunEvent::ExitRequested { code, .. }
+                    if code == Some(tauri::RESTART_EXIT_CODE) =>
+                {
+                    restart_event.store(true, std::sync::atomic::Ordering::Release);
+                }
+                tauri::RunEvent::Exit if !restarting.load(std::sync::atomic::Ordering::Acquire) => {
+                    unsafe { libc::_exit(0) };
+                }
+                _ => {}
             }
         });
 }

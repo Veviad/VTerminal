@@ -47,6 +47,7 @@ export function useSettings() {
       agentMaxIterations: s.agent_max_iterations,
       agentCommandTimeoutSecs: s.agent_command_timeout_secs,
       aiWebAccess: s.ai_web_access,
+      autoUpdateEnabled: s.auto_update_enabled,
       docsEnabled: s.docs_enabled,
       hasApiKey: {
         anthropic: s.has_anthropic_api_key,
@@ -128,6 +129,8 @@ export function useSettings() {
       useAppStore.setState({ agentCommandTimeoutSecs: patch.agent_command_timeout_secs });
     if (patch.ai_web_access !== undefined)
       useAppStore.setState({ aiWebAccess: patch.ai_web_access });
+    if (patch.auto_update_enabled !== undefined)
+      useAppStore.setState({ autoUpdateEnabled: patch.auto_update_enabled });
     if (patch.docs_enabled !== undefined)
       useAppStore.setState({ docsEnabled: patch.docs_enabled });
     // Keys are write-only. Mirror only whether one is now present — the value

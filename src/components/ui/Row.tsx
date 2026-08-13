@@ -60,11 +60,13 @@ export function Toggle({
   hint,
   checked,
   onChange,
+  disabled = false,
 }: {
   label: string;
   hint?: string;
   checked: boolean;
   onChange: (v: boolean) => void;
+  disabled?: boolean;
 }) {
   return (
     <div className="flex items-center justify-between gap-4">
@@ -74,9 +76,10 @@ export function Toggle({
       </div>
       <button
         onClick={() => onChange(!checked)}
+        disabled={disabled}
         className={`relative h-5 w-9 shrink-0 rounded-full transition-colors duration-150 ${
           checked ? "bg-accent" : "bg-bg-elevated"
-        }`}
+        } disabled:cursor-not-allowed disabled:opacity-50`}
         role="switch"
         aria-checked={checked}
         // The visible label is a sibling <p>, so without this the switch has no

@@ -66,6 +66,7 @@ let lastFingerprint = "";
  *  a plain lookup rather than string surgery on a packed key. */
 let lastActiveId: string | null = null;
 let flushInFlight: Promise<void> | null = null;
+let flushInFlightStrict = false;
 
 /**
  * Cheap change detector. The store has no middleware, so `subscribeWithSelector`
@@ -171,12 +172,17 @@ function buildSnapshot(withScrollback: Set<string>): {
   return { active_session_id: state.activeSessionId, sessions };
 }
 
-async function write(withScrollback: Set<string>, finalFlush: boolean): Promise<void> {
+async function write(
+  withScrollback: Set<string>,
+  finalFlush: boolean,
+  strict = false,
+): Promise<void> {
   const snapshot = buildSnapshot(withScrollback);
   try {
     await api.workspaceSnapshot({ ...snapshot, final_flush: finalFlush });
   } catch (err) {
     console.warn("session snapshot failed:", err);
+    if (strict) throw err;
   }
 }
 
@@ -279,23 +285,32 @@ function runWhenIdle(fn: () => void): void {
 }
 
 /** Write everything now. Used by the close hook and by tab-blur handoff. */
-export async function flushAll(opts: { final?: boolean } = {}): Promise<void> {
+export async function flushAll(opts: { final?: boolean; strict?: boolean } = {}): Promise<void> {
   // Concurrent callers share one write — the close hook and a timer can race.
-  if (flushInFlight) return flushInFlight;
+  const strict = opts.strict ?? false;
+  if (flushInFlight) {
+    if (!strict || flushInFlightStrict) return flushInFlight;
+    // A restart may not inherit an ordinary flush that deliberately swallows
+    // errors. Let it settle, then perform its own strict final snapshot.
+    await flushInFlight;
+    return flushAll(opts);
+  }
   const all = new Set(useAppStore.getState().sessions.map((s) => s.id));
   const final = opts.final ?? false;
+  flushInFlightStrict = strict;
   flushInFlight = (async () => {
     // At quit, snapshot and archive CONCURRENTLY rather than in sequence. Both
     // serialize the same buffers and both contend for the same DB mutex, and the
     // whole flush lives inside a 1.5s budget — doing them one after the other is
     // how the archive half silently never happens on a machine with many tabs.
     if (final) {
-      await Promise.all([write(all, true), archiveAllOnQuit()]);
+      await Promise.all([write(all, true, strict), archiveAllOnQuit()]);
     } else {
-      await write(all, false);
+      await write(all, false, strict);
     }
   })().finally(() => {
     flushInFlight = null;
+    flushInFlightStrict = false;
   });
   return flushInFlight;
 }
@@ -443,4 +458,5 @@ export function __resetPersistenceForTests(): void {
   lastActiveId = null;
   sweepCursor = 0;
   flushInFlight = null;
+  flushInFlightStrict = false;
 }

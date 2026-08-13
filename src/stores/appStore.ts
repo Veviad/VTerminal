@@ -394,6 +394,7 @@ export interface AppState {
   agentMaxIterations: number;
   agentCommandTimeoutSecs: number;
   aiWebAccess: boolean;
+  autoUpdateEnabled: boolean;
   /** Document buckets, EXPERIMENTAL. A mirror of the setting for rendering only —
    *  the capability itself is gated in Rust, which withholds the `search_docs`
    *  tool and refuses every `docs_*` command while it is false. Flipping this
@@ -1118,6 +1119,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   agentMaxIterations: 10,
   agentCommandTimeoutSecs: 120,
   aiWebAccess: true,
+  autoUpdateEnabled: false,
   docsEnabled: false,
   docBuckets: [],
   docsIndexing: {},
