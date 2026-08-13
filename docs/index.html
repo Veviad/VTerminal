@@ -63,7 +63,7 @@
         "name": "VTerminal",
         "applicationCategory": "DeveloperApplication",
         "operatingSystem": "macOS (Apple Silicon)",
-        "softwareVersion": "0.1.0",
+        "softwareVersion": "0.1.2",
         "url": "https://vterminal.veviad.com/",
         "codeRepository": "https://github.com/Veviad/VTerminal",
         "license": "https://www.gnu.org/licenses/gpl-3.0.html",
@@ -226,7 +226,7 @@
         <div class="header-actions">
           <a
             class="button button-primary header-cta"
-            href="https://github.com/Veviad/VTerminal/releases/download/v0.1.0/VTerminal_0.1.0_aarch64.dmg"
+            href="https://github.com/Veviad/VTerminal/releases/download/v0.1.2/VTerminal_0.1.2_aarch64.dmg"
             >Download</a
           >
           <button
@@ -253,7 +253,7 @@
           <div class="mobile-menu-actions">
             <a
               class="button button-primary"
-              href="https://github.com/Veviad/VTerminal/releases/download/v0.1.0/VTerminal_0.1.0_aarch64.dmg"
+              href="https://github.com/Veviad/VTerminal/releases/download/v0.1.2/VTerminal_0.1.2_aarch64.dmg"
               >Download for macOS</a
             >
             <a
@@ -271,10 +271,10 @@
         <div class="hero-inner shell">
           <a
             class="announcement"
-            href="https://github.com/Veviad/VTerminal/releases/tag/v0.1.0"
-            aria-label="Version 0.1.0 is out. Read the release notes."
+            href="https://github.com/Veviad/VTerminal/releases/tag/v0.1.2"
+            aria-label="Version 0.1.2 is out. Read the release notes."
           >
-            <span class="announcement-badge">0.1.0</span>
+            <span class="announcement-badge">0.1.2</span>
             <span class="announcement-label">Read the release notes</span>
             <svg class="ui-icon" aria-hidden="true"><use href="#i-arrow-right" /></svg>
           </a>
@@ -292,13 +292,12 @@
           </p>
 
           <!-- Versioned asset URL rather than /releases/latest/download/…: the
-               filename carries the version, so a "latest" path 404s the moment
-               0.1.1 ships. Two places to update per release — here and the
-               download section. -->
+               filename carries the version, so a "latest" path 404s when the
+               next version ships. Keep every release CTA below in sync. -->
           <div class="hero-actions">
             <a
               class="button button-primary"
-              href="https://github.com/Veviad/VTerminal/releases/download/v0.1.0/VTerminal_0.1.0_aarch64.dmg"
+              href="https://github.com/Veviad/VTerminal/releases/download/v0.1.2/VTerminal_0.1.2_aarch64.dmg"
             >
               <svg class="ui-icon" aria-hidden="true"><use href="#i-download" /></svg>
               Download for macOS
@@ -310,7 +309,7 @@
             >
           </div>
           <p class="download-meta hero-download-meta">
-            0.1.0 · Apple Silicon · 10 MB ·
+            0.1.2 · Apple Silicon · 11 MB ·
             <a href="#download">not notarized, see setup</a>
           </p>
 
@@ -374,7 +373,7 @@
                 </div>
                 <div class="mock-cmd">cargo test --features local-llm</div>
                 <div class="mock-out">
-                  <span class="is-dim">   Compiling vterminal v0.1.0</span>
+                  <span class="is-dim">   Compiling vterminal v0.1.2</span>
                   <span class="is-dim">    Finished `test` profile in 4.21s</span>
                   <span class="is-ok">test result: ok. 214 passed; 0 failed</span>
                 </div>
@@ -1074,7 +1073,7 @@
               A Disk Image. Drag It Across.
             </h2>
             <p class="section-lead">
-              One 10&nbsp;MB download with on-device inference already compiled
+              One 11&nbsp;MB download with on-device inference already compiled
               in — llama.cpp and its Metal kernels ship inside the app, so there
               is nothing to build and no daemon to install.
             </p>
@@ -1090,13 +1089,20 @@
               </div>
               <div class="req-row">
                 <dt>Download</dt>
-                <dd>10&nbsp;MB disk image</dd>
+                <dd>11&nbsp;MB disk image</dd>
               </div>
               <div class="req-row">
                 <dt>Signature</dt>
                 <dd>
                   ad-hoc signed, not notarized — one extra step on first
                   launch, see step 3
+                </dd>
+              </div>
+              <div class="req-row">
+                <dt>Updates</dt>
+                <dd>
+                  experimental and opt-in — signed updater downloads always ask
+                  before installing and restarting
                 </dd>
               </div>
               <div class="req-row">
@@ -1114,6 +1120,14 @@
               covers the source build, and building also sidesteps the Gatekeeper
               step entirely, since a locally built app is never quarantined.
             </p>
+            <p class="install-note">
+              <strong>New in 0.1.2: Experimental automatic updates.</strong>
+              After installing, open <strong>Settings → Updates</strong> to check
+              manually or opt in to checks every 24 hours. Stable releases and
+              prereleases share one channel, updater archives are
+              cryptographically verified, and every install requires your
+              confirmation before VTerminal restarts.
+            </p>
           </div>
 
           <ol class="steps">
@@ -1124,18 +1138,18 @@
                 <div class="download-cta">
                   <a
                     class="button button-primary"
-                    href="https://github.com/Veviad/VTerminal/releases/download/v0.1.0/VTerminal_0.1.0_aarch64.dmg"
+                    href="https://github.com/Veviad/VTerminal/releases/download/v0.1.2/VTerminal_0.1.2_aarch64.dmg"
                   >
                     <svg class="ui-icon" aria-hidden="true">
                       <use href="#i-download" />
                     </svg>
-                    VTerminal 0.1.0
+                    VTerminal 0.1.2
                   </a>
                   <span class="download-meta">
-                    <code>VTerminal_0.1.0_aarch64.dmg</code><br />
-                    10&nbsp;MB ·
+                    <code>VTerminal_0.1.2_aarch64.dmg</code><br />
+                    11&nbsp;MB ·
                     <a
-                      href="https://github.com/Veviad/VTerminal/releases/tag/v0.1.0"
+                      href="https://github.com/Veviad/VTerminal/releases/tag/v0.1.2"
                       >release notes</a
                     >
                   </span>
@@ -1149,7 +1163,7 @@
                 <p>
                   The build is not notarized, so verify it if you like. Download
                   <a
-                    href="https://github.com/Veviad/VTerminal/releases/download/v0.1.0/SHA256SUMS.txt"
+                    href="https://github.com/Veviad/VTerminal/releases/download/v0.1.2/SHA256SUMS.txt"
                     >SHA256SUMS.txt</a
                   >
                   next to the image and run:
@@ -1173,8 +1187,12 @@
               <div class="step-body">
                 <h3>Drag VTerminal to Applications</h3>
                 <p>
-                  Open the disk image and drag the app across, as usual. Then
-                  eject the image.
+                  If you are upgrading, quit VTerminal completely first. Open
+                  the new disk image and replace the copy in Applications, then
+                  eject every older VTerminal image before launching
+                  <code>/Applications/VTerminal.app</code>. A running or mounted
+                  older copy can otherwise be reopened instead of the version
+                  you just installed.
                 </p>
               </div>
             </li>
@@ -1263,7 +1281,7 @@
           <div class="cta-actions">
             <a
               class="button button-primary"
-              href="https://github.com/Veviad/VTerminal/releases/download/v0.1.0/VTerminal_0.1.0_aarch64.dmg"
+              href="https://github.com/Veviad/VTerminal/releases/download/v0.1.2/VTerminal_0.1.2_aarch64.dmg"
               >Download for macOS</a
             >
             <a
