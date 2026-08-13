@@ -32,16 +32,16 @@ pub struct DownloadRequest {
     /// before the `.part` file is atomically promoted or registered.
     pub expected_sha256: Option<String>,
     pub models_dir: PathBuf,
-    pub hf_token: Option<String>,
+    pub hf_token: Option<crate::credentials::Secret>,
 }
 
-fn client(hf_token: Option<&str>) -> Result<reqwest::Client, String> {
+fn client(hf_token: Option<&crate::credentials::Secret>) -> Result<reqwest::Client, String> {
     let mut headers = reqwest::header::HeaderMap::new();
     if let Some(token) = hf_token {
-        if !token.trim().is_empty() {
+        if !token.expose().trim().is_empty() {
             headers.insert(
                 reqwest::header::AUTHORIZATION,
-                format!("Bearer {}", token.trim())
+                format!("Bearer {}", token.expose().trim())
                     .parse()
                     .map_err(|_| "invalid HF token".to_string())?,
             );
@@ -101,7 +101,7 @@ async fn run_inner(
     let part_path = dir.join(format!("{}.part", req.filename));
     let meta_path = dir.join(format!("{}.part.json", req.filename));
 
-    let http = client(req.hf_token.as_deref())?;
+    let http = client(req.hf_token.as_ref())?;
 
     // HEAD for etag + size (follows redirects to the CDN).
     let head = http

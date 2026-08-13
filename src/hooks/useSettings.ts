@@ -24,7 +24,8 @@ export function useSettings() {
       shellIntegrationEnabled: s.shell_integration_enabled,
       temperature: s.temperature,
       activeModelId: s.active_model_id,
-      hfToken: s.hf_token,
+      hasHfToken: s.has_hf_token,
+      credentialStoreStatus: s.credential_store_status,
       historyEnabled: s.history_enabled,
       historyCaptureOutput: s.history_capture_output,
       sendContextToAi: s.send_context_to_ai,
@@ -85,7 +86,8 @@ export function useSettings() {
     if (patch.temperature !== undefined) useAppStore.setState({ temperature: patch.temperature });
     if (patch.active_model_id !== undefined)
       useAppStore.setState({ activeModelId: patch.active_model_id });
-    if (patch.hf_token !== undefined) useAppStore.setState({ hfToken: patch.hf_token || null });
+    if (patch.hf_token !== undefined)
+      useAppStore.setState({ hasHfToken: patch.hf_token.trim().length > 0 });
     if (patch.history_enabled !== undefined) useAppStore.setState({ historyEnabled: patch.history_enabled });
     if (patch.history_capture_output !== undefined)
       useAppStore.setState({ historyCaptureOutput: patch.history_capture_output });

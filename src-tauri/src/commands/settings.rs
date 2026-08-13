@@ -10,6 +10,14 @@ pub const STORE_NAME: &str = "settings.json";
 pub fn get_settings(app: tauri::AppHandle<Wry>) -> Result<Value, String> {
     let store = app.store(STORE_NAME).map_err(|e| e.to_string())?;
     let get = |key: &str, default: Value| store.get(key).unwrap_or(default);
+    let credentials = crate::credentials::state(&app);
+    let presence = |id: crate::credentials::CredentialId| {
+        if credentials.is_blocked() {
+            false
+        } else {
+            credentials.has(&id).unwrap_or(false)
+        }
+    };
     Ok(json!({
         "theme": get("theme", json!("veviad-developer")),
         "font_size": get("font_size", json!(13)),
@@ -39,12 +47,13 @@ pub fn get_settings(app: tauri::AppHandle<Wry>) -> Result<Value, String> {
         // choice IS the signal this reader is wanted. A reader you picked that is
         // not there after a restart is one you stop trusting.
         "vision_auto_load_on_start": get("vision_auto_load_on_start", json!(true)),
-        "hf_token": get("hf_token", Value::Null),
+        "has_hf_token": json!(presence(crate::credentials::CredentialId::HuggingFace)),
         "models_dir": get("models_dir", Value::Null),
         // API keys are write-only: report presence, never the value.
-        "has_anthropic_api_key": json!(store.get("anthropic_api_key").map(|v| !v.is_null()).unwrap_or(false)),
-        "has_openai_api_key": json!(store.get("openai_api_key").map(|v| !v.is_null()).unwrap_or(false)),
-        "has_mistral_api_key": json!(store.get("mistral_api_key").map(|v| !v.is_null()).unwrap_or(false)),
+        "has_anthropic_api_key": json!(presence(crate::credentials::CredentialId::Anthropic)),
+        "has_openai_api_key": json!(presence(crate::credentials::CredentialId::OpenAi)),
+        "has_mistral_api_key": json!(presence(crate::credentials::CredentialId::Mistral)),
+        "credential_store_status": if credentials.is_blocked() { "blocked" } else { "ready" },
         "history_enabled": get("history_enabled", json!(true)),
         "history_capture_output": get("history_capture_output", json!(true)),
         "send_context_to_ai": get("send_context_to_ai", json!(true)),
@@ -131,6 +140,23 @@ pub fn save_settings(
 ) -> Result<(), String> {
     let store = app.store(STORE_NAME).map_err(|e| e.to_string())?;
 
+    // Credentials never enter the JSON store. Do these first so a Keychain
+    // failure cannot make a mixed request appear successful.
+    let credentials = crate::credentials::state(&app);
+    for (id, value) in [
+        (crate::credentials::CredentialId::HuggingFace, hf_token),
+        (
+            crate::credentials::CredentialId::Anthropic,
+            anthropic_api_key,
+        ),
+        (crate::credentials::CredentialId::OpenAi, openai_api_key),
+        (crate::credentials::CredentialId::Mistral, mistral_api_key),
+    ] {
+        if let Some(value) = value {
+            credentials.set_or_clear(&id, value)?;
+        }
+    }
+
     if let Some(v) = theme {
         store.set("theme", json!(v));
     }
@@ -208,20 +234,8 @@ pub fn save_settings(
     if let Some(v) = vision_auto_load_on_start {
         store.set("vision_auto_load_on_start", json!(v));
     }
-    if let Some(v) = hf_token {
-        store.set("hf_token", clearable(v));
-    }
     if let Some(v) = models_dir {
         store.set("models_dir", clearable(v));
-    }
-    if let Some(v) = anthropic_api_key {
-        store.set("anthropic_api_key", clearable(v));
-    }
-    if let Some(v) = openai_api_key {
-        store.set("openai_api_key", clearable(v));
-    }
-    if let Some(v) = mistral_api_key {
-        store.set("mistral_api_key", clearable(v));
     }
     if let Some(v) = history_enabled {
         store.set("history_enabled", json!(v));
@@ -297,7 +311,26 @@ pub fn save_settings(
         store.set("log_level", json!(v));
     }
 
-    store.save().map_err(|e| e.to_string())
+    store.save().map_err(|e| e.to_string())?;
+    secure_settings_permissions(&app)
+}
+
+fn secure_settings_permissions(app: &tauri::AppHandle<Wry>) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        use tauri::Manager;
+        let path = app
+            .path()
+            .app_data_dir()
+            .map_err(|_| "could not secure settings file".to_string())?
+            .join(STORE_NAME);
+        if path.exists() {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|_| "could not secure settings file".to_string())?;
+        }
+    }
+    Ok(())
 }
 
 // ------------------------------------------------ active model + per-model effort
@@ -409,6 +442,13 @@ pub fn get_system_info() -> Result<Value, String> {
 pub fn read_string(app: &tauri::AppHandle<Wry>, key: &str) -> Option<String> {
     let store = app.store(STORE_NAME).ok()?;
     store.get(key).and_then(|v| v.as_str().map(String::from))
+}
+
+pub fn read_credential(
+    app: &tauri::AppHandle<Wry>,
+    id: crate::credentials::CredentialId,
+) -> Result<Option<crate::credentials::Secret>, String> {
+    crate::credentials::state(app).get(&id)
 }
 
 pub fn read_bool(app: &tauri::AppHandle<Wry>, key: &str, default: bool) -> bool {

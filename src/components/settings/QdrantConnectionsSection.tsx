@@ -346,8 +346,8 @@ function ConnectionForm({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const insecureUrl = /^http:\/\//i.test(url) && !isLoopbackUrl(url);
-  const endpointChanged =
-    connection !== null && url.trim().replace(/\/+$/, "") !== connection.url;
+  const credentialOriginChanged =
+    connection !== null && !sameNetworkOrigin(url, connection.url);
   const valid = label.trim().length > 0 && url.trim().length > 0;
 
   const save = async () => {
@@ -359,7 +359,11 @@ function ConnectionForm({
         id: connection?.id,
         label: label.trim(),
         url: url.trim().replace(/\/+$/, ""),
-        ...(apiKey.length > 0 ? { api_key: apiKey } : {}),
+        ...(apiKey.length > 0
+          ? { api_key: apiKey }
+          : credentialOriginChanged && connection && !connection.has_api_key
+            ? { api_key: "" }
+            : {}),
         allow_insecure: allowInsecure,
       });
       setApiKey("");
@@ -414,7 +418,7 @@ function ConnectionForm({
         Use a Database API Key or granular cluster token, not a Qdrant Cloud management key.
         The stored value is never shown again.
       </p>
-      {endpointChanged && connection?.has_api_key && apiKey.length === 0 && (
+      {credentialOriginChanged && connection?.has_api_key && apiKey.length === 0 && (
         <p className="rounded border border-warning/30 bg-warning/10 px-2 py-1 text-[9px] text-warning">
           This changes the credential origin. Enter the new endpoint&apos;s key, or cancel and
           clear the saved key before changing the URL.
@@ -476,6 +480,14 @@ function isLoopbackUrl(value: string): boolean {
   try {
     const host = new URL(value).hostname.toLowerCase();
     return host === "localhost" || host === "127.0.0.1" || host === "[::1]" || host === "::1";
+  } catch {
+    return false;
+  }
+}
+
+function sameNetworkOrigin(left: string, right: string): boolean {
+  try {
+    return new URL(left).origin.toLowerCase() === new URL(right).origin.toLowerCase();
   } catch {
     return false;
   }

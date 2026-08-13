@@ -607,13 +607,13 @@ impl EmbeddingInput {
 #[derive(Clone)]
 pub struct EmbeddingEndpoint {
     base_url: String,
-    api_key: Option<String>,
+    api_key: Option<crate::credentials::Secret>,
 }
 
 impl EmbeddingEndpoint {
     pub fn new(
         base_url: impl Into<String>,
-        api_key: Option<String>,
+        api_key: Option<crate::credentials::Secret>,
     ) -> Result<Self, EmbeddingError> {
         let base_url = base_url.into();
         validate_base_url(&base_url)?;
@@ -625,7 +625,7 @@ impl EmbeddingEndpoint {
     }
 
     pub fn has_api_key(&self) -> bool {
-        self.api_key.as_deref().is_some_and(|key| !key.is_empty())
+        self.api_key.is_some()
     }
 }
 
@@ -704,8 +704,8 @@ pub async fn embed_http_batch(
     let body = embedding_request_body(profile, &texts)?;
 
     let mut request = client.post(url).json(&body);
-    if let Some(api_key) = endpoint.api_key.as_deref().filter(|key| !key.is_empty()) {
-        request = request.bearer_auth(api_key);
+    if let Some(api_key) = endpoint.api_key.as_ref() {
+        request = request.bearer_auth(api_key.expose());
     }
     let response = request
         .send()

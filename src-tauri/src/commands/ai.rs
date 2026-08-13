@@ -95,8 +95,10 @@ pub async fn resolve_provider(app: &tauri::AppHandle<Wry>) -> Result<Resolved, S
         .provider
         .api_key_setting()
         .ok_or("this model has no API key setting")?;
-    let api_key = crate::commands::settings::read_string(app, key_setting)
-        .filter(|k| !k.trim().is_empty())
+    let credential_id = crate::credentials::CredentialId::from_setting(key_setting)
+        .ok_or("this model has no credential mapping")?;
+    let api_key = crate::commands::settings::read_credential(app, credential_id)?
+        .filter(|k| !k.expose().trim().is_empty())
         .ok_or_else(|| {
             format!(
                 "no {} API key — add one in Settings → Models",
@@ -148,6 +150,8 @@ fn resolve_remote(
                 model.label
             )
         })?;
+    let api_key = remote::read_token(app, server_id)?;
+    crate::models::remote_probe::ensure_credential_transport(&server.base_url, api_key.is_some())?;
 
     Ok(Resolved {
         provider: Box::new(crate::provider::http::openai_compat::OpenAiCompatProvider {
@@ -155,7 +159,7 @@ fn resolve_remote(
             endpoint: format!("{}/v1/chat/completions", server.base_url),
             // A missing token is NOT an error: keyless is the normal case for a
             // LAN server. A server that does want one answers 401, which says so.
-            api_key: remote::read_token(app, server_id),
+            api_key,
             split_think_tags: true,
         }),
         model,

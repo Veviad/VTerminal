@@ -155,7 +155,7 @@ pub async fn knowledge_embedding_model_download(
         expected_size: Some(artifact.size_bytes),
         expected_sha256: Some(artifact.sha256.into()),
         models_dir: dir.clone(),
-        hf_token: settings::read_string(&app, "hf_token"),
+        hf_token: settings::read_credential(&app, crate::credentials::CredentialId::HuggingFace)?,
     };
     let sink = InstallSink(&on_event);
     let download_result = download::run(request, &sink, cancel_rx).await;

@@ -111,13 +111,15 @@ fn find_index(servers: &[RemoteServer], id: &str) -> Result<usize, String> {
 
 #[tauri::command]
 pub fn remote_servers_list(app: tauri::AppHandle<Wry>) -> Result<Vec<RemoteServerView>, String> {
-    Ok(remote::read_servers(&app)
+    remote::read_servers(&app)
         .into_iter()
-        .map(|server| RemoteServerView {
-            has_api_key: remote::has_token(&app, &server.id),
-            server,
+        .map(|server| {
+            Ok(RemoteServerView {
+                has_api_key: remote::has_token(&app, &server.id)?,
+                server,
+            })
         })
-        .collect())
+        .collect()
 }
 
 /// Returns the new server's id.
@@ -130,6 +132,8 @@ pub fn remote_servers_create(
     let mut input = server;
     let kind = validate(&mut input)?;
     let id = uuid::Uuid::new_v4().to_string();
+    let api_key = api_key.filter(|key| !key.trim().is_empty());
+    remote_probe::ensure_credential_transport(&input.base_url, api_key.is_some())?;
 
     let mut servers = remote::read_servers(&app);
     servers.push(RemoteServer {
@@ -139,18 +143,21 @@ pub fn remote_servers_create(
         base_url: input.base_url,
         models: Vec::new(),
     });
-    remote::write_servers(&app, &servers)?;
-    if let Some(key) = api_key {
-        remote::write_token(&app, &id, &key)?;
+    if let Some(key) = api_key.as_deref() {
+        remote::write_token(&app, &id, key)?;
+    }
+    if let Err(error) = remote::write_servers(&app, &servers) {
+        let _ = remote::write_token(&app, &id, "");
+        return Err(error);
     }
     Ok(id)
 }
 
 /// Edit a server's kind, label or address.
 ///
-/// Deliberately cannot touch `models` or the token: both have their own commands,
-/// and the id is never rewritten, so a rename or a moved address leaves
-/// `active_model_id` and the stored per-model effort intact.
+/// Deliberately cannot set `models` or a token: both have their own commands.
+/// Moving to a different origin clears the old origin's token before persistence;
+/// the stable id still keeps `active_model_id` and per-model effort intact.
 #[tauri::command(rename_all = "snake_case")]
 pub fn remote_servers_update(
     app: tauri::AppHandle<Wry>,
@@ -161,6 +168,14 @@ pub fn remote_servers_update(
     let kind = validate(&mut input)?;
     let mut servers = remote::read_servers(&app);
     let at = find_index(&servers, &id)?;
+    let origin_changed = !remote_probe::same_origin(&servers[at].base_url, &input.base_url);
+    if origin_changed {
+        // A credential belongs to the old trust boundary. Delete it before the
+        // new origin can be persisted, even when both origins use HTTPS.
+        remote::write_token(&app, &id, "")?;
+    } else {
+        remote_probe::ensure_credential_transport(&input.base_url, remote::has_token(&app, &id)?)?;
+    }
     servers[at].kind = kind;
     servers[at].label = input.label;
     servers[at].base_url = input.base_url;
@@ -178,8 +193,8 @@ pub fn remote_servers_delete(app: tauri::AppHandle<Wry>, id: String) -> Result<(
     let mut servers = remote::read_servers(&app);
     let at = find_index(&servers, &id)?;
     let removed = servers.remove(at);
-    remote::write_servers(&app, &servers)?;
     remote::write_token(&app, &id, "")?;
+    remote::write_servers(&app, &servers)?;
 
     let active =
         crate::commands::settings::read_string(&app, "active_model_id").unwrap_or_default();
@@ -201,7 +216,8 @@ pub fn remote_servers_set_api_key(
     api_key: String,
 ) -> Result<(), String> {
     let servers = remote::read_servers(&app);
-    find_index(&servers, &id)?;
+    let at = find_index(&servers, &id)?;
+    remote_probe::ensure_credential_transport(&servers[at].base_url, !api_key.trim().is_empty())?;
     remote::write_token(&app, &id, &api_key)
 }
 
@@ -249,11 +265,11 @@ pub async fn remote_servers_probe(
     let servers = remote::read_servers(&app);
     let at = find_index(&servers, &id)?;
     let server = &servers[at];
-    let token = remote::read_token(&app, &id);
+    let token = remote::read_token(&app, &id)?;
     remote_probe::probe(
         server.kind,
         &server.base_url,
-        token.as_deref(),
+        token.as_ref().map(crate::credentials::Secret::expose),
         &server.models,
     )
     .await
@@ -299,6 +315,22 @@ mod tests {
                 "{described} should be rejected"
             );
         }
+    }
+
+    #[test]
+    fn changing_server_origin_requires_the_existing_token_to_be_removed() {
+        assert!(!remote_probe::same_origin(
+            "https://old.example.test/v1",
+            "https://new.example.test/v1"
+        ));
+        assert!(!remote_probe::same_origin(
+            "http://localhost:11434",
+            "https://localhost:11434"
+        ));
+        assert!(remote_probe::same_origin(
+            "https://same.example.test/one",
+            "https://same.example.test/two"
+        ));
     }
 
     fn model(wire: &str, ctx: u32) -> RemoteModel {

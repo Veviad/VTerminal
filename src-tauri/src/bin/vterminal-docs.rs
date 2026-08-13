@@ -29,9 +29,6 @@ struct SettingsFile {
     #[serde(default)]
     knowledge_qdrant_connections: Vec<QdrantConnectionRecord>,
     #[serde(default)]
-    knowledge_qdrant_api_keys: HashMap<String, String>,
-    openai_api_key: Option<String>,
-    mistral_api_key: Option<String>,
     models_dir: Option<String>,
 }
 
@@ -206,12 +203,7 @@ fn connection<'a>(context: &'a Context, id: &str) -> Result<&'a QdrantConnection
 
 fn qdrant(context: &Context, id: &str) -> Result<QdrantClient, String> {
     let record = connection(context, id)?;
-    let key = context
-        .settings
-        .knowledge_qdrant_api_keys
-        .get(id)
-        .cloned()
-        .filter(|key| !key.trim().is_empty());
+    let key = vterminal_lib::credentials::headless_qdrant_get(id, &record.url)?;
     let endpoint = QdrantEndpoint::parse(&record.url, key.is_some(), record.allow_insecure)
         .map_err(|error| error.to_string())?;
     QdrantClient::new(endpoint, key).map_err(|error| error.to_string())
@@ -245,8 +237,12 @@ async fn connection_command(context: &Context, args: &[String]) -> Result<(), St
                         "id": record.id,
                         "label": record.label,
                         "url": record.url,
-                        "has_api_key": context.settings.knowledge_qdrant_api_keys
-                            .get(&record.id).is_some_and(|key| !key.trim().is_empty()),
+                        "has_api_key": vterminal_lib::credentials::headless_qdrant_get(
+                            &record.id,
+                            &record.url,
+                        )
+                        .map(|key| key.is_some())
+                        .unwrap_or(false),
                         "status": record.status,
                         "server_version": record.server_version
                     })
@@ -639,11 +635,17 @@ async fn embed_query_cli(
     let (base, key) = match profile.semantic().provider {
         EmbeddingProviderDialect::OpenAi => (
             "https://api.openai.com",
-            context.settings.openai_api_key.clone(),
+            vterminal_lib::credentials::headless_get(
+                &vterminal_lib::credentials::CredentialId::OpenAi,
+            )?
+            .map(|secret| secret.expose().to_owned()),
         ),
         EmbeddingProviderDialect::Mistral => (
             "https://api.mistral.ai",
-            context.settings.mistral_api_key.clone(),
+            vterminal_lib::credentials::headless_get(
+                &vterminal_lib::credentials::CredentialId::Mistral,
+            )?
+            .map(|secret| secret.expose().to_owned()),
         ),
         _ => {
             return Err(
@@ -651,7 +653,11 @@ async fn embed_query_cli(
             )
         }
     };
-    let endpoint = EmbeddingEndpoint::new(base, key).map_err(|error| error.to_string())?;
+    let endpoint = EmbeddingEndpoint::new(
+        base,
+        key.filter(|key| !key.trim().is_empty()).map(Into::into),
+    )
+    .map_err(|error| error.to_string())?;
     let batch = embed_http_batch(
         &reqwest::Client::new(),
         &endpoint,
@@ -743,13 +749,10 @@ fn media_type(source: &str) -> &'static str {
 
 impl Context {
     /// Non-secret values needed by the headless ingestion core. Credentials are
-    /// still resolved from this process's private settings object.
+    /// resolved directly from Keychain by the shared backend.
     fn settings_path_values(&self) -> Value {
         json!({
             "connections": self.settings.knowledge_qdrant_connections,
-            "keys": self.settings.knowledge_qdrant_api_keys,
-            "openai_api_key": self.settings.openai_api_key,
-            "mistral_api_key": self.settings.mistral_api_key,
             "models_dir": self.settings.models_dir
         })
     }

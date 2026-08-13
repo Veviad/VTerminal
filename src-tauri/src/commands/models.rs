@@ -53,7 +53,7 @@ pub async fn models_download(
         expected_size: None,
         expected_sha256: None,
         models_dir: models_dir(&app)?,
-        hf_token: settings::read_string(&app, "hf_token"),
+        hf_token: settings::read_credential(&app, crate::credentials::CredentialId::HuggingFace)?,
     };
 
     let result = download::run(req, &on_event, cancel_rx).await;
@@ -173,7 +173,9 @@ pub fn models_catalog(app: tauri::AppHandle<Wry>) -> Result<Vec<CatalogEntry>, S
             None => (true, false),
         };
         let configured = match model.provider.api_key_setting() {
-            Some(key) => settings::read_string(&app, key).is_some_and(|k| !k.trim().is_empty()),
+            Some(key) => crate::credentials::CredentialId::from_setting(key)
+                .and_then(|id| crate::credentials::state(&app).has(&id).ok())
+                .unwrap_or(false),
             None => true,
         };
         CatalogEntry {

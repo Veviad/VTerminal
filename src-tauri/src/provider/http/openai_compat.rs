@@ -24,7 +24,7 @@ pub struct OpenAiCompatProvider {
     pub endpoint: String,
     /// `None` for a keyless server. Ollama and LM Studio need no auth, and
     /// `bearer_auth` used to be sent unconditionally.
-    pub api_key: Option<String>,
+    pub api_key: Option<crate::credentials::Secret>,
     /// Convert `<think>…</think>` inside `content` into reasoning events.
     ///
     /// True only for user-configured servers. LM Studio serving a GGUF it has no
@@ -378,12 +378,17 @@ impl Provider for OpenAiCompatProvider {
                     .json(&body);
                 // A keyless self-hosted server gets no header at all — sending
                 // `Authorization: Bearer ` is not the same as sending nothing.
-                if let Some(key) = self.api_key.as_deref().filter(|k| !k.trim().is_empty()) {
-                    req = req.bearer_auth(key);
+                if let Some(key) = self
+                    .api_key
+                    .as_ref()
+                    .filter(|k| !k.expose().trim().is_empty())
+                {
+                    req = req.bearer_auth(key.expose());
                 }
                 req
             },
             &mut cancel,
+            self.api_key.as_ref(),
         )
         .await?;
 
@@ -401,7 +406,9 @@ impl Provider for OpenAiCompatProvider {
                 Err(_) => return Ok(false),
             };
             if let Some(err) = v.pointer("/error/message").and_then(Value::as_str) {
-                return Err(ProviderError::Http(err.to_string()));
+                return Err(ProviderError::Http(
+                    crate::credentials::redact_provider_text(err, self.api_key.as_ref()),
+                ));
             }
             if let Some(u) = v.get("usage").filter(|u| !u.is_null()) {
                 prompt_tokens = u["prompt_tokens"].as_u64().unwrap_or(0) as u32;

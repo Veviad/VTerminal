@@ -661,7 +661,7 @@ async fn discover_remote_bucket(
         Some(record) => record,
         None => return Err((bucket, "the Qdrant connection no longer exists".into())),
     };
-    let api_key = store::read_api_key(app, &connection_id);
+    let api_key = store::read_api_key(app, &record).map_err(|error| (bucket.clone(), error))?;
     let endpoint = QdrantEndpoint::parse(&record.url, api_key.is_some(), record.allow_insecure)
         .map_err(|error| (bucket.clone(), error.to_string()))?;
     let client = QdrantClient::new(endpoint, api_key)
@@ -812,19 +812,21 @@ async fn embed_query(
     let (base_url, api_key) = match provider {
         EmbeddingProviderDialect::OpenAi => (
             "https://api.openai.com".to_string(),
-            crate::commands::settings::read_string(app, "openai_api_key")
-                .filter(|key| !key.trim().is_empty())
-                .ok_or_else(|| "OpenAI API key is missing; add it in Settings → Models".to_string())
-                .map(Some)?,
+            crate::commands::settings::read_credential(
+                app,
+                crate::credentials::CredentialId::OpenAi,
+            )?
+            .ok_or_else(|| "OpenAI API key is missing; add it in Settings → Models".to_string())
+            .map(Some)?,
         ),
         EmbeddingProviderDialect::Mistral => (
             "https://api.mistral.ai".to_string(),
-            crate::commands::settings::read_string(app, "mistral_api_key")
-                .filter(|key| !key.trim().is_empty())
-                .ok_or_else(|| {
-                    "Mistral API key is missing; add it in Settings → Models".to_string()
-                })
-                .map(Some)?,
+            crate::commands::settings::read_credential(
+                app,
+                crate::credentials::CredentialId::Mistral,
+            )?
+            .ok_or_else(|| "Mistral API key is missing; add it in Settings → Models".to_string())
+            .map(Some)?,
         ),
         EmbeddingProviderDialect::Ollama | EmbeddingProviderDialect::LmStudio => {
             advanced_embedding_endpoint(app, profile)?
@@ -856,7 +858,7 @@ async fn embed_query(
 fn advanced_embedding_endpoint(
     app: &tauri::AppHandle<Wry>,
     profile: &EmbeddingProfile,
-) -> Result<(String, Option<String>), String> {
+) -> Result<(String, Option<crate::credentials::Secret>), String> {
     use crate::models::remote::ServerKind;
 
     let wanted_kind = match profile.semantic().provider {
@@ -893,7 +895,7 @@ fn advanced_embedding_endpoint(
     };
     Ok((
         server.base_url.clone(),
-        crate::models::remote::read_token(app, &server.id),
+        crate::models::remote::read_token(app, &server.id)?,
     ))
 }
 

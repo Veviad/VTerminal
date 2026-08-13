@@ -387,7 +387,9 @@ export interface AppState {
   shellIntegrationEnabled: boolean;
   temperature: number;
   activeModelId: string;
-  hfToken: string | null;
+  /** Presence only. The Hugging Face token is never held frontend-side. */
+  hasHfToken: boolean;
+  credentialStoreStatus: "ready" | "blocked";
   historyEnabled: boolean;
   historyCaptureOutput: boolean;
   sendContextToAi: boolean;
@@ -1146,7 +1148,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   shellIntegrationEnabled: true,
   temperature: 0.7,
   activeModelId: "local/qwen3.5-9b",
-  hfToken: null,
+  hasHfToken: false,
+  credentialStoreStatus: "ready",
   historyEnabled: true,
   historyCaptureOutput: true,
   sendContextToAi: true,

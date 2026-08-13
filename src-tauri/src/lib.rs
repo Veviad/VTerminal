@@ -1,5 +1,6 @@
 pub mod agent;
 mod commands;
+pub mod credentials;
 mod database;
 pub mod docs;
 pub mod knowledge;
@@ -69,6 +70,9 @@ pub fn run() {
         )
         .setup(|app| {
             let app_data = app.path().app_data_dir()?;
+            let credential_store = credentials::CredentialStoreState::system();
+            credentials::initialize(app.handle(), &credential_store);
+            app.manage(credential_store);
             let conn = database::init(&app_data).map_err(std::io::Error::other)?;
             app.manage(database::DbState(std::sync::Mutex::new(conn)));
             // Document buckets live in their OWN database file, opened lazily — the

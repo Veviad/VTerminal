@@ -80,6 +80,7 @@ fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
 pub(crate) async fn send_with_retry(
     build: impl Fn() -> reqwest::RequestBuilder,
     cancel: &mut tokio::sync::watch::Receiver<bool>,
+    secret: Option<&crate::credentials::Secret>,
 ) -> Result<reqwest::Response, ProviderError> {
     let mut last: Option<ProviderError> = None;
     for attempt in 1..=MAX_ATTEMPTS {
@@ -93,7 +94,7 @@ pub(crate) async fn send_with_retry(
                 // Read the headers BEFORE the body: `text()` consumes the
                 // response and `retry-after` would be gone with it.
                 let wait = backoff(attempt, parse_retry_after(resp.headers()));
-                let err = status_error(status, resp.text().await.unwrap_or_default());
+                let err = status_error(status, resp.text().await.unwrap_or_default(), secret);
                 if !is_transient(status.as_u16()) || attempt == MAX_ATTEMPTS {
                     return Err(err);
                 }
@@ -128,7 +129,11 @@ async fn wait_or_cancel(wait: Duration, cancel: &mut tokio::sync::watch::Receive
     }
 }
 
-fn status_error(status: reqwest::StatusCode, body: String) -> ProviderError {
+fn status_error(
+    status: reqwest::StatusCode,
+    body: String,
+    secret: Option<&crate::credentials::Secret>,
+) -> ProviderError {
     let detail = serde_json::from_str::<serde_json::Value>(&body)
         .ok()
         .and_then(|v| {
@@ -137,6 +142,7 @@ fn status_error(status: reqwest::StatusCode, body: String) -> ProviderError {
                 .and_then(|m| m.as_str().map(String::from))
         })
         .unwrap_or_else(|| body.chars().take(400).collect());
+    let detail = crate::credentials::redact_provider_text(&detail, secret);
     ProviderError::Http(match status.as_u16() {
         401 | 403 => format!(
             "authentication failed ({status}) — check the API key in Settings → Models: {detail}"
@@ -268,7 +274,19 @@ mod tests {
 
     #[test]
     fn auth_failures_name_the_setting_to_fix() {
-        let e = status_error(reqwest::StatusCode::UNAUTHORIZED, String::new()).to_string();
+        let e = status_error(reqwest::StatusCode::UNAUTHORIZED, String::new(), None).to_string();
         assert!(e.contains("Settings → Models"), "{e}");
+    }
+
+    #[test]
+    fn provider_status_errors_never_expose_credentials() {
+        let secret = crate::credentials::Secret::from("sentinel-provider-secret");
+        let error = status_error(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"error":{"message":"bad sentinel-provider-secret"}}"#.into(),
+            Some(&secret),
+        )
+        .to_string();
+        assert!(!error.contains("sentinel-provider-secret"), "{error}");
     }
 }

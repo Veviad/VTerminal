@@ -183,16 +183,18 @@ fn profile_operational(
     let semantic = profile.semantic();
     match semantic.provider {
         EmbeddingProviderDialect::OpenAi => {
-            crate::commands::settings::read_string(app, "openai_api_key")
-                .filter(|key| !key.trim().is_empty())
-                .map(|_| ())
-                .ok_or_else(|| "OpenAI API key is missing".into())
+            if crate::credentials::state(app).has(&crate::credentials::CredentialId::OpenAi)? {
+                Ok(())
+            } else {
+                Err("OpenAI API key is missing".into())
+            }
         }
         EmbeddingProviderDialect::Mistral => {
-            crate::commands::settings::read_string(app, "mistral_api_key")
-                .filter(|key| !key.trim().is_empty())
-                .map(|_| ())
-                .ok_or_else(|| "Mistral API key is missing".into())
+            if crate::credentials::state(app).has(&crate::credentials::CredentialId::Mistral)? {
+                Ok(())
+            } else {
+                Err("Mistral API key is missing".into())
+            }
         }
         EmbeddingProviderDialect::LocalLlamaCpp => {
             let app_data = app
@@ -406,26 +408,26 @@ pub struct QdrantConnectionView {
 fn connection_view(
     app: &tauri::AppHandle<Wry>,
     connection: &QdrantConnectionRecord,
-) -> QdrantConnectionView {
-    QdrantConnectionView {
+) -> Result<QdrantConnectionView, String> {
+    Ok(QdrantConnectionView {
         id: connection.id.clone(),
         label: connection.label.clone(),
         url: connection.url.clone(),
-        has_api_key: store::has_api_key(app, &connection.id),
+        has_api_key: store::has_api_key(app, &connection.id)?,
         allow_insecure: connection.allow_insecure,
         status: connection.status.clone(),
         server_version: connection.server_version.clone(),
         last_checked_at: connection.last_checked_at,
         error: connection.error.clone(),
         collections: cached_bucket_views(connection),
-    }
+    })
 }
 
 fn qdrant_client(
     app: &tauri::AppHandle<Wry>,
     connection: &QdrantConnectionRecord,
 ) -> Result<QdrantClient, String> {
-    let key = store::read_api_key(app, &connection.id);
+    let key = store::read_api_key(app, connection)?;
     let endpoint = QdrantEndpoint::parse(&connection.url, key.is_some(), connection.allow_insecure)
         .map_err(|error| error.to_string())?;
     QdrantClient::new(endpoint, key).map_err(|error| error.to_string())
@@ -594,81 +596,116 @@ pub fn knowledge_connections_list(
     app: tauri::AppHandle<Wry>,
 ) -> Result<Vec<QdrantConnectionView>, String> {
     gate(&app)?;
-    Ok(store::read_connections(&app)
+    store::read_connections(&app)
         .iter()
         .map(|connection| connection_view(&app, connection))
-        .collect())
+        .collect::<Result<Vec<_>, _>>()
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn knowledge_connections_create(
+pub async fn knowledge_connections_create(
     app: tauri::AppHandle<Wry>,
     connection: QdrantConnectionInput,
     api_key: Option<String>,
 ) -> Result<String, String> {
     gate(&app)?;
+    let _process_lock = knowledge_writer_lock(&app).await?;
     let input = connection.validate()?;
     let id = uuid::Uuid::new_v4().to_string();
-    let mut connections = store::read_connections(&app);
-    connections.push(store::new_record(id.clone(), input));
-    store::write_connections_and_api_key(&app, &connections, &id, api_key.as_deref())?;
+    store::create_connection(
+        &app,
+        store::new_record(id.clone(), input),
+        api_key.as_deref(),
+    )?;
     Ok(id)
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn knowledge_connections_update(
+pub async fn knowledge_connections_update(
     app: tauri::AppHandle<Wry>,
+    docs: State<'_, crate::docs::db::DocsDb>,
     id: String,
     connection: QdrantConnectionInput,
     api_key: Option<String>,
 ) -> Result<(), String> {
     gate(&app)?;
+    let _process_lock = knowledge_writer_lock(&app).await?;
     let input = connection.validate()?;
-    let mut connections = store::read_connections(&app);
-    let record = store::find_connection_mut(&mut connections, &id)?;
+    let connections = store::read_connections(&app);
+    let record = store::find_connection(&connections, &id)?;
     let endpoint_changed = record.url != input.url;
-    if endpoint_changed && store::has_api_key(&app, &id) && api_key.is_none() {
-        return Err(
-            "changing the Qdrant URL requires a replacement key; clear the saved key first if the new endpoint needs none"
-                .into(),
-        );
+
+    // A binding and a resumable job describe one concrete vector space. Once
+    // the connection points at a different endpoint (including a different
+    // path prefix on the same host), retaining either
+    // could apply the old cluster's contract or content to a same-named
+    // collection on the new cluster. The writer lock ensures no ingest/import
+    // can race this invalidation. Do it before changing settings so any later
+    // failure is fail-closed (the user may need to re-import, but data cannot be
+    // sent to the wrong origin).
+    if endpoint_changed && docs.exists() {
+        docs.with(|database| {
+            semantic::delete_qdrant_bindings_for_connection(database, &id)?;
+            database
+                .execute(
+                    "UPDATE knowledge_jobs
+                        SET status='failed',
+                            error='Qdrant connection endpoint changed; start a new ingestion job',
+                            updated_at=?2
+                      WHERE json_extract(target_ref_json,'$.source')='qdrant'
+                        AND json_extract(target_ref_json,'$.connection_id')=?1
+                        AND status!='completed'",
+                    rusqlite::params![id, semantic::now_ms()],
+                )
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        })?;
     }
-    store::update_record(record, input);
-    store::write_connections_and_api_key(&app, &connections, &id, api_key.as_deref())
+    store::update_connection(&app, &id, input, api_key.as_deref())?;
+    Ok(())
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn knowledge_connections_set_api_key(
+pub async fn knowledge_connections_set_api_key(
     app: tauri::AppHandle<Wry>,
     id: String,
     api_key: String,
 ) -> Result<(), String> {
     gate(&app)?;
+    let _process_lock = knowledge_writer_lock(&app).await?;
     store::find_connection(&store::read_connections(&app), &id)?;
     store::write_api_key(&app, &id, &api_key)
 }
 
 /// Forgetting a connection never sends a network request.
 #[tauri::command(rename_all = "snake_case")]
-pub fn knowledge_connections_delete(
+pub async fn knowledge_connections_delete(
     app: tauri::AppHandle<Wry>,
     docs: State<'_, crate::docs::db::DocsDb>,
     id: String,
 ) -> Result<(), String> {
     gate(&app)?;
-    let mut connections = store::read_connections(&app);
-    let before = connections.len();
-    connections.retain(|connection| connection.id != id);
-    if connections.len() == before {
-        return Err("no such Qdrant connection".into());
-    }
-    store::write_connections(&app, &connections)?;
-    store::write_api_key(&app, &id, "")?;
+    let _process_lock = knowledge_writer_lock(&app).await?;
+    store::find_connection(&store::read_connections(&app), &id)?;
     if docs.exists() {
         docs.with(|database| {
-            semantic::delete_qdrant_bindings_for_connection(database, &id).map(|_| ())
+            semantic::delete_qdrant_bindings_for_connection(database, &id)?;
+            database
+                .execute(
+                    "UPDATE knowledge_jobs
+                        SET status='failed',
+                            error='Qdrant connection was removed; start a new ingestion job',
+                            updated_at=?2
+                      WHERE json_extract(target_ref_json,'$.source')='qdrant'
+                        AND json_extract(target_ref_json,'$.connection_id')=?1
+                        AND status!='completed'",
+                    rusqlite::params![id, semantic::now_ms()],
+                )
+                .map_err(|error| error.to_string())?;
+            Ok(())
         })?;
     }
+    store::delete_connection(&app, &id)?;
     Ok(())
 }
 
@@ -679,7 +716,7 @@ pub async fn knowledge_connections_refresh(
     id: String,
 ) -> Result<QdrantConnectionView, String> {
     gate(&app)?;
-    let mut connections = store::read_connections(&app);
+    let connections = store::read_connections(&app);
     let at = connections
         .iter()
         .position(|connection| connection.id == id)
@@ -764,19 +801,24 @@ pub async fn knowledge_connections_refresh(
     }
     .await;
 
-    match refresh {
+    let updated = match refresh {
         Ok((version, buckets)) => {
             let values = buckets
                 .into_iter()
                 .map(serde_json::to_value)
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|error| error.to_string())?;
-            store::set_discovery(&mut connections[at], version, values, checked_at);
+            store::update_connection_if_current(&app, &snapshot, move |current| {
+                store::set_discovery(current, version, values, checked_at);
+                Ok(())
+            })?
         }
-        Err(error) => store::set_discovery_error(&mut connections[at], error, checked_at),
-    }
-    store::write_connections(&app, &connections)?;
-    Ok(connection_view(&app, &connections[at]))
+        Err(error) => store::update_connection_if_current(&app, &snapshot, move |current| {
+            store::set_discovery_error(current, error, checked_at);
+            Ok(())
+        })?,
+    };
+    connection_view(&app, &updated)
 }
 
 #[tauri::command]
@@ -916,7 +958,7 @@ pub async fn knowledge_buckets_create(
     };
 
     let selected = selected.ok_or("a remote bucket requires an embedding profile")?;
-    let mut connections = store::read_connections(&app);
+    let connections = store::read_connections(&app);
     let at = connections
         .iter()
         .position(|connection| connection.id == connection_id)
@@ -954,22 +996,20 @@ pub async fn knowledge_buckets_create(
         false,
         None,
     );
-    let mut cached = cached_bucket_views(&snapshot);
-    cached.retain(|bucket| bucket.label != name);
-    cached.push(view.clone());
-    let values = cached
-        .into_iter()
-        .map(serde_json::to_value)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())?;
-    store::set_discovery(
-        &mut connections[at],
-        server.version,
-        values,
-        semantic::now_ms(),
-    );
-    store::write_connections(&app, &connections)?;
-    Ok(view)
+    let return_view = view.clone();
+    store::update_connection_if_current(&app, &snapshot, move |current| {
+        let mut current_cached = cached_bucket_views(current);
+        current_cached.retain(|bucket| bucket.label != name);
+        current_cached.push(view.clone());
+        let values = current_cached
+            .into_iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        store::set_discovery(current, server.version, values, semantic::now_ms());
+        Ok(())
+    })?;
+    Ok(return_view)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -1004,14 +1044,17 @@ pub async fn knowledge_buckets_delete(
                         .map(|_| ())
                 })?;
             }
-            let mut connections = store::read_connections(&app);
-            let connection = store::find_connection_mut(&mut connections, &connection_id)?;
-            connection.collections.retain(|value| {
-                serde_json::from_value::<KnowledgeBucketView>(value.clone())
-                    .ok()
-                    .is_none_or(|bucket| bucket.label != collection)
-            });
-            store::write_connections(&app, &connections)
+            let connections = store::read_connections(&app);
+            let snapshot = store::find_connection(&connections, &connection_id)?.clone();
+            store::update_connection_if_current(&app, &snapshot, |current| {
+                current.collections.retain(|value| {
+                    serde_json::from_value::<KnowledgeBucketView>(value.clone())
+                        .ok()
+                        .is_none_or(|bucket| bucket.label != collection)
+                });
+                Ok(())
+            })
+            .map(|_| ())
         }
     }
 }
@@ -1151,7 +1194,7 @@ pub async fn knowledge_embedding_profile_create_cloud(
     dimensions: Option<u32>,
 ) -> Result<String, String> {
     gate(&app)?;
-    let (profile, key_name, base_url, id) = match provider.as_str() {
+    let (profile, credential_id, base_url, id) = match provider.as_str() {
         "openai" => {
             let max = match model.as_str() {
                 "text-embedding-3-small" => 1536,
@@ -1165,7 +1208,7 @@ pub async fn knowledge_embedding_profile_create_cloud(
             (
                 embedding::openai_profile(model.clone(), dimensions)
                     .map_err(|error| error.to_string())?,
-                "openai_api_key",
+                crate::credentials::CredentialId::OpenAi,
                 "https://api.openai.com",
                 format!("openai/{model}/{dimensions}"),
             )
@@ -1183,15 +1226,14 @@ pub async fn knowledge_embedding_profile_create_cloud(
             (
                 embedding::mistral_profile(model.clone(), dimensions)
                     .map_err(|error| error.to_string())?,
-                "mistral_api_key",
+                crate::credentials::CredentialId::Mistral,
                 "https://api.mistral.ai",
                 format!("mistral/{model}/{dimensions}"),
             )
         }
         _ => return Err("only OpenAI and Mistral cloud embeddings are supported".into()),
     };
-    let key = crate::commands::settings::read_string(&app, key_name)
-        .filter(|key| !key.trim().is_empty())
+    let key = crate::commands::settings::read_credential(&app, credential_id)?
         .ok_or_else(|| format!("add the {provider} API key in Settings first"))?;
     let endpoint = embedding::EmbeddingEndpoint::new(base_url, Some(key))
         .map_err(|error| error.to_string())?;
@@ -1344,12 +1386,8 @@ pub async fn knowledge_qdrant_import_save(
         model_attested: true,
     };
 
-    let mut connections = store::read_connections(&app);
-    let connection_at = connections
-        .iter()
-        .position(|connection| connection.id == connection_id)
-        .ok_or_else(|| "no such Qdrant connection".to_string())?;
-    let connection = connections[connection_at].clone();
+    let connections = store::read_connections(&app);
+    let connection = store::find_connection(&connections, &connection_id)?.clone();
     let client = qdrant_client(&app, &connection)?;
     let info = client
         .collection_info(&collection)
@@ -1438,22 +1476,20 @@ pub async fn knowledge_qdrant_import_save(
             imported_binding: Some(&binding),
         },
     );
-    let mut cached = cached_bucket_views(&connection);
-    cached.retain(|bucket| bucket.label != collection);
-    cached.push(remote_bucket_view(
-        raw,
-        &connection.label,
-        &profiles,
-        false,
-        None,
-    ));
-    cached.sort_by_key(|bucket| bucket.label.to_lowercase());
-    connections[connection_at].collections = cached
-        .into_iter()
-        .map(serde_json::to_value)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())?;
-    store::write_connections(&app, &connections)
+    let imported_view = remote_bucket_view(raw, &connection.label, &profiles, false, None);
+    store::update_connection_if_current(&app, &connection, move |current| {
+        let mut cached = cached_bucket_views(current);
+        cached.retain(|bucket| bucket.label != collection);
+        cached.push(imported_view);
+        cached.sort_by_key(|bucket| bucket.label.to_lowercase());
+        current.collections = cached
+            .into_iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    })
+    .map(|_| ())
 }
 
 /// Forget only VTerminal's local interpretation. The remote collection and every
@@ -1478,31 +1514,34 @@ pub async fn knowledge_qdrant_import_remove(
             semantic::delete_qdrant_binding(database, &connection_id, &collection).map(|_| ())
         })?;
     }
-    let mut connections = store::read_connections(&app);
-    if let Some(connection) = connections
-        .iter_mut()
+    let connections = store::read_connections(&app);
+    if let Some(snapshot) = connections
+        .iter()
         .find(|connection| connection.id == connection_id)
+        .cloned()
     {
-        for value in &mut connection.collections {
-            let Ok(mut bucket) = serde_json::from_value::<KnowledgeBucketView>(value.clone())
-            else {
-                continue;
-            };
-            if bucket.label != collection {
-                continue;
+        store::update_connection_if_current(&app, &snapshot, move |connection| {
+            for value in &mut connection.collections {
+                let Ok(mut bucket) = serde_json::from_value::<KnowledgeBucketView>(value.clone())
+                else {
+                    continue;
+                };
+                if bucket.label != collection {
+                    continue;
+                }
+                bucket.profile = None;
+                bucket.compatibility = "needs_import".into();
+                bucket.compatibility_reason = Some(
+                    "This collection has no VTerminal embedding metadata. Map its vector and payload fields in the import wizard."
+                        .into(),
+                );
+                bucket.attachable = false;
+                bucket.vector_name = None;
+                bucket.imported = false;
+                *value = serde_json::to_value(bucket).map_err(|error| error.to_string())?;
             }
-            bucket.profile = None;
-            bucket.compatibility = "needs_import".into();
-            bucket.compatibility_reason = Some(
-                "This collection has no VTerminal embedding metadata. Map its vector and payload fields in the import wizard."
-                    .into(),
-            );
-            bucket.attachable = false;
-            bucket.vector_name = None;
-            bucket.imported = false;
-            *value = serde_json::to_value(bucket).map_err(|error| error.to_string())?;
-        }
-        store::write_connections(&app, &connections)?;
+            Ok(())
+        })?;
     }
     Ok(())
 }

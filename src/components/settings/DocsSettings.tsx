@@ -34,6 +34,7 @@ import { RemoteDocumentsPanel } from "./RemoteDocumentsPanel";
 import { TurboQuantPanel } from "./TurboQuantPanel";
 import { QdrantImportWizard } from "./QdrantImportWizard";
 import { AddKnowledgeWizard } from "./AddKnowledgeWizard";
+import { CredentialStoreBanner } from "./ModelsSettings";
 
 /** The Docs tab.
  *
@@ -100,6 +101,7 @@ export function DocsSettings() {
 
   return (
     <div className="space-y-6">
+      <CredentialStoreBanner />
       <section className="space-y-3">
         <h3 className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">
           {S.settings.docs.title}

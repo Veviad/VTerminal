@@ -6,8 +6,6 @@
 //! revision activation. Job payloads intentionally contain extracted text but never
 //! original binaries or credentials, which makes retry possible after an app restart.
 
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{Manager, Wry};
@@ -64,10 +62,6 @@ pub struct IngestRequest {
 struct HeadlessSettings {
     #[serde(default)]
     connections: Vec<store::QdrantConnectionRecord>,
-    #[serde(default)]
-    keys: HashMap<String, String>,
-    openai_api_key: Option<String>,
-    mistral_api_key: Option<String>,
     models_dir: Option<String>,
 }
 
@@ -930,7 +924,7 @@ async fn managed_qdrant_target(
 ) -> Result<(QdrantClient, EmbeddingProfile), String> {
     let connections = store::read_connections(app);
     let connection = store::find_connection(&connections, connection_id)?;
-    let key = store::read_api_key(app, connection_id);
+    let key = store::read_api_key(app, connection)?;
     let endpoint = QdrantEndpoint::parse(&connection.url, key.is_some(), connection.allow_insecure)
         .map_err(|error| error.to_string())?;
     let client = QdrantClient::new(endpoint, key).map_err(|error| error.to_string())?;
@@ -1090,15 +1084,23 @@ fn embedding_endpoint(
     app: &tauri::AppHandle<Wry>,
     profile: &EmbeddingProfile,
     provider: EmbeddingProviderDialect,
-) -> Result<(String, Option<String>), String> {
+) -> Result<(String, Option<crate::credentials::Secret>), String> {
     match provider {
         EmbeddingProviderDialect::OpenAi => Ok((
             "https://api.openai.com".into(),
-            Some(required_setting(app, "openai_api_key", "OpenAI")?),
+            Some(required_credential(
+                app,
+                crate::credentials::CredentialId::OpenAi,
+                "OpenAI",
+            )?),
         )),
         EmbeddingProviderDialect::Mistral => Ok((
             "https://api.mistral.ai".into(),
-            Some(required_setting(app, "mistral_api_key", "Mistral")?),
+            Some(required_credential(
+                app,
+                crate::credentials::CredentialId::Mistral,
+                "Mistral",
+            )?),
         )),
         EmbeddingProviderDialect::Ollama | EmbeddingProviderDialect::LmStudio => {
             advanced_embedding_endpoint(app, profile)
@@ -1107,20 +1109,19 @@ fn embedding_endpoint(
     }
 }
 
-fn required_setting(
+fn required_credential(
     app: &tauri::AppHandle<Wry>,
-    name: &str,
+    id: crate::credentials::CredentialId,
     provider: &str,
-) -> Result<String, String> {
-    crate::commands::settings::read_string(app, name)
-        .filter(|value| !value.trim().is_empty())
+) -> Result<crate::credentials::Secret, String> {
+    crate::commands::settings::read_credential(app, id)?
         .ok_or_else(|| format!("{provider} API key is missing; add it in Settings first"))
 }
 
 fn advanced_embedding_endpoint(
     app: &tauri::AppHandle<Wry>,
     profile: &EmbeddingProfile,
-) -> Result<(String, Option<String>), String> {
+) -> Result<(String, Option<crate::credentials::Secret>), String> {
     use crate::models::remote::ServerKind;
     let kind = match profile.semantic().provider {
         EmbeddingProviderDialect::Ollama => ServerKind::Ollama,
@@ -1154,7 +1155,7 @@ fn advanced_embedding_endpoint(
     };
     Ok((
         server.base_url.clone(),
-        crate::models::remote::read_token(app, &server.id),
+        crate::models::remote::read_token(app, &server.id)?,
     ))
 }
 
@@ -1546,11 +1547,7 @@ fn qdrant_headless(
         .iter()
         .find(|connection| connection.id == connection_id)
         .ok_or_else(|| format!("unknown Qdrant connection {connection_id:?}"))?;
-    let key = settings
-        .keys
-        .get(connection_id)
-        .cloned()
-        .filter(|key| !key.trim().is_empty());
+    let key = crate::credentials::headless_qdrant_get(connection_id, &connection.url)?;
     let endpoint = QdrantEndpoint::parse(&connection.url, key.is_some(), connection.allow_insecure)
         .map_err(|error| error.to_string())?;
     QdrantClient::new(endpoint, key).map_err(|error| error.to_string())
@@ -1584,12 +1581,16 @@ async fn embed_documents_headless(
             .map_err(|error| error.to_string());
     }
     let (base_url, key) = match profile.semantic().provider {
-        EmbeddingProviderDialect::OpenAi => {
-            ("https://api.openai.com", settings.openai_api_key.clone())
-        }
-        EmbeddingProviderDialect::Mistral => {
-            ("https://api.mistral.ai", settings.mistral_api_key.clone())
-        }
+        EmbeddingProviderDialect::OpenAi => (
+            "https://api.openai.com",
+            crate::credentials::headless_get(&crate::credentials::CredentialId::OpenAi)?
+                .map(|secret| secret.expose().to_owned()),
+        ),
+        EmbeddingProviderDialect::Mistral => (
+            "https://api.mistral.ai",
+            crate::credentials::headless_get(&crate::credentials::CredentialId::Mistral)?
+                .map(|secret| secret.expose().to_owned()),
+        ),
         _ => {
             return Err(
                 "headless ingestion supports built-in local, OpenAI, and Mistral profiles".into(),
@@ -1600,7 +1601,7 @@ async fn embed_documents_headless(
         .filter(|key| !key.trim().is_empty())
         .ok_or_else(|| "the embedding provider API key is missing".to_string())?;
     let endpoint =
-        EmbeddingEndpoint::new(base_url, Some(key)).map_err(|error| error.to_string())?;
+        EmbeddingEndpoint::new(base_url, Some(key.into())).map_err(|error| error.to_string())?;
     embed_http_batch(
         &reqwest::Client::new(),
         &endpoint,
@@ -1620,38 +1621,41 @@ fn remember_point_access(
     collection: &str,
     writable: bool,
 ) -> Result<(), String> {
-    let mut connections = store::read_connections(app);
-    let connection = store::find_connection_mut(&mut connections, connection_id)?;
-    for value in &mut connection.collections {
-        let Ok(mut bucket) = serde_json::from_value::<
-            crate::commands::knowledge::KnowledgeBucketView,
-        >(value.clone()) else {
-            continue;
-        };
-        if matches!(
-            &bucket.bucket_ref,
-            KnowledgeBucketRef::Qdrant { collection: name, .. } if name == collection
-        ) {
-            bucket.access = Some(if writable {
-                match bucket.access {
-                    Some(super::types::CollectionAccess::Manage) => {
-                        super::types::CollectionAccess::Manage
-                    }
-                    _ => super::types::CollectionAccess::PointsReadWrite,
-                }
-            } else {
-                super::types::CollectionAccess::ReadOnly
-            });
-            bucket.writable = writable;
-            bucket.write_capability = if writable {
-                "read_write".into()
-            } else {
-                "read_only".into()
+    let connections = store::read_connections(app);
+    let snapshot = store::find_connection(&connections, connection_id)?.clone();
+    store::update_connection_if_current(app, &snapshot, |connection| {
+        for value in &mut connection.collections {
+            let Ok(mut bucket) = serde_json::from_value::<
+                crate::commands::knowledge::KnowledgeBucketView,
+            >(value.clone()) else {
+                continue;
             };
-            *value = serde_json::to_value(bucket).map_err(|error| error.to_string())?;
+            if matches!(
+                &bucket.bucket_ref,
+                KnowledgeBucketRef::Qdrant { collection: name, .. } if name == collection
+            ) {
+                bucket.access = Some(if writable {
+                    match bucket.access {
+                        Some(super::types::CollectionAccess::Manage) => {
+                            super::types::CollectionAccess::Manage
+                        }
+                        _ => super::types::CollectionAccess::PointsReadWrite,
+                    }
+                } else {
+                    super::types::CollectionAccess::ReadOnly
+                });
+                bucket.writable = writable;
+                bucket.write_capability = if writable {
+                    "read_write".into()
+                } else {
+                    "read_only".into()
+                };
+                *value = serde_json::to_value(bucket).map_err(|error| error.to_string())?;
+            }
         }
-    }
-    store::write_connections(app, &connections)
+        Ok(())
+    })
+    .map(|_| ())
 }
 
 pub fn cancel_job(
@@ -1701,6 +1705,16 @@ pub fn prepare_retry(
         let existing = load_job(connection, id)?;
         if !matches!(existing.status.as_str(), "failed" | "cancelled") {
             return Err("only a failed or cancelled job can be retried".into());
+        }
+        if existing.error.as_deref().is_some_and(|error| {
+            error.starts_with("Qdrant connection origin changed")
+                || error.starts_with("Qdrant connection endpoint changed")
+                || error.starts_with("Qdrant connection was removed")
+        }) {
+            return Err(
+                "this job belongs to a previous Qdrant connection origin; start a new ingestion job"
+                    .into(),
+            );
         }
         let resource_key = existing
             .resource_key

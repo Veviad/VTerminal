@@ -1,12 +1,12 @@
 //! Persistent Qdrant connection configuration and its last successful discovery.
 //!
-//! Credentials deliberately live in a sibling map.  The serializable connection
-//! record cannot contain a key, so list/refresh IPC paths cannot leak one by
-//! accidentally returning the stored object wholesale.
+//! Credentials live in macOS Keychain. The serializable connection record cannot
+//! contain a key, so list/refresh IPC paths cannot leak one by accidentally
+//! returning the stored object wholesale.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::sync::Mutex;
 use tauri::Wry;
 use tauri_plugin_store::StoreExt;
 use url::{Host, Url};
@@ -14,10 +14,14 @@ use url::{Host, Url};
 use crate::commands::settings::STORE_NAME;
 
 const CONNECTIONS_KEY: &str = "knowledge_qdrant_connections";
-const KEYS_KEY: &str = "knowledge_qdrant_api_keys";
 const MAX_CONNECTIONS: usize = 64;
 const MAX_LABEL_CHARS: usize = 64;
 const MAX_CACHED_COLLECTIONS: usize = 2_000;
+
+/// Serializes metadata/key snapshots inside this process. In particular, a
+/// request holding an old connection record can never pick up a replacement key
+/// after that connection has moved to another origin.
+static CONNECTION_CREDENTIAL_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QdrantConnectionRecord {
@@ -99,6 +103,11 @@ fn is_loopback(host: Host<&str>) -> bool {
 }
 
 pub fn read_connections(app: &tauri::AppHandle<Wry>) -> Vec<QdrantConnectionRecord> {
+    let _guard = CONNECTION_CREDENTIAL_LOCK.lock().ok();
+    read_connections_unlocked(app)
+}
+
+fn read_connections_unlocked(app: &tauri::AppHandle<Wry>) -> Vec<QdrantConnectionRecord> {
     app.store(STORE_NAME)
         .ok()
         .and_then(|store| store.get(CONNECTIONS_KEY))
@@ -106,7 +115,7 @@ pub fn read_connections(app: &tauri::AppHandle<Wry>) -> Vec<QdrantConnectionReco
         .unwrap_or_default()
 }
 
-pub fn write_connections(
+fn write_connections_unlocked(
     app: &tauri::AppHandle<Wry>,
     connections: &[QdrantConnectionRecord],
 ) -> Result<(), String> {
@@ -116,45 +125,130 @@ pub fn write_connections(
         ));
     }
     let store = app.store(STORE_NAME).map_err(|error| error.to_string())?;
+    let previous = store.get(CONNECTIONS_KEY);
     store.set(
         CONNECTIONS_KEY,
         serde_json::to_value(connections).map_err(|error| error.to_string())?,
     );
-    store.save().map_err(|error| error.to_string())
+    if let Err(error) = store.save() {
+        match previous {
+            Some(value) => store.set(CONNECTIONS_KEY, value),
+            None => {
+                store.delete(CONNECTIONS_KEY);
+            }
+        }
+        if store.save().is_err() {
+            return Err("Qdrant connection storage failed and could not be restored".into());
+        }
+        return Err(error.to_string());
+    }
+    Ok(())
 }
 
-/// Persist connection metadata and an optional key mutation in one store save.
-/// This prevents a changed origin from ever being paired with the previous
-/// origin's credential between two IPC operations.
-pub fn write_connections_and_api_key(
+pub fn create_connection(
     app: &tauri::AppHandle<Wry>,
-    connections: &[QdrantConnectionRecord],
-    id: &str,
+    record: QdrantConnectionRecord,
     api_key: Option<&str>,
 ) -> Result<(), String> {
-    if connections.len() > MAX_CONNECTIONS {
+    let _guard = CONNECTION_CREDENTIAL_LOCK
+        .lock()
+        .map_err(|_| "Qdrant connection store is unavailable".to_string())?;
+    let mut connections = read_connections_unlocked(app);
+    if connections.iter().any(|current| current.id == record.id) {
+        return Err("a Qdrant connection with this id already exists".into());
+    }
+    if connections.len() >= MAX_CONNECTIONS {
         return Err(format!(
             "at most {MAX_CONNECTIONS} Qdrant connections are supported"
         ));
     }
-    let store = app.store(STORE_NAME).map_err(|error| error.to_string())?;
-    let mut keys = read_keys(app);
+    let credential = crate::credentials::qdrant_id(&record.id, &record.url)?;
+    let credentials = crate::credentials::state(app);
     if let Some(key) = api_key {
-        if key.trim().is_empty() {
-            keys.remove(id);
-        } else {
-            keys.insert(id.to_owned(), key.to_owned());
-        }
+        credentials.set_or_clear(&credential, key.to_owned())?;
     }
-    store.set(
-        CONNECTIONS_KEY,
-        serde_json::to_value(connections).map_err(|error| error.to_string())?,
-    );
-    store.set(
-        KEYS_KEY,
-        serde_json::to_value(keys).map_err(|error| error.to_string())?,
-    );
-    store.save().map_err(|error| error.to_string())
+    connections.push(record);
+    if let Err(error) = write_connections_unlocked(app, &connections) {
+        if api_key.is_some() {
+            credentials.delete(&credential)?;
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+pub fn update_connection(
+    app: &tauri::AppHandle<Wry>,
+    id: &str,
+    input: QdrantConnectionInput,
+    api_key: Option<&str>,
+) -> Result<(QdrantConnectionRecord, QdrantConnectionRecord), String> {
+    let _guard = CONNECTION_CREDENTIAL_LOCK
+        .lock()
+        .map_err(|_| "Qdrant connection store is unavailable".to_string())?;
+    let mut connections = read_connections_unlocked(app);
+    let at = connections
+        .iter()
+        .position(|connection| connection.id == id)
+        .ok_or_else(|| "no such Qdrant connection".to_string())?;
+    let old = connections[at].clone();
+    let old_id = crate::credentials::qdrant_id(id, &old.url)?;
+    let mut new = old.clone();
+    update_record(&mut new, input);
+    let new_id = crate::credentials::qdrant_id(id, &new.url)?;
+    let credentials = crate::credentials::state(app);
+    if old_id != new_id && api_key.is_none() {
+        return Err("changing the Qdrant origin requires a replacement key; pass an empty key explicitly if the new endpoint needs none".into());
+    }
+    let previous_new_key = if api_key.is_some() {
+        credentials.get(&new_id)?
+    } else {
+        None
+    };
+    if let Some(key) = api_key {
+        credentials.set_or_clear(&new_id, key.to_owned())?;
+    }
+    connections[at] = new.clone();
+    if let Err(error) = write_connections_unlocked(app, &connections) {
+        if api_key.is_some() {
+            match previous_new_key {
+                Some(secret) => credentials.set_or_clear(&new_id, secret.expose().to_owned())?,
+                None => credentials.delete(&new_id)?,
+            }
+        }
+        return Err(error);
+    }
+    if old_id != new_id {
+        credentials.delete(&old_id)?;
+    }
+    Ok((old, new))
+}
+
+pub fn delete_connection(
+    app: &tauri::AppHandle<Wry>,
+    id: &str,
+) -> Result<QdrantConnectionRecord, String> {
+    let _guard = CONNECTION_CREDENTIAL_LOCK
+        .lock()
+        .map_err(|_| "Qdrant connection store is unavailable".to_string())?;
+    let mut connections = read_connections_unlocked(app);
+    let at = connections
+        .iter()
+        .position(|connection| connection.id == id)
+        .ok_or_else(|| "no such Qdrant connection".to_string())?;
+    let removed = connections[at].clone();
+    let credential = crate::credentials::qdrant_id(id, &removed.url)?;
+    let credentials = crate::credentials::state(app);
+    let previous_key = credentials.get(&credential)?;
+    credentials.delete(&credential)?;
+    connections.remove(at);
+    if let Err(error) = write_connections_unlocked(app, &connections) {
+        if let Some(secret) = previous_key {
+            credentials.set_or_clear(&credential, secret.expose().to_owned())?;
+        }
+        return Err(error);
+    }
+    Ok(removed)
 }
 
 pub fn find_connection<'a>(
@@ -163,16 +257,6 @@ pub fn find_connection<'a>(
 ) -> Result<&'a QdrantConnectionRecord, String> {
     connections
         .iter()
-        .find(|connection| connection.id == id)
-        .ok_or_else(|| "no such Qdrant connection".to_string())
-}
-
-pub fn find_connection_mut<'a>(
-    connections: &'a mut [QdrantConnectionRecord],
-    id: &str,
-) -> Result<&'a mut QdrantConnectionRecord, String> {
-    connections
-        .iter_mut()
         .find(|connection| connection.id == id)
         .ok_or_else(|| "no such Qdrant connection".to_string())
 }
@@ -232,38 +316,75 @@ pub fn set_discovery_error(record: &mut QdrantConnectionRecord, error: String, c
     record.error = Some(error);
 }
 
-fn read_keys(app: &tauri::AppHandle<Wry>) -> HashMap<String, String> {
-    app.store(STORE_NAME)
-        .ok()
-        .and_then(|store| store.get(KEYS_KEY))
-        .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_default()
+pub fn read_api_key(
+    app: &tauri::AppHandle<Wry>,
+    connection: &QdrantConnectionRecord,
+) -> Result<Option<crate::credentials::Secret>, String> {
+    let _guard = CONNECTION_CREDENTIAL_LOCK
+        .lock()
+        .map_err(|_| "Qdrant connection store is unavailable".to_string())?;
+    let current = read_connections_unlocked(app)
+        .into_iter()
+        .find(|candidate| candidate.id == connection.id)
+        .ok_or_else(|| "the Qdrant connection no longer exists".to_string())?;
+    if current.url != connection.url || current.allow_insecure != connection.allow_insecure {
+        return Err("the Qdrant connection changed; retry the operation".into());
+    }
+    let id = crate::credentials::qdrant_id(&connection.id, &connection.url)?;
+    crate::credentials::state(app).get(&id)
 }
 
-pub fn read_api_key(app: &tauri::AppHandle<Wry>, id: &str) -> Option<String> {
-    read_keys(app)
-        .remove(id)
-        .filter(|key| !key.trim().is_empty())
-}
-
-pub fn has_api_key(app: &tauri::AppHandle<Wry>, id: &str) -> bool {
-    read_api_key(app, id).is_some()
+pub fn has_api_key(app: &tauri::AppHandle<Wry>, id: &str) -> Result<bool, String> {
+    let _guard = CONNECTION_CREDENTIAL_LOCK
+        .lock()
+        .map_err(|_| "Qdrant connection store is unavailable".to_string())?;
+    let connection = read_connections_unlocked(app)
+        .into_iter()
+        .find(|connection| connection.id == id)
+        .ok_or_else(|| "the Qdrant connection no longer exists".to_string())?;
+    let credential = crate::credentials::qdrant_id(id, &connection.url)?;
+    crate::credentials::state(app).has(&credential)
 }
 
 /// Empty clears. The key is never returned by any serializable view.
 pub fn write_api_key(app: &tauri::AppHandle<Wry>, id: &str, api_key: &str) -> Result<(), String> {
-    let store = app.store(STORE_NAME).map_err(|error| error.to_string())?;
-    let mut keys = read_keys(app);
-    if api_key.trim().is_empty() {
-        keys.remove(id);
-    } else {
-        keys.insert(id.to_owned(), api_key.to_owned());
+    let _guard = CONNECTION_CREDENTIAL_LOCK
+        .lock()
+        .map_err(|_| "Qdrant connection store is unavailable".to_string())?;
+    let connection = read_connections_unlocked(app)
+        .into_iter()
+        .find(|connection| connection.id == id)
+        .ok_or_else(|| "the Qdrant connection no longer exists".to_string())?;
+    let credential = crate::credentials::qdrant_id(id, &connection.url)?;
+    crate::credentials::state(app).set_or_clear(&credential, api_key.to_owned())
+}
+
+/// Compare-and-swap one connection record after an async Qdrant operation.
+/// Callers mutate only discovery/cache fields. If the endpoint changed while the
+/// request was in flight, the stale result is rejected rather than restoring an
+/// old URL or overwriting unrelated connection edits.
+pub fn update_connection_if_current(
+    app: &tauri::AppHandle<Wry>,
+    snapshot: &QdrantConnectionRecord,
+    mutate: impl FnOnce(&mut QdrantConnectionRecord) -> Result<(), String>,
+) -> Result<QdrantConnectionRecord, String> {
+    let _guard = CONNECTION_CREDENTIAL_LOCK
+        .lock()
+        .map_err(|_| "Qdrant connection store is unavailable".to_string())?;
+    let mut connections = read_connections_unlocked(app);
+    let current = connections
+        .iter_mut()
+        .find(|connection| connection.id == snapshot.id)
+        .ok_or_else(|| "the Qdrant connection no longer exists".to_string())?;
+    if current.url != snapshot.url || current.allow_insecure != snapshot.allow_insecure {
+        return Err(
+            "the Qdrant connection changed while the operation was running; retry it".into(),
+        );
     }
-    store.set(
-        KEYS_KEY,
-        serde_json::to_value(keys).map_err(|error| error.to_string())?,
-    );
-    store.save().map_err(|error| error.to_string())
+    mutate(current)?;
+    let result = current.clone();
+    write_connections_unlocked(app, &connections)?;
+    Ok(result)
 }
 
 #[cfg(test)]

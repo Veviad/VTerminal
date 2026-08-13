@@ -3,7 +3,7 @@ import { X } from "lucide-react";
 import { useAppStore } from "../../stores/appStore";
 import { useSettings } from "../../hooks/useSettings";
 import * as api from "../../lib/tauri";
-import type { BuiltInProviderId, CatalogEntry } from "../../lib/types";
+import type { BuiltInProviderId, CatalogEntry, SettingsPatch } from "../../lib/types";
 import { refreshModels as refresh } from "../../lib/selectModel";
 import { formatBytes, ModelRow } from "./ModelRow";
 import { RemoteServersSection } from "./RemoteServersSection";
@@ -22,7 +22,7 @@ const PROVIDER_LABELS: Record<BuiltInProviderId, string> = {
   mistral: "Mistral",
 };
 
-const KEY_FIELD: Record<string, keyof import("../../lib/types").SettingsPatch> = {
+const KEY_FIELD: Record<string, keyof SettingsPatch> = {
   anthropic: "anthropic_api_key",
   openai: "openai_api_key",
   mistral: "mistral_api_key",
@@ -41,6 +41,7 @@ export function ModelsSettings() {
 
   return (
     <div className="space-y-8">
+      <CredentialStoreBanner />
       <LoadErrorBanner />
       <ActiveDownloads />
       {PROVIDER_ORDER.map((provider) => {
@@ -67,20 +68,45 @@ export function ModelsSettings() {
 /// floating below the API providers as if it were global.
 function HfTokenField() {
   const { save } = useSettings();
-  const hfToken = useAppStore((s) => s.hfToken);
+  const present = useAppStore((s) => s.hasHfToken);
   return (
     <div className="space-y-1 pt-1">
-      <input
-        type="password"
-        defaultValue={hfToken ?? ""}
-        onBlur={(e) => void save({ hf_token: e.target.value })}
-        placeholder={S.settings.models.hfToken}
-        className="w-full rounded-md border border-border-subtle bg-bg-card px-2 py-1.5 font-mono text-[12px] text-text-primary placeholder:text-text-muted"
-      />
+      <div className="flex gap-2">
+        <input
+          type="password"
+          placeholder={present ? S.settings.models.apiKeyStored : S.settings.models.hfToken}
+          onBlur={(e) => {
+            const value = e.target.value;
+            if (!value) return;
+            void save({ hf_token: value });
+            e.target.value = "";
+          }}
+          className="min-w-0 flex-1 rounded-md border border-border-subtle bg-bg-card px-2 py-1.5 font-mono text-[12px] text-text-primary placeholder:text-text-muted"
+        />
+        {present && (
+          <button
+            type="button"
+            onClick={() => void save({ hf_token: "" })}
+            className="rounded-md border border-border-subtle px-2 text-[11px] text-text-muted hover:text-error"
+          >
+            Clear
+          </button>
+        )}
+      </div>
       <p className="text-[10px] leading-relaxed text-text-muted">
         {S.settings.models.hfTokenHint}
       </p>
     </div>
+  );
+}
+
+export function CredentialStoreBanner() {
+  const status = useAppStore((s) => s.credentialStoreStatus);
+  if (status === "ready") return null;
+  return (
+    <p className="rounded-lg bg-error-subtle px-3 py-2 text-[11px] leading-relaxed text-error">
+      macOS Keychain is unavailable. Credential use is blocked until Keychain access is restored.
+    </p>
   );
 }
 
@@ -138,20 +164,31 @@ function ApiKeyField({ provider }: { provider: BuiltInProviderId }) {
   const field = KEY_FIELD[provider];
   if (!field) return null;
   return (
-    <input
-      type="password"
-      // Never render the stored value — the backend only reports presence.
-      placeholder={present ? S.settings.models.apiKeyStored : S.settings.models.apiKey}
-      onBlur={(e) => {
-        const v = e.target.value;
-        // Only write on an actual edit; blurring an untouched field would clear
-        // a stored key, because "" is the clear sentinel.
-        if (v.length === 0) return;
-        void save({ [field]: v } as never).then(() => void refresh());
-        e.target.value = "";
-      }}
-      className="w-full rounded-md border border-border-subtle bg-bg-card px-2 py-1.5 font-mono text-[12px] text-text-primary placeholder:text-text-muted"
-    />
+    <div className="flex gap-2">
+      <input
+        type="password"
+        // Never render the stored value — the backend only reports presence.
+        placeholder={present ? S.settings.models.apiKeyStored : S.settings.models.apiKey}
+        onBlur={(e) => {
+          const v = e.target.value;
+          if (v.length === 0) return;
+          void save({ [field]: v } as never).then(() => void refresh());
+          e.target.value = "";
+        }}
+        className="min-w-0 flex-1 rounded-md border border-border-subtle bg-bg-card px-2 py-1.5 font-mono text-[12px] text-text-primary placeholder:text-text-muted"
+      />
+      {present && (
+        <button
+          type="button"
+          onClick={() =>
+            void save({ [field]: "" } as never).then(() => void refresh())
+          }
+          className="rounded-md border border-border-subtle px-2 text-[11px] text-text-muted hover:text-error"
+        >
+          Clear
+        </button>
+      )}
+    </div>
   );
 }
 

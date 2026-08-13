@@ -170,7 +170,7 @@ pub enum QdrantError {
 /// exposes only whether a key exists.
 pub struct QdrantClient {
     endpoint: QdrantEndpoint,
-    api_key: Option<String>,
+    api_key: Option<crate::credentials::Secret>,
     client: reqwest::Client,
 }
 
@@ -185,10 +185,13 @@ impl fmt::Debug for QdrantClient {
 }
 
 impl QdrantClient {
-    pub fn new(endpoint: QdrantEndpoint, api_key: Option<String>) -> Result<Self, QdrantError> {
+    pub fn new(
+        endpoint: QdrantEndpoint,
+        api_key: Option<crate::credentials::Secret>,
+    ) -> Result<Self, QdrantError> {
         let api_key = api_key.and_then(|key| {
-            let trimmed = key.trim();
-            (!trimmed.is_empty()).then(|| trimmed.to_string())
+            let trimmed = key.expose().trim();
+            (!trimmed.is_empty()).then(|| crate::credentials::Secret::from(trimmed))
         });
         // Re-run the keyed transport policy so a caller cannot parse without a
         // key and add one afterwards to bypass the TLS gate.
@@ -850,7 +853,7 @@ impl QdrantClient {
         let url = self.endpoint.url(path);
         let mut request = self.client.request(method, &url);
         if let Some(api_key) = &self.api_key {
-            request = request.header("api-key", api_key);
+            request = request.header("api-key", api_key.expose());
         }
         if let Some(body) = body {
             request = request.json(&body);
@@ -1400,7 +1403,11 @@ mod tests {
     #[test]
     fn debug_never_contains_api_key() {
         let endpoint = QdrantEndpoint::parse("https://qdrant.example", true, false).unwrap();
-        let client = QdrantClient::new(endpoint, Some("super-secret-key".into())).unwrap();
+        let client = QdrantClient::new(
+            endpoint,
+            Some(crate::credentials::Secret::from("super-secret-key")),
+        )
+        .unwrap();
         let debug = format!("{client:?}");
         assert!(!debug.contains("super-secret-key"));
         assert!(debug.contains("has_api_key: true"));

@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { Check, Cloud, Download, HardDrive, Loader2, X } from "lucide-react";
 
+import { sanitizeExternalWebUrl } from "../../lib/externalUrl";
 import * as api from "../../lib/tauri";
 import type {
   DownloadEvent,
@@ -274,14 +276,18 @@ function EmbeddingModelCard({
               />
               <span>
                 I accept the{" "}
-                <a
-                  href={`https://huggingface.co/${model.model}`}
-                  target="_blank"
-                  rel="noreferrer"
+                <button
+                  type="button"
                   className="text-accent hover:underline"
+                  onClick={() => {
+                    const safeUrl = sanitizeExternalWebUrl(
+                      `https://huggingface.co/${model.model}`,
+                    );
+                    if (safeUrl) void openUrl(safeUrl);
+                  }}
                 >
                   upstream model license
-                </a>
+                </button>
                 .
               </span>
             </label>
