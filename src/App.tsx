@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AppShell } from "./components/layout/AppShell";
 import { applyTheme } from "./lib/applyTheme";
 import { updateAllTermOptions } from "./lib/termRegistry";
@@ -8,11 +8,18 @@ import { useSessions } from "./hooks/useSessions";
 import { startPersistence } from "./lib/sessionPersistence";
 import { warmStart } from "./lib/selectModel";
 import * as api from "./lib/tauri";
+import { useAutoUpdater } from "./hooks/useAutoUpdater";
+import { useUpdateStore } from "./stores/updateStore";
 
 /** A run that gets this far is treated as good, resetting the crash-loop guard. */
 const HEALTHY_AFTER_MS = 5_000;
 
 export default function App() {
+  const [workspaceReady, setWorkspaceReady] = useState(false);
+  // Update prompts must wait until every saved tab has been restored and
+  // persistence is watching the complete workspace. Otherwise an unusually
+  // fast check/install can snapshot a half-restored tab set before restarting.
+  useAutoUpdater(workspaceReady);
   const theme = useAppStore((s) => s.theme);
   const settingsLoaded = useAppStore((s) => s.settingsLoaded);
   const { loadSettings } = useSettings();
@@ -52,6 +59,8 @@ export default function App() {
         }
       } finally {
         startPersistence();
+        useUpdateStore.setState({ workspaceReady: true });
+        setWorkspaceReady(true);
         // Only declare the run healthy once it has actually survived a while;
         // doing it at boot would defeat the crash-loop guard entirely.
         setTimeout(() => void api.workspaceMarkHealthy().catch(() => {}), HEALTHY_AFTER_MS);

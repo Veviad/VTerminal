@@ -71,6 +71,9 @@ pub fn get_settings(app: tauri::AppHandle<Wry>) -> Result<Value, String> {
         // it was pinned at this default. Default stays `true`: flipping it would
         // silently take the web away from every existing install on upgrade.
         "ai_web_access": get("ai_web_access", json!(true)),
+        // Experimental and opt-in: upgrading an existing install must never
+        // start release traffic or prompts without the user's choice.
+        "auto_update_enabled": get("auto_update_enabled", json!(false)),
         // Document buckets: EXPERIMENTAL, and the only setting in this table that
         // defaults OFF for a reason other than "no value chosen yet". It is the
         // real gate, not UI sugar — `commands::ai` omits the `search_docs` tool
@@ -122,6 +125,7 @@ pub fn save_settings(
     agent_max_iterations: Option<u32>,
     agent_command_timeout_secs: Option<u32>,
     ai_web_access: Option<bool>,
+    auto_update_enabled: Option<bool>,
     docs_enabled: Option<bool>,
     log_level: Option<String>,
 ) -> Result<(), String> {
@@ -282,6 +286,9 @@ pub fn save_settings(
     }
     if let Some(v) = ai_web_access {
         store.set("ai_web_access", json!(v));
+    }
+    if let Some(v) = auto_update_enabled {
+        store.set("auto_update_enabled", json!(v));
     }
     if let Some(v) = docs_enabled {
         store.set("docs_enabled", json!(v));

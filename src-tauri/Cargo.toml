@@ -1,6 +1,6 @@
 [package]
 name = "vterminal"
-version = "0.1.1"
+version = "0.1.2"
 description = "VTerminal — lean AI-powered terminal"
 authors = ["Shawn Maholick"]
 edition = "2021"
@@ -59,6 +59,8 @@ sha2 = "0.10"
 # before being written to disk.
 base64 = "0.22"
 tauri-plugin-single-instance = "2.4.3"
+tauri-plugin-updater = "2"
+semver = "1"
 # llama.cpp hands back token pieces that can split a multibyte character; its
 # detokenizer takes an incremental decoder to stitch them back together.
 encoding_rs = { version = "0.8", optional = true }

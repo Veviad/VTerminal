@@ -9,5 +9,6 @@ pub mod remote_servers;
 pub mod settings;
 pub mod shell_integration;
 pub mod ssh_hosts;
+pub mod updates;
 pub mod vision;
 pub mod workspace;

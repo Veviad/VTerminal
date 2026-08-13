@@ -7,10 +7,11 @@ import { TerminalSection } from "./TerminalSection";
 import { AgentSection } from "./AgentSection";
 import { DocsSettings } from "./DocsSettings";
 import { SshHostsSection } from "./SshHostsSection";
+import { UpdatesSection } from "./UpdatesSection";
 import { Row } from "../ui/Row";
 import { S } from "../../lib/strings";
 
-type Tab = "models" | "agent" | "docs" | "appearance" | "terminal" | "hosts" | "about";
+type Tab = "models" | "agent" | "docs" | "appearance" | "terminal" | "hosts" | "updates" | "about";
 
 // The Docs tab is listed even while the feature is off: its own toggle is the first
 // thing inside it, and a tab that only appears once the feature is enabled leaves the
@@ -22,6 +23,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "appearance", label: S.settings.tabs.appearance },
   { id: "terminal", label: S.settings.tabs.terminal },
   { id: "hosts", label: S.settings.tabs.hosts },
+  { id: "updates", label: S.settings.tabs.updates },
   { id: "about", label: S.settings.tabs.about },
 ];
 
@@ -64,6 +66,7 @@ export function SettingsPage() {
             {tab === "appearance" && <AppearanceSection />}
             {tab === "terminal" && <TerminalSection />}
             {tab === "hosts" && <SshHostsSection />}
+            {tab === "updates" && <UpdatesSection />}
             {tab === "about" && <AboutSection />}
           </div>
         </div>

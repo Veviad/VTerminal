@@ -32,6 +32,8 @@ import type {
   SshHostInput,
   StreamEvent,
   TerminalContext,
+  UpdateDownloadEvent,
+  UpdateMetadata,
   VisionCatalogEntry,
   WorkspaceRestore,
   WorkspaceSnapshotInput,
@@ -46,6 +48,7 @@ const ptyEventChannels = new Map<string, Channel<PtyEvent>>();
 const aiChannels = new Map<string, Channel<StreamEvent>>();
 const downloadChannels = new Map<string, Channel<DownloadEvent>>();
 const loadChannels = new Map<string, Channel<LoadEvent>>();
+const updateChannels = new Set<Channel<UpdateDownloadEvent>>();
 
 // ---------- PTY ----------
 
@@ -510,6 +513,25 @@ export const saveSettings = (patch: Partial<SettingsPatch>) =>
 
 export const getSystemInfo = () =>
   invoke<{ total_ram_bytes: number; os: string; arch: string }>("get_system_info");
+
+// ---------- Application updates ----------
+
+export const updateCheck = () => invoke<UpdateMetadata | null>("update_check");
+
+export async function updateInstall(
+  onEvent: (event: UpdateDownloadEvent) => void,
+): Promise<void> {
+  const channel = new Channel<UpdateDownloadEvent>();
+  channel.onmessage = onEvent;
+  updateChannels.add(channel);
+  try {
+    await invoke<void>("update_install", { onEvent: channel });
+  } finally {
+    updateChannels.delete(channel);
+  }
+}
+
+export const appRestart = () => invoke<void>("app_restart");
 
 // ---------- On-device vision sidecar ----------
 

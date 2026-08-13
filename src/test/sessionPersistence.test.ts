@@ -317,4 +317,10 @@ describe("flushAll", () => {
     startPersistence();
     await expect(flushAll()).resolves.toBeUndefined();
   });
+
+  it("surfaces a failing backend when a restart requires a durable snapshot", async () => {
+    snapshotMock.mockRejectedValueOnce(new Error("db poisoned"));
+    startPersistence();
+    await expect(flushAll({ final: true, strict: true })).rejects.toThrow("db poisoned");
+  });
 });
