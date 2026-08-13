@@ -2,7 +2,7 @@
 
 A lean, AI-powered terminal for macOS — Warp-style command blocks and an AI agent, without the bulk. Local models run **in-process** with Metal acceleration: no Ollama, no vLLM, no daemon to babysit. Cloud models sit behind the same interface, so switching between on-device and frontier models is one keystroke.
 
-**[Download 0.1.0 for macOS](https://github.com/Veviad/VTerminal/releases/latest)** (Apple Silicon, 10 MB) · **[vterminal.veviad.com](https://vterminal.veviad.com)**
+**[Download 0.1.2 for macOS](https://github.com/Veviad/VTerminal/releases/download/v0.1.2/VTerminal_0.1.2_aarch64.dmg)** (Apple Silicon, 11 MB) · **[vterminal.veviad.com](https://vterminal.veviad.com)**
 
 The sections below build from source. If you just want to run the app, take the download above — it already includes on-device inference, and a locally built app is the one case that skips the Gatekeeper prompt.
 
@@ -11,7 +11,7 @@ The sections below build from source. If you just want to run the app, take the 
 ![ui](https://img.shields.io/badge/React%2019-Tailwind%204-informational)
 ![license](https://img.shields.io/badge/license-GPL--3.0-blue)
 
-> **Status: early.** VTerminal is pre-1.0 (`0.1.0`) and developed in the open. It is used daily by its author, but expect rough edges and breaking changes between versions.
+> **Status: early.** VTerminal is pre-1.0 (`0.1.2`) and developed in the open. It is used daily by its author, but expect rough edges and breaking changes between versions.
 
 ---
 
@@ -84,6 +84,15 @@ Release build:
 ```bash
 npm run tauri build -- --features local-llm
 ```
+
+## Experimental updates
+
+Version 0.1.2 establishes VTerminal's signed update chain for future macOS Apple Silicon releases. Open **Settings → Updates** to check manually or opt in to automatic checks.
+
+- **Automatic updates are off by default.** Enabling them checks immediately, then every 24 hours.
+- **Stable releases and prereleases share one channel.** Manual **Check now** remains available while automatic checks are disabled.
+- **Installation is never silent.** VTerminal shows the release notes and asks before downloading, installing, and restarting; running terminal processes stop during the restart.
+- **Updater archives are cryptographically verified.** This signature is separate from the app's current ad-hoc Apple code signature and Gatekeeper status.
 
 ## Models
 
