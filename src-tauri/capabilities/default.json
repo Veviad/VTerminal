@@ -11,6 +11,12 @@
     "store:default",
     "log:default",
     "dialog:default",
-    "shell:allow-open"
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "http://*" },
+        { "url": "https://*" }
+      ]
+    }
   ]
 }

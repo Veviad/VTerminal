@@ -6,8 +6,9 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { ClipboardAddon } from "@xterm/addon-clipboard";
 import { SerializeAddon } from "@xterm/addon-serialize";
-import { open } from "@tauri-apps/plugin-shell";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { BlockTracker, type BlockTrackerCallbacks } from "./osc133";
+import { sanitizeExternalWebUrl } from "./externalUrl";
 import { matchesReserved } from "./keymap";
 import { resolveXtermTheme } from "./xtermTheme";
 import "@xterm/xterm/css/xterm.css";
@@ -129,7 +130,8 @@ export function getOrCreateTerm(
   term.unicode.activeVersion = "11";
   term.loadAddon(
     new WebLinksAddon((_e, uri) => {
-      void open(uri);
+      const safeUrl = sanitizeExternalWebUrl(uri);
+      if (safeUrl) void openUrl(safeUrl);
     }),
   );
   term.loadAddon(new ClipboardAddon());
