@@ -56,7 +56,7 @@ export function ReconnectBar({ sessionId }: { sessionId: string }) {
   const gate = canConnectHere(sessionId);
 
   return (
-    <div className="absolute inset-x-0 bottom-0 flex items-center justify-center gap-2 border-t border-border-subtle bg-bg-secondary/95 px-3 py-1.5 text-[11px] text-text-muted">
+    <div className="pointer-events-auto absolute inset-x-0 bottom-0 z-20 flex items-center justify-center gap-2 border-t border-border-subtle bg-bg-secondary/95 px-3 py-1.5 text-[11px] text-text-muted">
       <span className="inline-block h-1.5 w-1.5 rounded-full border border-text-muted" />
       <Server size={11} />
       <span className="font-mono">{describeSshTarget(host)}</span>
