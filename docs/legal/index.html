@@ -317,6 +317,25 @@
               nothing. Model downloads are fetched from Hugging Face.
             </p>
             <p>
+              Knowledge can index documents with an on-device embedding model,
+              in which case the document text and search queries remain on your
+              Mac. If you deliberately choose OpenAI or Mistral embeddings, the
+              extracted document chunks—and later search queries—are sent
+              directly to that provider after an in-app disclosure. Anthropic is
+              not used for embeddings. If you connect Qdrant, VTerminal sends
+              extracted manifests, chunks, metadata and vectors to the Qdrant
+              endpoint you configured; it does not upload the original document
+              binaries. Veviad operates neither an embedding proxy nor a Qdrant
+              service and receives none of this content.
+            </p>
+            <p>
+              Provider credentials, Hugging Face tokens, remote-model tokens and
+              Qdrant keys are handled by the Rust backend and stored in macOS
+              Keychain. The frontend receives only presence information, not the
+              credential value. A keyed non-loopback connection uses HTTPS by
+              default; allowing cleartext HTTP is an explicit advanced choice.
+            </p>
+            <p>
               Update checks are <strong>off by default</strong>. If you click
               <strong>Check now</strong> or opt in to automatic checks, the app
               contacts GitHub's public Releases API and, when a newer release is

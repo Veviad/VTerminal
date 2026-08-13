@@ -1,0 +1,84 @@
+{
+  "repositoryData": {
+    "html_url": "https://github.com/Veviad/VTerminal",
+    "stargazers_count": 1234
+  },
+  "releases": [
+    {
+      "tag_name": "v9.0.0",
+      "draft": true,
+      "prerelease": false,
+      "published_at": "2026-08-12T12:00:00Z",
+      "html_url": "https://github.com/Veviad/VTerminal/releases/tag/v9.0.0",
+      "assets": [
+        { "name": "VTerminal_9.0.0_aarch64.dmg", "browser_download_url": "https://github.com/Veviad/VTerminal/releases/download/v9.0.0/VTerminal_9.0.0_aarch64.dmg", "size": 13000000, "download_count": 1000, "state": "uploaded" },
+        { "name": "VTerminal.app.tar.gz", "browser_download_url": "https://github.com/Veviad/VTerminal/releases/download/v9.0.0/VTerminal.app.tar.gz", "size": 10000000, "download_count": 1000, "state": "uploaded" },
+        { "name": "VTerminal.app.tar.gz.sig", "browser_download_url": "https://github.com/Veviad/VTerminal/releases/download/v9.0.0/VTerminal.app.tar.gz.sig", "size": 344, "download_count": 0, "state": "uploaded" },
+        { "name": "latest.json", "browser_download_url": "https://github.com/Veviad/VTerminal/releases/download/v9.0.0/latest.json", "size": 800, "download_count": 0, "state": "uploaded" },
+        { "name": "SHA256SUMS.txt", "browser_download_url": "https://github.com/Veviad/VTerminal/releases/download/v9.0.0/SHA256SUMS.txt", "size": 200, "download_count": 0, "state": "uploaded" }
+      ]
+    },
+    {
+      "tag_name": "v0.3.0-beta.2",
+      "draft": false,
+      "prerelease": true,
+      "published_at": "2026-08-10T12:00:00Z",
+      "html_url": "https://github.com/Veviad/VTerminal/releases/tag/v0.3.0-beta.2",
+      "assets": [
+        { "name": "VTerminal_0.3.0-beta.2_aarch64.dmg", "browser_download_url": "https://github.com/Veviad/VTerminal/releases/download/v0.3.0-beta.2/VTerminal_0.3.0-beta.2_aarch64.dmg", "size": 12750000, "download_count": 4, "state": "uploaded" },
+        { "name": "VTerminal.app.tar.gz", "browser_download_url": "https://github.com/Veviad/VTerminal/releases/download/v0.3.0-beta.2/VTerminal.app.tar.gz", "size": 10000000, "download_count": 3, "state": "uploaded" },
+        { "name": "VTerminal.app.tar.gz.sig", "browser_download_url": "https://github.com/Veviad/VTerminal/releases/download/v0.3.0-beta.2/VTerminal.app.tar.gz.sig", "size": 344, "download_count": 91, "state": "uploaded" },
+        { "name": "latest.json", "browser_download_url": "https://github.com/Veviad/VTerminal/releases/download/v0.3.0-beta.2/latest.json", "size": 800, "download_count": 92, "state": "uploaded" },
+        { "name": "SHA256SUMS.txt", "browser_download_url": "https://github.com/Veviad/VTerminal/releases/download/v0.3.0-beta.2/SHA256SUMS.txt", "size": 200, "download_count": 93, "state": "uploaded" }
+      ]
+    },
+    {
+      "tag_name": "v0.3.0-beta.1",
+      "draft": false,
+      "prerelease": true,
+      "published_at": "2026-08-08T12:00:00Z",
+      "html_url": "https://github.com/Veviad/VTerminal/releases/tag/v0.3.0-beta.1",
+      "assets": [
+        { "name": "VTerminal_0.3.0-beta.1_aarch64.dmg", "browser_download_url": "https://github.com/Veviad/VTerminal/releases/download/v0.3.0-beta.1/VTerminal_0.3.0-beta.1_aarch64.dmg", "size": 12500000, "download_count": 2, "state": "uploaded" },
+        { "name": "VTerminal.app.tar.gz", "browser_download_url": "https://github.com/Veviad/VTerminal/releases/download/v0.3.0-beta.1/VTerminal.app.tar.gz", "size": 9900000, "download_count": 1, "state": "uploaded" },
+        { "name": "VTerminal.app.tar.gz.sig", "browser_download_url": "https://github.com/Veviad/VTerminal/releases/download/v0.3.0-beta.1/VTerminal.app.tar.gz.sig", "size": 344, "download_count": 0, "state": "uploaded" },
+        { "name": "latest.json", "browser_download_url": "https://github.com/Veviad/VTerminal/releases/download/v0.3.0-beta.1/latest.json", "size": 800, "download_count": 0, "state": "uploaded" },
+        { "name": "SHA256SUMS.txt", "browser_download_url": "https://github.com/Veviad/VTerminal/releases/download/v0.3.0-beta.1/SHA256SUMS.txt", "size": 200, "download_count": 0, "state": "uploaded" }
+      ]
+    },
+    {
+      "tag_name": "v0.2.0",
+      "draft": false,
+      "prerelease": false,
+      "published_at": "2026-08-01T12:00:00Z",
+      "html_url": "https://github.com/Veviad/VTerminal/releases/tag/v0.2.0",
+      "assets": [
+        { "name": "VTerminal_0.2.0_aarch64.dmg", "browser_download_url": "https://github.com/Veviad/VTerminal/releases/download/v0.2.0/VTerminal_0.2.0_aarch64.dmg", "size": 11000000, "download_count": 12, "state": "uploaded" },
+        { "name": "VTerminal.app.tar.gz", "browser_download_url": "https://github.com/Veviad/VTerminal/releases/download/v0.2.0/VTerminal.app.tar.gz", "size": 9000000, "download_count": 5, "state": "uploaded" },
+        { "name": "VTerminal.app.tar.gz.sig", "browser_download_url": "https://github.com/Veviad/VTerminal/releases/download/v0.2.0/VTerminal.app.tar.gz.sig", "size": 344, "download_count": 0, "state": "uploaded" },
+        { "name": "latest.json", "browser_download_url": "https://github.com/Veviad/VTerminal/releases/download/v0.2.0/latest.json", "size": 800, "download_count": 0, "state": "uploaded" },
+        { "name": "SHA256SUMS.txt", "browser_download_url": "https://github.com/Veviad/VTerminal/releases/download/v0.2.0/SHA256SUMS.txt", "size": 200, "download_count": 0, "state": "uploaded" }
+      ]
+    },
+    {
+      "tag_name": "nightly-2026-08-11",
+      "draft": false,
+      "prerelease": true,
+      "published_at": "2026-08-11T12:00:00Z",
+      "assets": [
+        { "name": "VTerminal_nightly_aarch64.dmg", "download_count": 500, "state": "uploaded" },
+        { "name": "VTerminal.app.tar.gz", "download_count": 500, "state": "uploaded" }
+      ]
+    },
+    {
+      "tag_name": "v0.4.0",
+      "draft": false,
+      "prerelease": false,
+      "published_at": null,
+      "assets": [
+        { "name": "VTerminal_0.4.0_aarch64.dmg", "download_count": 500, "state": "uploaded" },
+        { "name": "VTerminal.app.tar.gz", "download_count": 500, "state": "uploaded" }
+      ]
+    }
+  ]
+}

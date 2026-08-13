@@ -11,7 +11,8 @@
     "check:e5-manifest": "node scripts/embedding-models/check-e5-manifest.mjs",
     "tauri": "tauri",
     "build:mac": "tauri build --features local-llm && ./scripts/dmg-icon.sh",
-    "test": "vitest --run"
+    "test": "vitest --run",
+    "test:site-release": "node --test scripts/site-release/release-data.node-test.mjs"
   },
   "dependencies": {
     "@tailwindcss/typography": "^0.5.19",
