@@ -68,8 +68,6 @@ async fn run(mut args: Vec<String>, json_output: bool) -> Result<(), String> {
         return Ok(());
     }
     let app_data = app_data_dir()?;
-    let settings = read_settings(&app_data);
-    let docs = DocsDb::new(app_data.clone());
     // Serialize only writes. Listing, testing connections, and searching stay
     // available while either the desktop or another CLI writer is active.
     let _process_lock = is_mutating_command(&args)
@@ -77,6 +75,12 @@ async fn run(mut args: Vec<String>, json_output: bool) -> Result<(), String> {
             vterminal_lib::knowledge::process_lock::KnowledgeProcessLock::try_acquire(&app_data)
         })
         .transpose()?;
+    // Read trust-boundary settings only after a mutating command owns the
+    // shared writer lock. Otherwise a desktop connection update could finish
+    // between this snapshot and lock acquisition, leaving the CLI to write to
+    // the endpoint that was just replaced.
+    let settings = read_settings(&app_data);
+    let docs = DocsDb::new(app_data.clone());
     let context = Context {
         json: json_output,
         app_data,
@@ -364,6 +368,15 @@ async fn bucket_command(context: &Context, args: &[String]) -> Result<(), String
                         .delete_collection(&collection)
                         .await
                         .map_err(|error| error.to_string())?;
+                    if context.docs.exists() {
+                        context.docs.with(|database| {
+                            vterminal_lib::knowledge::ingest::forget_deleted_remote_collection(
+                                database,
+                                &connection_id,
+                                &collection,
+                            )
+                        })?;
+                    }
                 }
             }
             output(context, &json!({"deleted":raw}))
@@ -414,6 +427,12 @@ async fn document_command(context: &Context, args: &[String]) -> Result<(), Stri
                     connection_id,
                     collection,
                 } => {
+                    vterminal_lib::knowledge::ingest::ensure_remote_document_idle(
+                        &context.docs,
+                        &connection_id,
+                        &collection,
+                        document_id,
+                    )?;
                     qdrant(context, &connection_id)?
                         .delete_document(&collection, document_id)
                         .await

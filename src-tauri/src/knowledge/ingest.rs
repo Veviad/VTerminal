@@ -254,6 +254,34 @@ pub fn ensure_remote_document_idle(
     }
 }
 
+/// Retire local state which can no longer be valid after a remote collection is
+/// deleted. The binding and resumable jobs are changed in one transaction so a
+/// later collection with the same name cannot inherit either one.
+pub fn forget_deleted_remote_collection(
+    connection: &mut rusqlite::Connection,
+    connection_id: &str,
+    collection: &str,
+) -> Result<(), String> {
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    semantic::delete_qdrant_binding(&transaction, connection_id, collection)?;
+    transaction
+        .execute(
+            "UPDATE knowledge_jobs
+                SET status='failed',
+                    error='Qdrant collection was deleted; start a new ingestion job',
+                    updated_at=?3
+              WHERE json_extract(target_ref_json,'$.source')='qdrant'
+                AND json_extract(target_ref_json,'$.connection_id')=?1
+                AND json_extract(target_ref_json,'$.collection')=?2
+                AND status!='completed'",
+            rusqlite::params![connection_id, collection, semantic::now_ms()],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())
+}
+
 pub fn new_local_backfill_job(bucket_id: String) -> Result<semantic::KnowledgeJob, String> {
     let now = semantic::now_ms();
     let resource_key = format!("local:{bucket_id}");
@@ -1710,10 +1738,10 @@ pub fn prepare_retry(
             error.starts_with("Qdrant connection origin changed")
                 || error.starts_with("Qdrant connection endpoint changed")
                 || error.starts_with("Qdrant connection was removed")
+                || error.starts_with("Qdrant collection was deleted")
         }) {
             return Err(
-                "this job belongs to a previous Qdrant connection origin; start a new ingestion job"
-                    .into(),
+                "this job's Qdrant target changed or was removed; start a new ingestion job".into(),
             );
         }
         let resource_key = existing
@@ -1802,10 +1830,18 @@ mod tests {
     }
 
     fn remote_job(document_id: &str) -> semantic::KnowledgeJob {
+        remote_job_for("connection", "docs", document_id)
+    }
+
+    fn remote_job_for(
+        connection_id: &str,
+        collection: &str,
+        document_id: &str,
+    ) -> semantic::KnowledgeJob {
         new_ingest_job(
             &KnowledgeBucketRef::Qdrant {
-                connection_id: "connection".into(),
-                collection: "docs".into(),
+                connection_id: connection_id.into(),
+                collection: collection.into(),
             },
             IngestDocument {
                 document_id: Some(document_id.into()),
@@ -1822,6 +1858,22 @@ mod tests {
             }],
         )
         .unwrap()
+    }
+
+    fn imported_binding(collection: &str) -> super::super::types::ImportedCollectionBinding {
+        super::super::types::ImportedCollectionBinding {
+            connection_id: "connection".into(),
+            collection: collection.into(),
+            vector_name: "dense".into(),
+            embedding_profile_fingerprint: "sha256:exact".into(),
+            text_field: "text".into(),
+            document_id_field: "document_id".into(),
+            title_field: None,
+            source_uri_field: None,
+            page_field: None,
+            heading_field: None,
+            model_attested: true,
+        }
     }
 
     #[test]
@@ -1916,6 +1968,48 @@ mod tests {
         })
         .unwrap();
         ensure_remote_document_idle(&docs, "connection", "docs", "document-2").unwrap();
+
+        docs.destroy().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn deleted_collection_cleanup_is_exact_and_terminal_for_pending_jobs() {
+        let (dir, docs) = test_docs();
+        let target = remote_job_for("connection", "docs", "pending");
+        let mut completed = remote_job_for("connection", "docs", "completed");
+        completed.status = "completed".into();
+        let other = remote_job_for("connection", "other", "pending");
+
+        docs.with(|connection| {
+            semantic::put_profile(
+                connection,
+                "profile-a",
+                "sha256:exact",
+                &serde_json::json!({"semantic":"fixture"}),
+                "ready",
+            )?;
+            semantic::put_qdrant_binding(connection, "profile-a", &imported_binding("docs"))?;
+            semantic::put_qdrant_binding(connection, "profile-a", &imported_binding("other"))?;
+            for job in [&target, &completed, &other] {
+                semantic::put_job(connection, job)?;
+            }
+            forget_deleted_remote_collection(connection, "connection", "docs")
+        })
+        .unwrap();
+
+        docs.with(|connection| {
+            assert!(semantic::get_qdrant_binding(connection, "connection", "docs")?.is_none());
+            assert!(semantic::get_qdrant_binding(connection, "connection", "other")?.is_some());
+            assert_eq!(load_job(connection, &target.id)?.status, "failed");
+            assert_eq!(load_job(connection, &completed.id)?.status, "completed");
+            assert_eq!(load_job(connection, &other.id)?.status, "queued");
+            Ok(())
+        })
+        .unwrap();
+        assert!(prepare_retry(&docs, &target.id)
+            .unwrap_err()
+            .contains("target changed or was removed"));
 
         docs.destroy().unwrap();
         std::fs::remove_dir_all(dir).unwrap();

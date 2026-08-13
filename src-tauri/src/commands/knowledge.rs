@@ -634,6 +634,11 @@ pub async fn knowledge_connections_update(
     let connections = store::read_connections(&app);
     let record = store::find_connection(&connections, &id)?;
     let endpoint_changed = record.url != input.url;
+    let credential_origin_changed = crate::credentials::qdrant_id(&id, &record.url)?
+        != crate::credentials::qdrant_id(&id, &input.url)?;
+    if credential_origin_changed && api_key.is_none() {
+        return Err("changing the Qdrant origin requires a replacement key; pass an empty key explicitly if the new endpoint needs none".into());
+    }
 
     // A binding and a resumable job describe one concrete vector space. Once
     // the connection points at a different endpoint (including a different
@@ -1040,8 +1045,11 @@ pub async fn knowledge_buckets_delete(
                 .map_err(|error| error.to_string())?;
             if docs.exists() {
                 docs.with(|database| {
-                    semantic::delete_qdrant_binding(database, &connection_id, &collection)
-                        .map(|_| ())
+                    crate::knowledge::ingest::forget_deleted_remote_collection(
+                        database,
+                        &connection_id,
+                        &collection,
+                    )
                 })?;
             }
             let connections = store::read_connections(&app);
