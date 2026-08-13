@@ -49,6 +49,9 @@ pub async fn models_download(
         download_id: download_id.clone(),
         repo_id,
         filename,
+        revision: None,
+        expected_size: None,
+        expected_sha256: None,
         models_dir: models_dir(&app)?,
         hf_token: settings::read_credential(&app, crate::credentials::CredentialId::HuggingFace)?,
     };

@@ -2,7 +2,7 @@
 
 A lean, AI-powered terminal for macOS — Warp-style command blocks and an AI agent, without the bulk. Local models run **in-process** with Metal acceleration: no Ollama, no vLLM, no daemon to babysit. Cloud models sit behind the same interface, so switching between on-device and frontier models is one keystroke.
 
-**[Download 0.1.6 for macOS](https://github.com/Veviad/VTerminal/releases/download/v0.1.6/VTerminal_0.1.6_aarch64.dmg)** (Apple Silicon, 12 MB) · **[vterminal.veviad.com](https://vterminal.veviad.com)**
+**[Download the latest release for macOS](https://vterminal.veviad.com/#download)** (Apple Silicon) · **[vterminal.veviad.com](https://vterminal.veviad.com)**
 
 The sections below build from source. If you just want to run the app, take the download above — it already includes on-device inference, and a locally built app is the one case that skips the Gatekeeper prompt.
 
@@ -13,7 +13,7 @@ Upgrading from an older build? Quit VTerminal completely before replacing `/Appl
 ![ui](https://img.shields.io/badge/React%2019-Tailwind%204-informational)
 ![license](https://img.shields.io/badge/license-GPL--3.0-blue)
 
-> **Status: early.** VTerminal is pre-1.0 (`0.1.6`) and developed in the open. It is used daily by its author, but expect rough edges and breaking changes between versions.
+> **Status: early.** VTerminal is pre-1.0 and developed in the open. It is used daily by its author, but expect rough edges and breaking changes between versions.
 
 ---
 
@@ -43,6 +43,7 @@ Modern AI terminals tend to be Electron apps that phone home for every completio
 - **Agent mode** — multi-step runs that propose commands, execute them in your *visible* terminal, and read the real output
 - **Per-model reasoning effort** — `off → low → medium → high → max`, showing only the rungs each model actually accepts
 - **Image & file attachments** — drag, paste, or pick. An optional on-device vision sidecar transcribes screenshots so even a non-vision chat model can use them.
+- **Knowledge buckets** — attach local SQLite document buckets and compatible Qdrant collections to one Ask or Agent request, with UI-first ingestion and source-qualified citations.
 - **Reusable Runbooks** *(experimental and disabled by default)* — versioned YAML checklists with immutable run snapshots, per-action approvals, visible-terminal execution, evidence, and canonical JSON/Markdown reports. See [the authoring guide](docs/RUNBOOKS.md).
 
 **Interface**
@@ -90,7 +91,7 @@ npm run tauri build -- --features local-llm
 
 ## Experimental updates
 
-Version 0.1.2 establishes VTerminal's signed update chain for future macOS Apple Silicon releases. Open **Settings → Updates** to check manually or opt in to automatic checks.
+VTerminal includes an experimental signed update chain for macOS Apple Silicon releases. Open **Settings → Updates** to check manually or opt in to automatic checks.
 
 - **Automatic updates are off by default.** Enabling them checks immediately, then every 24 hours.
 - **Stable releases and prereleases share one channel.** Manual **Check now** remains available while automatic checks are disabled.
@@ -98,6 +99,8 @@ Version 0.1.2 establishes VTerminal's signed update chain for future macOS Apple
 - **Updater archives are cryptographically verified.** This signature is separate from the app's current ad-hoc Apple code signature and Gatekeeper status.
 
 ## Models
+
+Chat, vision and embedding models have separate jobs. Chat models write answers and commands; the optional vision sidecar transcribes attached images; embedding models turn document chunks and queries into vectors for Knowledge retrieval.
 
 **On-device** (GGUF, downloaded from Hugging Face with resumable transfers)
 
@@ -116,6 +119,31 @@ Version 0.1.2 establishes VTerminal's signed update chain for future macOS Apple
 **Self-hosted** — point VTerminal at any OpenAI-compatible server: Ollama, LM Studio, llama.cpp's server, vLLM, LiteLLM. Add the address in **Settings → Models**, press **Test**, and pick which of the served models to expose. Per-server tokens are supported and optional; token-bearing connections require HTTPS except for localhost/loopback HTTP.
 
 **Vision sidecar** *(optional, on-device)* — PaddleOCR-VL 1.6, Qwen3-VL 4B, or Qwen3-VL 8B, loaded alongside the chat model to transcribe attached images.
+
+## Knowledge
+
+Settings → Knowledge manages local and remote document buckets, embedding profiles, files and persistent ingestion jobs. A single request can mix keyword-only local buckets, semantic local buckets and multiple compatible Qdrant collections. VTerminal queries each source independently and combines ranked results, so scores from different embedding spaces are never compared as though they were interchangeable.
+
+**One-click local embedding models**
+
+| Model | Packaged profile |
+|---|---|
+| Qwen3-Embedding 0.6B | Q8, recommended default |
+| Qwen3-Embedding 4B | Q4_K_M |
+| Qwen3-Embedding 8B | Q4_K_M |
+| EmbeddingGemma | Q8, 768 dimensions |
+| Multilingual E5 Base | Q8; visible but unavailable until signed Veviad GGUFs pass multilingual parity tests |
+| Multilingual E5 Large | Q8; visible but unavailable until signed Veviad GGUFs pass multilingual parity tests |
+
+The built-in artifacts are pinned, checksum-verified, loaded and tested by the app. Users never compile, convert, run Python or choose arbitrary files. OpenAI and Mistral are the only guided cloud embedding providers; Anthropic has no embedding model. Ollama and LM Studio are available only under Advanced after a real embedding probe.
+
+**Qdrant** — add a cluster URL and granular database key. The app lists only collections the key can see and explains whether each one is managed-compatible, attach-only, importable, upgrade-required or incompatible. Managed buckets require Qdrant 1.16+. Existing collections are never identified by dimensions alone: importing one requires an exact embedding profile and an attestation of the original model, revision and transforms.
+
+Qdrant receives extracted manifests, chunks, metadata and vectors, not original binaries. Read-only credentials can attach and search; wider permissions unlock document upload, replace and deletion or collection management. TurboQuant is an advanced, opt-in sidecar for Qdrant 1.18+; bits4 is recommended, original vectors remain, and it can be disabled.
+
+The signed standalone `vterminal-docs` CLI installs from the UI into `~/.local/bin` without editing shell profiles. It shares the app's saved profiles, connections, model cache, chunking and job records. It can list profiles; list/test connections; list/create/delete buckets; list/ingest/replace/delete documents; and search, with JSON output and stdin support. Text, structured text, page JSON and text-layer PDFs work headlessly; OCR-required inputs direct you to the UI.
+
+Local embedding stays on the Mac. Qdrant and cloud-provider credentials stay backend-only in macOS Keychain. Before the first cloud ingestion, the UI explains that document chunks—and later search queries—will leave the device. Embedding profiles are immutable fingerprints of the exact model, revision, dimensions and query/document transforms; changing any of those creates a new profile and requires re-embedding.
 
 ## How command execution is gated
 
@@ -150,12 +178,15 @@ When web access is disabled, VTerminal withholds the model's fetch tooling and r
 - A single `Provider` trait covering in-process llama.cpp (feature `local-llm`), Anthropic, OpenAI, Mistral, and any user-configured OpenAI-compatible server
 - A curated model catalog carrying each model's tier, legal reasoning-effort rungs, and RAM floor
 - Prompts rendered from each GGUF's own Jinja chat template, so native tool-calling and thinking modes work per model family
-- Two-tier persistence: a settings store plus SQLite (WAL, versioned migrations) for history and archived transcripts
+- Backend-only credentials in macOS Keychain; settings store contains presence flags, not secret values
+- SQLite (WAL, versioned migrations) for history, transcripts, local knowledge metadata, canonical vectors and rebuildable sqlite-vec indexes
+- One asynchronous Knowledge service for hybrid local retrieval, profile-aware Qdrant search, persistent ingestion jobs and deterministic rank fusion
 
 **React** (`src/`)
 - xterm instances live in a registry *outside* React state, which keeps them StrictMode-safe; only the active tab holds a WebGL context
 - Command blocks are overlay decorations driven by live xterm markers, not stored line numbers
 - One zustand store with per-session maps; settings persist through Rust only
+- Source-qualified Knowledge attachments and progress-driven model, connection, bucket and document management
 
 ## Development
 
@@ -175,7 +206,7 @@ cd src-tauri && cargo check && cargo check --features local-llm
 
 Headless smoke examples live in `src-tauri/examples/` and exercise inference, the agent loop, the vision sidecar, and shutdown behaviour against a real GGUF.
 
-The project page at [vterminal.veviad.com](https://vterminal.veviad.com) is hand-written static HTML in `docs/` — no build step and no dependencies. Preview it with `npx vite docs`; pushing a change to `docs/` on `main` deploys it.
+The project page at [vterminal.veviad.com](https://vterminal.veviad.com) is hand-written static HTML in `docs/`. GitHub Pages runs the dependency-free renderer in `scripts/site-release/` at deploy time to inject the greatest published SemVer release, download links, stars and application-download counts into a staging copy; the browser makes no GitHub API request. Preview the generic fallbacks with `npx vite docs`, or render the checked-in fixture into a fresh temporary path with `node scripts/site-release/render.mjs --source docs --output "$(mktemp -d)/site" --fixture scripts/site-release/fixtures/releases.json`.
 
 ## Contributing
 

@@ -121,6 +121,11 @@ jobs:
           # APPLE_TEAM_ID, which stay unset here.
           : "${APPLE_SIGNING_IDENTITY:=-}"
           export APPLE_SIGNING_IDENTITY
+          cargo build --manifest-path src-tauri/Cargo.toml --bin vterminal-docs \
+            --release --features local-llm --target aarch64-apple-darwin
+          mkdir -p src-tauri/binaries
+          cp src-tauri/target/aarch64-apple-darwin/release/vterminal-docs \
+            src-tauri/binaries/vterminal-docs-aarch64-apple-darwin
           npm run tauri build -- --features local-llm --target aarch64-apple-darwin --config src-tauri/tauri.updater.conf.json
 
       # Report what was actually produced, not what secrets were configured.

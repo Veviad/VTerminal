@@ -654,7 +654,7 @@ pub async fn agent_start(
     context: TerminalContext,
     // Document buckets the user attached to this session. Same `Option` reasoning as
     // `history` below.
-    doc_buckets: Option<Vec<String>>,
+    doc_buckets: Option<Vec<crate::knowledge::KnowledgeBucketRef>>,
     // Prior turns of THIS conversation, in the model's own shape. `Option` rather
     // than a bare `Vec` because tauri deserializes each argument by key and
     // omitting it has to stay legal.
@@ -699,7 +699,7 @@ pub async fn agent_start(
     // and stay byte-identical for every round of this run — both live inside the
     // Anthropic cache breakpoint's span.
     let docs_enabled = crate::commands::settings::read_bool(&app, "docs_enabled", false);
-    let doc_buckets: Vec<String> = if docs_enabled {
+    let doc_buckets: Vec<crate::knowledge::KnowledgeBucketRef> = if docs_enabled {
         doc_buckets.unwrap_or_default()
     } else {
         Vec::new()
@@ -796,6 +796,7 @@ pub async fn agent_start(
         &approvals,
         &pty_exec,
         &steers,
+        Some(&app),
         // Handed over only when a bucket is attached, so a run with none cannot open
         // `docs.db` at all — which is what keeps the flag-off install free of the file.
         if docs_attached { Some(&*docs) } else { None },

@@ -1,5 +1,7 @@
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
 
@@ -20,6 +22,15 @@ pub struct DownloadRequest {
     pub download_id: String,
     pub repo_id: String,
     pub filename: String,
+    /// Immutable Hub commit. `None` keeps the legacy chat/vision behavior and
+    /// resolves `main`; security-sensitive catalogs should always pin this.
+    pub revision: Option<String>,
+    /// Catalog-pinned file size. When present it takes precedence over HEAD and
+    /// is checked both before and after the transfer.
+    pub expected_size: Option<u64>,
+    /// Catalog-pinned SHA-256 (the Hugging Face LFS oid). Verification happens
+    /// before the `.part` file is atomically promoted or registered.
+    pub expected_sha256: Option<String>,
     pub models_dir: PathBuf,
     pub hf_token: Option<crate::credentials::Secret>,
 }
@@ -77,8 +88,9 @@ async fn run_inner(
         );
     }
 
+    let revision = req.revision.as_deref().unwrap_or("main");
     let url = format!(
-        "https://huggingface.co/{}/resolve/main/{}",
+        "https://huggingface.co/{}/resolve/{revision}/{}",
         req.repo_id, req.filename
     );
     let dir = registry::repo_dir(&req.models_dir, &req.repo_id);
@@ -105,11 +117,19 @@ async fn run_inner(
         .get(reqwest::header::ETAG)
         .and_then(|v| v.to_str().ok())
         .map(String::from);
-    let total_size = head
+    let remote_size = head
         .headers()
         .get(reqwest::header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok());
+    if let (Some(expected), Some(remote)) = (req.expected_size, remote_size) {
+        if expected != remote {
+            return Err(format!(
+                "Catalog size mismatch before download: server reports {remote} bytes, expected {expected}"
+            ));
+        }
+    }
+    let total_size = req.expected_size.or(remote_size);
 
     // Resume only when the stored etag matches the remote file.
     let mut resume_from: u64 = 0;
@@ -277,6 +297,22 @@ async fn finalize(
         }
     }
 
+    if let Some(expected) = req.expected_sha256.as_deref() {
+        on_event.phase("verifying");
+        let path = part_path.to_path_buf();
+        let actual = tokio::task::spawn_blocking(move || sha256_file(&path))
+            .await
+            .map_err(|e| format!("artifact verification task failed: {e}"))??;
+        if !actual.eq_ignore_ascii_case(expected) {
+            let _ = tokio::fs::remove_file(part_path).await;
+            let _ = tokio::fs::remove_file(meta_path).await;
+            return Err(format!(
+                "SHA-256 mismatch after download: got {actual}, expected {} — cleaned up, please retry.",
+                expected.to_ascii_lowercase()
+            ));
+        }
+    }
+
     tokio::fs::rename(part_path, final_path)
         .await
         .map_err(|e| format!("finalize failed: {e}"))?;
@@ -290,6 +326,30 @@ async fn finalize(
         path: final_path.to_string_lossy().into_owned(),
     });
     Ok(Outcome::Completed(model))
+}
+
+/// Hash a file without buffering multi-gigabyte GGUF weights in memory.
+pub fn sha256_file(path: &Path) -> Result<String, String> {
+    use std::fmt::Write;
+
+    let mut file = std::fs::File::open(path).map_err(|e| format!("open for SHA-256: {e}"))?;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|e| format!("read for SHA-256: {e}"))?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    let digest = digest.finalize();
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(output, "{byte:02x}");
+    }
+    Ok(output)
 }
 
 pub fn delete_model_files(models_dir: &Path, model: &registry::LocalModel) -> Result<(), String> {
@@ -485,5 +545,19 @@ mod tests {
         let sink = RebasedSink::new(&out, 900, 3_000);
         sink.emit(progress(2_100, Some(2_100)));
         assert_eq!(out.progress(), vec![(3_000, Some(3_000))]);
+    }
+
+    #[test]
+    fn sha256_is_streamed_and_hex_encoded() {
+        let path = std::env::temp_dir().join(format!(
+            "vterminal-download-sha-{}.bin",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, b"abc").unwrap();
+        assert_eq!(
+            sha256_file(&path).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        std::fs::remove_file(path).ok();
     }
 }

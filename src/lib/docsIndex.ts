@@ -20,6 +20,7 @@ import { ocrAvailable } from "./attachInput";
 import { useAppStore } from "../stores/appStore";
 import { S } from "./strings";
 import type { DocFile, DocPutPage } from "./types";
+import { localBucketDescriptor } from "./knowledge";
 
 /** Pages read per PDF in a LIBRARY, as opposed to `PDF_MAX_PAGES = 50` for one chat
  *  turn. The chat cap bounds a single message's token cost; a bucket has no such
@@ -258,5 +259,18 @@ export async function refreshBuckets(): Promise<void> {
     useAppStore.getState().setDocBuckets(await api.docsBucketsList());
   } catch {
     useAppStore.getState().setDocBuckets([]);
+  }
+}
+
+/** Refresh source-qualified local and remote knowledge buckets without making the
+ * legacy local list depend on a Qdrant connection being reachable. */
+export async function refreshKnowledgeBuckets(): Promise<void> {
+  try {
+    useAppStore.getState().setKnowledgeBuckets(await api.knowledgeBucketsList());
+  } catch {
+    const state = useAppStore.getState();
+    // A backend that fails the whole unified call must not make already-loaded local
+    // buckets disappear from the picker.
+    state.setKnowledgeBuckets(state.docBuckets.map(localBucketDescriptor));
   }
 }

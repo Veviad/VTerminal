@@ -100,7 +100,7 @@ function HfTokenField() {
   );
 }
 
-function CredentialStoreBanner() {
+export function CredentialStoreBanner() {
   const status = useAppStore((s) => s.credentialStoreStatus);
   if (status === "ready") return null;
   return (

@@ -194,6 +194,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &approvals,
         &pty_exec,
         &steers,
+        // No Tauri app handle in this headless example; no knowledge buckets are
+        // attached, so the knowledge service is never invoked.
+        None,
         // No document index headless: there is no app data directory to open one in.
         None,
         cancel_rx,

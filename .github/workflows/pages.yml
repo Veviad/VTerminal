@@ -1,16 +1,20 @@
 name: Pages
 
-# The project page is hand-written static HTML under docs/ — no build step, so
-# this workflow only uploads the directory. Deliberately NOT wired into ci.yml's
-# `gate`: a docs-only change must not wait on a 10x-billed macOS Rust job, and a
-# red Rust job must not block a typo fix on the page.
+# The renderer copies the hand-written site into a staging tree and enriches it
+# with the current published-release metadata. The schedule keeps that dynamic
+# data fresh even when a release is edited without a repository push.
 on:
   push:
     branches: [main]
     paths:
       - docs/**
+      - scripts/site-release/**
+      - package.json
       - .github/workflows/pages.yml
-  # Lets a deploy be re-run from the Actions tab without an empty commit.
+  release:
+    types: [published]
+  schedule:
+    - cron: '17 3 * * *'
   workflow_dispatch:
 
 concurrency:
@@ -29,7 +33,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # Always deploy current main. A release event otherwise checks out its tag,
+      # and workflow_dispatch can target another ref; neither should be allowed
+      # to publish an obsolete or unreviewed renderer/site tree.
+      - name: Check out main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: .nvmrc
+
+      - name: Render live release data
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/site-release/render.mjs --source docs --output "$RUNNER_TEMP/vterminal-pages"
 
       # Every asset is referenced relatively ("assets/…" at the root, "../assets/…"
       # from docs/legal/), so the site works at the custom domain, at the
@@ -39,14 +58,19 @@ jobs:
       # the sub-page is the easier one to get wrong.
       - name: No absolute asset paths
         run: |
-          if find docs -name '*.html' -print0 | xargs -0 grep -nE '(src|href)="/[^/]'; then
+          staging="$RUNNER_TEMP/vterminal-pages"
+          if find "$staging" -name '*.html' -print0 | xargs -0 grep -nE '(src|href)="/[^/]'; then
             echo "::error::Absolute asset path found — paths must stay relative so the site survives being served from a base path."
+            exit 1
+          fi
+          if find "$staging" -name '*.css' -print0 | xargs -0 grep -nE "url\\(['\"]?/[^/]"; then
+            echo "::error::Absolute CSS asset path found — paths must stay relative so the site survives being served from a base path."
             exit 1
           fi
 
       # No `actions/configure-pages` step on purpose. It exists to enable Pages
       # and to emit base_path/base_url for generators that bake the base URL in
-      # at build time — this page has no build step and only relative paths (the
+      # at build time — this renderer preserves only relative paths (the
       # check above enforces that), so nothing consumed its outputs. It also
       # calls GET /repos/{owner}/{repo}/pages, which needs the `pages`
       # permission; this job has only `contents: read`, so it failed the first
@@ -55,7 +79,7 @@ jobs:
       # write access to Pages when only `deploy` publishes.
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
         with:
-          path: docs
+          path: ${{ runner.temp }}/vterminal-pages
 
   deploy:
     name: Deploy

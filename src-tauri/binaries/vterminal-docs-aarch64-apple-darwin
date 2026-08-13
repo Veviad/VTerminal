@@ -1,0 +1,3 @@
+#!/bin/sh
+echo "vterminal-docs is installed from a packaged VTerminal release; this development sidecar is only a build placeholder." >&2
+exit 1

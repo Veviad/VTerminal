@@ -577,6 +577,12 @@ a:hover {
   margin: 0.9rem 0 0;
 }
 
+.release-date {
+  margin: 0.25rem 0 0;
+  color: var(--text-3);
+  font-size: 0.74rem;
+}
+
 .hero-download-meta a {
   color: var(--text-2);
   text-decoration: underline;
@@ -609,6 +615,49 @@ a:hover {
   width: 0.9rem;
   height: 0.9rem;
   color: var(--accent);
+}
+
+.hero-stats {
+  display: flex;
+  justify-content: center;
+  gap: 0;
+  margin: 1.5rem auto 0;
+  color: var(--text-3);
+  list-style: none;
+  padding: 0;
+}
+
+.hero-stats li {
+  min-width: 9.5rem;
+  padding-inline: 1.4rem;
+}
+
+.hero-stats li + li {
+  border-left: 1px solid var(--line);
+}
+
+.hero-stats a {
+  display: grid;
+  gap: 0.15rem;
+  color: inherit;
+  text-decoration: none;
+}
+
+.hero-stats a:hover span {
+  color: var(--text-2);
+}
+
+.hero-stats strong {
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 1.1rem;
+  font-synthesis-weight: none;
+}
+
+.hero-stats span {
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 /* -------------------------------------------------------------- the mock */
@@ -1744,6 +1793,97 @@ a:hover {
   text-align: center;
 }
 
+/* ------------------------------------------------------------- knowledge */
+
+.knowledge-section {
+  border-block: 1px solid var(--line-soft);
+  background:
+    radial-gradient(circle at 85% 10%, rgba(16, 185, 129, 0.1), transparent 32rem),
+    var(--bg-2);
+}
+
+.knowledge-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(17rem, 0.8fr);
+  align-items: end;
+  gap: clamp(2rem, 6vw, 5rem);
+}
+
+.knowledge-privacy {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.9rem;
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  border-radius: var(--radius-md);
+  background: rgba(16, 185, 129, 0.06);
+  padding: 1.2rem;
+}
+
+.knowledge-privacy > .ui-icon {
+  width: 1.35rem;
+  height: 1.35rem;
+  color: var(--accent);
+}
+
+.knowledge-privacy h3 {
+  margin: 0 0 0.35rem;
+  color: var(--text);
+  font-size: 0.95rem;
+}
+
+.knowledge-privacy p {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 0.8rem;
+  line-height: 1.65;
+}
+
+.knowledge-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  margin-top: 2.5rem;
+}
+
+.knowledge-card {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  padding: 1.45rem;
+}
+
+.knowledge-card h3 {
+  margin: 0.85rem 0 0.55rem;
+  color: var(--text);
+  font-size: 1.05rem;
+}
+
+.knowledge-card > p,
+.knowledge-card li {
+  color: var(--text-2);
+  font-size: 0.84rem;
+  line-height: 1.65;
+}
+
+.knowledge-card > p {
+  margin: 0;
+}
+
+.knowledge-card ul {
+  display: grid;
+  gap: 0.4rem;
+  margin: 1rem 0;
+  padding-left: 1.2rem;
+}
+
+.knowledge-card .knowledge-caveat {
+  border-top: 1px solid var(--line-soft);
+  color: var(--text-3);
+  font-size: 0.76rem;
+  padding-top: 0.85rem;
+}
+
 /* --------------------------------------------------------------- install */
 
 .install-layout {
@@ -1760,6 +1900,13 @@ a:hover {
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   background: var(--bg-2);
+}
+
+.metric-note {
+  margin: 1.1rem 0 0;
+  color: var(--text-3);
+  font-size: 0.76rem;
+  line-height: 1.65;
 }
 
 .req-row {
@@ -2643,6 +2790,7 @@ code {
 
   .assistant-layout,
   .install-layout,
+  .knowledge-heading,
   .runbooks-heading,
   .why-layout {
     grid-template-columns: 1fr;
@@ -2675,6 +2823,7 @@ code {
   }
 
   .feature-grid,
+  .knowledge-grid,
   .security-grid {
     grid-template-columns: 1fr;
   }
@@ -2717,6 +2866,16 @@ code {
 }
 
 @media (max-width: 640px) {
+  .hero-stats {
+    width: 100%;
+  }
+
+  .hero-stats li {
+    min-width: 0;
+    flex: 1 1 0;
+    padding-inline: 0.75rem;
+  }
+
   .hero-inner {
     padding-block: 4.5rem 5rem;
   }

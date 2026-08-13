@@ -886,6 +886,288 @@ export interface DocSearchPreview {
   score: number;
 }
 
+// ---------- Unified knowledge sources ----------
+
+/** A stable, source-qualified bucket identity.
+ *
+ * Local ids deliberately keep their old value instead of being prefixed. This lets the
+ * frontend migrate in-memory attachments without invalidating the established `docs_*`
+ * compatibility commands, while Qdrant collections can never collide with them. */
+export type KnowledgeBucketRef =
+  | { source: "local"; bucket_id: string }
+  | { source: "qdrant"; connection_id: string; collection: string };
+
+export type KnowledgeCompatibility =
+  | "managed_compatible"
+  | "attach_only"
+  | "needs_import"
+  | "upgrade_required"
+  | "incompatible"
+  | "unreadable";
+
+export type EmbeddingProvider =
+  | "local"
+  | "openai"
+  | "mistral"
+  | "ollama"
+  | "lm_studio";
+
+export interface EmbeddingProfile {
+  id: string;
+  fingerprint: string;
+  label: string;
+  provider: EmbeddingProvider;
+  model: string;
+  revision: string | null;
+  dimensions: number;
+  pooling: "mean" | "last_token" | "cls" | "provider";
+  normalized: boolean;
+  query_prefix: string | null;
+  document_prefix: string | null;
+  max_tokens: number;
+  distance: "cosine";
+  available: boolean;
+}
+
+export type EmbeddingModelState =
+  | "not_installed"
+  | "downloading"
+  | "verifying"
+  | "loading"
+  | "ready"
+  | "error";
+
+export interface EmbeddingModelStatus {
+  id: string;
+  state: EmbeddingModelState;
+  installed: boolean;
+  loaded: boolean;
+  downloaded_bytes: number;
+  total_bytes: number | null;
+  error: string | null;
+  profile_id: string | null;
+}
+
+export interface EmbeddingCatalogEntry {
+  id: string;
+  label: string;
+  description: string;
+  provider: "local" | "openai" | "mistral" | "remote";
+  model: string;
+  dimensions: number[];
+  default_dimension: number;
+  context_tokens: number;
+  download: {
+    repo_id: string;
+    filename: string;
+    size_bytes: number;
+    min_ram_gb: number;
+    requires_license?: boolean;
+  } | null;
+  installed: boolean;
+  available: boolean;
+  unavailable_reason?: string | null;
+  recommended: boolean;
+  privacy: "local" | "cloud";
+}
+
+export type EmbeddingInstallEvent =
+  | { type: "Started"; total_bytes: number | null; resumed_from: number }
+  | { type: "Progress"; downloaded: number; total_bytes: number | null; bytes_per_sec: number }
+  | { type: "Phase"; phase: "verifying" | "loading" }
+  | { type: "Ready"; profile_id: string }
+  | { type: "Cancelled" }
+  | { type: "Error"; message: string };
+
+export type QdrantConnectionStatus = "unchecked" | "checking" | "connected" | "stale" | "error";
+
+/** The backend never serializes an API key. `has_api_key` is the only credential
+ * information allowed back over IPC. */
+export interface QdrantConnection {
+  id: string;
+  label: string;
+  url: string;
+  has_api_key: boolean;
+  allow_insecure: boolean;
+  status: QdrantConnectionStatus;
+  server_version: string | null;
+  last_checked_at: number | null;
+  error: string | null;
+  collections?: KnowledgeBucketDescriptor[];
+}
+
+export interface QdrantConnectionInput {
+  id?: string;
+  label: string;
+  url: string;
+  /** undefined means keep the stored key when editing; an empty string is accepted
+   * only for a new, explicitly unauthenticated self-hosted connection. */
+  api_key?: string;
+  allow_insecure: boolean;
+}
+
+export interface QdrantConnectionConfig {
+  label: string;
+  url: string;
+  allow_insecure: boolean;
+}
+
+export interface KnowledgeBucketDescriptor {
+  ref: KnowledgeBucketRef;
+  label: string;
+  connection_label: string | null;
+  profile: EmbeddingProfile | null;
+  compatibility: KnowledgeCompatibility;
+  compatibility_reason: string | null;
+  attachable: boolean;
+  writable: boolean;
+  /** Discovery performs no surprise write probe. Unknown allows an explicit upload,
+   * whose success or precise 403 teaches the backend the real capability. */
+  write_capability?: "unknown" | "read_only" | "read_write";
+  manageable: boolean;
+  file_count: number;
+  chunk_count: number;
+  pending_count: number;
+  stale: boolean;
+  error: string | null;
+  quantization?:
+    | { state: "off" }
+    | { state: "turbo"; bits: TurboQuantBits; always_ram: boolean }
+    | { state: "other"; kind: string };
+  /** True when compatibility comes from an explicit local guided-import binding. */
+  imported?: boolean;
+}
+
+/** Unified search hits remain structurally compatible with `DocSearchPreview`, so the
+ * existing ask-mode prompt fencing can consume them without a second rendering path. */
+export interface KnowledgeSearchHit extends DocSearchPreview {
+  bucket: KnowledgeBucketRef;
+  bucket_label: string;
+  connection_label: string | null;
+  document_id: string;
+  revision: string;
+  chunk_id: string;
+  source_uri: string | null;
+}
+
+export interface KnowledgeSearchWarning {
+  bucket: KnowledgeBucketRef | null;
+  message: string;
+}
+
+export interface KnowledgeSearchResponse {
+  hits: KnowledgeSearchHit[];
+  warnings: KnowledgeSearchWarning[];
+  partial: boolean;
+}
+
+export type KnowledgePointId = string | number;
+
+export interface KnowledgeDocumentManifest {
+  document_id: string;
+  source_id: string | null;
+  revision: number;
+  state: "staging" | "active";
+  content_sha256: string;
+  title: string;
+  source_uri: string;
+  mime_type: string;
+  chunk_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface KnowledgeDocumentSummary {
+  point_id: KnowledgePointId;
+  manifest: KnowledgeDocumentManifest;
+}
+
+export interface KnowledgeDocumentPage {
+  documents: KnowledgeDocumentSummary[];
+  /** Qdrant cursors are opaque: pass this value back without parsing or incrementing. */
+  next_cursor: KnowledgePointId | null;
+}
+
+export interface KnowledgeDocumentMetadataUpdate {
+  title: string;
+  source_uri: string;
+  mime_type: string;
+  updated_at: string;
+}
+
+export interface KnowledgeDocumentIngestInput {
+  bucket: KnowledgeBucketRef;
+  title: string;
+  source_uri: string;
+  mime_type: string;
+  pages: DocPutPage[];
+  source_id?: string | null;
+  size_bytes?: number | null;
+  mtime_ms?: number | null;
+  /** Present for replacement. The backend stages a new revision under this stable id. */
+  document_id?: string;
+}
+
+export type KnowledgeJobStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelling"
+  | "cancelled";
+
+export interface KnowledgeJob {
+  id: string;
+  kind: string;
+  target_ref: KnowledgeBucketRef;
+  stage: string;
+  status: KnowledgeJobStatus;
+  completed_items: number;
+  total_items: number | null;
+  error: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export type TurboQuantBits = "bits4" | "bits2" | "bits1_5" | "bits1";
+
+export interface TurboQuantConfig {
+  bits: TurboQuantBits;
+  always_ram: boolean;
+}
+
+export interface QdrantVectorDescriptor {
+  /** Empty means Qdrant's unnamed/default dense vector. */
+  name: string;
+  size: number;
+  distance: string;
+  data_type: string | null;
+}
+
+export interface QdrantPayloadSample {
+  point_id: KnowledgePointId;
+  payload: Record<string, unknown>;
+}
+
+export interface QdrantImportInspection {
+  vectors: QdrantVectorDescriptor[];
+  samples: QdrantPayloadSample[];
+  profiles: EmbeddingProfile[];
+  binding: ({ profile_id: string } & QdrantImportInput) | null;
+}
+
+export interface QdrantImportInput {
+  profile_id: string;
+  vector_name: string;
+  text_field: string;
+  document_id_field: string;
+  title_field?: string | null;
+  source_uri_field?: string | null;
+  page_field?: string | null;
+  heading_field?: string | null;
+  model_attested: boolean;
+}
+
 /** One page of extracted text on its way to Rust. `page` is null for formats with
  *  no page structure (markdown, text, HTML). */
 export interface DocPutPage {

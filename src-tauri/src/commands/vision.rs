@@ -233,6 +233,9 @@ mod enabled {
             download_id: download_id.to_string(),
             repo_id: m.repo_id.to_string(),
             filename: filename.to_string(),
+            revision: None,
+            expected_size: None,
+            expected_sha256: None,
             models_dir: dir.to_path_buf(),
             hf_token: hf_token.clone(),
         };

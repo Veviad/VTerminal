@@ -40,6 +40,12 @@ jobs:
       - name: Version consistency
         run: ./scripts/check-version.sh
 
+      - name: Embedding release manifest
+        run: npm run check:e5-manifest
+
+      - name: Site release renderer fixtures
+        run: npm run test:site-release
+
       # `tsc && vite build`. Deliberately the full build rather than a bare
       # `tsc --noEmit`: bundling catches what typechecking cannot, and
       # tsconfig.json already sets strict + noUnusedLocals + noUnusedParameters.

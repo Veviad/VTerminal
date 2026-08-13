@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "status": "source_pinned_gguf_unpublished",
+  "models": [
+    {
+      "catalog_id": "local/multilingual-e5-base",
+      "source_repo": "intfloat/multilingual-e5-base",
+      "source_revision": "d128750597153bb5987e10b1c3493a34e5a4502a",
+      "source_safetensors_sha256": "a18a44fad1d0b46ded15928144138cff1135d5cc8233bdd90be5f18822de09a7",
+      "source_safetensors_size": 1112201288,
+      "gguf_quantization": "Q8_0",
+      "gguf_url": null,
+      "gguf_size": null,
+      "gguf_sha256": null,
+      "minisign_signature": null,
+      "dimensions": 768
+    },
+    {
+      "catalog_id": "local/multilingual-e5-large",
+      "source_repo": "intfloat/multilingual-e5-large",
+      "source_revision": "3d7cfbdacd47fdda877c5cd8a79fbcc4f2a574f3",
+      "source_safetensors_sha256": "020afdebf2762b29fcaf286629a96c3b3b65af241f6a08226b1cfee60a21def6",
+      "source_safetensors_size": 2239611368,
+      "gguf_quantization": "Q8_0",
+      "gguf_url": null,
+      "gguf_size": null,
+      "gguf_sha256": null,
+      "minisign_signature": null,
+      "dimensions": 1024
+    }
+  ]
+}

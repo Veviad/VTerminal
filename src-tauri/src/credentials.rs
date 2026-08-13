@@ -9,6 +9,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use sha2::{Digest, Sha256};
 use tauri::{Manager, Wry};
 use tauri_plugin_store::StoreExt;
 use zeroize::Zeroizing;
@@ -26,6 +27,7 @@ const LEGACY_PROVIDER_KEYS: [(&str, CredentialId); 4] = [
     ("hf_token", CredentialId::HuggingFace),
 ];
 pub const LEGACY_REMOTE_TOKENS_KEY: &str = "remote_server_tokens";
+pub const LEGACY_QDRANT_KEYS_KEY: &str = "knowledge_qdrant_api_keys";
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CredentialId {
@@ -34,6 +36,7 @@ pub enum CredentialId {
     Mistral,
     HuggingFace,
     RemoteServer(String),
+    Qdrant(String),
 }
 
 impl CredentialId {
@@ -44,6 +47,7 @@ impl CredentialId {
             Self::Mistral => "provider/mistral".into(),
             Self::HuggingFace => "provider/huggingface".into(),
             Self::RemoteServer(id) => format!("remote-model/{id}"),
+            Self::Qdrant(id) => format!("qdrant/{id}"),
         }
     }
 
@@ -52,6 +56,34 @@ impl CredentialId {
             .iter()
             .find_map(|(legacy, id)| (*legacy == key).then(|| id.clone()))
     }
+}
+
+/// Bind a Qdrant credential to the connection id *and network origin*. During an
+/// endpoint change the new-origin account can be written before metadata changes,
+/// while concurrent app/CLI readers still resolve the old-origin account. Thus a
+/// key is never sent to a different scheme/host/effective-port due to a split
+/// Keychain/settings update.
+pub fn qdrant_id(connection_id: &str, endpoint: &str) -> Result<CredentialId, String> {
+    let parsed = url::Url::parse(endpoint).map_err(|_| "invalid Qdrant credential origin")?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err("invalid Qdrant credential origin".into());
+    }
+    let port = parsed
+        .port_or_known_default()
+        .ok_or("invalid Qdrant credential origin")?;
+    let host = parsed
+        .host_str()
+        .expect("host was checked")
+        .to_ascii_lowercase();
+    let origin = format!("{}://{host}:{port}", parsed.scheme());
+    let digest = Sha256::digest(origin.as_bytes());
+    let fingerprint = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(CredentialId::Qdrant(format!(
+        "{connection_id}/{fingerprint}"
+    )))
 }
 
 /// A secret which zeroes its backing allocation and cannot accidentally cross
@@ -226,6 +258,19 @@ pub fn state(app: &tauri::AppHandle<Wry>) -> tauri::State<'_, CredentialStoreSta
     app.state::<CredentialStoreState>()
 }
 
+/// Read a credential from the system vault outside Tauri state. The standalone
+/// Knowledge CLI uses this to share the exact same Keychain accounts as the app
+/// without ever parsing or recreating plaintext settings fields.
+pub fn headless_get(id: &CredentialId) -> Result<Option<Secret>, String> {
+    let store = SystemStore;
+    store.available().map_err(|_| GENERIC_ERROR.to_string())?;
+    store.get(id).map_err(|_| GENERIC_ERROR.to_string())
+}
+
+pub fn headless_qdrant_get(connection_id: &str, endpoint: &str) -> Result<Option<Secret>, String> {
+    headless_get(&qdrant_id(connection_id, endpoint)?)
+}
+
 #[derive(Default)]
 struct LegacyCredentials {
     values: BTreeMap<CredentialId, Secret>,
@@ -251,6 +296,34 @@ fn collect_legacy(store: &tauri_plugin_store::Store<Wry>) -> LegacyCredentials {
                 legacy
                     .values
                     .insert(CredentialId::RemoteServer(server_id), token.into());
+            }
+        }
+    }
+    if let Some(keys) = store
+        .get(LEGACY_QDRANT_KEYS_KEY)
+        .and_then(|value| value.as_object().cloned())
+    {
+        let connection_origins: BTreeMap<String, String> = store
+            .get("knowledge_qdrant_connections")
+            .and_then(|value| value.as_array().cloned())
+            .into_iter()
+            .flatten()
+            .filter_map(|connection| {
+                Some((
+                    connection.get("id")?.as_str()?.to_owned(),
+                    connection.get("url")?.as_str()?.to_owned(),
+                ))
+            })
+            .collect();
+        for (connection_id, value) in keys {
+            if let Some(key) = value.as_str().filter(|value| !value.trim().is_empty()) {
+                let credential = connection_origins
+                    .get(&connection_id)
+                    .and_then(|endpoint| qdrant_id(&connection_id, endpoint).ok())
+                    // Orphaned legacy keys remain protected in Keychain even
+                    // though no connection can resolve them.
+                    .unwrap_or(CredentialId::Qdrant(connection_id));
+                legacy.values.insert(credential, key.into());
             }
         }
     }
@@ -305,11 +378,13 @@ pub fn initialize(app: &tauri::AppHandle<Wry>, state: &CredentialStoreState) {
         if !legacy.values.is_empty()
             || LEGACY_PROVIDER_KEYS.iter().any(|(key, _)| store.has(key))
             || store.has(LEGACY_REMOTE_TOKENS_KEY)
+            || store.has(LEGACY_QDRANT_KEYS_KEY)
         {
             for (key, _) in LEGACY_PROVIDER_KEYS {
                 store.delete(key);
             }
             store.delete(LEGACY_REMOTE_TOKENS_KEY);
+            store.delete(LEGACY_QDRANT_KEYS_KEY);
         }
         // Create the sanitized store even on a fresh install, so the first
         // non-secret writer cannot create it with the process umask's broader
@@ -444,6 +519,10 @@ mod tests {
                     CredentialId::RemoteServer("uuid".into()),
                     Secret::from("remote-sentinel"),
                 ),
+                (
+                    CredentialId::Qdrant("connection-uuid".into()),
+                    Secret::from("qdrant-sentinel"),
+                ),
             ]),
         }
     }
@@ -453,7 +532,7 @@ mod tests {
         let backend = MemoryStore::default();
         write_and_verify_all(&backend, &legacy()).unwrap();
         write_and_verify_all(&backend, &legacy()).unwrap();
-        assert_eq!(backend.values.lock().unwrap().len(), 2);
+        assert_eq!(backend.values.lock().unwrap().len(), 3);
     }
 
     #[test]
@@ -463,7 +542,7 @@ mod tests {
         assert!(write_and_verify_all(&backend, &source).is_err());
         assert_eq!(
             source.values.len(),
-            2,
+            3,
             "source remains available for retry/recovery"
         );
     }
@@ -472,7 +551,7 @@ mod tests {
     fn total_migration_failure_blocks_use_with_only_the_generic_error() {
         let source = legacy();
         assert!(write_and_verify_all(&MemoryStore::failing_after(0), &source).is_err());
-        assert_eq!(source.values.len(), 2);
+        assert_eq!(source.values.len(), 3);
 
         let backend = Arc::new(MemoryStore::failing_after(0));
         let state = CredentialStoreState::with_store(backend);
@@ -496,13 +575,15 @@ mod tests {
             "openai_api_key": "openai-sentinel",
             "mistral_api_key": "mistral-sentinel",
             "hf_token": "hf-sentinel",
-            "remote_server_tokens": {"uuid": "remote-sentinel"}
+            "remote_server_tokens": {"uuid": "remote-sentinel"},
+            "knowledge_qdrant_api_keys": {"connection-uuid": "qdrant-sentinel"}
         });
         let object = json.as_object_mut().unwrap();
         for (key, _) in LEGACY_PROVIDER_KEYS {
             object.remove(key);
         }
         object.remove(LEGACY_REMOTE_TOKENS_KEY);
+        object.remove(LEGACY_QDRANT_KEYS_KEY);
         let serialized = serde_json::to_string(&json).unwrap();
         assert_eq!(serialized, r#"{"theme":"dark"}"#);
         assert!(!serialized.contains("sentinel"));
@@ -547,5 +628,22 @@ mod tests {
             CredentialId::RemoteServer("server-uuid".into()).account(),
             "remote-model/server-uuid"
         );
+        assert_eq!(
+            CredentialId::Qdrant("connection-uuid".into()).account(),
+            "qdrant/connection-uuid"
+        );
+    }
+
+    #[test]
+    fn qdrant_accounts_are_scoped_to_normalized_network_origins() {
+        let base = qdrant_id("id", "https://EXAMPLE.com/one").unwrap();
+        assert_eq!(
+            base,
+            qdrant_id("id", "https://example.com:443/two").unwrap()
+        );
+        assert_ne!(base, qdrant_id("id", "http://example.com").unwrap());
+        assert_ne!(base, qdrant_id("id", "https://example.com:8443").unwrap());
+        assert_ne!(base, qdrant_id("id", "https://other.example.com").unwrap());
+        assert_ne!(base, qdrant_id("other-id", "https://example.com").unwrap());
     }
 }

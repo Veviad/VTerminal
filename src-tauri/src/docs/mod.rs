@@ -16,6 +16,8 @@ pub mod db;
 pub mod index;
 pub mod scan;
 pub mod search;
+pub mod semantic;
+pub mod vector;
 
 /// The whole pipeline, end to end, against real files on disk.
 ///

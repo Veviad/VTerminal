@@ -8,12 +8,18 @@ import type {
   CommandStall,
   DocBucket,
   Effort,
+  KnowledgeBucketDescriptor,
+  KnowledgeBucketRef,
   LocalModel,
   ModelState,
   RemoteContext,
   Session,
   VisionCatalogEntry,
 } from "../lib/types";
+import {
+  normalizeKnowledgeBucketRef,
+  sameKnowledgeBucket,
+} from "../lib/knowledge";
 import { MAX_ATTACHMENTS } from "../lib/attachments";
 import type { Phase } from "../lib/osc133";
 import type { PermissionMode } from "../lib/permissionMode";
@@ -131,6 +137,10 @@ export interface AiStreamState {
    *  same approval path, whatever it read. That is why this needs no equivalent of the
    *  "must not arrive pre-armed" rule. */
   attachedBucketIds: string[];
+  /** Source-qualified successor to `attachedBucketIds`. The legacy list is kept in
+   * sync for local buckets while older backends remain supported; all new retrieval
+   * and rendering code reads this list. */
+  attachedBucketRefs: KnowledgeBucketRef[];
   /** Files staged for the NEXT turn.
    *
    *  Deliberately unlike `attachedBlockIds`: a block is standing context and
@@ -146,6 +156,9 @@ export interface AiStreamState {
    *  `attachError` deliberately: that field is styled as an error and its
    *  clear-then-set ordering is load-bearing. */
   attachStatus: string | null;
+  /** Non-fatal retrieval failure. The answer still streams, but the user can
+   * see that only some (or none) of the attached knowledge sources contributed. */
+  knowledgeWarning: string | null;
   lastError: string | null;
 }
 
@@ -201,9 +214,11 @@ export function emptyAiStream(): AiStreamState {
     steerQueue: [],
     attachedBlockIds: [],
     attachedBucketIds: [],
+    attachedBucketRefs: [],
     pendingAttachments: [],
     attachError: null,
     attachStatus: null,
+    knowledgeWarning: null,
     lastError: null,
   };
 }
@@ -318,8 +333,8 @@ export interface AppState {
   newAiConversation(sessionId: string): void;
   attachBlockToAi(sessionId: string, blockId: string): void;
   detachBlockFromAi(sessionId: string, blockId: string): void;
-  attachBucketToAi(sessionId: string, bucketId: string): void;
-  detachBucketFromAi(sessionId: string, bucketId: string): void;
+  attachBucketToAi(sessionId: string, bucket: string | KnowledgeBucketRef): void;
+  detachBucketFromAi(sessionId: string, bucket: string | KnowledgeBucketRef): void;
   /** Stage files for the next turn. Silently caps at `MAX_ATTACHMENTS` and sets
    *  `attachError` when it does — dropping files without saying so is worse. */
   attachFilesToAi(sessionId: string, attachments: Attachment[]): void;
@@ -328,6 +343,7 @@ export interface AppState {
   clearPendingAttachments(sessionId: string): void;
   setAttachError(sessionId: string, message: string | null): void;
   setAttachStatus(sessionId: string, message: string | null): void;
+  setKnowledgeWarning(sessionId: string, message: string | null): void;
   /** Fill in the bytes of an already-sent attachment, read back off disk after a
    *  reopen. Addressed by message + attachment id rather than by index because
    *  the transcript can grow while the reads are in flight. */
@@ -407,6 +423,8 @@ export interface AppState {
   /** The bucket list, refreshed from Rust. Global rather than per-session: a bucket
    *  exists once and is attached by reference. */
   docBuckets: DocBucket[];
+  /** Local and remote buckets returned by the unified knowledge service. */
+  knowledgeBuckets: KnowledgeBucketDescriptor[];
   /** Progress of an in-flight indexing pass, keyed by bucket id. Absent means idle.
    *  `cancel` flips to true to stop the loop between files — never mid-file, so a
    *  cancelled pass leaves no half-written bucket. */
@@ -416,6 +434,7 @@ export interface AppState {
   >;
   docsError: string | null;
   setDocBuckets(buckets: DocBucket[]): void;
+  setKnowledgeBuckets(buckets: KnowledgeBucketDescriptor[]): void;
   setDocsIndexing(
     bucketId: string,
     progress: { done: number; total: number; current: string | null } | null,
@@ -1002,22 +1021,44 @@ export const useAppStore = create<AppState>((set, get) => ({
       })),
     ),
 
-  attachBucketToAi: (sessionId, bucketId) =>
+  attachBucketToAi: (sessionId, bucket) =>
     set((state) =>
-      withAiStream(state, sessionId, (s) => ({
-        ...s,
-        attachedBucketIds: s.attachedBucketIds.includes(bucketId)
-          ? s.attachedBucketIds
-          : [...s.attachedBucketIds, bucketId],
-      })),
+      withAiStream(state, sessionId, (s) => {
+        const ref = normalizeKnowledgeBucketRef(bucket);
+        const currentRefs =
+          s.attachedBucketRefs ?? s.attachedBucketIds.map(normalizeKnowledgeBucketRef);
+        const refs = currentRefs.some((candidate) => sameKnowledgeBucket(candidate, ref))
+          ? currentRefs
+          : [...currentRefs, ref];
+        const localId = ref.source === "local" ? ref.bucket_id : null;
+        return {
+          ...s,
+          attachedBucketRefs: refs,
+          attachedBucketIds:
+            localId && !s.attachedBucketIds.includes(localId)
+              ? [...s.attachedBucketIds, localId]
+              : s.attachedBucketIds,
+        };
+      }),
     ),
 
-  detachBucketFromAi: (sessionId, bucketId) =>
+  detachBucketFromAi: (sessionId, bucket) =>
     set((state) =>
-      withAiStream(state, sessionId, (s) => ({
-        ...s,
-        attachedBucketIds: s.attachedBucketIds.filter((id) => id !== bucketId),
-      })),
+      withAiStream(state, sessionId, (s) => {
+        const ref = normalizeKnowledgeBucketRef(bucket);
+        const currentRefs =
+          s.attachedBucketRefs ?? s.attachedBucketIds.map(normalizeKnowledgeBucketRef);
+        return {
+          ...s,
+          attachedBucketRefs: currentRefs.filter(
+            (candidate) => !sameKnowledgeBucket(candidate, ref),
+          ),
+          attachedBucketIds:
+            ref.source === "local"
+              ? s.attachedBucketIds.filter((id) => id !== ref.bucket_id)
+              : s.attachedBucketIds,
+        };
+      }),
     ),
 
   attachFilesToAi: (sessionId, attachments) =>
@@ -1059,6 +1100,11 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setAttachStatus: (sessionId, message) =>
     set((state) => withAiStream(state, sessionId, (s) => ({ ...s, attachStatus: message }))),
+
+  setKnowledgeWarning: (sessionId, message) =>
+    set((state) =>
+      withAiStream(state, sessionId, (s) => ({ ...s, knowledgeWarning: message })),
+    ),
 
   setAttachmentData: (sessionId, messageId, attachmentId, data) =>
     set((state) =>
@@ -1128,9 +1174,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   docsEnabled: false,
   runbooksEnabled: false,
   docBuckets: [],
+  knowledgeBuckets: [],
   docsIndexing: {},
   docsError: null,
   setDocBuckets: (docBuckets) => set({ docBuckets }),
+  setKnowledgeBuckets: (knowledgeBuckets) => set({ knowledgeBuckets }),
   setDocsIndexing: (bucketId, progress) =>
     set((state) => {
       const next = { ...state.docsIndexing };

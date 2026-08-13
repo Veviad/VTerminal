@@ -10,7 +10,7 @@
     <title>VTerminal — The Lean AI Terminal for macOS</title>
     <meta
       name="description"
-      content="A lean, AI-powered terminal for macOS. Warp-style command blocks and a multi-step agent, with local models running in-process via llama.cpp — no Ollama, no daemon. Open source, GPL-3.0."
+      content="A lean, AI-powered terminal for macOS with command blocks, a multi-step agent, and local or Qdrant knowledge buckets. Local models run in-process via llama.cpp. Open source, GPL-3.0."
     />
     <link rel="canonical" href="https://vterminal.veviad.com/" />
 
@@ -23,7 +23,7 @@
     />
     <meta
       property="og:description"
-      content="Warp-style command blocks and a multi-step AI agent, with local models running in-process via llama.cpp. No Ollama, no daemon, nothing runs without you."
+      content="Command blocks, a multi-step AI agent, and local or Qdrant knowledge buckets. Local models run in-process via llama.cpp; nothing runs without you."
     />
     <meta property="og:url" content="https://vterminal.veviad.com/" />
     <meta name="twitter:card" content="summary" />
@@ -33,7 +33,7 @@
     />
     <meta
       name="twitter:description"
-      content="Warp-style command blocks and a multi-step AI agent, with local models running in-process via llama.cpp. No Ollama, no daemon, nothing runs without you."
+      content="Command blocks, a multi-step AI agent, and local or Qdrant knowledge buckets. Local models run in-process via llama.cpp; nothing runs without you."
     />
 
     <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
@@ -56,18 +56,19 @@
     />
     <link rel="stylesheet" href="assets/site.css" />
 
-    <script type="application/ld+json">
+    <script type="application/ld+json" data-release-jsonld>
       {
         "@context": "https://schema.org",
         "@type": "SoftwareApplication",
         "name": "VTerminal",
         "applicationCategory": "DeveloperApplication",
         "operatingSystem": "macOS (Apple Silicon)",
-        "softwareVersion": "0.1.6",
+        "softwareVersion": "Latest release",
+        "downloadUrl": "https://github.com/Veviad/VTerminal/releases",
         "url": "https://vterminal.veviad.com/",
         "codeRepository": "https://github.com/Veviad/VTerminal",
         "license": "https://www.gnu.org/licenses/gpl-3.0.html",
-        "description": "A lean, AI-powered terminal for macOS with Warp-style command blocks and a multi-step agent. Local models run in-process via llama.cpp with Metal acceleration; cloud providers sit behind the same interface.",
+        "description": "A lean, AI-powered terminal for macOS with command blocks, a multi-step agent, and local or Qdrant knowledge buckets. Local models run in-process via llama.cpp with Metal acceleration.",
         "author": {
           "@type": "Organization",
           "name": "Veviad",
@@ -218,6 +219,7 @@
           <a href="#why">Why</a>
           <a href="#terminal">Terminal</a>
           <a href="#ai">AI</a>
+          <a href="#knowledge">Knowledge</a>
           <a href="#runbooks">Runbooks</a>
           <a href="#safety">Safety</a>
           <a href="#models">Models</a>
@@ -227,7 +229,9 @@
         <div class="header-actions">
           <a
             class="button button-primary header-cta"
-            href="https://github.com/Veviad/VTerminal/releases/download/v0.1.6/VTerminal_0.1.6_aarch64.dmg"
+            href="https://github.com/Veviad/VTerminal/releases"
+            data-release-href="dmg"
+            data-release-aria="download"
             >Download</a
           >
           <button
@@ -248,6 +252,7 @@
           <a href="#why">Why</a>
           <a href="#terminal">Terminal</a>
           <a href="#ai">AI</a>
+          <a href="#knowledge">Knowledge</a>
           <a href="#runbooks">Runbooks</a>
           <a href="#safety">Safety</a>
           <a href="#models">Models</a>
@@ -255,7 +260,9 @@
           <div class="mobile-menu-actions">
             <a
               class="button button-primary"
-              href="https://github.com/Veviad/VTerminal/releases/download/v0.1.6/VTerminal_0.1.6_aarch64.dmg"
+              href="https://github.com/Veviad/VTerminal/releases"
+              data-release-href="dmg"
+              data-release-aria="download"
               >Download for macOS</a
             >
             <a
@@ -273,11 +280,16 @@
         <div class="hero-inner shell">
           <a
             class="announcement"
-            href="https://github.com/Veviad/VTerminal/releases/tag/v0.1.6"
-            aria-label="Version 0.1.6 is out. Read the release notes."
+            href="https://github.com/Veviad/VTerminal/releases"
+            aria-label="Read the latest VTerminal release notes."
+            data-release-href="release"
+            data-release-aria="announcement"
           >
-            <span class="announcement-badge">0.1.6</span>
-            <span class="announcement-label">Read the release notes</span>
+            <span class="announcement-badge" data-release-text="version">Latest</span>
+            <span class="announcement-label">
+              <span data-release-text="release_label">Latest release</span> ·
+              Read the release notes
+            </span>
             <svg class="ui-icon" aria-hidden="true"><use href="#i-arrow-right" /></svg>
           </a>
 
@@ -293,13 +305,14 @@
             behind the same interface.
           </p>
 
-          <!-- Versioned asset URL rather than /releases/latest/download/…: the
-               filename carries the version, so a "latest" path 404s when the
-               next version ships. Keep every release CTA below in sync. -->
+          <!-- Generic fallbacks keep the source page valid. The Pages release
+               renderer replaces every marked value in the deployed copy. -->
           <div class="hero-actions">
             <a
               class="button button-primary"
-              href="https://github.com/Veviad/VTerminal/releases/download/v0.1.6/VTerminal_0.1.6_aarch64.dmg"
+              href="https://github.com/Veviad/VTerminal/releases"
+              data-release-href="dmg"
+              data-release-aria="download"
             >
               <svg class="ui-icon" aria-hidden="true"><use href="#i-download" /></svg>
               Download for macOS
@@ -311,9 +324,28 @@
             >
           </div>
           <p class="download-meta hero-download-meta">
-            0.1.6 · Apple Silicon · 12 MB ·
+            <span data-release-text="version">Latest release</span> · Apple Silicon ·
+            <span data-release-text="dmg_size">DMG</span> ·
             <a href="#download">not notarized, see setup</a>
           </p>
+          <p class="release-date">
+            Published <span data-release-text="published_date">—</span>
+          </p>
+
+          <ul class="hero-stats" aria-label="Project activity">
+            <li>
+              <a href="https://github.com/Veviad/VTerminal">
+                <strong data-release-text="stars">—</strong>
+                <span>GitHub stars</span>
+              </a>
+            </li>
+            <li>
+              <a href="#download">
+                <strong data-release-text="total_downloads">—</strong>
+                <span>release downloads</span>
+              </a>
+            </li>
+          </ul>
 
           <ul class="hero-proof" aria-label="At a glance">
             <li>
@@ -375,7 +407,7 @@
                 </div>
                 <div class="mock-cmd">cargo test --features local-llm</div>
                 <div class="mock-out">
-                  <span class="is-dim">   Compiling vterminal v0.1.6</span>
+                  <span class="is-dim">   Compiling vterminal</span>
                   <span class="is-dim">    Finished `test` profile in 4.21s</span>
                   <span class="is-ok">test result: ok. 214 passed; 0 failed</span>
                 </div>
@@ -780,6 +812,151 @@
       </section>
 
       <section
+        class="section knowledge-section"
+        id="knowledge"
+        aria-labelledby="knowledge-title"
+      >
+        <div class="shell">
+          <div class="knowledge-heading">
+            <div>
+              <p class="eyebrow">Knowledge</p>
+              <h2 class="section-heading" id="knowledge-title">
+                Local Documents and Qdrant. One Search Surface.
+              </h2>
+              <p class="section-lead">
+                Attach local SQLite buckets and permission-filtered Qdrant
+                collections to the same Ask or Agent request. VTerminal creates
+                the right query embedding for every bucket, searches each source
+                independently, and fuses ranked results without comparing
+                incompatible raw scores.
+              </p>
+            </div>
+            <aside class="knowledge-privacy">
+              <svg class="ui-icon" aria-hidden="true"><use href="#i-lock" /></svg>
+              <div>
+                <h3>Private by construction</h3>
+                <p>
+                  Local embeddings stay on your Mac. Qdrant keys and cloud
+                  provider keys stay in macOS Keychain and never return to the
+                  frontend. Before cloud embedding, VTerminal tells you that
+                  document chunks and future search queries leave the device.
+                </p>
+              </div>
+            </aside>
+          </div>
+
+          <div class="knowledge-grid">
+            <article class="knowledge-card">
+              <span class="feature-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-download" /></svg>
+              </span>
+              <h3>One-click local embeddings</h3>
+              <p>
+                Download, verify, load and test a pinned model from Settings →
+                Knowledge, with progress, cancellation, RAM and disk estimates,
+                and license acceptance where required. No Python, conversion,
+                compilation or arbitrary model files.
+              </p>
+              <ul>
+                <li>Qwen3-Embedding 0.6B Q8 — recommended</li>
+                <li>Qwen3-Embedding 4B Q4_K_M</li>
+                <li>Qwen3-Embedding 8B Q4_K_M</li>
+                <li>EmbeddingGemma Q8 — 768 dimensions</li>
+                <li>Multilingual E5 Base Q8 — visible, release-gated</li>
+                <li>Multilingual E5 Large Q8 — visible, release-gated</li>
+              </ul>
+              <p class="knowledge-caveat">
+                Multilingual E5 Base and Large remain unavailable until signed,
+                checksum-pinned Veviad Q8 GGUFs pass multilingual parity tests
+                against the official Sentence Transformers models.
+              </p>
+            </article>
+
+            <article class="knowledge-card">
+              <span class="feature-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-cloud" /></svg>
+              </span>
+              <h3>Qdrant collections are buckets</h3>
+              <p>
+                Add a Qdrant URL and granular database key. VTerminal lists only
+                collections that key may see, explains compatibility, and keeps
+                attachment read-only unless the credential allows document or
+                collection management.
+              </p>
+              <ul>
+                <li>Mix local and remote buckets in one request</li>
+                <li>The attachment picker shows only exact runnable profiles</li>
+                <li>Upload, replace, edit or delete individual documents</li>
+                <li>Import existing collections with an explicit profile attestation</li>
+                <li>Source-qualified citations keep every result traceable</li>
+              </ul>
+              <p class="knowledge-caveat">
+                Managed buckets require Qdrant 1.16+. Qdrant stores extracted
+                chunks, metadata and vectors—not original binaries. Matching
+                dimensions are not proof of compatibility: existing collections
+                need the exact original embedding profile.
+                Profiles fingerprint the model, revision, dimensions and exact
+                query/document transforms; changing one creates a new profile
+                and requires re-embedding.
+              </p>
+            </article>
+
+            <article class="knowledge-card">
+              <span class="feature-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-sparkles" /></svg>
+              </span>
+              <h3>UI-first ingestion</h3>
+              <p>
+                Pick files or folders, preview estimated chunks and cloud
+                transfer, then follow persistent Extract → Chunk → Embed → Upload
+                progress. Jobs resume safely after interruption, and failed jobs
+                can be retried without duplicating documents.
+              </p>
+              <ul>
+                <li>Keyword-only local buckets remain usable</li>
+                <li>OpenAI and Mistral are the only guided cloud embedders</li>
+                <li>Anthropic is chat-only; it does not offer embeddings</li>
+                <li>Ollama and LM Studio embedding probes live under Advanced</li>
+              </ul>
+              <p class="knowledge-caveat">
+                Chat, vision and embedding models have separate jobs: chat writes
+                answers, vision transcribes attached images, and embeddings map
+                documents and queries into a retrieval vector space.
+              </p>
+            </article>
+
+            <article class="knowledge-card">
+              <span class="feature-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-terminal" /></svg>
+              </span>
+              <h3>Automation and advanced storage</h3>
+              <p>
+                The signed standalone <code>vterminal-docs</code> CLI installs
+                from the UI into <code>~/.local/bin</code> without editing shell
+                profiles. It shares profiles, model cache, connections, chunking
+                and job records with the app for repeatable terminal automation.
+              </p>
+              <ul>
+                <li>List profiles; list and test saved connections</li>
+                <li>List, create and delete buckets</li>
+                <li>List, ingest, replace and delete documents; search buckets</li>
+                <li>JSON output, stdin and safe Ctrl-C</li>
+                <li>Qdrant 1.18+ TurboQuant bits4 as an opt-in sidecar</li>
+              </ul>
+              <p class="knowledge-caveat">
+                TurboQuant is advanced and off by default. It keeps the original
+                vectors, so it can be disabled; bits2, bits1.5 and bits1 are
+                advanced choices that trade recall for lower memory use and a
+                different search-speed profile. The
+                CLI handles text, structured text, page JSON and text-layer PDFs;
+                OCR-required files are directed to the UI.
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section
         class="section section-soft"
         id="runbooks"
         aria-labelledby="runbooks-title"
@@ -1032,9 +1209,10 @@
             One Interface. On-Device, Cloud, or Your Own Server.
           </h2>
           <p class="section-lead">
-            The catalog is a curated allowlist, so every model carries the
-            reasoning-effort rungs it actually accepts and the RAM it actually
-            needs — no runtime surprises, no 400s from a guessed parameter.
+            Chat models write and reason, the optional vision sidecar transcribes
+            images, and embedding models power Knowledge retrieval. Each has a
+            curated catalog and a separate runtime role rather than one model
+            being treated as interchangeable with another.
           </p>
 
           <div class="plans-grid">
@@ -1194,9 +1372,16 @@
               A Disk Image. Drag It Across.
             </h2>
             <p class="section-lead">
-              One 12&nbsp;MB download with on-device inference already compiled
-              in — llama.cpp and its Metal kernels ship inside the app, so there
-              is nothing to build and no daemon to install.
+              One disk image with on-device inference already compiled in —
+              llama.cpp and its Metal kernels ship inside the app, so there is
+              nothing to build and no daemon to install.
+            </p>
+            <p class="metric-note">
+              The project counters above are rendered from GitHub-reported release data
+              when this static site is published. “Release downloads” counts the
+              disk image and signed updater archive across non-draft published
+              releases. It includes upgrades and is not a count of unique users
+              or installations; the app sends no telemetry.
             </p>
 
             <dl class="req-list">
@@ -1210,7 +1395,7 @@
               </div>
               <div class="req-row">
                 <dt>Download</dt>
-                <dd>12&nbsp;MB disk image</dd>
+                <dd><span data-release-text="dmg_size">DMG</span> disk image</dd>
               </div>
               <div class="req-row">
                 <dt>Signature</dt>
@@ -1242,8 +1427,8 @@
               step entirely, since a locally built app is never quarantined.
             </p>
             <p class="install-note">
-              <strong>New in 0.1.2: Experimental automatic updates.</strong>
-              After installing, open <strong>Settings → Updates</strong> to check
+              <strong>Experimental automatic updates.</strong> After installing,
+              open <strong>Settings → Updates</strong> to check
               manually or opt in to checks every 24 hours. Stable releases and
               prereleases share one channel, updater archives are
               cryptographically verified, and every install requires your
@@ -1259,18 +1444,21 @@
                 <div class="download-cta">
                   <a
                     class="button button-primary"
-                    href="https://github.com/Veviad/VTerminal/releases/download/v0.1.6/VTerminal_0.1.6_aarch64.dmg"
+                    href="https://github.com/Veviad/VTerminal/releases"
+                    data-release-href="dmg"
+                    data-release-aria="download"
                   >
                     <svg class="ui-icon" aria-hidden="true">
                       <use href="#i-download" />
                     </svg>
-                    VTerminal 0.1.6
+                    VTerminal <span data-release-text="version">latest release</span>
                   </a>
                   <span class="download-meta">
-                    <code>VTerminal_0.1.6_aarch64.dmg</code><br />
-                    12&nbsp;MB ·
+                    <code data-release-text="dmg_name">DMG</code><br />
+                    <span data-release-text="dmg_size">DMG</span> ·
                     <a
-                      href="https://github.com/Veviad/VTerminal/releases/tag/v0.1.6"
+                      href="https://github.com/Veviad/VTerminal/releases"
+                      data-release-href="release"
                       >release notes</a
                     >
                   </span>
@@ -1284,7 +1472,8 @@
                 <p>
                   The build is not notarized, so verify it if you like. Download
                   <a
-                    href="https://github.com/Veviad/VTerminal/releases/download/v0.1.6/SHA256SUMS.txt"
+                    href="https://github.com/Veviad/VTerminal/releases"
+                    data-release-href="checksum"
                     >SHA256SUMS.txt</a
                   >
                   next to the image and run:
@@ -1402,7 +1591,9 @@
           <div class="cta-actions">
             <a
               class="button button-primary"
-              href="https://github.com/Veviad/VTerminal/releases/download/v0.1.6/VTerminal_0.1.6_aarch64.dmg"
+              href="https://github.com/Veviad/VTerminal/releases"
+              data-release-href="dmg"
+              data-release-aria="download"
               >Download for macOS</a
             >
             <a
@@ -1461,6 +1652,7 @@
             <a href="#why">Why VTerminal</a>
             <a href="#terminal">Terminal</a>
             <a href="#ai">AI</a>
+            <a href="#knowledge">Knowledge</a>
             <a href="#runbooks">Runbooks</a>
             <a href="#safety">Safety</a>
             <a href="#models">Models</a>

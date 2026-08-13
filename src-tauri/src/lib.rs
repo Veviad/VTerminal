@@ -3,6 +3,7 @@ mod commands;
 pub mod credentials;
 mod database;
 pub mod docs;
+pub mod knowledge;
 pub mod models;
 pub mod provider;
 mod pty;
@@ -102,7 +103,16 @@ pub fn run() {
                 app.manage(provider::vision::VisionHost::with_gate(
                     std::sync::Arc::clone(&gate.0),
                 ));
+                app.manage(knowledge::local::EmbeddingHost::with_gate(
+                    std::sync::Arc::clone(&gate.0),
+                ));
                 app.manage(gate);
+            }
+            #[cfg(not(feature = "local-llm"))]
+            app.manage(knowledge::local::EmbeddingHost);
+
+            if let Err(error) = knowledge::ingest::resume_pending_jobs(app.handle()) {
+                log::warn!("resume knowledge ingestion jobs failed: {error}");
             }
 
             // Regenerate the shell-integration zdotdir on every start so script
@@ -195,6 +205,38 @@ pub fn run() {
             commands::docs::docs_put_text,
             commands::docs::docs_search,
             commands::docs::docs_destroy,
+            // unified knowledge and embedding models
+            commands::knowledge::knowledge_connections_list,
+            commands::knowledge::knowledge_connections_create,
+            commands::knowledge::knowledge_connections_update,
+            commands::knowledge::knowledge_connections_set_api_key,
+            commands::knowledge::knowledge_connections_delete,
+            commands::knowledge::knowledge_connections_refresh,
+            commands::knowledge::knowledge_buckets_list,
+            commands::knowledge::knowledge_buckets_create,
+            commands::knowledge::knowledge_buckets_delete,
+            commands::knowledge::knowledge_search,
+            commands::knowledge::knowledge_search_detailed,
+            commands::knowledge::knowledge_embedding_catalog,
+            commands::knowledge::knowledge_embedding_profile_create_cloud,
+            commands::knowledge::knowledge_qdrant_import_inspect,
+            commands::knowledge::knowledge_qdrant_import_save,
+            commands::knowledge::knowledge_qdrant_import_remove,
+            commands::knowledge::knowledge_documents_list,
+            commands::knowledge::knowledge_document_delete,
+            commands::knowledge::knowledge_document_update,
+            commands::knowledge::knowledge_document_ingest,
+            commands::knowledge::knowledge_bucket_embed,
+            commands::knowledge::knowledge_bucket_semantic_enable,
+            commands::knowledge::knowledge_qdrant_turbo_quant_set,
+            commands::knowledge::knowledge_jobs_list,
+            commands::knowledge::knowledge_jobs_cancel,
+            commands::knowledge::knowledge_jobs_retry,
+            commands::knowledge_cli::knowledge_cli_install,
+            commands::embedding_models::knowledge_embedding_model_download,
+            commands::embedding_models::knowledge_embedding_model_cancel,
+            commands::embedding_models::knowledge_embedding_model_delete,
+            commands::embedding_models::knowledge_embedding_model_status,
             // reusable runbooks (experimental; every command gated on runbooks_enabled)
             commands::runbooks::runbooks_import,
             commands::runbooks::runbooks_refresh,

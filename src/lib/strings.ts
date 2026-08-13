@@ -302,7 +302,7 @@ export const S = {
     tabs: {
       models: "Models",
       agent: "Agent",
-      docs: "Docs",
+      docs: "Knowledge",
       updates: "Updates",
       runbooks: "Runbooks",
       appearance: "Appearance",
@@ -499,13 +499,13 @@ export const S = {
         "Off: the agent's commands may not reach the network (curl, wget, git fetch/pull/clone, package installs, ssh), and models with a built-in web tool stop being offered one. Chat and models keep working. Command blocking is best-effort — a script the agent wrote earlier can still reach out.",
     },
     docs: {
-      title: "Documents",
+      title: "Knowledge",
       // The honesty clause, in the same spirit as `webAccessHint` above: the fencing
       // and labelling of retrieved passages are real and tested, but no framing forces
       // a model to obey them, and saying otherwise would be a promise the app cannot
       // keep.
       intro:
-        "Index your own PDFs, markdown, HTML and images into buckets, then attach a bucket to a chat so the agent can search it instead of guessing. Retrieved passages are quoted to the model as reference material, clearly marked as data rather than instructions — that marking is best-effort, so treat a bucket as documents you trust.",
+        "Index your own PDFs, markdown, HTML and images into local buckets or permitted Qdrant collections, then attach any compatible mix to a chat. Retrieved passages are quoted to the model as reference material, clearly marked as data rather than instructions — that marking is best-effort, so attach only knowledge you trust.",
       enable: "Enable document buckets",
       enableHint:
         "Experimental. While this is off there is no document search: the agent is offered no such tool, nothing is indexed, and no index file exists on disk.",

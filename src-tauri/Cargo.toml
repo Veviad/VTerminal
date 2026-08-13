@@ -1,9 +1,10 @@
 [package]
 name = "vterminal"
-version = "0.1.6"
+version = "0.2.0"
 description = "VTerminal — lean AI-powered terminal"
 authors = ["Shawn Maholick"]
 edition = "2021"
+default-run = "vterminal"
 
 [lib]
 name = "vterminal_lib"
@@ -40,6 +41,9 @@ serde-saphyr = "=0.0.29"
 semver = { version = "=1.0.26", features = ["serde"] }
 schemars = "=1.0.4"
 rusqlite = { version = "0.40", features = ["bundled"] }
+# Statically compiled into the app; no dylib, Python process, or system SQLite
+# extension is required on user machines. Pin the pre-v1 API deliberately.
+sqlite-vec = "=0.1.9"
 tokio = { version = "1", features = ["full"] }
 portable-pty = "0.9.0"
 reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], default-features = false }
@@ -65,6 +69,10 @@ zeroize = "1"
 base64 = "0.23"
 tauri-plugin-single-instance = "2.4.3"
 tauri-plugin-updater = "2"
+# Pure-Rust text-layer extraction for the standalone docs CLI. Scanned PDFs
+# deliberately fail with guidance to use the UI's OCR path.
+pdf-extract = "0.12"
+fs2 = "0.4"
 # llama.cpp hands back token pieces that can split a multibyte character; its
 # detokenizer takes an incremental decoder to stitch them back together.
 encoding_rs = { version = "0.8", optional = true }
