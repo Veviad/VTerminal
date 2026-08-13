@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  BookOpen,
   Brain,
   ChevronDown,
   ChevronRight,
@@ -13,6 +14,7 @@ import {
   Paperclip,
   ScanText,
   Send,
+  ShieldCheck,
   Sparkles,
   Square,
   Zap,
@@ -29,6 +31,7 @@ import { useAiStream } from "../../hooks/useAiStream";
 import { useAutoGrow } from "../../hooks/useAutoGrow";
 import { AiMessageView } from "./AiMessageView";
 import { BlockContextChip } from "./BlockContextChip";
+import { BucketChip, BucketPicker } from "./BucketPicker";
 import { CommandApprovalCard } from "./CommandApprovalCard";
 import { describeRemote } from "../../lib/nesting";
 import {
@@ -40,7 +43,7 @@ import { interruptJob } from "../../lib/ptyExec";
 import { askReason, autoRuns, PERMISSION_MODES } from "../../lib/permissionMode";
 import { relativeTime } from "../../lib/relativeTime";
 import { S } from "../../lib/strings";
-import { Segmented } from "../ui/Segmented";
+import { Dropdown } from "../ui/Dropdown";
 import { EffortPicker } from "../ui/EffortPicker";
 import * as api from "../../lib/tauri";
 import { AttachmentChip } from "./AttachmentChip";
@@ -88,6 +91,8 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const catalog = useAppStore((s) => s.catalog);
   const modelEffort = useAppStore((s) => s.modelEffort);
   const detachBlockFromAi = useAppStore((s) => s.detachBlockFromAi);
+  const detachBucketFromAi = useAppStore((s) => s.detachBucketFromAi);
+  const docBuckets = useAppStore((s) => s.docBuckets);
   const detachFileFromAi = useAppStore((s) => s.detachFileFromAi);
   const setAiMode = useAppStore((s) => s.setAiMode);
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
@@ -133,6 +138,11 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
     .map((id) => blocks.find((b) => b.id === id))
     .filter((b) => b !== undefined);
   const pendingAttachments = stream?.pendingAttachments ?? NO_ATTACHMENTS;
+  // Resolved against the live bucket list, so a bucket deleted in Settings while it was
+  // attached simply stops rendering instead of showing a chip for something gone.
+  const attachedBuckets = (stream?.attachedBucketIds ?? [])
+    .map((id) => docBuckets.find((b) => b.id === id))
+    .filter((b) => b !== undefined);
   const attachError = stream?.attachError ?? null;
   const attachStatus = stream?.attachStatus ?? null;
   const hasChat = streamHasConversation(stream);
@@ -233,8 +243,11 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
         </div>
       )}
       {/* Header */}
-      <div className="flex h-9 shrink-0 items-center justify-between border-b border-border-subtle px-2">
-        <div className="flex items-center rounded-lg bg-bg-primary p-0.5 border border-border-subtle">
+      {/* `gap-1` and `min-w-0` on both clusters: this row has no wrap and no scroll, so
+          without them a narrow panel clips whatever is furthest right — the collapse
+          chevron — instead of letting the dropdown triggers shorten. */}
+      <div className="flex h-9 shrink-0 items-center justify-between gap-1 border-b border-border-subtle px-2">
+        <div className="flex min-w-0 items-center rounded-lg bg-bg-primary p-0.5 border border-border-subtle">
           {(["ask", "agent"] as const).map((m) => (
             <button
               key={m}
@@ -253,7 +266,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             </button>
           ))}
         </div>
-        <div className="flex items-center gap-0.5">
+        <div className="flex min-w-0 items-center gap-0.5">
           {/* First in the cluster deliberately: Auto-accept appears and vanishes
               with the mode, and a button that moves under the cursor is a button
               you misclick. */}
@@ -286,8 +299,18 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
           >
             <MessageSquarePlus size={14} />
           </button>
+          {/* A dropdown rather than a segmented control, because three segmented
+              controls plus two buttons need ~510px and this panel defaults to 420px and
+              floors at 320px, in a fixed-height row with no wrap and no scroll.
+
+              Collapsing a SAFETY control is only acceptable because the trigger still
+              renders the current mode in its own tone — "All" stays warning-coloured —
+              and the auto_all banner below this row is untouched. Hiding the options is
+              fine; hiding the state would break the promise that arming auto-accept is a
+              deliberate, visible act. The per-mode explanations also read better here:
+              as a segmented control they were tooltips nobody hovered. */}
           {agentMode && sessionId && (
-            <Segmented
+            <Dropdown
               value={permissionMode}
               options={PERMISSION_MODES.map((m) => ({
                 value: m,
@@ -306,16 +329,28 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
                 }
               }}
               ariaLabel={S.aiPanel.permissionLabel}
+              hint={S.aiPanel.permissionLabel}
               size="sm"
+              icon={<ShieldCheck size={10} className="shrink-0 opacity-70" />}
             />
           )}
+          {/* Ask AND agent, by different mechanisms: agent mode gets a `search_docs`
+              tool it calls when it wants, while ask mode has no tool loop and instead
+              gets the best-matching passages folded into the turn. Not in Explain,
+              which is one-shot on a block the user already picked. Renders nothing when
+              the feature is off or no bucket has been indexed. */}
+          {(agentMode || mode === "ask") && sessionId && <BucketPicker sessionId={sessionId} />}
           {/* Reasoning depth for the model in use. The rungs come from that
-              model's own capabilities, so this is not a fixed on/off switch. */}
+              model's own capabilities, so this is not a fixed on/off switch — and
+              `layout="dropdown"` because five of them at ~150px is the single widest
+              thing in this row, for the setting changed least often. Still renders
+              nothing below two rungs. */}
           {activeEntry && (
             <EffortPicker
               value={modelEffort[activeEntry.id] ?? activeEntry.effort}
               available={activeEntry.efforts}
               size="sm"
+              layout="dropdown"
               onChange={(e: import("../../lib/types").Effort) => {
                 useAppStore.getState().setModelEffortLocal(activeEntry.id, e);
                 void api.setModelEffort(activeEntry.id, e).catch(() => {});
@@ -454,6 +489,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
       {/* Attached blocks and staged files share one strip: both are "context for
           the next turn", and two stacked rows would eat the message list. */}
       {(attachedBlocks.length > 0 ||
+        attachedBuckets.length > 0 ||
         pendingAttachments.length > 0 ||
         attachError ||
         attachStatus) &&
@@ -464,6 +500,14 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
               key={b.id}
               block={b}
               onRemove={() => detachBlockFromAi(sessionId, b.id)}
+            />
+          ))}
+          {attachedBuckets.map((b) => (
+            <BucketChip
+              key={b.id}
+              label={b.label}
+              chunkCount={b.chunk_count}
+              onRemove={() => detachBucketFromAi(sessionId, b.id)}
             />
           ))}
           {pendingAttachments.map((a) => (
@@ -699,17 +743,51 @@ function FoldedBlockSection({ block }: { block: FoldedBlock }) {
         type="button"
         aria-expanded={open}
         onClick={() => setOpen(!open)}
-        className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-[10px] font-medium uppercase tracking-widest text-text-muted"
+        className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[10px] font-medium uppercase tracking-widest text-text-muted"
       >
-        {open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-        {block.kind === "transcript" ? <ScanText size={11} /> : <FileText size={11} />}
-        {block.kind === "transcript" ? S.attachments.blockTranscript : S.attachments.blockFile}
-        {/* The filename and model are data, not a section title — drop the
-            uppercase treatment for them or a path becomes unreadable. */}
-        <span className="min-w-0 truncate font-normal normal-case tracking-normal">
+        <span className="shrink-0">
+          {open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+        </span>
+        <span className="shrink-0">
+          {block.kind === "transcript" ? (
+            <ScanText size={11} />
+          ) : block.kind === "docs" ? (
+            <BookOpen size={11} />
+          ) : (
+            <FileText size={11} />
+          )}
+        </span>
+        {/* `shrink-0 whitespace-nowrap`, not a bare text node. Uppercase plus
+            `tracking-widest` makes even a short label wide, and as a shrinkable flex item
+            it wrapped onto a second line and left a gap the filename was pushed across.
+
+            Dropped entirely for a passage: the book icon already distinguishes it from a
+            file or a transcript, and at this tracking the word cost ~75px that a long
+            source filename needs more — three passages from one document are told apart
+            by their page, and the filename is what says WHICH document. */}
+        {block.kind !== "docs" && (
+          <span className="shrink-0 whitespace-nowrap">
+            {block.kind === "transcript"
+              ? S.attachments.blockTranscript
+              : S.attachments.blockFile}
+          </span>
+        )}
+        {/* The filename, model and page are data, not a section title — drop the
+            uppercase treatment for them or a path becomes unreadable.
+            `flex-1` so this is the element that absorbs the truncation. */}
+        <span className="min-w-0 flex-1 truncate font-normal normal-case tracking-normal">
           {block.name}
           {block.model ? ` ${S.attachments.blockReadBy(block.model)}` : ""}
         </span>
+        {/* The page is the LAST thing that should be lost. Folded into the filename it
+            was truncated away first — and for three passages from one document the page
+            is the only thing telling them apart. Capped so a long heading cannot squeeze
+            the filename out entirely. */}
+        {block.locator && (
+          <span className="max-w-[45%] shrink-0 truncate font-normal normal-case tracking-normal">
+            {block.locator}
+          </span>
+        )}
       </button>
       {open && (
         <div className="max-h-40 overflow-y-auto whitespace-pre-wrap px-3 pb-2 text-[11px] leading-relaxed text-text-muted">

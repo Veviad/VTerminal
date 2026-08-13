@@ -8,9 +8,12 @@ import { nameSession } from "../lib/sessionNaming";
 import { markTranscriptDirty } from "../lib/sessionPersistence";
 import { setAiPanelOpen } from "../lib/aiPanel";
 import {
+  DOC_INJECT_LIMIT,
   buildOutgoing,
+  foldRetrievedPassages,
   ocrAvailable,
   persistAttachments,
+  stripDocBlocks,
   transcribeImages,
 } from "../lib/attachInput";
 import { S } from "../lib/strings";
@@ -197,11 +200,21 @@ export function useAiStream() {
     // `image_count`, not the images: an image rides only on the turn it was
     // attached to, and Rust turns the count back into a note so a replayed turn
     // does not read as if nothing had been attached.
-    const history = (stream?.messages ?? []).map((m) => ({
-      role: m.role,
-      content: m.content,
-      image_count: (m.attachments ?? []).filter((a) => a.kind === "image").length,
-    }));
+    //
+    // Retrieved passages get the same treatment via `stripDocBlocks`, and for a sharper
+    // reason: they arrive on EVERY turn, so across the 12 turns ask mode replays they
+    // would compound into the whole context budget. Attached files deliberately still
+    // ride along — someone who attached a log to turn one expects a follow-up about it
+    // to work.
+    const history = (stream?.messages ?? []).map((m) => {
+      const stripped = stripDocBlocks(m.content);
+      return {
+        role: m.role,
+        content: stripped.content,
+        image_count: (m.attachments ?? []).filter((a) => a.kind === "image").length,
+        doc_count: stripped.count,
+      };
+    });
 
     const staged = await persistAttachments(sessionId, stream?.pendingAttachments ?? []);
     let outgoing = buildOutgoing(prompt, staged);
@@ -227,6 +240,29 @@ export function useAiStream() {
       }
       outgoing = { prompt: folded, images: [] };
     }
+
+    // Retrieval, before the turn goes out. Ask mode has no tool loop, so this is the
+    // only place documents can reach it — and it runs only when the session has a bucket
+    // attached, so a session without one pays nothing.
+    //
+    // After the OCR branch above, so `initAiStream` has already run in the case that
+    // needs it, and the query is the user's own words. A failure is deliberately NOT
+    // fatal, unlike a failed transcription: an image the model never saw makes its answer
+    // meaningless, while missing passages just make it a normal ungrounded answer — and
+    // refusing to send would strand the user's message over an optional lookup.
+    let docsUsed = 0;
+    const bucketIds = stream?.attachedBucketIds ?? [];
+    if (bucketIds.length > 0) {
+      try {
+        const hits = await api.docsSearch(bucketIds, prompt, DOC_INJECT_LIMIT);
+        const folded = foldRetrievedPassages(outgoing.prompt, hits);
+        outgoing = { ...outgoing, prompt: folded.prompt };
+        docsUsed = folded.count;
+      } catch {
+        // Swallowed on purpose — see above. The turn still goes.
+      }
+    }
+
     store.pushAiMessage(sessionId, {
       id: `msg-${Date.now()}`,
       role: "user",
@@ -248,6 +284,7 @@ export function useAiStream() {
         history,
         outgoing.images,
         context,
+        docsUsed > 0,
         (e) => dispatchPanelEvent(sessionId, requestId, e),
       );
     } catch (err) {
@@ -279,6 +316,10 @@ export function useAiStream() {
     // transcript is written into the store asynchronously, and this is what turns
     // agent mode from single-shot into an actual conversation.
     const history = useAppStore.getState().aiStreams[sessionId]?.modelTranscript ?? [];
+    // Read at dispatch time for the same reason as `history`: the user may attach or
+    // detach a bucket between turns, and each turn is a fresh run whose tool vector is
+    // decided from this list.
+    const docBuckets = useAppStore.getState().aiStreams[sessionId]?.attachedBucketIds ?? [];
     try {
       const transcript = await api.agentStart(
         requestId,
@@ -286,6 +327,7 @@ export function useAiStream() {
         buildTerminalContext(sessionId),
         history,
         outgoing.images,
+        docBuckets,
         (e) => dispatchPanelEvent(sessionId, requestId, e),
       );
       useAppStore.getState().setModelTranscript(sessionId, transcript);

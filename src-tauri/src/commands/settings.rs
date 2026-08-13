@@ -71,6 +71,13 @@ pub fn get_settings(app: tauri::AppHandle<Wry>) -> Result<Value, String> {
         // it was pinned at this default. Default stays `true`: flipping it would
         // silently take the web away from every existing install on upgrade.
         "ai_web_access": get("ai_web_access", json!(true)),
+        // Document buckets: EXPERIMENTAL, and the only setting in this table that
+        // defaults OFF for a reason other than "no value chosen yet". It is the
+        // real gate, not UI sugar — `commands::ai` omits the `search_docs` tool
+        // and its prompt section entirely while this is false, and every `docs_*`
+        // command refuses. So a default install has no retrieval capability, no
+        // `docs.db` on disk, and no new surface reachable from a stale frontend.
+        "docs_enabled": get("docs_enabled", json!(false)),
         "log_level": get("log_level", json!("info")),
     }))
 }
@@ -115,6 +122,7 @@ pub fn save_settings(
     agent_max_iterations: Option<u32>,
     agent_command_timeout_secs: Option<u32>,
     ai_web_access: Option<bool>,
+    docs_enabled: Option<bool>,
     log_level: Option<String>,
 ) -> Result<(), String> {
     let store = app.store(STORE_NAME).map_err(|e| e.to_string())?;
@@ -274,6 +282,9 @@ pub fn save_settings(
     }
     if let Some(v) = ai_web_access {
         store.set("ai_web_access", json!(v));
+    }
+    if let Some(v) = docs_enabled {
+        store.set("docs_enabled", json!(v));
     }
     if let Some(v) = log_level {
         store.set("log_level", json!(v));

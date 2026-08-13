@@ -1,6 +1,7 @@
 pub mod agent;
 mod commands;
 mod database;
+pub mod docs;
 pub mod models;
 pub mod provider;
 mod pty;
@@ -62,6 +63,11 @@ pub fn run() {
             let app_data = app.path().app_data_dir()?;
             let conn = database::init(&app_data).map_err(std::io::Error::other)?;
             app.manage(database::DbState(std::sync::Mutex::new(conn)));
+            // Document buckets live in their OWN database file, opened lazily — the
+            // handle is registered here but nothing touches the disk until a
+            // `docs_*` command runs, so the default (flag-off) install has no
+            // `docs.db` at all. See `docs::db` for why the file is separate.
+            app.manage(docs::db::DocsDb::new(app_data.clone()));
             app.manage(pty::PtyManager::default());
             app.manage(agent::AiState::default());
             app.manage(agent::ApprovalState::default());
@@ -153,6 +159,22 @@ pub fn run() {
             // attachments
             commands::attachments::attachment_put,
             commands::attachments::attachment_read,
+            // document buckets (experimental; every command gated on docs_enabled)
+            commands::docs::docs_buckets_list,
+            commands::docs::docs_bucket_create,
+            commands::docs::docs_bucket_rename,
+            commands::docs::docs_bucket_delete,
+            commands::docs::docs_bucket_reindex,
+            commands::docs::docs_scan,
+            commands::docs::docs_files_list,
+            commands::docs::docs_files_needing_work,
+            commands::docs::docs_file_remove,
+            commands::docs::docs_file_failed,
+            commands::docs::docs_refresh_states,
+            commands::docs::docs_read_source,
+            commands::docs::docs_put_text,
+            commands::docs::docs_search,
+            commands::docs::docs_destroy,
             // vision sidecar
             commands::vision::vision_catalog,
             commands::vision::vision_download,

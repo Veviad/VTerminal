@@ -5,15 +5,20 @@ import { ModelsSettings } from "./ModelsSettings";
 import { AppearanceSection } from "./AppearanceSection";
 import { TerminalSection } from "./TerminalSection";
 import { AgentSection } from "./AgentSection";
+import { DocsSettings } from "./DocsSettings";
 import { SshHostsSection } from "./SshHostsSection";
 import { Row } from "../ui/Row";
 import { S } from "../../lib/strings";
 
-type Tab = "models" | "agent" | "appearance" | "terminal" | "hosts" | "about";
+type Tab = "models" | "agent" | "docs" | "appearance" | "terminal" | "hosts" | "about";
 
+// The Docs tab is listed even while the feature is off: its own toggle is the first
+// thing inside it, and a tab that only appears once the feature is enabled leaves the
+// switch nowhere to be found.
 const TABS: { id: Tab; label: string }[] = [
   { id: "models", label: S.settings.tabs.models },
   { id: "agent", label: S.settings.tabs.agent },
+  { id: "docs", label: S.settings.tabs.docs },
   { id: "appearance", label: S.settings.tabs.appearance },
   { id: "terminal", label: S.settings.tabs.terminal },
   { id: "hosts", label: S.settings.tabs.hosts },
@@ -55,6 +60,7 @@ export function SettingsPage() {
           <div className="mx-auto max-w-lg px-6 py-6">
             {tab === "models" && <ModelsSettings />}
             {tab === "agent" && <AgentSection />}
+            {tab === "docs" && <DocsSettings />}
             {tab === "appearance" && <AppearanceSection />}
             {tab === "terminal" && <TerminalSection />}
             {tab === "hosts" && <SshHostsSection />}

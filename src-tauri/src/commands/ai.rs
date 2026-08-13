@@ -271,6 +271,15 @@ pub struct HistoryMessage {
     /// user had attached nothing.
     #[serde(default)]
     pub image_count: u8,
+    /// How many retrieved document passages rode on this turn when it was sent.
+    ///
+    /// Same contract as `image_count`, for the same reason. The passages are folded into
+    /// `content` on the way out, but they are stripped again before replay: ask mode
+    /// replays 12 turns, so three passages per turn would compound into the whole
+    /// budget. Stripping without saying so would let the model answer a follow-up as if
+    /// the earlier answer had come from nowhere.
+    #[serde(default)]
+    pub doc_count: u8,
 }
 
 /// The turn's images, after the active model has had its say.
@@ -333,6 +342,11 @@ pub async fn ai_ask(
     // text-only send, matching how `agent_start` treats `history`.
     images: Option<Vec<crate::provider::ImagePart>>,
     context: TerminalContext,
+    // Whether THIS turn carries passages retrieved from the user's document buckets,
+    // folded into `prompt` by the frontend. `Option` for the same reason as `images`.
+    // Only the prompt tier depends on it: the passages themselves are already in
+    // `prompt`, so a stale `false` costs the framing paragraph, not the content.
+    docs: Option<bool>,
     on_event: Channel<StreamEvent>,
 ) -> Result<(), String> {
     // Ask mode has no client tools, but a provider with a server-side fetch
@@ -343,29 +357,55 @@ pub async fn ai_ask(
     let native_web =
         crate::commands::settings::read_bool(&app, "ai_web_access", true) && model.native_web_fetch;
     let mut messages = vec![ChatMessage::system(format!(
-        "{}{}\n\nCurrent terminal context:\n{}",
+        "{}{}{}\n\nCurrent terminal context:\n{}",
         prompts::ASK,
         if native_web {
             prompts::ASK_WEB_NATIVE
         } else {
             prompts::ASK_WEB_NONE
         },
+        // Appended only when passages are actually present. Ask mode is deliberately
+        // uncached, so a system prompt that varies per turn costs nothing here — unlike
+        // the agent path, where it would invalidate the run's cached prefix.
+        if docs.unwrap_or(false) {
+            prompts::ASK_DOCS
+        } else {
+            ""
+        },
         context.render()
     ))];
     for h in history.iter().rev().take(12).rev() {
-        messages.push(match h.role.as_str() {
-            "assistant" => ChatMessage::assistant(h.content.clone()),
-            // A past turn's images are gone by design, so say they were there.
-            // Silence here is what would let the model answer a follow-up as if it
-            // could still see the screenshot.
-            _ if h.image_count > 0 => ChatMessage::user(format!(
-                "{}\n\n[{} image{} were attached to this message]",
-                h.content,
+        if h.role == "assistant" {
+            messages.push(ChatMessage::assistant(h.content.clone()));
+            continue;
+        }
+        // ADDITIVE, not a match ladder. This was a `match` whose image arm was
+        // exclusive, which was fine while images were the only thing stripped from
+        // history — but a turn can carry images AND retrieved passages, and an
+        // exclusive arm would silently drop one of the two notes.
+        let mut content = h.content.clone();
+        // A past turn's images are gone by design, so say they were there. Silence here
+        // is what would let the model answer a follow-up as if it could still see the
+        // screenshot.
+        if h.image_count > 0 {
+            content.push_str(&format!(
+                "\n\n[{} image{} were attached to this message]",
                 h.image_count,
                 if h.image_count == 1 { "" } else { "s" }
-            )),
-            _ => ChatMessage::user(h.content.clone()),
-        });
+            ));
+        }
+        // Same reasoning, same shape: the passages were stripped before replay (they
+        // would compound over 12 turns), so the turn has to say it consulted documents
+        // rather than read as if the answer came from nowhere.
+        if h.doc_count > 0 {
+            content.push_str(&format!(
+                "\n\n[{} passage{} from the user's documents {} included with this message]",
+                h.doc_count,
+                if h.doc_count == 1 { "" } else { "s" },
+                if h.doc_count == 1 { "was" } else { "were" }
+            ));
+        }
+        messages.push(ChatMessage::user(content));
     }
     let (images, note) = gate_images(model, images.unwrap_or_default());
     messages.push(ChatMessage::user_with_images(
@@ -593,9 +633,13 @@ pub async fn agent_start(
     approvals: State<'_, crate::agent::ApprovalState>,
     pty_exec: State<'_, crate::agent::PtyExecState>,
     steers: State<'_, crate::agent::SteerState>,
+    docs: State<'_, crate::docs::db::DocsDb>,
     request_id: String,
     goal: String,
     context: TerminalContext,
+    // Document buckets the user attached to this session. Same `Option` reasoning as
+    // `history` below.
+    doc_buckets: Option<Vec<String>>,
     // Prior turns of THIS conversation, in the model's own shape. `Option` rather
     // than a bare `Vec` because tauri deserializes each argument by key and
     // omitting it has to stay legal.
@@ -630,6 +674,23 @@ pub async fn agent_start(
     let shell = crate::commands::settings::read_string(&app, "shell_path")
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "/bin/zsh".into());
+
+    // THE agent-facing half of the experimental gate, and the only one that matters:
+    // an empty list means `tools()` never adds `search_docs`, so the capability is
+    // absent rather than merely discouraged. The `&&` order also means a frontend
+    // that kept stale bucket ids across a toggle-off cannot reintroduce them.
+    //
+    // Read ONCE here, so the tool vector and the system prompt are decided together
+    // and stay byte-identical for every round of this run — both live inside the
+    // Anthropic cache breakpoint's span.
+    let docs_enabled = crate::commands::settings::read_bool(&app, "docs_enabled", false);
+    let doc_buckets: Vec<String> = if docs_enabled {
+        doc_buckets.unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let docs_attached = !doc_buckets.is_empty();
+
     let config = crate::agent::run::AgentConfig {
         request_id: request_id.clone(),
         shell,
@@ -649,6 +710,7 @@ pub async fn agent_start(
             120,
         )),
         web_access,
+        doc_buckets,
         // Always the user's visible terminal: commands must run where the user
         // is (including a remote host) and be visible while they run.
         exec_target: crate::agent::run::ExecTarget::Pty {
@@ -684,6 +746,12 @@ pub async fn agent_start(
             context.render()
         ),
     };
+    // Paired with the tool: appended exactly when `tools()` adds `search_docs`, so the
+    // prompt can never describe a tool the model was not given (or stay silent about
+    // one it was). There is no "no documents" tier — see `prompts::AGENT_DOCS`.
+    if docs_attached {
+        system_prompt.push_str(&format!("\n\n{}", prompts::AGENT_DOCS));
+    }
     if !history.is_empty() {
         // The transcript describes a world that has moved on: it may contain
         // `exit code: 0` for an `npm run dev` that is no longer running, and after
@@ -713,6 +781,9 @@ pub async fn agent_start(
         &approvals,
         &pty_exec,
         &steers,
+        // Handed over only when a bucket is attached, so a run with none cannot open
+        // `docs.db` at all — which is what keeps the flag-off install free of the file.
+        if docs_attached { Some(&*docs) } else { None },
         cancel_rx,
         &on_event,
     )

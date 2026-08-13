@@ -1,13 +1,14 @@
 import {
   MAX_SOURCE_BYTES,
   base64FromBytes,
+  fitUtf8,
   type IngestFailure,
   ingestBlob,
 } from "./attachments";
 import * as api from "./tauri";
 import { useAppStore } from "../stores/appStore";
 import { S } from "./strings";
-import type { Attachment, ImagePart } from "./types";
+import type { Attachment, DocSearchPreview, ImagePart } from "./types";
 
 /** The three ways a file gets into the chat — drop, paste, picker — reduced to
  *  one shape before anything is decoded.
@@ -131,19 +132,94 @@ export interface Outgoing {
 
 /** One fenced block that was folded into a message, pulled back out for display. */
 export interface FoldedBlock {
-  kind: "transcript" | "file";
+  kind: "transcript" | "file" | "docs";
   /** The file it came from. */
   name: string;
   /** Transcripts only: which model read it. */
   model?: string;
+  /** Docs only: where in the file — `"p.12 — Deploys > Rolling back"`. */
+  locator?: string;
   body: string;
   /** The closing fence was missing — see `splitFoldedBlocks`. */
   truncated: boolean;
 }
 
+/** Passages retrieved per ask turn.
+ *
+ *  Smaller than `search::DEFAULT_LIMIT` (5) on purpose: agent mode pays for retrieval
+ *  only on turns where the model chooses to look something up, while this rides on every
+ *  turn of a session with a bucket attached. */
+export const DOC_INJECT_LIMIT = 3;
+
+/** Total characters of retrieved text folded into one turn. Bounds the per-turn cost so
+ *  a bucket of 1000-char chunks cannot quietly triple the size of every message. */
+export const DOC_INJECT_MAX_CHARS = 4000;
+
 const FILE_LABEL = /^Attached file — (.+):$/;
 const TRANSCRIPT_LABEL = /^\[image: (.+) — transcribed on-device by (.+)\]$/;
+/** `[docs: runbook.pdf — p.12 — Deploys > Rolling back]`, the locator optional. */
+const DOC_LABEL = /^\[docs: (.+?)(?: — (.+?))?\]$/;
 const FENCE = /^(`{3,})\s*$/;
+
+/** One folded block located in a message, plus where it sits.
+ *
+ *  Shared by `splitFoldedBlocks` (which turns these into `FoldedBlock`s for display) and
+ *  `stripDocBlocks` (which drops just the doc ones before replay). The fence discipline
+ *  below is subtle enough — a label is only a label if a fence follows, and the block
+ *  closes on the SAME backtick run — that having two copies of it would be how the two
+ *  functions drift apart.
+ */
+interface ScannedBlock {
+  kind: FoldedBlock["kind"];
+  name: string;
+  model?: string;
+  locator?: string;
+  body: string;
+  truncated: boolean;
+  /** Index of the line AFTER the block, for the caller's loop. */
+  next: number;
+}
+
+function scanFoldedBlock(lines: string[], i: number): ScannedBlock | null {
+  const file = FILE_LABEL.exec(lines[i]);
+  const transcript = file ? null : TRANSCRIPT_LABEL.exec(lines[i]);
+  const docs = file || transcript ? null : DOC_LABEL.exec(lines[i]);
+  if (!file && !transcript && !docs) return null;
+
+  // A label is only a label if a fence follows it. Otherwise it is prose that
+  // happens to look like one, and belongs in the prompt.
+  const open = i + 1 < lines.length ? FENCE.exec(lines[i + 1]) : null;
+  if (!open) return null;
+
+  // Close on the SAME backtick run: `fenceFor` grows the fence past any run in
+  // the body, so a fixed three would end the block early on a body containing
+  // its own fence.
+  const marker = open[1];
+  const body: string[] = [];
+  let closed = false;
+  let j = i + 2;
+  for (; j < lines.length; j++) {
+    const close = FENCE.exec(lines[j]);
+    if (close && close[1] === marker) {
+      closed = true;
+      break;
+    }
+    body.push(lines[j]);
+  }
+
+  return {
+    kind: file ? "file" : transcript ? "transcript" : "docs",
+    name: file ? file[1] : transcript ? transcript[1] : docs![1],
+    ...(transcript ? { model: transcript[2] } : {}),
+    ...(docs && docs[2] ? { locator: docs[2] } : {}),
+    body: body.join("\n"),
+    // Reachable, not hypothetical: the archive head()-truncates content at 16KB
+    // while a text attachment may be 128KB, so a large log comes back from a
+    // reopen with its closing fence gone.
+    truncated: !closed,
+    next: closed ? j + 1 : lines.length,
+  };
+}
 
 /**
  * Undo the folding, for DISPLAY only.
@@ -164,50 +240,97 @@ export function splitFoldedBlocks(content: string): { prompt: string; blocks: Fo
   const blocks: FoldedBlock[] = [];
 
   for (let i = 0; i < lines.length; i++) {
-    const file = FILE_LABEL.exec(lines[i]);
-    const transcript = file ? null : TRANSCRIPT_LABEL.exec(lines[i]);
-    if (!file && !transcript) {
+    const found = scanFoldedBlock(lines, i);
+    if (!found) {
       kept.push(lines[i]);
       continue;
     }
-    // A label is only a label if a fence follows it. Otherwise it is prose that
-    // happens to look like one, and belongs in the prompt.
-    const open = i + 1 < lines.length ? FENCE.exec(lines[i + 1]) : null;
-    if (!open) {
-      kept.push(lines[i]);
-      continue;
-    }
-
-    // Close on the SAME backtick run: `fenceFor` grows the fence past any run in
-    // the body, so a fixed three would end the block early on a body containing
-    // its own fence.
-    const marker = open[1];
-    const body: string[] = [];
-    let closed = false;
-    let j = i + 2;
-    for (; j < lines.length; j++) {
-      const close = FENCE.exec(lines[j]);
-      if (close && close[1] === marker) {
-        closed = true;
-        break;
-      }
-      body.push(lines[j]);
-    }
-
-    blocks.push({
-      kind: file ? "file" : "transcript",
-      name: file ? file[1] : transcript![1],
-      ...(transcript ? { model: transcript[2] } : {}),
-      body: body.join("\n"),
-      // Reachable, not hypothetical: the archive head()-truncates content at 16KB
-      // while a text attachment may be 128KB, so a large log comes back from a
-      // reopen with its closing fence gone.
-      truncated: !closed,
-    });
-    i = closed ? j : lines.length;
+    const { next, ...block } = found;
+    blocks.push(block);
+    i = next - 1; // the loop's own ++ lands on `next`
   }
 
   return { prompt: kept.join("\n").trim(), blocks };
+}
+
+/** Remove folded DOC blocks from a message, reporting how many went.
+ *
+ *  Called when building ask-mode history. Retrieved passages are folded into `content`
+ *  like any other attachment, but unlike an attachment they arrive on EVERY turn — and
+ *  ask mode replays 12 of them, so three passages per turn would compound into the whole
+ *  context budget within a short conversation. Rust turns the count back into a note
+ *  (`HistoryMessage.doc_count`), exactly as it already does for images, so a replayed
+ *  turn says it consulted documents instead of reading as if the answer came from
+ *  nowhere.
+ *
+ *  Touches ONLY doc blocks: attached files and image transcripts keep today's behaviour
+ *  of riding along in history, which is what a user who attached a log to turn one
+ *  expects when they ask a follow-up about it.
+ */
+export function stripDocBlocks(content: string): { content: string; count: number } {
+  const lines = content.split("\n");
+  const kept: string[] = [];
+  let count = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const found = scanFoldedBlock(lines, i);
+    if (!found) {
+      kept.push(lines[i]);
+      continue;
+    }
+    if (found.kind === "docs") {
+      count += 1;
+    } else {
+      // Re-emit verbatim rather than reconstructing: the fence width is `fenceFor`'s
+      // decision about this body, and rebuilding it could pick a different one.
+      kept.push(...lines.slice(i, found.next));
+    }
+    i = found.next - 1;
+  }
+
+  return { content: kept.join("\n").replace(/\n{3,}$/, "\n").trimEnd(), count };
+}
+
+/** Fold retrieved passages into a prompt, one labelled block each.
+ *
+ *  Ask mode has no tool loop, so it cannot call `search_docs` the way agent mode does —
+ *  retrieval happens before the turn and the passages ride in the prompt. Folding rather
+ *  than passing them on a sibling field is what makes them visible: `splitFoldedBlocks`
+ *  pulls them back out at render time, so the transcript shows exactly which passages
+ *  the model was given.
+ *
+ *  The framing duty is `prompts::ASK_DOCS`'s — this only guarantees the passages are
+ *  delimited so that framing has something to refer to, and fenced with `fenceFor` so a
+ *  passage containing its own ``` cannot break out of the block and read as prose.
+ */
+export function foldRetrievedPassages(
+  prompt: string,
+  hits: DocSearchPreview[],
+): { prompt: string; count: number } {
+  if (hits.length === 0) return { prompt, count: 0 };
+
+  const parts = [prompt];
+  let budget = DOC_INJECT_MAX_CHARS;
+  let count = 0;
+
+  for (const hit of hits) {
+    const text = fitUtf8(hit.text, Math.min(budget, DOC_INJECT_MAX_CHARS), "start").text;
+    // A passage trimmed to nothing is worse than absent: the label would promise
+    // content the model cannot see.
+    if (text.trim().length === 0) break;
+    const locator = [hit.page !== null ? `p.${hit.page}` : null, hit.heading]
+      .filter(Boolean)
+      .join(" — ");
+    const fence = fenceFor(text);
+    parts.push(
+      `[docs: ${hit.file_name}${locator ? ` — ${locator}` : ""}]\n${fence}\n${text}\n${fence}`,
+    );
+    budget -= text.length;
+    count += 1;
+    if (budget <= 0) break;
+  }
+
+  return { prompt: parts.join("\n\n"), count };
 }
 
 /** Whether the on-device sidecar can stand in for a chat model that cannot see.

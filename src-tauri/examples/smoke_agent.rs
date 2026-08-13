@@ -159,6 +159,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // The smoke run drives a local GGUF, which has no server-side web tool
         // for this to switch on anyway.
         web_access: false,
+        // Headless: no buckets, so `tools()` offers `run_command` and `finish` only.
+        // This example exercises tool calling against a real GGUF, and adding a third
+        // tool would change what it is measuring — the `docs` argument below is `None`
+        // for the same reason.
+        doc_buckets: vec![],
         // Headless: there is no PTY here, so this drives the captured-subprocess
         // path. The app itself always uses ExecTarget::Pty.
         exec_target: run::ExecTarget::Subprocess,
@@ -189,6 +194,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &approvals,
         &pty_exec,
         &steers,
+        // No document index headless: there is no app data directory to open one in.
+        None,
         cancel_rx,
         &on_event,
     )

@@ -1,6 +1,7 @@
 pub mod ai;
 pub mod archive;
 pub mod attachments;
+pub mod docs;
 pub mod history;
 pub mod models;
 pub mod pty;
