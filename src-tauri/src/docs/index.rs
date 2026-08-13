@@ -84,9 +84,16 @@ pub enum PutOutcome {
 }
 
 pub fn text_sha256(text: &str) -> String {
+    use std::fmt::Write;
+
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
-    format!("{:x}", hasher.finalize())
+    let digest = hasher.finalize();
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
 }
 
 fn now_ms() -> i64 {
@@ -520,6 +527,14 @@ pub fn refresh_states(conn: &Connection, bucket_id: &str) -> Result<u32, String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_sha256_is_lowercase_hex() {
+        assert_eq!(
+            text_sha256("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
 
     fn db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
