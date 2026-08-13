@@ -24,13 +24,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # vite.config.ts derives __BUILD_NUMBER__ from `git rev-list --count
           # HEAD` and falls back to "0" silently on a shallow clone.
           fetch-depth: 0
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -60,7 +60,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install toolchain
         run: |
           rustup show
@@ -81,7 +81,7 @@ jobs:
       run:
         working-directory: src-tauri
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # rust-toolchain.toml (repo root) pins channel 1.97 but declares no
       # components, so clippy has to be added explicitly.
@@ -131,6 +131,72 @@ jobs:
       - name: Test (local-llm)
         run: cargo test --locked --features local-llm
 
+  policy:
+    name: PR policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Dependency review
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5
+
+      - name: DCO signoff
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        with:
+          script: |
+            const commits = await github.paginate(github.rest.pulls.listCommits, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.pull_request.number,
+              per_page: 100,
+            });
+            const failures = [];
+            for (const commit of commits) {
+              if (commit.author?.login === "dependabot[bot]") continue;
+
+              const author = commit.commit.author;
+              const label = commit.sha.slice(0, 7);
+              if (!author?.name || !author?.email) {
+                failures.push(label + ": commit author name/email is unavailable");
+                continue;
+              }
+
+              const signoffs = [
+                ...commit.commit.message.matchAll(
+                  /^Signed-off-by:\s*(.+?)\s*<([^>]+)>\s*$/gim,
+                ),
+              ];
+              const matchesAuthor = signoffs.some(
+                ([, name, email]) =>
+                  name.trim() === author.name &&
+                  email.trim().toLowerCase() === author.email.toLowerCase(),
+              );
+              if (!matchesAuthor) {
+                failures.push(
+                  label +
+                    ": expected Signed-off-by: " +
+                    author.name +
+                    " <" +
+                    author.email +
+                    ">",
+                );
+              }
+            }
+
+            if (failures.length > 0) {
+              core.setFailed(
+                "DCO signoff missing or mismatched:\n" + failures.join("\n"),
+              );
+            }
+
+      - name: Main push policy
+        if: github.event_name != 'pull_request'
+        run: echo "Dependency review and DCO validation apply to pull requests."
+
   # The single required status check. Naming `frontend` and `rust` directly in
   # the branch ruleset would mean editing repo settings every time a job is
   # added or renamed — and a required check that never runs leaves a PR stuck
@@ -138,7 +204,7 @@ jobs:
   # both. Add jobs to `needs` and the ruleset keeps working untouched.
   gate:
     name: Quality gate
-    needs: [frontend, format, rust]
+    needs: [frontend, format, rust, policy]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

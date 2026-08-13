@@ -178,9 +178,9 @@ The project page at [vterminal.veviad.com](https://vterminal.veviad.com) is hand
 
 ## Contributing
 
-Issues and pull requests are welcome. Please open an issue before starting substantial work so we can agree on the approach first.
-
-Note that VTerminal is GPL-3.0 licensed and its copyright is held by Veviad. If you intend to contribute regularly, contact us first — contributions may need a licensing agreement to keep future relicensing possible.
+Issues and pull requests are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md)
+before starting; substantial changes should begin with an issue so the approach can
+be agreed first. Contributions require a Developer Certificate of Origin signoff.
 
 ## License
 
