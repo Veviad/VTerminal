@@ -4,6 +4,7 @@ import { useSettings } from "../../hooks/useSettings";
 import { useAppStore } from "../../stores/appStore";
 import { useUpdateStore, type UpdateStatus } from "../../stores/updateStore";
 import { Row, Toggle } from "../ui/Row";
+import { ReleaseNotes } from "../updates/ReleaseNotes";
 
 const statusLabel = (status: UpdateStatus) => {
   const u = S.settings.updates;
@@ -117,9 +118,9 @@ export function UpdatesSection() {
           <p className="text-[10px] font-medium uppercase tracking-wide text-text-muted">
             {S.settings.updates.releaseNotes}
           </p>
-          <p className="max-h-40 overflow-y-auto whitespace-pre-wrap text-[11px] leading-relaxed text-text-secondary">
-            {update.metadata.notes.trim() || S.settings.updates.noNotes}
-          </p>
+          <div className="max-h-40 overflow-y-auto">
+            <ReleaseNotes notes={update.metadata.notes} />
+          </div>
           {installing && (
             <UpdateProgress downloaded={update.downloadedBytes} total={update.totalBytes} />
           )}

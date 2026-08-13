@@ -2,6 +2,7 @@ import { dismissUpdatePrompt, installPendingUpdate } from "../../lib/appUpdates"
 import { S } from "../../lib/strings";
 import { useUpdateStore } from "../../stores/updateStore";
 import { UpdateProgress } from "../settings/UpdatesSection";
+import { ReleaseNotes } from "./ReleaseNotes";
 
 export function UpdateModal() {
   const update = useUpdateStore();
@@ -49,9 +50,7 @@ export function UpdateModal() {
           <p className="mb-1 text-[9px] font-medium uppercase tracking-wide text-text-muted">
             {S.settings.updates.releaseNotes}
           </p>
-          <p className="whitespace-pre-wrap text-[11px] leading-relaxed text-text-secondary">
-            {metadata.notes.trim() || S.settings.updates.noNotes}
-          </p>
+          <ReleaseNotes notes={metadata.notes} />
         </div>
 
         <p className="rounded-md border border-warning/30 bg-warning/10 px-2.5 py-2 text-[11px] leading-relaxed text-warning">

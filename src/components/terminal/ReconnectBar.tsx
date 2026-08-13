@@ -19,7 +19,13 @@ import type { SshHost } from "../../lib/types";
  */
 export function ReconnectBar({ sessionId }: { sessionId: string }) {
   const session = useAppStore((s) => s.sessions.find((x) => x.id === sessionId));
-  const remote = useAppStore((s) => s.sessionUi[sessionId]?.remote);
+  // Subscribe to the whole per-session UI record, not only `remote`. When ssh
+  // exits, the bar first renders while OSC 133 still reports `output`, so the
+  // safety gate is (correctly) closed. The following prompt changes `phase`
+  // without changing `remote`; subscribing only to `remote` left this render
+  // stale and the button disabled forever.
+  const sessionUi = useAppStore((s) => s.sessionUi[sessionId]);
+  const remote = sessionUi?.remote;
   const { createSession } = useSessions();
   const [host, setHost] = useState<SshHost | null>(null);
   const [busy, setBusy] = useState(false);
@@ -63,7 +69,7 @@ export function ReconnectBar({ sessionId }: { sessionId: string }) {
         }}
         disabled={busy || !gate.ok}
         title={gate.ok ? undefined : gate.reason}
-        className="rounded-md border border-border-subtle px-2 py-0.5 text-accent transition-colors duration-150 hover:bg-bg-hover disabled:opacity-60"
+        className="rounded-md border border-border-subtle px-2 py-0.5 text-accent transition-colors duration-150 hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-60"
       >
         {S.terminal.reconnect}
       </button>
