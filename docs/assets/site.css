@@ -1424,6 +1424,96 @@ a:hover {
   font-size: 0.88rem;
 }
 
+/* ------------------------------------------------------------- runbooks */
+
+.runbooks-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(18rem, 0.85fr);
+  align-items: start;
+  gap: clamp(2.5rem, 7vw, 6rem);
+}
+
+.runbooks-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 1.8rem;
+}
+
+.runbooks-actions .ui-icon {
+  width: 1rem;
+  height: 1rem;
+}
+
+.runbooks-flow {
+  display: grid;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  list-style: none;
+  padding: 0;
+}
+
+.runbooks-flow li {
+  display: grid;
+  grid-template-columns: 2.35rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.9rem;
+  padding: 1rem 1.1rem;
+}
+
+.runbooks-flow li:not(:last-child) {
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.runbooks-flow > li > span {
+  display: grid;
+  width: 2.35rem;
+  height: 2.35rem;
+  place-items: center;
+  border: 1px solid rgba(16, 185, 129, 0.32);
+  border-radius: 50%;
+  background: var(--accent-subtle);
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+}
+
+.runbooks-flow div {
+  display: grid;
+}
+
+.runbooks-flow strong {
+  color: var(--text);
+  font-size: 0.88rem;
+}
+
+.runbooks-flow small {
+  color: var(--text-3);
+  font-size: 0.76rem;
+}
+
+.runbooks-grid {
+  margin-top: 3rem;
+}
+
+.runbooks-note {
+  margin-top: 1.2rem;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: var(--radius-sm);
+  background: rgba(245, 158, 11, 0.07);
+  color: var(--text-2);
+  font-size: 0.86rem;
+  line-height: 1.7;
+  padding: 1rem 1.15rem;
+}
+
+.runbooks-note strong {
+  color: var(--warning);
+}
+
 /* -------------------------------------------------------------- security */
 
 .trust-row {
@@ -2116,6 +2206,286 @@ code {
   line-height: 1.7;
 }
 
+/* --------------------------------------------------------- guide pages */
+
+.guide-main {
+  min-height: calc(100vh - var(--header-height));
+}
+
+.guide-hero {
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--bg-2);
+  padding-block: clamp(3.5rem, 8vw, 6.5rem);
+}
+
+.guide-hero-inner {
+  width: min(calc(100% - 3.5rem), 64rem);
+  margin-inline: auto;
+}
+
+.guide-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 999px;
+  background: rgba(245, 158, 11, 0.08);
+  color: var(--warning);
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  padding: 0.42rem 0.72rem;
+  text-transform: uppercase;
+}
+
+.guide-status::before {
+  width: 0.42rem;
+  height: 0.42rem;
+  border-radius: 50%;
+  background: currentColor;
+  content: "";
+}
+
+.guide-hero h1 {
+  max-width: 49rem;
+  margin: 1.25rem 0 0;
+  color: var(--text);
+  font-size: clamp(2.45rem, 6vw, 4.2rem);
+  letter-spacing: -0.052em;
+  line-height: 1.03;
+  text-wrap: balance;
+}
+
+.guide-hero-copy {
+  max-width: 46rem;
+  margin: 1.2rem 0 0;
+  color: var(--text-2);
+  font-size: clamp(1rem, 2vw, 1.12rem);
+  line-height: 1.75;
+}
+
+.guide-hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 1.8rem;
+}
+
+.guide-layout {
+  display: grid;
+  width: min(calc(100% - 3.5rem), 64rem);
+  grid-template-columns: minmax(11rem, 0.3fr) minmax(0, 1fr);
+  align-items: start;
+  gap: clamp(2.5rem, 7vw, 6rem);
+  margin-inline: auto;
+  padding-block: clamp(3rem, 7vw, 5.5rem);
+}
+
+.guide-toc {
+  position: sticky;
+  top: calc(var(--header-height) + 1.5rem);
+}
+
+.guide-toc h2 {
+  margin: 0 0 0.8rem;
+  color: var(--text-3);
+  font-family: "Inter Variable", system-ui, sans-serif;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.guide-toc ol {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0;
+  list-style: none;
+  padding: 0;
+}
+
+.guide-toc a {
+  display: block;
+  border-left: 2px solid var(--line);
+  color: var(--text-3);
+  font-size: 0.82rem;
+  font-weight: 650;
+  padding: 0.38rem 0.7rem;
+  text-decoration: none;
+}
+
+.guide-toc a:hover {
+  border-left-color: var(--accent);
+  color: var(--text);
+}
+
+.guide-content {
+  min-width: 0;
+}
+
+.guide-section {
+  scroll-margin-top: calc(var(--header-height) + 1.5rem);
+}
+
+.guide-section + .guide-section {
+  margin-top: 3.5rem;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 3.5rem;
+}
+
+.guide-section h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: clamp(1.65rem, 3.5vw, 2.3rem);
+  letter-spacing: -0.035em;
+  line-height: 1.12;
+}
+
+.guide-section h3 {
+  margin: 1.8rem 0 0.55rem;
+  color: var(--text);
+  font-size: 1.08rem;
+}
+
+.guide-section p,
+.guide-section li {
+  color: var(--text-2);
+  font-size: 0.93rem;
+  line-height: 1.75;
+}
+
+.guide-section p {
+  margin: 0.85rem 0;
+}
+
+.guide-section ul,
+.guide-section ol:not(.guide-steps) {
+  margin: 0.8rem 0;
+  padding-left: 1.2rem;
+}
+
+.guide-section li {
+  margin: 0.38rem 0;
+}
+
+.guide-section li::marker {
+  color: var(--accent);
+}
+
+.guide-steps {
+  display: grid;
+  gap: 0.8rem;
+  margin: 1.4rem 0 0;
+  list-style: none;
+  padding: 0;
+}
+
+.guide-steps li {
+  display: grid;
+  grid-template-columns: 2.4rem minmax(0, 1fr);
+  gap: 0.9rem;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  padding: 1rem 1.1rem;
+}
+
+.guide-steps li > span {
+  display: grid;
+  width: 2.4rem;
+  height: 2.4rem;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--bg);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.guide-steps strong {
+  display: block;
+  color: var(--text);
+}
+
+.guide-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+  margin-top: 1.25rem;
+}
+
+.guide-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  padding: 1.1rem;
+}
+
+.guide-card h3 {
+  margin: 0 0 0.45rem;
+  font-size: 0.98rem;
+}
+
+.guide-card p {
+  margin: 0;
+  font-size: 0.86rem;
+}
+
+.guide-code {
+  margin: 1.15rem 0;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-terminal);
+  padding: 1rem 1.1rem;
+}
+
+.guide-code code {
+  display: block;
+  min-width: max-content;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 0.79rem;
+  line-height: 1.65;
+  padding: 0;
+  white-space: pre;
+}
+
+.guide-callout {
+  margin: 1.3rem 0;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  border-radius: var(--radius-sm);
+  background: var(--accent-subtle);
+  padding: 1rem 1.1rem;
+}
+
+.guide-callout.is-warning {
+  border-color: rgba(245, 158, 11, 0.32);
+  background: rgba(245, 158, 11, 0.07);
+}
+
+.guide-callout strong {
+  color: var(--accent);
+}
+
+.guide-callout.is-warning strong {
+  color: var(--warning);
+}
+
+.guide-callout p {
+  margin: 0.35rem 0 0;
+  font-size: 0.87rem;
+}
+
+.guide-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  margin-top: 1.5rem;
+}
+
 /* ---------------------------------------------------------------- footer */
 
 .site-footer {
@@ -2273,6 +2643,7 @@ code {
 
   .assistant-layout,
   .install-layout,
+  .runbooks-heading,
   .why-layout {
     grid-template-columns: 1fr;
   }
@@ -2297,6 +2668,8 @@ code {
   }
 
   .shell,
+  .guide-hero-inner,
+  .guide-layout,
   .header-inner {
     width: min(calc(100% - 2rem), var(--shell));
   }
@@ -2304,6 +2677,28 @@ code {
   .feature-grid,
   .security-grid {
     grid-template-columns: 1fr;
+  }
+
+  .guide-layout {
+    grid-template-columns: 1fr;
+    gap: 2.5rem;
+  }
+
+  .guide-toc {
+    position: static;
+  }
+
+  .guide-toc ol {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+
+  .guide-toc a {
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--bg-card);
+    padding: 0.42rem 0.75rem;
   }
 
   /* The mock stacks: terminal above, AI panel below, both full width. */
@@ -2375,8 +2770,20 @@ code {
   }
 
   .assistant-grid,
+  .guide-grid,
   .plans-grid {
     grid-template-columns: 1fr;
+  }
+
+  .guide-hero-actions,
+  .runbooks-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .guide-hero-actions .button,
+  .runbooks-actions .button {
+    width: 100%;
   }
 
   /* .keys-grid deliberately stays at two columns: each row is a chord plus two

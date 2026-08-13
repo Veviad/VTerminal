@@ -1,0 +1,496 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#09090b" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="robots" content="index,follow" />
+
+    <title>Reusable Runbooks — VTerminal</title>
+    <meta
+      name="description"
+      content="Author and run reusable VTerminal checklists with explicit approvals, immutable definitions, evidence capture and canonical reports."
+    />
+    <link rel="canonical" href="https://vterminal.veviad.com/runbooks/" />
+
+    <link rel="icon" href="../assets/favicon.svg" type="image/svg+xml" />
+    <link rel="alternate icon" href="../assets/favicon.ico" sizes="32x32" />
+    <link rel="apple-touch-icon" href="../assets/favicon.svg" />
+    <link
+      rel="preload"
+      href="../assets/fonts/inter-latin-wght-normal.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin="anonymous"
+    />
+    <link
+      rel="preload"
+      href="../assets/fonts/anton-regular.ttf"
+      as="font"
+      type="font/ttf"
+      crossorigin="anonymous"
+    />
+    <link rel="stylesheet" href="../assets/site.css" />
+  </head>
+
+  <body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="brand-link" href="../" aria-label="VTerminal home">
+          <img
+            class="brand-mark"
+            src="../assets/favicon.svg"
+            width="32"
+            height="32"
+            alt=""
+          />
+          <span class="brand-product">VTerminal</span>
+        </a>
+        <a class="header-back-link" href="../">← Back to VTerminal</a>
+      </div>
+    </header>
+
+    <main class="guide-main" id="main-content">
+      <section class="guide-hero" aria-labelledby="guide-title">
+        <div class="guide-hero-inner">
+          <span class="guide-status">Experimental · Disabled by default</span>
+          <h1 id="guide-title">Reusable Runbooks</h1>
+          <p class="guide-hero-copy">
+            Define a repeatable operational checklist once, run it against the
+            terminal you can see, approve every action, and leave with a durable
+            report of what was already compliant, what changed, and what remains
+            unresolved.
+          </p>
+          <div class="guide-hero-actions">
+            <a class="button button-primary" href="#getting-started"
+              >Get started</a
+            >
+            <a
+              class="button button-secondary"
+              href="https://github.com/Veviad/VTerminal/tree/main/examples/runbooks"
+              >View example packages</a
+            >
+          </div>
+        </div>
+      </section>
+
+      <div class="guide-layout">
+        <nav class="guide-toc" aria-label="Runbooks guide">
+          <h2>On this page</h2>
+          <ol>
+            <li><a href="#getting-started">Getting started</a></li>
+            <li><a href="#package-format">Package format</a></li>
+            <li><a href="#lifecycle">Lifecycle</a></li>
+            <li><a href="#actions">Actions &amp; approvals</a></li>
+            <li><a href="#reports">Evidence &amp; reports</a></li>
+            <li><a href="#ansible">Ansible status</a></li>
+          </ol>
+        </nav>
+
+        <div class="guide-content">
+          <section
+            class="guide-section"
+            id="getting-started"
+            aria-labelledby="getting-started-title"
+          >
+            <p class="eyebrow">Start Here</p>
+            <h2 id="getting-started-title">From Package to Checked List</h2>
+            <p>
+              Native v1 targets one active, visible POSIX terminal. That can be
+              a local shell or an SSH/container session you established before
+              starting the run.
+            </p>
+
+            <ol class="guide-steps">
+              <li>
+                <span>01</span>
+                <div>
+                  <strong>Enable the experiment</strong>
+                  Open <strong>Settings → Runbooks</strong> and enable Runbooks.
+                  It is off by default while the format is <code>v1alpha1</code>.
+                </div>
+              </li>
+              <li>
+                <span>02</span>
+                <div>
+                  <strong>Import a local package</strong>
+                  Select a folder whose root contains exactly one
+                  <code>runbook.vrun.yaml</code>. VTerminal validates the package
+                  before registering it.
+                </div>
+              </li>
+              <li>
+                <span>03</span>
+                <div>
+                  <strong>Review the preflight</strong>
+                  Choose the terminal, confirm its observed target, enter only
+                  non-secret inputs, review declared capabilities, and select an
+                  evidence mode.
+                </div>
+              </li>
+              <li>
+                <span>04</span>
+                <div>
+                  <strong>Run beside the terminal</strong>
+                  Follow the live checklist, approve actions, resolve pauses,
+                  add comments, then inspect or export the final report.
+                </div>
+              </li>
+            </ol>
+
+            <div class="guide-callout is-warning">
+              <strong>Definitions and inputs must not contain secrets.</strong>
+              <p>
+                Inputs, operator comments and evidence metadata are retained in
+                the report. Redaction is a best-effort safety net, not permission
+                to place passwords, tokens, private keys or credentials in a
+                Runbook.
+              </p>
+              <p>
+                Model credentials configured in <strong>Settings → Models</strong>
+                stay in macOS Keychain and use the same backend-only provider path
+                as ordinary AI requests. A token-bearing self-hosted provider
+                requires HTTPS, except for localhost or loopback HTTP.
+              </p>
+            </div>
+          </section>
+
+          <section
+            class="guide-section"
+            id="package-format"
+            aria-labelledby="package-format-title"
+          >
+            <p class="eyebrow">Own Format</p>
+            <h2 id="package-format-title">A Small, Versioned YAML Package</h2>
+            <p>
+              A package is deliberately local and constrained. The definition
+              uses a stable Runbook ID, a semantic content version and ordered
+              steps with durable IDs.
+            </p>
+
+            <pre class="guide-code"><code>my-runbook/
+├── runbook.vrun.yaml   required
+├── README.md           optional
+└── ansible/            reserved for the follow-on adapter</code></pre>
+
+            <pre class="guide-code"><code>apiVersion: runbooks.veviad.com/v1alpha1
+kind: Runbook
+
+metadata:
+  id: ensure-jq-installed
+  version: 1.0.0
+  title: Ensure jq is installed
+  tags: [linux, software]
+
+spec:
+  target:
+    kind: active-terminal
+
+  declaredCapabilities:
+    network: true
+    privilege: root
+    writes: [/usr/bin, /usr/local/bin]
+
+  defaults:
+    onFailure: pause
+
+  steps:
+    - id: jq-installed
+      title: jq is installed
+      required: true
+      check:
+        uses: shell
+        with:
+          command: "command -v jq &gt;/dev/null 2&gt;&amp;1"
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]
+      apply:
+        uses: agent
+        instructions: |
+          Install jq with the target's package manager.
+          Make the smallest safe change.
+      verify:
+        uses: shell
+        with:
+          command: "command -v jq &gt;/dev/null 2&gt;&amp;1"
+        passExitCodes: [0]</code></pre>
+
+            <h3>Validation rules that matter</h3>
+            <ul>
+              <li>
+                Every step requires <code>check</code>. If <code>apply</code> is
+                present, <code>verify</code> is mandatory.
+              </li>
+              <li>
+                Shell actions are one inline command of at most 4,096
+                characters—no newlines, control characters or heredocs.
+              </li>
+              <li>
+                Typed inputs are non-secret and enter shell actions only through
+                an explicit <code>VRUN_*</code> environment mapping. There are no
+                arbitrary template expressions.
+              </li>
+              <li>
+                Unknown fields/actions, duplicate IDs, aliases, custom tags,
+                merge keys, includes, multiple YAML documents and invalid
+                semantic versions are rejected.
+              </li>
+              <li>
+                Symlinks, traversal and package-root escapes are rejected.
+                Native v1 never uploads or executes package scripts in a remote
+                terminal.
+              </li>
+            </ul>
+
+            <div class="guide-callout">
+              <strong>A live definition cannot drift.</strong>
+              <p>
+                Run creation stores the original YAML, canonical JSON and a
+                SHA-256 digest of each. Refreshing an edited package affects a
+                future run, never an active or historical one.
+              </p>
+            </div>
+          </section>
+
+          <section
+            class="guide-section"
+            id="lifecycle"
+            aria-labelledby="lifecycle-title"
+          >
+            <p class="eyebrow">Execution Model</p>
+            <h2 id="lifecycle-title">Check → Apply → Verify</h2>
+            <p>
+              Steps execute sequentially. A check explicitly distinguishes a
+              compliant exit code, a non-compliant exit code and an execution
+              error—success is never inferred from an apply command alone.
+            </p>
+
+            <div class="guide-grid">
+              <article class="guide-card">
+                <h3>Already compliant</h3>
+                <p>
+                  A compliant check skips apply and completes the step as
+                  <code>already_compliant</code>.
+                </p>
+              </article>
+              <article class="guide-card">
+                <h3>Changed and verified</h3>
+                <p>
+                  A non-compliant check may run an approved apply, but only a
+                  separate passing verify completes it as
+                  <code>remediated_verified</code>.
+                </p>
+              </article>
+              <article class="guide-card">
+                <h3>Assessment only</h3>
+                <p>
+                  Omit apply for a control that should be assessed and reported,
+                  not changed automatically.
+                </p>
+              </article>
+              <article class="guide-card">
+                <h3>Paused, not replayed</h3>
+                <p>
+                  A failure can pause for retry, skip, timestamped waiver or
+                  stop. Mutations are never retried blindly.
+                </p>
+              </article>
+            </div>
+
+            <p>
+              Only <code>already_compliant</code> and
+              <code>remediated_verified</code> render as checked. A required
+              skipped, waived, blocked, failed, non-compliant or unknown step
+              produces a completed run with exceptions rather than a false
+              success.
+            </p>
+          </section>
+
+          <section
+            class="guide-section"
+            id="actions"
+            aria-labelledby="actions-title"
+          >
+            <p class="eyebrow">Operator Control</p>
+            <h2 id="actions-title">Actions, Approvals and the Trust Boundary</h2>
+
+            <div class="guide-grid">
+              <article class="guide-card">
+                <h3><code>shell</code></h3>
+                <p>
+                  Runs one approved inline command in the bound visible terminal
+                  and observes its exit status and output.
+                </p>
+              </article>
+              <article class="guide-card">
+                <h3><code>agent</code></h3>
+                <p>
+                  Gives bounded Markdown instructions to the current model. Each
+                  mutation it proposes receives its own approval.
+                </p>
+              </article>
+              <article class="guide-card">
+                <h3><code>manual</code></h3>
+                <p>
+                  Collects an operator outcome, required comment and optional
+                  evidence note for a human-only control.
+                </p>
+              </article>
+              <article class="guide-card">
+                <h3><code>ansible.playbook</code></h3>
+                <p>
+                  Reserved and validated, but runtime-unavailable in native v1.
+                  It never falls back to generic shell execution.
+                </p>
+              </article>
+            </div>
+
+            <h3>What approval means in native v1</h3>
+            <ul>
+              <li>
+                Every visible-terminal shell action requires explicit approval,
+                including checks and verification. Apply always requires it.
+              </li>
+              <li>
+                Runbooks do not honor the agent panel's <em>Auto all</em>
+                setting. Edited commands are retained as deviations.
+              </li>
+              <li>
+                Each approval shows the immutable target and asks you to attest
+                that the visible row is a POSIX prompt on the intended
+                host/container, and that its shell, functions, aliases and
+                <code>PATH</code> are trusted.
+              </li>
+              <li>
+                A run binds to one terminal and observed local/SSH/container
+                context. Target or session drift pauses execution, and two runs
+                cannot drive the same terminal concurrently.
+              </li>
+            </ul>
+
+            <div class="guide-callout is-warning">
+              <strong>The interactive shell is inside the trust boundary.</strong>
+              <p>
+                A visible PTY is not a deterministic sandbox: aliases, exported
+                functions, startup files, <code>PATH</code> shims and an already
+                privileged remote shell can change what a textual command does.
+                Shell results are therefore reported as
+                <code>shell_observed</code>. A compromised interactive shell is
+                outside v1's trust model.
+              </p>
+            </div>
+
+            <p>
+              A timeout is <code>unknown</code>; it is not an automatic retry.
+              Cancellation sends SIGINT to the owned foreground job but cannot
+              prove detached work stopped or undo a mutation. After an app
+              restart, an active run is interrupted and must be explicitly
+              rebound before resuming.
+            </p>
+          </section>
+
+          <section
+            class="guide-section"
+            id="reports"
+            aria-labelledby="reports-title"
+          >
+            <p class="eyebrow">Durable Results</p>
+            <h2 id="reports-title">Evidence and Canonical Reports</h2>
+            <p>
+              Successful, exceptional, failed and cancelled runs all finalize a
+              canonical <code>report.json</code>. The human-readable
+              <code>report.md</code> is generated only from that report data, so
+              the two views cannot invent different outcomes.
+            </p>
+
+            <div class="guide-grid">
+              <article class="guide-card">
+                <h3><code>none</code></h3>
+                <p>Keep attempt and outcome metadata, but no output body.</p>
+              </article>
+              <article class="guide-card">
+                <h3><code>tail</code> · default</h3>
+                <p>Keep a redacted 8 KiB output tail for each attempt.</p>
+              </article>
+              <article class="guide-card">
+                <h3><code>full</code></h3>
+                <p>Keep a redacted artifact capped at 1 MiB per attempt.</p>
+              </article>
+              <article class="guide-card">
+                <h3>Export bundle</h3>
+                <p>
+                  Export JSON, Markdown and eligible evidence to a folder you
+                  choose.
+                </p>
+              </article>
+            </div>
+
+            <p>
+              Reports include definition IDs, versions and digests; target and
+              input data; checklist states; attempts; approvals; edited-command
+              deviations; evidence metadata; agent summaries; comments;
+              exceptions and unresolved risks. Removing a package registration
+              does not erase its historical runs.
+            </p>
+            <p>
+              Credential-shaped content and private-key blocks are redacted
+              before display, persistence and export, and truncation is explicit.
+              Detection is necessarily best-effort: arbitrary secrets without a
+              recognizable name or shape cannot be found reliably.
+            </p>
+          </section>
+
+          <section
+            class="guide-section"
+            id="ansible"
+            aria-labelledby="ansible-title"
+          >
+            <p class="eyebrow">Follow-On Adapter</p>
+            <h2 id="ansible-title">Ansible Is Reserved, Not Silently Emulated</h2>
+            <p>
+              Native v1 recognizes <code>ansible.playbook</code> so the format
+              can evolve without an ambiguous shell fallback, but it refuses to
+              execute it today. The planned adapter will use a user-installed
+              <code>ansible-runner</code> as an explicit local controller, bind
+              approval to exact project/inventory digests and retain structured
+              per-host outcomes. Check mode will remain preview-only, and
+              verification will still be required.
+            </p>
+
+            <div class="guide-links">
+              <a
+                class="button button-secondary"
+                href="https://github.com/Veviad/VTerminal/tree/main/examples/runbooks"
+                >Example Runbooks</a
+              >
+              <a
+                class="button button-secondary"
+                href="https://github.com/Veviad/VTerminal/blob/main/src-tauri/schemas/runbook-v1alpha1.schema.json"
+                >JSON Schema</a
+              >
+              <a
+                class="button button-secondary"
+                href="https://github.com/Veviad/VTerminal/blob/main/docs/RUNBOOKS.md"
+                >Full authoring reference</a
+              >
+            </div>
+          </section>
+        </div>
+      </div>
+    </main>
+
+    <footer class="site-footer">
+      <div class="footer-bottom shell">
+        <small>© 2026 Veviad<sup>®</sup></small>
+        <small>
+          <a href="../legal/#privacy">Privacy</a> ·
+          <a href="https://github.com/Veviad/VTerminal">Source</a>
+        </small>
+      </div>
+    </footer>
+  </body>
+</html>

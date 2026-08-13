@@ -63,7 +63,7 @@
         "name": "VTerminal",
         "applicationCategory": "DeveloperApplication",
         "operatingSystem": "macOS (Apple Silicon)",
-        "softwareVersion": "0.1.3",
+        "softwareVersion": "0.1.5",
         "url": "https://vterminal.veviad.com/",
         "codeRepository": "https://github.com/Veviad/VTerminal",
         "license": "https://www.gnu.org/licenses/gpl-3.0.html",
@@ -218,6 +218,7 @@
           <a href="#why">Why</a>
           <a href="#terminal">Terminal</a>
           <a href="#ai">AI</a>
+          <a href="#runbooks">Runbooks</a>
           <a href="#safety">Safety</a>
           <a href="#models">Models</a>
           <a href="#download">Install</a>
@@ -226,7 +227,7 @@
         <div class="header-actions">
           <a
             class="button button-primary header-cta"
-            href="https://github.com/Veviad/VTerminal/releases/download/v0.1.3/VTerminal_0.1.3_aarch64.dmg"
+            href="https://github.com/Veviad/VTerminal/releases/download/v0.1.5/VTerminal_0.1.5_aarch64.dmg"
             >Download</a
           >
           <button
@@ -247,13 +248,14 @@
           <a href="#why">Why</a>
           <a href="#terminal">Terminal</a>
           <a href="#ai">AI</a>
+          <a href="#runbooks">Runbooks</a>
           <a href="#safety">Safety</a>
           <a href="#models">Models</a>
           <a href="#download">Install</a>
           <div class="mobile-menu-actions">
             <a
               class="button button-primary"
-              href="https://github.com/Veviad/VTerminal/releases/download/v0.1.3/VTerminal_0.1.3_aarch64.dmg"
+              href="https://github.com/Veviad/VTerminal/releases/download/v0.1.5/VTerminal_0.1.5_aarch64.dmg"
               >Download for macOS</a
             >
             <a
@@ -271,10 +273,10 @@
         <div class="hero-inner shell">
           <a
             class="announcement"
-            href="https://github.com/Veviad/VTerminal/releases/tag/v0.1.3"
-            aria-label="Version 0.1.3 is out. Read the release notes."
+            href="https://github.com/Veviad/VTerminal/releases/tag/v0.1.5"
+            aria-label="Version 0.1.5 is out. Read the release notes."
           >
-            <span class="announcement-badge">0.1.3</span>
+            <span class="announcement-badge">0.1.5</span>
             <span class="announcement-label">Read the release notes</span>
             <svg class="ui-icon" aria-hidden="true"><use href="#i-arrow-right" /></svg>
           </a>
@@ -297,7 +299,7 @@
           <div class="hero-actions">
             <a
               class="button button-primary"
-              href="https://github.com/Veviad/VTerminal/releases/download/v0.1.3/VTerminal_0.1.3_aarch64.dmg"
+              href="https://github.com/Veviad/VTerminal/releases/download/v0.1.5/VTerminal_0.1.5_aarch64.dmg"
             >
               <svg class="ui-icon" aria-hidden="true"><use href="#i-download" /></svg>
               Download for macOS
@@ -309,7 +311,7 @@
             >
           </div>
           <p class="download-meta hero-download-meta">
-            0.1.3 · Apple Silicon · 11 MB ·
+            0.1.5 · Apple Silicon · 11 MB ·
             <a href="#download">not notarized, see setup</a>
           </p>
 
@@ -373,7 +375,7 @@
                 </div>
                 <div class="mock-cmd">cargo test --features local-llm</div>
                 <div class="mock-out">
-                  <span class="is-dim">   Compiling vterminal v0.1.3</span>
+                  <span class="is-dim">   Compiling vterminal v0.1.5</span>
                   <span class="is-dim">    Finished `test` profile in 4.21s</span>
                   <span class="is-ok">test result: ok. 214 passed; 0 failed</span>
                 </div>
@@ -777,6 +779,121 @@
         </div>
       </section>
 
+      <section
+        class="section section-soft"
+        id="runbooks"
+        aria-labelledby="runbooks-title"
+      >
+        <div class="shell">
+          <div class="runbooks-heading">
+            <div>
+              <p class="eyebrow">Experimental · Off by Default</p>
+              <h2 class="section-heading" id="runbooks-title">
+                Repeat the Operation. Keep the Evidence.
+              </h2>
+              <p class="section-lead">
+                Reusable Runbooks turn a versioned YAML checklist into a visible
+                <code>check → apply → verify</code> workflow. Use one to assess a
+                server baseline, remediate it with approval, or install software
+                without losing the operator decisions and output behind the
+                result.
+              </p>
+              <div class="runbooks-actions">
+                <a class="button button-primary" href="runbooks/">
+                  Read the Runbooks guide
+                  <svg class="ui-icon" aria-hidden="true">
+                    <use href="#i-arrow-right" />
+                  </svg>
+                </a>
+                <a
+                  class="button button-secondary"
+                  href="https://github.com/Veviad/VTerminal/tree/main/examples/runbooks"
+                  >Browse example packages</a
+                >
+              </div>
+            </div>
+
+            <ol class="runbooks-flow" aria-label="A Runbook step lifecycle">
+              <li>
+                <span>01</span>
+                <div>
+                  <strong>Check</strong>
+                  <small>Observe the current state</small>
+                </div>
+              </li>
+              <li>
+                <span>02</span>
+                <div>
+                  <strong>Apply</strong>
+                  <small>Approve the smallest change</small>
+                </div>
+              </li>
+              <li>
+                <span>03</span>
+                <div>
+                  <strong>Verify</strong>
+                  <small>Prove the end state separately</small>
+                </div>
+              </li>
+              <li>
+                <span>04</span>
+                <div>
+                  <strong>Report</strong>
+                  <small>Export checklist and evidence</small>
+                </div>
+              </li>
+            </ol>
+          </div>
+
+          <div class="feature-grid runbooks-grid">
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-blocks" /></svg>
+              </span>
+              <h3>Your Format, Immutable Runs</h3>
+              <p>
+                Import a local package rooted at <code>runbook.vrun.yaml</code>.
+                Each run snapshots the original YAML, canonical JSON and both
+                digests, so editing a package cannot rewrite live or historical
+                execution.
+              </p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-eye" /></svg>
+              </span>
+              <h3>The Visible Terminal Is the Target</h3>
+              <p>
+                Native steps run in the terminal you can see, including an SSH
+                or container session you opened yourself. Every shell action
+                requires a fresh approval and target attestation; agent
+                <em>Auto all</em> never carries over.
+              </p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-check" /></svg>
+              </span>
+              <h3>Canonical, Auditable Reports</h3>
+              <p>
+                Completed, exceptional, failed and cancelled runs produce a
+                canonical <code>report.json</code>. Human-readable
+                <code>report.md</code> is derived from it, with approvals,
+                deviations, comments and captured evidence.
+              </p>
+            </article>
+          </div>
+
+          <div class="runbooks-note">
+            <strong>Native v1 is intentionally bounded.</strong>
+            Enable it in <strong>Settings → Runbooks</strong>. Inputs are
+            non-secret, the interactive shell remains inside the trust boundary,
+            and <code>ansible.playbook</code> is recognized but cannot execute
+            until the dedicated Ansible Runner adapter ships.
+          </div>
+        </div>
+      </section>
+
       <section class="section" id="safety" aria-labelledby="safety-title">
         <div class="shell">
           <p class="eyebrow">Safety</p>
@@ -980,8 +1097,9 @@
                 </li>
               </ul>
               <p class="package-card__note">
-                Keys are stored by the Rust backend and never round-trip to the
-                UI.
+                Provider keys, Hugging Face tokens and remote-server tokens stay
+                in macOS Keychain (service <code>com.veviad.terminal</code>).
+                They never round-trip to the UI or <code>settings.json</code>.
               </p>
             </article>
 
@@ -1015,7 +1133,8 @@
               </ul>
               <p class="package-card__note">
                 Hosts are only contacted behind an explicit Test — never probed
-                in the background.
+                in the background. A token-bearing connection requires HTTPS,
+                except for localhost or loopback HTTP.
               </p>
             </article>
 
@@ -1138,18 +1257,18 @@
                 <div class="download-cta">
                   <a
                     class="button button-primary"
-                    href="https://github.com/Veviad/VTerminal/releases/download/v0.1.3/VTerminal_0.1.3_aarch64.dmg"
+                    href="https://github.com/Veviad/VTerminal/releases/download/v0.1.5/VTerminal_0.1.5_aarch64.dmg"
                   >
                     <svg class="ui-icon" aria-hidden="true">
                       <use href="#i-download" />
                     </svg>
-                    VTerminal 0.1.3
+                    VTerminal 0.1.5
                   </a>
                   <span class="download-meta">
-                    <code>VTerminal_0.1.3_aarch64.dmg</code><br />
+                    <code>VTerminal_0.1.5_aarch64.dmg</code><br />
                     11&nbsp;MB ·
                     <a
-                      href="https://github.com/Veviad/VTerminal/releases/tag/v0.1.3"
+                      href="https://github.com/Veviad/VTerminal/releases/tag/v0.1.5"
                       >release notes</a
                     >
                   </span>
@@ -1163,7 +1282,7 @@
                 <p>
                   The build is not notarized, so verify it if you like. Download
                   <a
-                    href="https://github.com/Veviad/VTerminal/releases/download/v0.1.3/SHA256SUMS.txt"
+                    href="https://github.com/Veviad/VTerminal/releases/download/v0.1.5/SHA256SUMS.txt"
                     >SHA256SUMS.txt</a
                   >
                   next to the image and run:
@@ -1281,7 +1400,7 @@
           <div class="cta-actions">
             <a
               class="button button-primary"
-              href="https://github.com/Veviad/VTerminal/releases/download/v0.1.3/VTerminal_0.1.3_aarch64.dmg"
+              href="https://github.com/Veviad/VTerminal/releases/download/v0.1.5/VTerminal_0.1.5_aarch64.dmg"
               >Download for macOS</a
             >
             <a
@@ -1340,6 +1459,7 @@
             <a href="#why">Why VTerminal</a>
             <a href="#terminal">Terminal</a>
             <a href="#ai">AI</a>
+            <a href="#runbooks">Runbooks</a>
             <a href="#safety">Safety</a>
             <a href="#models">Models</a>
           </nav>
