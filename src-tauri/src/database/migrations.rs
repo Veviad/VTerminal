@@ -31,6 +31,10 @@ pub fn run(conn: &Connection) -> Result<(), String> {
     if version < 5 {
         migrate_v5(conn)?;
     }
+    if version < 6 {
+        crate::runbooks::db::migrate_v6(conn)?;
+    }
+    crate::runbooks::db::ensure_v6_runtime_indexes(conn)?;
 
     Ok(())
 }
@@ -373,7 +377,7 @@ mod tests {
         let first = version(&conn);
         super::run(&conn).unwrap();
         assert_eq!(version(&conn), first);
-        assert_eq!(first, 5);
+        assert_eq!(first, 6);
     }
 
     /// The migration chain is append-only, so this asserts the shape a v4
@@ -461,7 +465,7 @@ mod tests {
         )
         .unwrap();
         super::run(&conn).unwrap();
-        assert_eq!(version(&conn), 5);
+        assert_eq!(version(&conn), 6);
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM command_history", [], |r| r.get(0))
             .unwrap();
@@ -490,7 +494,7 @@ mod tests {
         super::run(&conn).unwrap();
 
         // Upgrades run the whole chain, so this lands on the current head.
-        assert_eq!(version(&conn), 5);
+        assert_eq!(version(&conn), 6);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()
@@ -536,7 +540,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 5);
+        assert_eq!(version(&conn), 6);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()

@@ -6,6 +6,7 @@ pub mod history;
 pub mod models;
 pub mod pty;
 pub mod remote_servers;
+pub mod runbooks;
 pub mod settings;
 pub mod shell_integration;
 pub mod ssh_hosts;

@@ -2,7 +2,7 @@
 
 A lean, AI-powered terminal for macOS — Warp-style command blocks and an AI agent, without the bulk. Local models run **in-process** with Metal acceleration: no Ollama, no vLLM, no daemon to babysit. Cloud models sit behind the same interface, so switching between on-device and frontier models is one keystroke.
 
-**[Download 0.1.3 for macOS](https://github.com/Veviad/VTerminal/releases/download/v0.1.3/VTerminal_0.1.3_aarch64.dmg)** (Apple Silicon, 11 MB) · **[vterminal.veviad.com](https://vterminal.veviad.com)**
+**[Download 0.1.5 for macOS](https://github.com/Veviad/VTerminal/releases/download/v0.1.5/VTerminal_0.1.5_aarch64.dmg)** (Apple Silicon, 11 MB) · **[vterminal.veviad.com](https://vterminal.veviad.com)**
 
 The sections below build from source. If you just want to run the app, take the download above — it already includes on-device inference, and a locally built app is the one case that skips the Gatekeeper prompt.
 
@@ -13,7 +13,7 @@ Upgrading from an older build? Quit VTerminal completely before replacing `/Appl
 ![ui](https://img.shields.io/badge/React%2019-Tailwind%204-informational)
 ![license](https://img.shields.io/badge/license-GPL--3.0-blue)
 
-> **Status: early.** VTerminal is pre-1.0 (`0.1.3`) and developed in the open. It is used daily by its author, but expect rough edges and breaking changes between versions.
+> **Status: early.** VTerminal is pre-1.0 (`0.1.5`) and developed in the open. It is used daily by its author, but expect rough edges and breaking changes between versions.
 
 ---
 
@@ -43,6 +43,7 @@ Modern AI terminals tend to be Electron apps that phone home for every completio
 - **Agent mode** — multi-step runs that propose commands, execute them in your *visible* terminal, and read the real output
 - **Per-model reasoning effort** — `off → low → medium → high → max`, showing only the rungs each model actually accepts
 - **Image & file attachments** — drag, paste, or pick. An optional on-device vision sidecar transcribes screenshots so even a non-vision chat model can use them.
+- **Reusable Runbooks** *(coming in 0.1.6; experimental and currently available from source)* — versioned YAML checklists with immutable run snapshots, per-mutation approvals, visible-terminal execution, evidence, and canonical JSON/Markdown reports. See [the authoring guide](docs/RUNBOOKS.md).
 
 **Interface**
 - Six themes — Veviad Developer UI (default), Veviad UI, Midnight, Nord, Solarized Dark, Light — each with a matched terminal ANSI palette

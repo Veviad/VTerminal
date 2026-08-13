@@ -1,6 +1,7 @@
 import * as api from "./tauri";
+import type { IDisposable, IMarker } from "@xterm/xterm";
 import { getTerm, subscribeTerm, type TermEvent } from "./termRegistry";
-import { readLineRange } from "./terminalSnapshot";
+import { readLineRangeResult, type ReadRangeResult } from "./terminalSnapshot";
 import { useAppStore } from "../stores/appStore";
 import type { CommandStall } from "./types";
 import {
@@ -9,9 +10,11 @@ import {
   hardenCommand,
   installerFor,
   parsePrivateToken,
+  prefixCommandEnvironment,
   sanitizeCommand,
   sentinelSuffix,
   shellFromProbe,
+  type HardenedCommand,
   type ExecMode,
   type PrivateToken,
 } from "./ptyExecShell";
@@ -58,6 +61,7 @@ export type ExecError =
   | "command_not_observed"
   | "unsafe_command"
   | "interrupt_failed"
+  | "target_changed"
   | "cancelled";
 
 export interface PtyExecOutcome {
@@ -68,6 +72,10 @@ export interface PtyExecOutcome {
   error?: ExecError;
   /** Model-facing explanation, prepended to the tool result. */
   note?: string;
+  /** Explicit local tail-capture metadata, before evidence reaches Rust. */
+  outputTruncated?: boolean;
+  outputObservedBytes?: number;
+  outputCapturedBytes?: number;
 }
 
 interface Job {
@@ -85,8 +93,13 @@ interface Job {
   nonce: string;
   startedAt: number;
   startLine: number;
+  /** Live anchor for hook/sentinel output. Its disposal proves scrollback loss. */
+  startMarker: IMarker | null;
+  startMarkerListener: IDisposable | null;
   boundBlockId: string | null;
   foreignBlocks: number;
+  /** Scrollback was trimmed before capture; byte count is then a lower bound. */
+  outputLost: boolean;
   injected: boolean;
   settled: boolean;
   /** Live hang classification, republished to the card on every refresh tick. */
@@ -107,6 +120,22 @@ interface Job {
 const jobs = new Map<string, Job>();
 /** Resolved exec mode per session; cleared when a nested session exits. */
 const sessionModes = new Map<string, ExecMode>();
+
+interface ApprovalPromptSnapshot {
+  sessionId: string;
+  entry: NonNullable<ReturnType<typeof getTerm>>;
+  bufferType: string;
+  row: number;
+  cursorX: number;
+  lastDataAt: number;
+  lastUserInputAt: number;
+  capturedAt: number;
+}
+
+/** Opaque, one-shot bindings from an operator's approval click to the exact
+ * terminal epoch they attested. They never cross IPC or enter persistence. */
+const approvalPromptBindings = new Map<string, ApprovalPromptSnapshot>();
+const APPROVAL_PROMPT_TTL_MS = 30_000;
 
 const IDLE_WAIT_MAX_MS = 20_000;
 const IDLE_POLL_MS = 100;
@@ -147,14 +176,77 @@ export function isBusy(sessionId: string): boolean {
   return jobs.has(sessionId);
 }
 
+/** Capture the exact visible terminal state the operator is attesting. A human
+ * still establishes that this is a POSIX prompt; the binding proves only that
+ * the row did not change between that gesture and the eventual PTY write. */
+export function captureApprovalPromptBinding(sessionId: string): string | null {
+  const entry = getTerm(sessionId);
+  if (!entry || entry.disposed) return null;
+  const buffer = entry.term.buffer.active;
+  if (buffer.type !== "normal") return null;
+  const row = buffer.getLine(buffer.baseY + buffer.cursorY)?.translateToString(true) ?? "";
+  if (buffer.cursorX <= 0 || row.trim().length === 0) return null;
+  const token = `${sessionId}:${Date.now()}:${makeNonce()}`;
+  approvalPromptBindings.set(token, {
+    sessionId,
+    entry,
+    bufferType: buffer.type,
+    row: buffer.baseY + buffer.cursorY,
+    cursorX: buffer.cursorX,
+    lastDataAt: entry.lastDataAt,
+    lastUserInputAt: entry.lastUserInputAt,
+    capturedAt: Date.now(),
+  });
+  setTimeout(() => approvalPromptBindings.delete(token), APPROVAL_PROMPT_TTL_MS + 1_000);
+  return token;
+}
+
+export function releaseApprovalPromptBinding(token: string): void {
+  approvalPromptBindings.delete(token);
+}
+
+function consumeApprovalPromptBinding(
+  token: string | undefined,
+  sessionId: string,
+): ApprovalPromptSnapshot | null {
+  if (!token) return null;
+  const snapshot = approvalPromptBindings.get(token) ?? null;
+  approvalPromptBindings.delete(token);
+  if (
+    !snapshot
+    || snapshot.sessionId !== sessionId
+    || Date.now() - snapshot.capturedAt > APPROVAL_PROMPT_TTL_MS
+  ) return null;
+  return snapshot;
+}
+
+function promptMatchesApproval(snapshot: ApprovalPromptSnapshot): boolean {
+  const entry = getTerm(snapshot.sessionId);
+  const buffer = entry?.term.buffer.active;
+  return !!entry
+    && entry === snapshot.entry
+    && !entry.disposed
+    && buffer?.type === snapshot.bufferType
+    && buffer.type === "normal"
+    && buffer.baseY + buffer.cursorY === snapshot.row
+    && buffer.cursorX === snapshot.cursorX
+    && entry.lastDataAt === snapshot.lastDataAt
+    && entry.lastUserInputAt === snapshot.lastUserInputAt;
+}
+
 /**
  * Hand the terminal back to the shell, on the user's own gesture.
  *
  * Exported for the command card's Interrupt button: the `input` and `idle`
  * stalls are heuristics, so the app surfaces them and the user decides.
  */
-export function interruptJob(sessionId: string): void {
-  jobs.get(sessionId)?.interrupt("user");
+export function interruptJob(sessionId: string, expectedApprovalId?: string): boolean {
+  const job = jobs.get(sessionId);
+  if (!job || (expectedApprovalId !== undefined && job.approvalId !== expectedApprovalId)) {
+    return false;
+  }
+  job.interrupt("user");
+  return true;
 }
 
 /** Forget the negotiated mode — called when `ssh` exits and we are local again. */
@@ -163,9 +255,13 @@ export function resetSessionMode(sessionId: string): void {
 }
 
 /** Release a pending command without touching the terminal. */
-export function abortSession(sessionId: string, reason: "cancelled" | "closed" = "cancelled"): void {
+export function abortSession(
+  sessionId: string,
+  reason: "cancelled" | "closed" = "cancelled",
+  expectedApprovalId?: string,
+): boolean {
   const job = jobs.get(sessionId);
-  if (!job) return;
+  if (!job || (expectedApprovalId !== undefined && job.approvalId !== expectedApprovalId)) return false;
   job.finish({
     exitCode: null,
     output: "",
@@ -173,12 +269,25 @@ export function abortSession(sessionId: string, reason: "cancelled" | "closed" =
     mode: job.mode,
     error: reason === "closed" ? "terminal_closed" : "cancelled",
   });
+  return true;
 }
 
 export interface RunOptions {
   timeoutMs?: number;
   idleWaitMs?: number;
   tailLimit?: number;
+  /** Validated, non-secret values scoped to this one command invocation. */
+  environment?: Record<string, string>;
+  /** Runbooks set this false because Rust already owns and records the guards. */
+  harden?: boolean;
+  /** Atomic backend dispatch authorization acquired after all asynchronous probing. */
+  beforeWrite?: () => boolean | Promise<boolean>;
+  /** Final synchronous target/feature guard, checked immediately before write. */
+  canWrite?: () => boolean;
+  /** Require a fresh per-command completion token even when shell integration exists. */
+  nonceCompletion?: boolean;
+  /** One-shot terminal epoch captured by the operator's Runbook approval. */
+  approvalPromptBinding?: string;
 }
 
 export async function runInTerminal(
@@ -212,13 +321,32 @@ export async function runInTerminal(
     return closedOutcome(startedAt, null);
   }
 
+  const approvedPrompt = consumeApprovalPromptBinding(opts.approvalPromptBinding, sessionId);
+  if (opts.approvalPromptBinding && (!approvedPrompt || !promptMatchesApproval(approvedPrompt))) {
+    return {
+      exitCode: null,
+      output: "",
+      outputTruncated: false,
+      outputObservedBytes: 0,
+      outputCapturedBytes: 0,
+      durationMs: Date.now() - startedAt,
+      mode: null,
+      error: "target_changed",
+      note: "Nothing was executed: the terminal changed after the operator attested the visible shell prompt.",
+    };
+  }
+
   // 1. Wait for the terminal to be safe to type into (never inject blind).
-  const mode = await resolveMode(sessionId, idleWaitMs);
-  if (mode === "closed") return closedOutcome(startedAt, null);
-  if (mode === "busy") {
+  // Runbooks always use a fresh sentinel and therefore must not install an
+  // unapproved probe/prompt hook before acquiring their dispatch lease.
+  const resolvedMode = opts.nonceCompletion
+    ? await resolveSentinelPrompt(sessionId, idleWaitMs)
+    : await resolveMode(sessionId, idleWaitMs);
+  if (resolvedMode === "closed") return closedOutcome(startedAt, null);
+  if (resolvedMode === "busy") {
     return busyOutcome(startedAt, null, "a program is in the foreground or the user is typing");
   }
-  if (mode === "not_a_shell") {
+  if (resolvedMode === "not_a_shell") {
     return {
       exitCode: null,
       output: "",
@@ -228,6 +356,23 @@ export async function runInTerminal(
       note: "Nothing was executed: the visible terminal is not sitting at a shell prompt (a pager, editor, or another program has it). Ask the user to return to a prompt.",
     };
   }
+  // Shell OSC/block markers describe ordinary interactive commands well, but
+  // command output itself can forge them. Runbooks opt into a fresh nonce on
+  // every attempt to reject stale/replayed completion output. The active shell
+  // remains operator-trusted and the result is labelled shell-observed, not a
+  // deterministic executor attestation.
+  const mode: ExecMode = opts.nonceCompletion ? "sentinel" : resolvedMode;
+  const readyEntry = getTerm(sessionId);
+  if (!readyEntry || readyEntry.disposed) return closedOutcome(startedAt, mode);
+  const readyBuffer = readyEntry.term.buffer.active;
+  const promptSnapshot = {
+    entry: readyEntry,
+    bufferType: readyBuffer.type,
+    row: readyBuffer.baseY + readyBuffer.cursorY,
+    cursorX: readyBuffer.cursorX,
+    lastDataAt: readyEntry.lastDataAt,
+    lastUserInputAt: readyEntry.lastUserInputAt,
+  };
 
   // 2. Build the exact line to type. Hardening comes first and the sentinel
   // last: `$?` in the sentinel must be the command's status, so nothing may be
@@ -243,8 +388,87 @@ export async function runInTerminal(
       note: "Nothing was executed: this shell needs an exit-code sentinel appended, which is unsafe for commands using heredocs, line continuations, or unbalanced quotes. Rewrite it as a single self-contained command.",
     };
   }
-  const hardened = hardenCommand(command);
-  const line = mode === "sentinel" ? hardened.line + sentinelSuffix("posix", nonce) : hardened.line;
+  const hardened = opts.harden === false
+    ? { line: command, applied: [] as HardenedCommand["applied"] }
+    : hardenCommand(command);
+  let typed: string;
+  try {
+    typed = prefixCommandEnvironment(hardened.line, opts.environment ?? {});
+  } catch (error) {
+    return {
+      exitCode: null,
+      output: "",
+      durationMs: Date.now() - startedAt,
+      mode,
+      error: "unsafe_command",
+      note: `Nothing was executed: ${String(error)}`,
+    };
+  }
+  const line = mode === "sentinel" ? typed + sentinelSuffix("posix", nonce) : typed;
+  if (line.length > 4_096) {
+    return {
+      exitCode: null,
+      output: "",
+      durationMs: Date.now() - startedAt,
+      mode,
+      error: "unsafe_command",
+      note: "Nothing was executed: the guarded command and completion instrumentation exceed 4,096 characters.",
+    };
+  }
+  if (opts.beforeWrite) {
+    let authorized = false;
+    try {
+      authorized = await opts.beforeWrite();
+    } catch {
+      authorized = false;
+    }
+    if (!authorized) {
+      return {
+        exitCode: null,
+        output: "",
+        outputTruncated: false,
+        outputObservedBytes: 0,
+        outputCapturedBytes: 0,
+        durationMs: Date.now() - startedAt,
+        mode,
+        error: "cancelled",
+        note: "Nothing was executed: final backend dispatch authorization was unavailable.",
+      };
+    }
+  }
+
+  // The backend claim above is asynchronous. Re-prove the exact prompt that
+  // resolveMode accepted before yielding: a user keystroke, PTY output, cursor
+  // move, buffer switch, terminal replacement, or lost prompt means the claim
+  // is settled as unknown without typing into the new foreground program.
+  const dispatchEntry = getTerm(sessionId);
+  const dispatchBuffer = dispatchEntry?.term.buffer.active;
+  const promptStillBound =
+    (!approvedPrompt || promptMatchesApproval(approvedPrompt)) &&
+    dispatchEntry === promptSnapshot.entry &&
+    !dispatchEntry?.disposed &&
+    dispatchBuffer?.type === promptSnapshot.bufferType &&
+    dispatchBuffer.type === "normal" &&
+    dispatchBuffer.baseY + dispatchBuffer.cursorY === promptSnapshot.row &&
+    dispatchBuffer.cursorX === promptSnapshot.cursorX &&
+    dispatchEntry.lastDataAt === promptSnapshot.lastDataAt &&
+    dispatchEntry.lastUserInputAt === promptSnapshot.lastUserInputAt &&
+    (resolvedMode !== "integrated" ||
+      dispatchEntry.tracker.isAtEmptyPrompt() ||
+      dispatchEntry.tracker.isAtPromptColumn());
+  if (!promptStillBound) {
+    return {
+      exitCode: null,
+      output: "",
+      outputTruncated: false,
+      outputObservedBytes: 0,
+      outputCapturedBytes: 0,
+      durationMs: Date.now() - startedAt,
+      mode,
+      error: "target_changed",
+      note: "Nothing was executed: the visible shell prompt changed while final dispatch authorization was being acquired.",
+    };
+  }
 
   return await new Promise<PtyExecOutcome>((resolve) => {
     const entry = getTerm(sessionId);
@@ -256,13 +480,16 @@ export async function runInTerminal(
     const job: Job = {
       approvalId,
       command,
-      typed: hardened.line,
+      typed,
       mode,
       nonce,
       startedAt,
       startLine: buf.baseY + buf.cursorY,
+      startMarker: null,
+      startMarkerListener: null,
       boundBlockId: null,
       foreignBlocks: 0,
+      outputLost: false,
       injected: false,
       settled: false,
       stall: null,
@@ -280,6 +507,13 @@ export async function runInTerminal(
     job.finish = (outcome) => {
       if (job.settled) return;
       job.settled = true;
+      if (opts.nonceCompletion) {
+        getTerm(sessionId)?.tracker.endRunbookOutputIsolation();
+      }
+      job.startMarkerListener?.dispose();
+      job.startMarkerListener = null;
+      job.startMarker?.dispose();
+      job.startMarker = null;
       for (const t of timers) clearTimeout(t);
       if (refresh) clearInterval(refresh);
       unsubscribe();
@@ -290,8 +524,25 @@ export async function runInTerminal(
 
     // Non-integrated modes anchor on the row we typed into, so skip it: it
     // holds the prompt plus the echoed command, not output.
-    const harvest = (toInclusive: number, limit: number, from = job.startLine + 1): string =>
-      readLineRange(sessionId, from, toInclusive, { limit }).trimEnd();
+    const captureStartLine = (): number =>
+      job.startMarker && !job.startMarker.isDisposed ? job.startMarker.line : job.startLine;
+
+    const harvest = (
+      toInclusive: number,
+      limit: number,
+      from = captureStartLine() + 1,
+    ): ReadRangeResult => {
+      const captured = readLineRangeResult(sessionId, from, toInclusive, { limit });
+      const text = captured.text.trimEnd();
+      const capturedBytes = new TextEncoder().encode(text).length;
+      return {
+        ...captured,
+        text,
+        capturedBytes,
+        truncated:
+          captured.truncated || job.outputLost || capturedBytes < captured.capturedBytes,
+      };
+    };
 
     const cursorRow = (): number => {
       const e = getTerm(sessionId);
@@ -376,9 +627,13 @@ export async function runInTerminal(
       const from =
         markers && !markers.start.isDisposed ? markers.start.line : job.startLine + 1;
       const end = markers?.end && !markers.end.isDisposed ? markers.end.line - 1 : cursorRow();
+      const captured = harvest(end, tailLimit, from);
       job.finish({
         exitCode,
-        output: harvest(end, tailLimit, from),
+        output: captured.text,
+        outputTruncated: captured.truncated,
+        outputObservedBytes: captured.observedBytes,
+        outputCapturedBytes: captured.capturedBytes,
         durationMs: Date.now() - job.startedAt,
         mode,
         note: interruptNote(),
@@ -412,7 +667,10 @@ export async function runInTerminal(
         case "blockTrimmed":
           // Keep waiting for the exit code — it is the part that matters — but
           // the output is gone from scrollback.
-          if (e.blockId === job.boundBlockId) job.startLine = -1;
+          if (e.blockId === job.boundBlockId) {
+            job.startLine = -1;
+            job.outputLost = true;
+          }
           break;
         case "osc": {
           if (mode === "integrated") break;
@@ -421,9 +679,13 @@ export async function runInTerminal(
           // In sentinel mode the nonce makes attribution exact, so a late token
           // from an abandoned command can never be misread as this one's.
           if (mode === "sentinel" && token.arg !== job.nonce) break;
+          const captured = harvest(cursorRow(), tailLimit);
           job.finish({
             exitCode: token.exit,
-            output: harvest(cursorRow(), tailLimit),
+            output: captured.text,
+            outputTruncated: captured.truncated,
+            outputObservedBytes: captured.observedBytes,
+            outputCapturedBytes: captured.capturedBytes,
             durationMs: Date.now() - job.startedAt,
             mode,
             note: interruptNote(),
@@ -444,13 +706,48 @@ export async function runInTerminal(
     });
 
     // 3. Type it. Exactly once, ever.
+    if (opts.canWrite && !opts.canWrite()) {
+      job.finish({
+        exitCode: null,
+        output: "",
+        outputTruncated: false,
+        outputObservedBytes: 0,
+        outputCapturedBytes: 0,
+        durationMs: Date.now() - job.startedAt,
+        mode,
+        error: "target_changed",
+        note: "Nothing was executed: the runbook target stopped being the active visible terminal before dispatch.",
+      });
+      return;
+    }
+    // Hook/sentinel jobs do not receive an authoritative OSC block marker.
+    // Anchor their prompt row directly in xterm so ordinary line shifts remain
+    // accurate and disposal tells us when low scrollback dropped early output.
+    if (mode !== "integrated") {
+      const marker = entry.term.registerMarker(0) ?? null;
+      if (marker) {
+        job.startMarker = marker;
+        job.startLine = marker.line;
+        job.startMarkerListener = marker.onDispose(() => {
+          if (job.settled) return;
+          job.startLine = -1;
+          job.outputLost = true;
+        });
+      } else {
+        // Failing to obtain an anchor makes completeness unknowable; retain the
+        // available tail but never describe it as complete evidence.
+        job.startLine = -1;
+        job.outputLost = true;
+      }
+    }
     job.injected = true;
+    if (opts.nonceCompletion) entry.tracker.beginRunbookOutputIsolation();
     // Show what the guards changed: the user approved `systemctl status x`, and
     // the terminal is about to echo an env prefix and a redirect they never saw.
     // `hardened.line` rather than `line` — the exit-code sentinel is plumbing,
     // not a change to what the command does.
-    if (hardened.applied.length) {
-      useAppStore.getState().setCommandTyped(sessionId, approvalId, hardened.line);
+    if (hardened.applied.length || Object.keys(opts.environment ?? {}).length > 0) {
+      useAppStore.getState().setCommandTyped(sessionId, approvalId, typed);
     }
     void api.ptyWrite(sessionId, `${line}\r`).catch(() => {
       job.finish(closedOutcome(job.startedAt, mode));
@@ -476,7 +773,7 @@ export async function runInTerminal(
       const e = getTerm(sessionId);
       if (!e || e.disposed) return;
       const store = useAppStore.getState();
-      store.setCommandOutput(sessionId, approvalId, harvest(cursorRow(), CARD_TAIL));
+      store.setCommandOutput(sessionId, approvalId, harvest(cursorRow(), CARD_TAIL).text);
 
       const now = Date.now();
       // Charge the interval just elapsed to the pause budget if it was spent
@@ -507,9 +804,13 @@ export async function runInTerminal(
             armDeadline(left);
             return;
           }
+          const captured = harvest(cursorRow(), tailLimit);
           job.finish({
             exitCode: null,
-            output: harvest(cursorRow(), tailLimit),
+            output: captured.text,
+            outputTruncated: captured.truncated,
+            outputObservedBytes: captured.observedBytes,
+            outputCapturedBytes: captured.capturedBytes,
             durationMs: Date.now() - job.startedAt,
             mode,
             error: "timeout",
@@ -527,6 +828,15 @@ export async function runInTerminal(
 // ---------------------------------------------------------------------------
 
 type ModeResolution = ExecMode | "busy" | "closed" | "not_a_shell";
+
+async function resolveSentinelPrompt(
+  sessionId: string,
+  idleWaitMs: number,
+): Promise<ModeResolution> {
+  const remote = useAppStore.getState().sessionUi[sessionId]?.remote ?? null;
+  const ready = await waitForPrompt(sessionId, idleWaitMs, remote ? "nested" : "integrated");
+  return ready === "ok" ? "sentinel" : ready;
+}
 
 /** Wait for a safe prompt, then work out how this session reports exit codes. */
 async function resolveMode(sessionId: string, idleWaitMs: number): Promise<ModeResolution> {

@@ -1,0 +1,19 @@
+apiVersion: runbooks.veviad.com/v1alpha1
+kind: Runbook
+metadata:
+  id: malicious-shell-heredoc
+  version: 1.0.0
+  title: Heredoc fixture
+spec:
+  target:
+    kind: active-terminal
+  steps:
+    - id: heredoc-command
+      title: Reject a heredoc command
+      check:
+        uses: shell
+        with:
+          command: "cat <<EOF"
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]

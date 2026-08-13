@@ -37,6 +37,13 @@ export class BlockTracker {
   private inputPristine = false;
   /** Set while restored scrollback is being written back. */
   private suspended = false;
+  /** While a Runbook command emits untrusted terminal bytes, suppress semantic
+   * shell/cwd/clipboard OSC. Only its private nonce completion is forwarded. */
+  private runbookOutputIsolation = false;
+  /** Sticky for the terminal lifetime once any Runbook has executed. Delayed
+   * descendants must never regain OSC clipboard authority after the parent
+   * prints its completion token. */
+  private runbookClipboardIsolation = false;
 
   constructor(
     private term: Terminal,
@@ -61,16 +68,25 @@ export class BlockTracker {
     this.suspended = false;
   }
 
+  beginRunbookOutputIsolation(): void {
+    this.runbookOutputIsolation = true;
+    this.runbookClipboardIsolation = true;
+  }
+
+  endRunbookOutputIsolation(): void {
+    this.runbookOutputIsolation = false;
+  }
+
   attach(): void {
     this.disposables.push(
       this.term.parser.registerOscHandler(133, (data) => {
-        if (this.suspended) return true;
+        if (this.suspended || this.runbookOutputIsolation) return true;
         this.handle133(data);
         return true;
       }),
       // OSC 7 — cwd reporting (file://host/path)
       this.term.parser.registerOscHandler(7, (data) => {
-        if (this.suspended) return true;
+        if (this.suspended || this.runbookOutputIsolation) return true;
         const parsed = parseOsc7(data);
         if (parsed && this.cb.onCwdChange) this.cb.onCwdChange(parsed.path, parsed.host);
         return true;
@@ -80,6 +96,10 @@ export class BlockTracker {
       // up RPROMPT/PS2 decorations.
       this.term.parser.registerOscHandler(6973, (data) => {
         if (this.suspended) return true;
+        if (this.runbookOutputIsolation) {
+          if (data.startsWith("RD;")) this.cb.onOscPrivate?.(data);
+          return true;
+        }
         if (data.startsWith("CMD;")) {
           const decoded = decodeBase64Utf8(data.slice(4));
           if (decoded !== null) this.pendingCommand = decoded;
@@ -88,6 +108,10 @@ export class BlockTracker {
         }
         return true;
       }),
+      // This handler is registered after the ClipboardAddon. xterm consults
+      // newest handlers first, so `true` permanently prevents OSC 52 clipboard
+      // writes after this terminal has carried any Runbook output.
+      this.term.parser.registerOscHandler(52, () => this.runbookClipboardIsolation),
       this.term.onData(() => {
         if (this.phase === "input") this.inputPristine = false;
       }),

@@ -1,0 +1,16 @@
+apiVersion: runbooks.veviad.com/v1alpha1
+kind: Runbook
+metadata:
+  id: malicious-ansible-traversal
+  version: 1.0.0
+  title: Ansible traversal fixture
+spec:
+  target:
+    kind: active-terminal
+  steps:
+    - id: escaped-playbook
+      title: Reject an escaped playbook
+      check:
+        uses: ansible.playbook
+        with:
+          playbook: ../outside.yml

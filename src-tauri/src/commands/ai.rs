@@ -80,6 +80,17 @@ fn default_model_id(app: &tauri::AppHandle<Wry>) -> String {
 
 pub async fn resolve_provider(app: &tauri::AppHandle<Wry>) -> Result<Resolved, String> {
     let model = active_model(app);
+    resolve_provider_for_model(app, model).await
+}
+
+/// Resolve the exact model captured by a caller rather than re-reading the
+/// mutable active-model setting after an asynchronous task has been spawned.
+/// Runbooks use this to keep their durable execution-environment record tied
+/// to the provider that can actually participate in that run.
+pub async fn resolve_provider_for_model(
+    app: &tauri::AppHandle<Wry>,
+    model: &'static CatalogModel,
+) -> Result<Resolved, String> {
     let effort = crate::commands::settings::read_effort(app, model);
 
     if model.provider == ProviderId::Local {
