@@ -84,6 +84,7 @@
           <h2>On this page</h2>
           <ol>
             <li><a href="#getting-started">Getting started</a></li>
+            <li><a href="#new-runbook-wizard">New runbook wizard</a></li>
             <li><a href="#included-examples">Included examples</a></li>
             <li><a href="#package-format">Package format</a></li>
             <li><a href="#export-and-reuse">Export &amp; reuse</a></li>
@@ -162,6 +163,72 @@
                 requires HTTPS, except for localhost or loopback HTTP.
               </p>
             </div>
+          </section>
+
+          <section
+            class="guide-section"
+            id="new-runbook-wizard"
+            aria-labelledby="new-runbook-wizard-title"
+          >
+            <p class="eyebrow">Create Without YAML</p>
+            <h2 id="new-runbook-wizard-title">Build an Assessment in VTerminal</h2>
+            <p>
+              Choose <strong>New</strong> in the Library to open the deterministic,
+              offline assessment builder. Drafts autosave in app-managed storage
+              and remain resumable across restarts. They cannot be run until the
+              final package passes the same strict validation as an import.
+            </p>
+            <ol class="guide-steps">
+              <li>
+                <span>01</span>
+                <div>
+                  <strong>Basics</strong>
+                  Set the stable ID, semantic version, title, description, tags,
+                  failure policy, and declared network or root capability.
+                </div>
+              </li>
+              <li>
+                <span>02</span>
+                <div>
+                  <strong>Inputs</strong>
+                  Add non-secret string, integer, boolean, path, or enum inputs
+                  with typed defaults.
+                </div>
+              </li>
+              <li>
+                <span>03</span>
+                <div>
+                  <strong>Checks</strong>
+                  Order shell or manual checks. Shell inputs use explicit
+                  <code>VRUN_*</code> environment mappings and
+                  compliant/non-compliant exit codes.
+                </div>
+              </li>
+              <li>
+                <span>04</span>
+                <div>
+                  <strong>Review and publish</strong>
+                  Inspect the generated YAML and validation findings, then
+                  publish the app-managed package into the Library.
+                </div>
+              </li>
+            </ol>
+            <div class="guide-callout">
+              <strong>Assessment-only by design.</strong>
+              <p>
+                The wizard generates no apply, verify, agent, Ansible, or write
+                actions. macOS 13+ and Linux choices add a locked stopping target
+                guard; Any adds no guard and requires portable commands. Export a
+                published package for advanced YAML authoring.
+              </p>
+            </div>
+            <p>
+              Published wizard projects remain editable. Changed publications
+              require a strictly greater semantic version; unchanged publication
+              is a no-op. Removing a Library registration keeps its draft for
+              republishing. Discarding a published draft detaches wizard editing
+              but leaves the published source and historical snapshots intact.
+            </p>
           </section>
 
           <section

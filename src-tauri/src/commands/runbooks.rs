@@ -25,6 +25,9 @@ use crate::runbooks::db::{
     SourceRegistrationInput, StepRecord, StepSeed,
 };
 use crate::runbooks::definition::{ApplyAction, CheckAction, RunbookDefinition, VerifyAction};
+use crate::runbooks::drafts::{
+    RunbookDraft, RunbookDraftDocument, RunbookDraftPreview, RunbookDraftSummary,
+};
 use crate::runbooks::engine::{
     execute_runbook, resume_runbook, validate_runtime_command, EngineConfig, EngineContext,
     EngineRunSpec, OperatorDecisionResponse, RunbookDecisionState, RunbookManualIndex,
@@ -57,6 +60,7 @@ const HISTORY_LIMIT: u32 = 500;
 const MAX_CLEANUP_ERRORS: usize = 100;
 const BUILTIN_LIBRARY_DIRECTORY: &str = "runbook-library";
 const BUILTIN_PACKAGES_DIRECTORY: &str = "builtins";
+const AUTHORED_PACKAGES_DIRECTORY: &str = "authored";
 
 struct BuiltinPackage {
     id: &'static str,
@@ -313,6 +317,210 @@ fn sync_directory(path: &Path) -> Result<(), String> {
         .open(path)
         .and_then(|directory| directory.sync_all())
         .map_err(|error| format!("sync directory {}: {error}", path.display()))
+}
+
+fn validate_draft_storage(document: &RunbookDraftDocument) -> Result<(), String> {
+    let json = crate::runbooks::drafts::document_json(document)?;
+    reject_sensitive_text(&json, "runbook draft")
+}
+
+fn validate_draft_preview(document: &RunbookDraftDocument) -> RunbookDraftPreview {
+    let mut preview = crate::runbooks::drafts::preview(document);
+    let sensitive = crate::runbooks::drafts::document_json(document)
+        .and_then(|json| reject_sensitive_text(&json, "runbook draft"));
+    if let Err(error) = sensitive {
+        preview
+            .issues
+            .push(crate::runbooks::definition::ValidationError {
+                path: "document".into(),
+                message: error,
+            });
+    }
+    if let Some(source) = preview.source_yaml.as_deref() {
+        if let Err(error) = reject_sensitive_text(source, "generated runbook definition") {
+            preview
+                .issues
+                .push(crate::runbooks::definition::ValidationError {
+                    path: "document".into(),
+                    message: error,
+                });
+        }
+    }
+    preview
+}
+
+fn draft_publication_changed(
+    previous_document_sha256: Option<&str>,
+    previous_version: Option<&str>,
+    document_sha256: &str,
+    next_version: &str,
+) -> Result<bool, String> {
+    let changed = previous_document_sha256 != Some(document_sha256);
+    if changed {
+        if let Some(previous) = previous_version {
+            let previous = semver::Version::parse(previous)
+                .map_err(|error| format!("stored published version is invalid: {error}"))?;
+            let next = semver::Version::parse(next_version)
+                .map_err(|error| format!("draft version is invalid: {error}"))?;
+            if next <= previous {
+                return Err(format!(
+                    "changed runbooks require a version greater than {previous}"
+                ));
+            }
+        }
+    }
+    Ok(changed)
+}
+
+#[derive(Debug)]
+struct AuthoredPublication {
+    root: PathBuf,
+    destination: PathBuf,
+    staging: PathBuf,
+    backup: Option<PathBuf>,
+    committed: bool,
+}
+
+impl AuthoredPublication {
+    fn commit(&mut self) {
+        self.committed = true;
+        if let Some(backup) = self.backup.take() {
+            if let Err(error) = fs::remove_dir_all(&backup) {
+                log::warn!(
+                    "remove previous authored runbook {}: {error}",
+                    backup.display()
+                );
+            }
+        }
+        if let Err(error) = sync_directory(&self.root) {
+            log::warn!("sync authored runbook library after publication: {error}");
+        }
+    }
+}
+
+impl Drop for AuthoredPublication {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        if self.destination.exists() {
+            let _ = fs::remove_dir_all(&self.destination);
+        }
+        if let Some(backup) = self.backup.as_ref() {
+            let _ = fs::rename(backup, &self.destination);
+        }
+        if self.staging.exists() {
+            let _ = fs::remove_dir_all(&self.staging);
+        }
+        let _ = sync_directory(&self.root);
+    }
+}
+
+fn publish_authored_package(
+    authored_root: &Path,
+    destination: &Path,
+    source_yaml: &[u8],
+    readme: &[u8],
+    expected_source_sha256: Option<&str>,
+    expected_readme_sha256: Option<&str>,
+) -> Result<AuthoredPublication, String> {
+    fs::create_dir_all(authored_root)
+        .map_err(|error| format!("create authored runbook library: {error}"))?;
+    let root_metadata = fs::symlink_metadata(authored_root)
+        .map_err(|error| format!("inspect authored runbook library: {error}"))?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err("authored runbook library must be an ordinary directory".into());
+    }
+    restrict_builtin_directory(authored_root)?;
+
+    let mut backup = None;
+    match fs::symlink_metadata(destination) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err("authored runbook package path is not an ordinary directory".into());
+            }
+            let expected_source = expected_source_sha256
+                .ok_or("an unexpected package already exists at this draft's app-managed path")?;
+            let expected_readme = expected_readme_sha256
+                .ok_or("an unexpected package already exists at this draft's app-managed path")?;
+            let mut names = fs::read_dir(destination)
+                .map_err(|error| format!("read authored runbook package: {error}"))?
+                .map(|entry| {
+                    entry
+                        .map(|entry| entry.file_name())
+                        .map_err(|error| format!("read authored runbook entry: {error}"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            names.sort();
+            if names
+                != [
+                    std::ffi::OsString::from("README.md"),
+                    std::ffi::OsString::from("runbook.vrun.yaml"),
+                ]
+            {
+                return Err("authored runbook package contains unexpected files; export it before resolving the drift".into());
+            }
+            for name in ["runbook.vrun.yaml", "README.md"] {
+                let metadata = fs::symlink_metadata(destination.join(name))
+                    .map_err(|error| format!("inspect authored runbook {name}: {error}"))?;
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return Err(format!("authored runbook {name} is not an ordinary file"));
+                }
+            }
+            let current_source = fs::read(destination.join("runbook.vrun.yaml"))
+                .map_err(|error| format!("read authored runbook definition: {error}"))?;
+            let current_readme = fs::read(destination.join("README.md"))
+                .map_err(|error| format!("read authored runbook README: {error}"))?;
+            if sha256_hex(&current_source) != expected_source
+                || sha256_hex(&current_readme) != expected_readme
+            {
+                return Err("authored runbook package changed outside the wizard; export it before resolving the drift".into());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if expected_source_sha256.is_some() || expected_readme_sha256.is_some() {
+                return Err("the previously published app-managed package is missing".into());
+            }
+        }
+        Err(error) => return Err(format!("inspect authored runbook package: {error}")),
+    }
+
+    let suffix = uuid::Uuid::new_v4();
+    let staging = authored_root.join(format!(".draft-staging-{suffix}"));
+    fs::create_dir(&staging)
+        .map_err(|error| format!("create authored runbook staging directory: {error}"))?;
+    restrict_builtin_directory(&staging)?;
+    if let Err(error) = write_builtin_file(&staging.join("runbook.vrun.yaml"), source_yaml)
+        .and_then(|()| write_builtin_file(&staging.join("README.md"), readme))
+        .and_then(|()| load_and_check_package(&staging).map(|_| ()))
+        .and_then(|()| sync_directory(&staging))
+    {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+
+    if destination.exists() {
+        let backup_path = authored_root.join(format!(".draft-backup-{suffix}"));
+        fs::rename(destination, &backup_path)
+            .map_err(|error| format!("move previous authored runbook aside: {error}"))?;
+        backup = Some(backup_path);
+    }
+    if let Err(error) = fs::rename(&staging, destination) {
+        if let Some(backup_path) = backup.as_ref() {
+            let _ = fs::rename(backup_path, destination);
+        }
+        let _ = fs::remove_dir_all(&staging);
+        return Err(format!("publish authored runbook package: {error}"));
+    }
+    let publication = AuthoredPublication {
+        root: authored_root.to_path_buf(),
+        destination: destination.to_path_buf(),
+        staging,
+        backup,
+        committed: false,
+    };
+    sync_directory(authored_root)?;
+    Ok(publication)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -619,6 +827,177 @@ pub fn runbooks_restore_builtins(
     let connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
     reconcile_builtin_sources(&command_state.app_data_dir, &connection)?;
     db::restore_builtin_sources(&connection)
+}
+
+#[tauri::command]
+pub fn runbooks_drafts_list(
+    app: tauri::AppHandle<Wry>,
+    db_state: State<'_, DbState>,
+) -> Result<Vec<RunbookDraftSummary>, String> {
+    gate(&app)?;
+    let connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
+    db::list_runbook_drafts(&connection)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn runbooks_draft_create(
+    app: tauri::AppHandle<Wry>,
+    db_state: State<'_, DbState>,
+    initial: Option<RunbookDraftDocument>,
+) -> Result<RunbookDraft, String> {
+    gate(&app)?;
+    let document = initial.unwrap_or_default();
+    validate_draft_storage(&document)?;
+    let connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
+    Ok(db::create_runbook_draft(&connection, &document)?.draft)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn runbooks_draft_get(
+    app: tauri::AppHandle<Wry>,
+    db_state: State<'_, DbState>,
+    draft_id: String,
+) -> Result<RunbookDraft, String> {
+    gate(&app)?;
+    validate_identifier(&draft_id, "draft id")?;
+    let connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
+    Ok(db::get_runbook_draft(&connection, &draft_id)?
+        .ok_or_else(|| format!("unknown runbook draft: {draft_id}"))?
+        .draft)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn runbooks_draft_save(
+    app: tauri::AppHandle<Wry>,
+    db_state: State<'_, DbState>,
+    draft_id: String,
+    expected_revision: i64,
+    document: RunbookDraftDocument,
+) -> Result<RunbookDraft, String> {
+    gate(&app)?;
+    validate_identifier(&draft_id, "draft id")?;
+    validate_draft_storage(&document)?;
+    let connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
+    Ok(db::save_runbook_draft(&connection, &draft_id, expected_revision, &document)?.draft)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn runbooks_draft_validate(
+    app: tauri::AppHandle<Wry>,
+    db_state: State<'_, DbState>,
+    draft_id: String,
+) -> Result<RunbookDraftPreview, String> {
+    gate(&app)?;
+    validate_identifier(&draft_id, "draft id")?;
+    let connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
+    let stored = db::get_runbook_draft(&connection, &draft_id)?
+        .ok_or_else(|| format!("unknown runbook draft: {draft_id}"))?;
+    Ok(validate_draft_preview(&stored.draft.document))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn runbooks_draft_discard(
+    app: tauri::AppHandle<Wry>,
+    db_state: State<'_, DbState>,
+    draft_id: String,
+) -> Result<(), String> {
+    gate(&app)?;
+    validate_identifier(&draft_id, "draft id")?;
+    let connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
+    if db::discard_runbook_draft(&connection, &draft_id)? {
+        Ok(())
+    } else {
+        Err(format!("unknown runbook draft: {draft_id}"))
+    }
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn runbooks_draft_publish(
+    app: tauri::AppHandle<Wry>,
+    db_state: State<'_, DbState>,
+    command_state: State<'_, Arc<RunbookCommandState>>,
+    draft_id: String,
+    expected_revision: i64,
+) -> Result<SourceRegistration, String> {
+    gate(&app)?;
+    validate_identifier(&draft_id, "draft id")?;
+    let connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
+    let stored = db::get_runbook_draft(&connection, &draft_id)?
+        .ok_or_else(|| format!("unknown runbook draft: {draft_id}"))?;
+    if stored.draft.revision != expected_revision {
+        return Err("runbook draft changed in another window; reload it before publishing".into());
+    }
+    let preview = validate_draft_preview(&stored.draft.document);
+    if !preview.issues.is_empty() {
+        return Err(format!(
+            "runbook draft is not publishable: {}",
+            preview
+                .issues
+                .iter()
+                .map(|issue| format!("{}: {}", issue.path, issue.message))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+    let definition = preview
+        .definition
+        .ok_or("validated draft has no definition")?;
+    let source_yaml = preview.source_yaml.ok_or("validated draft has no YAML")?;
+    let readme = preview.readme.ok_or("validated draft has no README")?;
+    let document_sha256 = sha256_hex(stored.document_json.as_bytes());
+
+    let changed = draft_publication_changed(
+        stored.last_published_document_sha256.as_deref(),
+        stored.draft.last_published_version.as_deref(),
+        &document_sha256,
+        &definition.metadata.version,
+    )?;
+    if !changed {
+        if let Some(source_id) = stored.draft.published_source_id.as_deref() {
+            if let Some(source) = db::get_source(&connection, source_id)? {
+                let package = load_and_check_package(Path::new(&source.package_path))?;
+                require_registered_snapshot(&source, &package)?;
+                return Ok(source);
+            }
+        }
+    }
+
+    let authored_root = command_state
+        .app_data_dir
+        .join(BUILTIN_LIBRARY_DIRECTORY)
+        .join(AUTHORED_PACKAGES_DIRECTORY);
+    let package_path = authored_root.join(&draft_id);
+    let mut publication = publish_authored_package(
+        &authored_root,
+        &package_path,
+        source_yaml.as_bytes(),
+        readme.as_bytes(),
+        stored.last_published_source_sha256.as_deref(),
+        stored.last_published_readme_sha256.as_deref(),
+    )?;
+    let package = load_and_check_package(&package_path)?;
+    let input = registration_input(&package, true, None)?;
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| format!("begin runbook publication transaction: {error}"))?;
+    let source = db::upsert_source(&transaction, &input)?;
+    db::mark_runbook_draft_published(
+        &transaction,
+        &draft_id,
+        expected_revision,
+        db::PublishedDraftHashes {
+            version: &definition.metadata.version,
+            document_sha256: &document_sha256,
+            source_sha256: &sha256_hex(source_yaml.as_bytes()),
+            readme_sha256: &sha256_hex(readme.as_bytes()),
+            source_id: &source.id,
+        },
+    )?;
+    transaction
+        .commit()
+        .map_err(|error| format!("commit runbook publication: {error}"))?;
+    publication.commit();
+    Ok(source)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -3816,6 +4195,7 @@ mod tests {
             .unwrap();
         db::migrate_v6(&connection).unwrap();
         db::migrate_v8(&connection).unwrap();
+        db::migrate_v9(&connection).unwrap();
         connection
     }
 
@@ -4263,6 +4643,114 @@ spec:
                 .to_string_lossy()
                 .contains(".staging-")
         }));
+    }
+
+    #[test]
+    fn authored_publication_is_atomic_rollback_safe_and_drift_checked() {
+        let temp = TempRoot::new("authored-publication");
+        let source_root = temp.0.join("source");
+        let package = write_export_test_package(&source_root);
+        let source_v1 = package.snapshot.source_yaml.as_bytes().to_vec();
+        let readme_v1 = fs::read(package.readme_path.unwrap()).unwrap();
+        let authored_root = temp.0.join("authored");
+        let destination = authored_root.join("draft-1");
+
+        let mut first = publish_authored_package(
+            &authored_root,
+            &destination,
+            &source_v1,
+            &readme_v1,
+            None,
+            None,
+        )
+        .unwrap();
+        first.commit();
+        assert_eq!(
+            fs::read(destination.join("runbook.vrun.yaml")).unwrap(),
+            source_v1
+        );
+
+        let source_v2 = String::from_utf8(source_v1.clone())
+            .unwrap()
+            .replace("version: 1.0.0", "version: 1.1.0")
+            .into_bytes();
+        let readme_v2 = b"# Updated\n".to_vec();
+        {
+            let _uncommitted = publish_authored_package(
+                &authored_root,
+                &destination,
+                &source_v2,
+                &readme_v2,
+                Some(&sha256_hex(&source_v1)),
+                Some(&sha256_hex(&readme_v1)),
+            )
+            .unwrap();
+            assert_eq!(
+                fs::read(destination.join("runbook.vrun.yaml")).unwrap(),
+                source_v2
+            );
+        }
+        assert_eq!(
+            fs::read(destination.join("runbook.vrun.yaml")).unwrap(),
+            source_v1
+        );
+
+        fs::write(destination.join("unexpected.txt"), b"drift").unwrap();
+        let error = publish_authored_package(
+            &authored_root,
+            &destination,
+            &source_v2,
+            &readme_v2,
+            Some(&sha256_hex(&source_v1)),
+            Some(&sha256_hex(&readme_v1)),
+        )
+        .unwrap_err();
+        assert!(error.contains("unexpected files"));
+        assert_eq!(
+            fs::read(destination.join("unexpected.txt")).unwrap(),
+            b"drift"
+        );
+    }
+
+    #[test]
+    fn changed_drafts_require_a_strictly_greater_semantic_version() {
+        assert!(!draft_publication_changed(Some("same"), Some("1.0.0"), "same", "1.0.0").unwrap());
+        assert!(draft_publication_changed(Some("old"), Some("1.0.0"), "new", "1.0.1").unwrap());
+        assert!(
+            draft_publication_changed(Some("old"), Some("1.0.0"), "new", "1.0.0")
+                .unwrap_err()
+                .contains("greater than 1.0.0")
+        );
+        assert!(
+            draft_publication_changed(Some("old"), Some("1.0.0"), "new", "0.9.0")
+                .unwrap_err()
+                .contains("greater than 1.0.0")
+        );
+    }
+
+    #[test]
+    fn wizard_preview_rejects_secret_like_generated_content() {
+        let mut document = RunbookDraftDocument {
+            definition_id: "sensitive-check".into(),
+            version: "1.0.0".into(),
+            title: "Sensitive Check".into(),
+            platform: crate::runbooks::drafts::DraftPlatform::Any,
+            ..Default::default()
+        };
+        document.steps.push(crate::runbooks::drafts::DraftStep {
+            id: "inspect".into(),
+            title: "Inspect".into(),
+            required: true,
+            on_failure: None,
+            check: crate::runbooks::drafts::DraftCheck::Shell {
+                command: "curl -u operator:credential https://example.invalid".into(),
+                env: BTreeMap::new(),
+                compliant_exit_codes: vec![0],
+                noncompliant_exit_codes: vec![1],
+            },
+        });
+        let preview = validate_draft_preview(&document);
+        assert!(preview.issues.iter().any(|issue| issue.path == "document"));
     }
 
     #[test]

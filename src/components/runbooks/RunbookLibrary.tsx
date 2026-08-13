@@ -19,6 +19,7 @@ import {
 } from "../../lib/runbooks";
 import { useRunbookStore } from "../../stores/runbookStore";
 import { RunbookDefinitionPreview } from "./RunbookDefinitionPreview";
+import { NewRunbookWizard } from "./NewRunbookWizard";
 import { RunbookPreflight } from "./RunbookPreflight";
 import { secondaryButton } from "./runbookUi";
 
@@ -70,6 +71,13 @@ export function RunbookLibrary({ sessionId }: { sessionId: string | null }) {
       <aside className="flex w-48 shrink-0 flex-col border-e border-border-subtle bg-bg-primary">
         <div className="space-y-1 border-b border-border-subtle p-2">
           <div className="flex items-center gap-1">
+            <NewRunbookWizard
+              onPublished={async (source) => {
+                await loadLibrary();
+                await selectSource(source.source_id);
+                useRunbookStore.getState().setNotice("Runbook published to the Library.");
+              }}
+            />
             <button
               onClick={() => void pickAndImport()}
               disabled={busyAction !== null}

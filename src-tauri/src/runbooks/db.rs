@@ -256,6 +256,32 @@ pub fn migrate_v8(conn: &Connection) -> Result<(), String> {
     .map_err(|e| format!("migration v8 failed: {e}"))
 }
 
+/// Main-database migration v9. Draft JSON is intentionally separate from
+/// runnable sources: incomplete authoring state can never be executed.
+pub fn migrate_v9(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        BEGIN;
+        CREATE TABLE runbook_drafts (
+            id                              TEXT PRIMARY KEY,
+            revision                        INTEGER NOT NULL DEFAULT 1 CHECK(revision >= 1),
+            document_json                   TEXT NOT NULL,
+            published_source_id             TEXT REFERENCES runbook_sources(id) ON DELETE SET NULL,
+            last_published_version          TEXT,
+            last_published_document_sha256  TEXT,
+            last_published_source_sha256    TEXT,
+            last_published_readme_sha256    TEXT,
+            created_at                      TEXT NOT NULL,
+            updated_at                      TEXT NOT NULL
+        );
+        CREATE INDEX idx_runbook_drafts_updated ON runbook_drafts(updated_at DESC);
+        INSERT INTO schema_version (version) VALUES (9);
+        COMMIT;
+        "#,
+    )
+    .map_err(|e| format!("migration v9 failed: {e}"))
+}
+
 /// Refresh the one v6 partial index whose predicate changed during the
 /// unreleased experimental cycle. Fresh databases already have this shape;
 /// existing developer/test v6 databases are repaired without altering data.
@@ -705,6 +731,181 @@ fn source_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceRegistration> {
         builtin_order: row.get(11)?,
         created_at: row.get(12)?,
         updated_at: row.get(13)?,
+    })
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredRunbookDraft {
+    pub draft: super::drafts::RunbookDraft,
+    pub document_json: String,
+    pub last_published_document_sha256: Option<String>,
+    pub last_published_source_sha256: Option<String>,
+    pub last_published_readme_sha256: Option<String>,
+}
+
+pub fn create_runbook_draft(
+    conn: &Connection,
+    document: &super::drafts::RunbookDraftDocument,
+) -> Result<StoredRunbookDraft, String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let document_json = super::drafts::document_json(document)?;
+    let timestamp = now();
+    conn.execute(
+        "INSERT INTO runbook_drafts
+           (id, revision, document_json, created_at, updated_at)
+         VALUES (?1, 1, ?2, ?3, ?3)",
+        params![id, document_json, timestamp],
+    )
+    .map_err(|error| format!("create runbook draft: {error}"))?;
+    get_runbook_draft(conn, &id)?.ok_or_else(|| "created runbook draft disappeared".into())
+}
+
+pub fn get_runbook_draft(
+    conn: &Connection,
+    id: &str,
+) -> Result<Option<StoredRunbookDraft>, String> {
+    conn.query_row(
+        "SELECT id, revision, document_json, published_source_id,
+                last_published_version, last_published_document_sha256,
+                last_published_source_sha256, last_published_readme_sha256,
+                created_at, updated_at
+         FROM runbook_drafts WHERE id = ?1",
+        [id],
+        runbook_draft_row,
+    )
+    .optional()
+    .map_err(|error| format!("load runbook draft: {error}"))
+}
+
+pub fn list_runbook_drafts(
+    conn: &Connection,
+) -> Result<Vec<super::drafts::RunbookDraftSummary>, String> {
+    let mut statement = conn
+        .prepare(
+            "SELECT id, revision, document_json, published_source_id,
+                    last_published_version, last_published_document_sha256,
+                    last_published_source_sha256, last_published_readme_sha256,
+                    created_at, updated_at
+             FROM runbook_drafts ORDER BY updated_at DESC, id",
+        )
+        .map_err(|error| format!("prepare runbook draft list: {error}"))?;
+    let rows = statement
+        .query_map([], runbook_draft_row)
+        .map_err(|error| format!("query runbook drafts: {error}"))?;
+    let mut summaries = Vec::new();
+    for row in rows {
+        let stored = row.map_err(|error| format!("read runbook draft: {error}"))?;
+        let document = &stored.draft.document;
+        summaries.push(super::drafts::RunbookDraftSummary {
+            id: stored.draft.id,
+            revision: stored.draft.revision,
+            title: document.title.clone(),
+            definition_id: document.definition_id.clone(),
+            version: document.version.clone(),
+            published_source_id: stored.draft.published_source_id,
+            last_published_version: stored.draft.last_published_version,
+            dirty: stored.draft.dirty,
+            updated_at: stored.draft.updated_at,
+        });
+    }
+    Ok(summaries)
+}
+
+pub fn save_runbook_draft(
+    conn: &Connection,
+    id: &str,
+    expected_revision: i64,
+    document: &super::drafts::RunbookDraftDocument,
+) -> Result<StoredRunbookDraft, String> {
+    let document_json = super::drafts::document_json(document)?;
+    let updated = conn
+        .execute(
+            "UPDATE runbook_drafts
+             SET document_json = ?3, revision = revision + 1, updated_at = ?4
+             WHERE id = ?1 AND revision = ?2",
+            params![id, expected_revision, document_json, now()],
+        )
+        .map_err(|error| format!("save runbook draft: {error}"))?;
+    if updated == 0 {
+        return if get_runbook_draft(conn, id)?.is_some() {
+            Err("runbook draft changed in another window; reload it before saving".into())
+        } else {
+            Err(format!("unknown runbook draft: {id}"))
+        };
+    }
+    get_runbook_draft(conn, id)?.ok_or_else(|| "saved runbook draft disappeared".into())
+}
+
+pub struct PublishedDraftHashes<'a> {
+    pub version: &'a str,
+    pub document_sha256: &'a str,
+    pub source_sha256: &'a str,
+    pub readme_sha256: &'a str,
+    pub source_id: &'a str,
+}
+
+pub fn mark_runbook_draft_published(
+    conn: &Connection,
+    id: &str,
+    expected_revision: i64,
+    hashes: PublishedDraftHashes<'_>,
+) -> Result<StoredRunbookDraft, String> {
+    let updated = conn
+        .execute(
+            "UPDATE runbook_drafts
+             SET published_source_id = ?3,
+                 last_published_version = ?4,
+                 last_published_document_sha256 = ?5,
+                 last_published_source_sha256 = ?6,
+                 last_published_readme_sha256 = ?7,
+                 updated_at = ?8
+             WHERE id = ?1 AND revision = ?2",
+            params![
+                id,
+                expected_revision,
+                hashes.source_id,
+                hashes.version,
+                hashes.document_sha256,
+                hashes.source_sha256,
+                hashes.readme_sha256,
+                now(),
+            ],
+        )
+        .map_err(|error| format!("mark runbook draft published: {error}"))?;
+    if updated == 0 {
+        return Err("runbook draft changed before publication completed".into());
+    }
+    get_runbook_draft(conn, id)?.ok_or_else(|| "published runbook draft disappeared".into())
+}
+
+pub fn discard_runbook_draft(conn: &Connection, id: &str) -> Result<bool, String> {
+    conn.execute("DELETE FROM runbook_drafts WHERE id = ?1", [id])
+        .map(|count| count > 0)
+        .map_err(|error| format!("discard runbook draft: {error}"))
+}
+
+fn runbook_draft_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRunbookDraft> {
+    let document_json: String = row.get(2)?;
+    let document = super::drafts::decode_document(&document_json).map_err(text_sql_error)?;
+    let last_published_document_sha256: Option<String> = row.get(5)?;
+    let dirty = last_published_document_sha256
+        .as_deref()
+        .is_none_or(|digest| digest != sha256_hex(document_json.as_bytes()));
+    Ok(StoredRunbookDraft {
+        draft: super::drafts::RunbookDraft {
+            id: row.get(0)?,
+            revision: row.get(1)?,
+            document,
+            published_source_id: row.get(3)?,
+            last_published_version: row.get(4)?,
+            dirty,
+            created_at: row.get(8)?,
+            updated_at: row.get(9)?,
+        },
+        document_json,
+        last_published_document_sha256,
+        last_published_source_sha256: row.get(6)?,
+        last_published_readme_sha256: row.get(7)?,
     })
 }
 
@@ -3844,6 +4045,7 @@ mod tests {
         .unwrap();
         migrate_v6(&conn).unwrap();
         migrate_v8(&conn).unwrap();
+        migrate_v9(&conn).unwrap();
         conn
     }
     fn target(session: &str) -> TargetBinding {
@@ -3943,7 +4145,7 @@ mod tests {
     }
 
     #[test]
-    fn migration_is_v8_and_enforces_one_active_run_per_session() {
+    fn migration_is_v9_and_enforces_one_active_run_per_session() {
         let mut conn = db();
         let first = create_run(&mut conn, &creation("s1")).unwrap();
         assert_eq!(first.status, RunStatus::Created);
@@ -3973,7 +4175,7 @@ mod tests {
         let version: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 8);
+        assert_eq!(version, 9);
     }
 
     #[test]
@@ -4174,6 +4376,125 @@ mod tests {
         let unchanged = get_source(&conn, &builtin.id).unwrap().unwrap();
         assert_eq!(unchanged.source_kind, SourceKind::Builtin);
         assert_eq!(unchanged.builtin_order, Some(0));
+    }
+
+    #[test]
+    fn drafts_are_revision_checked_resumable_and_detach_from_published_sources() {
+        let conn = db();
+        let document = super::super::drafts::RunbookDraftDocument {
+            definition_id: "draft-health".into(),
+            version: "1.0.0".into(),
+            title: "Draft Health".into(),
+            ..Default::default()
+        };
+        let created = create_runbook_draft(&conn, &document).unwrap();
+        assert_eq!(created.draft.revision, 1);
+        assert!(created.draft.dirty);
+        let mut changed = document.clone();
+        changed.title = "Changed Health".into();
+        let saved = save_runbook_draft(&conn, &created.draft.id, 1, &changed).unwrap();
+        assert_eq!(saved.draft.revision, 2);
+        assert_eq!(saved.draft.document.title, "Changed Health");
+        assert!(save_runbook_draft(&conn, &created.draft.id, 1, &document)
+            .unwrap_err()
+            .contains("another window"));
+
+        let source = upsert_source(
+            &conn,
+            &SourceRegistrationInput {
+                package_path: "/tmp/draft-source".into(),
+                definition_id: "draft-health".into(),
+                definition_version: "1.0.0".into(),
+                title: "Changed Health".into(),
+                source_sha256: "a".repeat(64),
+                canonical_sha256: "b".repeat(64),
+                valid: true,
+                validation_error: None,
+                source_kind: SourceKind::User,
+                hidden: false,
+                builtin_order: None,
+            },
+        )
+        .unwrap();
+        let document_json = super::super::drafts::document_json(&changed).unwrap();
+        let published = mark_runbook_draft_published(
+            &conn,
+            &created.draft.id,
+            2,
+            PublishedDraftHashes {
+                version: "1.0.0",
+                document_sha256: &sha256_hex(document_json.as_bytes()),
+                source_sha256: &"a".repeat(64),
+                readme_sha256: &"c".repeat(64),
+                source_id: &source.id,
+            },
+        )
+        .unwrap();
+        assert!(!published.draft.dirty);
+        assert_eq!(
+            published.draft.published_source_id.as_deref(),
+            Some(source.id.as_str())
+        );
+        remove_source(&conn, &source.id).unwrap();
+        let detached = get_runbook_draft(&conn, &created.draft.id)
+            .unwrap()
+            .unwrap();
+        assert!(detached.draft.published_source_id.is_none());
+        assert_eq!(
+            detached.draft.last_published_version.as_deref(),
+            Some("1.0.0")
+        );
+        assert!(discard_runbook_draft(&conn, &created.draft.id).unwrap());
+    }
+
+    #[test]
+    fn discarding_a_published_draft_keeps_its_library_source() {
+        let conn = db();
+        let document = super::super::drafts::RunbookDraftDocument {
+            definition_id: "keep-source".into(),
+            version: "1.0.0".into(),
+            title: "Keep Source".into(),
+            ..Default::default()
+        };
+        let draft = create_runbook_draft(&conn, &document).unwrap();
+        let source = upsert_source(
+            &conn,
+            &SourceRegistrationInput {
+                package_path: "/tmp/keep-source".into(),
+                definition_id: "keep-source".into(),
+                definition_version: "1.0.0".into(),
+                title: "Keep Source".into(),
+                source_sha256: "a".repeat(64),
+                canonical_sha256: "b".repeat(64),
+                valid: true,
+                validation_error: None,
+                source_kind: SourceKind::User,
+                hidden: false,
+                builtin_order: None,
+            },
+        )
+        .unwrap();
+        let json = super::super::drafts::document_json(&document).unwrap();
+        mark_runbook_draft_published(
+            &conn,
+            &draft.draft.id,
+            1,
+            PublishedDraftHashes {
+                version: "1.0.0",
+                document_sha256: &sha256_hex(json.as_bytes()),
+                source_sha256: &"a".repeat(64),
+                readme_sha256: &"c".repeat(64),
+                source_id: &source.id,
+            },
+        )
+        .unwrap();
+
+        assert!(discard_runbook_draft(&conn, &draft.draft.id).unwrap());
+        assert!(get_runbook_draft(&conn, &draft.draft.id).unwrap().is_none());
+        assert_eq!(
+            get_source(&conn, &source.id).unwrap().unwrap().id,
+            source.id
+        );
     }
 
     #[test]

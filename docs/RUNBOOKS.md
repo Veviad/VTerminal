@@ -43,6 +43,37 @@ Included sources carry an **Included with VTerminal** badge. Removing one hides
 it from the Library without deleting its package or historical runs. Use
 **Restore examples** to make all hidden included sources visible again.
 
+## Create an assessment with the wizard
+
+Choose **New** in the Library to create a check-only Runbook without writing
+YAML. The deterministic wizard works offline and supports:
+
+- resumable app-managed drafts;
+- macOS 13+, Linux, or Any target selection;
+- string, integer, boolean, path, and enum inputs;
+- ordered shell checks with explicit `VRUN_*` input mappings and exit codes;
+- manual operator checks; and
+- declared network/root capabilities and failure policies.
+
+The macOS and Linux choices add a locked first step that stops on an unsupported
+target. **Any** adds no guard, so every command must handle portability itself.
+The wizard always declares an empty write set and cannot author apply, verify,
+agent, or Ansible actions. Export the published package when advanced YAML
+authoring is required.
+
+Drafts autosave locally and do not appear in the runnable Library until
+**Publish to Library** succeeds. Publication generates `runbook.vrun.yaml` and
+`README.md`, then applies the same strict parsing, secret-like content checks,
+package validation, and digest registration as an imported package. Published
+packages live in app-managed storage and remain portable through **Export
+runbook**.
+
+Wizard-created Runbooks can be reopened. The first publication defaults to
+`1.0.0`; changed publications require a strictly greater semantic version.
+Unchanged publication is a no-op. Removing the Library source leaves its draft
+available for republishing, while discarding a published draft only detaches the
+wizard project—the already published source and historical run snapshots remain.
+
 ## Export, edit, and import a package
 
 **Export runbook** in the Library creates a complete import-ready folder named
@@ -52,7 +83,7 @@ registered source. VTerminal revalidates package digests before export, rejects
 symlinks and path escapes, and never merges into or overwrites an existing
 destination.
 
-A practical authoring loop is:
+A practical advanced-authoring loop is:
 
 1. Export an included or imported Runbook from the Library.
 2. Edit its YAML and README with any text editor.
