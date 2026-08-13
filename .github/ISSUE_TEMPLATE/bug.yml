@@ -1,0 +1,66 @@
+name: Bug report
+description: Report reproducible incorrect behavior in VTerminal.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Do not include API keys, credentials, private terminal
+        output, or undisclosed vulnerabilities.
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open …
+        2. Run …
+        3. Observe …
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: VTerminal version
+      placeholder: 0.1.2 or commit SHA
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS and hardware
+      placeholder: macOS 15.6, M1 Pro
+    validations:
+      required: true
+  - type: dropdown
+    id: model
+    attributes:
+      label: Does this involve AI or a model?
+      options:
+        - "No"
+        - Local model
+        - Cloud model
+        - Self-hosted model
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or screenshots
+      description: Redact credentials, personal data, paths, hostnames, and private output.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues for duplicates.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

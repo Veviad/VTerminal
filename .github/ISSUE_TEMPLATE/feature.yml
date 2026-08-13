@@ -1,0 +1,37 @@
+name: Feature request
+description: Propose an improvement or new capability.
+title: "[Feature]: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user problem or limitation should be addressed?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the desired user experience without requiring a particular implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What workarounds or alternative designs have you tried?
+  - type: textarea
+    id: impact
+    attributes:
+      label: Security and privacy impact
+      description: Note any effect on command execution, network access, credentials, local files, or model data.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues for similar requests.
+          required: true
+        - label: I am willing to discuss the approach before a substantial implementation.
+          required: true

@@ -29,7 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # Every asset is referenced relatively ("assets/…" at the root, "../assets/…"
       # from docs/legal/), so the site works at the custom domain, at the
@@ -53,7 +53,7 @@ jobs:
       # deploy with "Resource not accessible by integration". Dropping it is the
       # fix rather than widening the token — the build job has no reason to hold
       # write access to Pages when only `deploy` publishes.
-      - uses: actions/upload-pages-artifact@v5
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
         with:
           path: docs
 
@@ -74,4 +74,4 @@ jobs:
       # which the runners now force onto Node 24 and warn about on every run.
       # v5's changelog is that bump and nothing else.
       - id: deployment
-        uses: actions/deploy-pages@v5
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5
