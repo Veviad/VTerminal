@@ -92,6 +92,8 @@ describe("ReconnectBar", () => {
     render(<ReconnectBar sessionId={session.id} />);
 
     const reconnect = await screen.findByRole("button", { name: "Reconnect" });
+    const bar = reconnect.parentElement;
+    expect(bar).toHaveClass("pointer-events-auto", "z-20");
     expect(reconnect).toBeDisabled();
 
     mocks.atPrompt = true;
