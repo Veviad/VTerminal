@@ -117,7 +117,7 @@ impl ProviderId {
     ///
     /// Also `None` for `Remote`, and that is load-bearing rather than incidental:
     /// a remote token belongs to ONE server, not to every server of that kind, so
-    /// it lives in `remote_server_tokens` keyed by server id. A `Some` here would
+    /// it lives in Keychain keyed by server id. A `Some` here would
     /// make `resolve_provider` demand a key that has no single home.
     pub fn api_key_setting(self) -> Option<&'static str> {
         match self {

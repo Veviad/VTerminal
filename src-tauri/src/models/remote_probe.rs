@@ -125,6 +125,39 @@ pub fn normalize_base_url(input: &str, kind: ServerKind) -> Result<String, Strin
     Ok(format!("{}://{authority}{path}", url.scheme()))
 }
 
+/// A bearer token may cross cleartext HTTP only when the destination is the
+/// local machine. This is checked at every write and every use, so hand-edited
+/// or legacy records cannot bypass the policy.
+pub fn ensure_credential_transport(base_url: &str, has_token: bool) -> Result<(), String> {
+    if !has_token {
+        return Ok(());
+    }
+    let url = url::Url::parse(base_url).map_err(|_| "invalid server address".to_string())?;
+    if url.scheme() == "https" {
+        return Ok(());
+    }
+    let loopback = match url.host() {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(host)) => host.is_loopback(),
+        Some(url::Host::Ipv6(host)) => host.is_loopback(),
+        None => false,
+    };
+    if url.scheme() == "http" && loopback {
+        Ok(())
+    } else {
+        Err("credentials require HTTPS unless the server is localhost".into())
+    }
+}
+
+pub fn same_origin(left: &str, right: &str) -> bool {
+    let (Ok(left), Ok(right)) = (url::Url::parse(left), url::Url::parse(right)) else {
+        return false;
+    };
+    left.scheme() == right.scheme()
+        && left.host() == right.host()
+        && left.port_or_known_default() == right.port_or_known_default()
+}
+
 /// Everything from after `://` up to the first `/`, `?` or `#`.
 fn authority_span(url: &str) -> (usize, usize) {
     let start = url.find("://").map(|i| i + 3).unwrap_or(0);
@@ -200,6 +233,7 @@ pub async fn probe(
     already_enabled: &[RemoteModel],
 ) -> Result<ProbeResult, String> {
     let base = normalize_base_url(base_url, kind)?;
+    ensure_credential_transport(&base, token.is_some_and(|t| !t.trim().is_empty()))?;
     let endpoint = format!("{base}/v1/models");
     let mut warnings = Vec::new();
 
@@ -864,5 +898,47 @@ mod tests {
         assert_eq!(models[1].role, "embedding");
         assert_eq!(models[2].role, "rerank");
         assert_eq!(models[3].role, "chat");
+    }
+
+    #[test]
+    fn credential_transport_policy_covers_https_loopback_and_keyless_http() {
+        for address in [
+            "https://models.example.test/v1",
+            "http://localhost:11434",
+            "http://127.0.0.1:1234",
+            "http://[::1]:8080",
+        ] {
+            assert!(
+                ensure_credential_transport(address, true).is_ok(),
+                "{address}"
+            );
+        }
+        assert!(ensure_credential_transport("http://192.168.1.20:11434", false).is_ok());
+        assert!(ensure_credential_transport("http://models.example.test", false).is_ok());
+    }
+
+    #[test]
+    fn credentialed_non_local_http_is_rejected_including_legacy_records() {
+        for address in ["http://192.168.1.20:11434", "http://models.example.test"] {
+            let error = ensure_credential_transport(address, true).unwrap_err();
+            assert!(error.contains("HTTPS"), "{error}");
+        }
+    }
+
+    #[test]
+    fn origin_comparison_ignores_paths_but_not_transport_hosts_or_ports() {
+        assert!(same_origin(
+            "https://models.example.test/prefix",
+            "https://models.example.test/other"
+        ));
+        assert!(!same_origin(
+            "http://localhost:11434",
+            "https://localhost:11434"
+        ));
+        assert!(!same_origin("https://one.test", "https://two.test"));
+        assert!(!same_origin(
+            "https://one.test:443",
+            "https://one.test:8443"
+        ));
     }
 }

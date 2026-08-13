@@ -8,7 +8,6 @@
     "core:event:default",
     "core:window:allow-destroy",
     "core:window:allow-start-dragging",
-    "store:default",
     "log:default",
     "dialog:default",
     {

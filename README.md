@@ -106,13 +106,13 @@ Version 0.1.2 establishes VTerminal's signed update chain for future macOS Apple
 | Qwen3.6 27B | needs a large-memory machine |
 | Gemma 4 E2B / E4B / 31B | |
 
-**Cloud** — bring your own API key; keys are stored by the Rust backend and never round-trip to the UI.
+**Cloud** — bring your own API key; provider keys, Hugging Face tokens, and remote-server tokens are stored by the Rust backend in macOS Keychain (service `com.veviad.terminal`) and never round-trip to the UI or `settings.json`.
 
 - Anthropic — Claude Haiku 4.5, Sonnet 5, Opus 5
 - OpenAI — GPT-5.6 Luna, Terra, Sol
 - Mistral — Mistral Small 4, Magistral Medium, Mistral Large 3
 
-**Self-hosted** — point VTerminal at any OpenAI-compatible server: Ollama, LM Studio, llama.cpp's server, vLLM, LiteLLM. Add the address in **Settings → Models**, press **Test**, and pick which of the served models to expose. Per-server tokens are supported and optional.
+**Self-hosted** — point VTerminal at any OpenAI-compatible server: Ollama, LM Studio, llama.cpp's server, vLLM, LiteLLM. Add the address in **Settings → Models**, press **Test**, and pick which of the served models to expose. Per-server tokens are supported and optional; token-bearing connections require HTTPS except for localhost/loopback HTTP.
 
 **Vision sidecar** *(optional, on-device)* — PaddleOCR-VL 1.6, Qwen3-VL 4B, or Qwen3-VL 8B, loaded alongside the chat model to transcribe attached images.
 

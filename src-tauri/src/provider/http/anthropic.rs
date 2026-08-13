@@ -19,7 +19,7 @@ const API_VERSION: &str = "2023-06-01";
 
 pub struct AnthropicProvider {
     pub model: &'static CatalogModel,
-    pub api_key: String,
+    pub api_key: crate::credentials::Secret,
 }
 
 /// Claude Haiku 4.5 predates the effort parameter and returns a 400 for it —
@@ -316,11 +316,12 @@ impl Provider for AnthropicProvider {
                 client()
                     .expect("client built once")
                     .post(API_URL)
-                    .header("x-api-key", &self.api_key)
+                    .header("x-api-key", self.api_key.expose())
                     .header("anthropic-version", API_VERSION)
                     .json(&body)
             },
             &mut cancel,
+            Some(&self.api_key),
         )
         .await?;
 
@@ -426,7 +427,9 @@ impl Provider for AnthropicProvider {
                         .pointer("/error/message")
                         .and_then(Value::as_str)
                         .unwrap_or("stream error");
-                    return Err(ProviderError::Http(msg.to_string()));
+                    return Err(ProviderError::Http(
+                        crate::credentials::redact_provider_text(msg, Some(&self.api_key)),
+                    ));
                 }
                 "message_stop" => return Ok(true),
                 _ => {}

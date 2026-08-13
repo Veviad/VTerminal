@@ -54,6 +54,7 @@ thiserror = "2"
 async-trait = "0.1"
 sysinfo = "0.39"
 sha2 = "0.11"
+zeroize = "1"
 # Chat attachments cross the IPC boundary as base64 (a `Vec<u8>` argument
 # serializes as a JSON number array, ~7x the size) and are decoded once here
 # before being written to disk.
@@ -79,6 +80,7 @@ minijinja-contrib = { version = "2", features = ["pycompat"], optional = true }
 libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "4.1.6", default-features = false, features = ["v1"] }
 # Safe wrappers over core llama.h. Chosen over mistral.rs because its GGUF
 # architecture coverage is a strict superset (Gemma 4 and Qwen3.5/3.6 do not
 # load in mistral.rs) and it returns load errors instead of panicking on an
