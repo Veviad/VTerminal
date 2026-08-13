@@ -37,6 +37,9 @@ pub fn run(conn: &Connection) -> Result<(), String> {
     if version < 7 {
         migrate_v7(conn)?;
     }
+    if version < 8 {
+        crate::runbooks::db::migrate_v8(conn)?;
+    }
     crate::runbooks::db::ensure_v6_runtime_indexes(conn)?;
 
     Ok(())
@@ -401,7 +404,7 @@ mod tests {
         let first = version(&conn);
         super::run(&conn).unwrap();
         assert_eq!(version(&conn), first);
-        assert_eq!(first, 7);
+        assert_eq!(first, 8);
     }
 
     /// The migration chain is append-only, so this asserts the shape a v4
@@ -489,11 +492,52 @@ mod tests {
         )
         .unwrap();
         super::run(&conn).unwrap();
-        assert_eq!(version(&conn), 7);
+        assert_eq!(version(&conn), 8);
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM command_history", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn a_v6_runbook_source_upgrades_to_a_visible_user_source() {
+        let conn = mem();
+        conn.execute_batch("CREATE TABLE schema_version (version INTEGER PRIMARY KEY);")
+            .unwrap();
+        crate::runbooks::db::migrate_v6(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO runbook_sources
+               (id, package_path, definition_id, definition_version, title,
+                source_sha256, canonical_sha256, valid, created_at, updated_at)
+             VALUES ('source', '/tmp/source', 'existing', '1.2.3', 'Existing',
+                     ?1, ?2, 1, 'created', 'updated')",
+            rusqlite::params!["a".repeat(64), "b".repeat(64)],
+        )
+        .unwrap();
+
+        super::run(&conn).unwrap();
+
+        assert_eq!(version(&conn), 8);
+        let migrated: (String, i64, Option<i64>, String, String) = conn
+            .query_row(
+                "SELECT source_kind, hidden, builtin_order, created_at, updated_at
+                 FROM runbook_sources WHERE id = 'source'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            migrated,
+            ("user".into(), 0, None, "created".into(), "updated".into())
+        );
     }
 
     #[test]

@@ -56,9 +56,9 @@
     <main class="guide-main" id="main-content">
       <section class="guide-hero" aria-labelledby="guide-title">
         <div class="guide-hero-inner">
-          <span class="guide-status"
-            >Experimental · Disabled by default</span
-          >
+            <span class="guide-status"
+            >Available in 0.2.2 · Experimental · Disabled by default</span
+            >
           <h1 id="guide-title">Reusable Runbooks</h1>
           <p class="guide-hero-copy">
             Define a repeatable operational checklist once, run it against the
@@ -84,7 +84,9 @@
           <h2>On this page</h2>
           <ol>
             <li><a href="#getting-started">Getting started</a></li>
+            <li><a href="#included-examples">Included examples</a></li>
             <li><a href="#package-format">Package format</a></li>
+            <li><a href="#export-and-reuse">Export &amp; reuse</a></li>
             <li><a href="#lifecycle">Lifecycle</a></li>
             <li><a href="#actions">Actions &amp; approvals</a></li>
             <li><a href="#reports">Evidence &amp; reports</a></li>
@@ -118,10 +120,11 @@
               <li>
                 <span>02</span>
                 <div>
-                  <strong>Import a local package</strong>
-                  Select a folder whose root contains exactly one
-                  <code>runbook.vrun.yaml</code>. VTerminal validates the package
-                  before registering it.
+                  <strong>Choose an example or import a package</strong>
+                  Start with one of the included macOS assessments, or select a
+                  local folder whose root contains exactly one
+                  <code>runbook.vrun.yaml</code>. VTerminal validates imported
+                  packages before registering them.
                 </div>
               </li>
               <li>
@@ -138,7 +141,8 @@
                 <div>
                   <strong>Run beside the terminal</strong>
                   Follow the live checklist, approve actions, resolve pauses,
-                  add comments, then inspect or export the final report.
+                  add comments, then inspect or export the final report from
+                  History.
                 </div>
               </li>
             </ol>
@@ -156,6 +160,74 @@
                 stay in macOS Keychain and use the same backend-only provider path
                 as ordinary AI requests. A token-bearing self-hosted provider
                 requires HTTPS, except for localhost or loopback HTTP.
+              </p>
+            </div>
+          </section>
+
+          <section
+            class="guide-section"
+            id="included-examples"
+            aria-labelledby="included-examples-title"
+          >
+            <p class="eyebrow">Ready to Run</p>
+            <h2 id="included-examples-title">Three Included macOS Assessments</h2>
+            <p>
+              VTerminal includes three packages for macOS 13 and newer. They are
+              assessment-only: they use no model actions and declare no network,
+              privilege or write capability. Each stops on an unsupported
+              target and, on a supported Mac, continues through independent
+              findings to produce a useful full report.
+            </p>
+
+            <div class="guide-grid">
+              <article class="guide-card">
+                <h3>macOS Security Posture</h3>
+                <p>
+                  Checks FileVault, SIP, Gatekeeper, the application firewall,
+                  and automatic critical and system-data updates. It is the
+                  first included Runbook selected when no valid selection exists.
+                </p>
+                <p>
+                  <a href="https://github.com/Veviad/VTerminal/tree/main/examples/runbooks/macos-security-posture"
+                    >View package →</a
+                  >
+                </p>
+              </article>
+              <article class="guide-card">
+                <h3>macOS Developer Workstation Health</h3>
+                <p>
+                  Checks Xcode Command Line Tools, the macOS SDK, Git, native
+                  versus Rosetta-translated shell execution, configurable free
+                  space, and optional Homebrew availability.
+                </p>
+                <p>
+                  <a href="https://github.com/Veviad/VTerminal/tree/main/examples/runbooks/macos-developer-workstation-health"
+                    >View package →</a
+                  >
+                </p>
+              </article>
+              <article class="guide-card">
+                <h3>macOS Backup &amp; Storage Readiness</h3>
+                <p>
+                  Checks configurable free space, the Time Machine destination
+                  and latest-backup age, APFS, and optional local snapshots.
+                </p>
+                <p>
+                  <a href="https://github.com/Veviad/VTerminal/tree/main/examples/runbooks/macos-backup-storage-readiness"
+                    >View package →</a
+                  >
+                </p>
+              </article>
+            </div>
+
+            <div class="guide-callout">
+              <strong>Included examples stay recoverable.</strong>
+              <p>
+                They carry an <strong>Included with VTerminal</strong> badge.
+                Removing one only hides it from the Library; it does not delete
+                the package or its run history. Choose
+                <strong>Restore examples</strong> to bring all hidden included
+                sources back.
               </p>
             </div>
           </section>
@@ -254,6 +326,77 @@ spec:
                 Run creation stores the original YAML, canonical JSON and a
                 SHA-256 digest of each. Refreshing an edited package affects a
                 future run, never an active or historical one.
+              </p>
+            </div>
+          </section>
+
+          <section
+            class="guide-section"
+            id="export-and-reuse"
+            aria-labelledby="export-and-reuse-title"
+          >
+            <p class="eyebrow">Portable Packages</p>
+            <h2 id="export-and-reuse-title">Export, Edit, Version and Import</h2>
+            <p>
+              <strong>Export runbook</strong> in the Library creates a complete,
+              import-ready folder named
+              <code>runbook-&lt;id&gt;-v&lt;version&gt;</code>. The folder contains
+              the exact validated YAML, optional README, and allowed
+              <code>ansible/</code> tree from the registered source.
+            </p>
+
+            <ol class="guide-steps">
+              <li>
+                <span>01</span>
+                <div>
+                  <strong>Export from the Library</strong>
+                  Choose a destination that does not already contain the
+                  generated folder. VTerminal revalidates source digests and
+                  refuses drift, symlinks, path escapes, merge or overwrite.
+                </div>
+              </li>
+              <li>
+                <span>02</span>
+                <div>
+                  <strong>Edit the exported files</strong>
+                  Change the YAML or README in an ordinary editor. Keep
+                  <code>metadata.id</code> when the operational purpose is the
+                  same, and retain step IDs for controls whose meaning is
+                  unchanged.
+                </div>
+              </li>
+              <li>
+                <span>03</span>
+                <div>
+                  <strong>Bump the semantic version</strong>
+                  Update <code>metadata.version</code> whenever requirements,
+                  behavior, inputs or step meaning changes.
+                </div>
+              </li>
+              <li>
+                <span>04</span>
+                <div>
+                  <strong>Import the edited folder</strong>
+                  Exported included examples import as normal user sources. The
+                  recoverable bundled original remains a separate source.
+                </div>
+              </li>
+            </ol>
+
+            <p>
+              Registrations are path-based. Importing the same folder refreshes
+              that source; importing a copy at another path creates a separate
+              user source.
+            </p>
+
+            <div class="guide-callout">
+              <strong>Package export and report export serve different jobs.</strong>
+              <p>
+                <strong>Export runbook</strong> creates reusable source files
+                from the Library. <strong>Export report</strong> in History
+                creates <code>report.json</code>, <code>report.md</code>, and
+                eligible evidence for one completed run; that evidence bundle
+                cannot be imported as a Runbook.
               </p>
             </div>
           </section>
@@ -428,10 +571,10 @@ spec:
                 <p>Keep a redacted artifact capped at 1 MiB per attempt.</p>
               </article>
               <article class="guide-card">
-                <h3>Export bundle</h3>
+                <h3>Export report</h3>
                 <p>
-                  Export JSON, Markdown and eligible evidence to a folder you
-                  choose.
+                  Export JSON, Markdown and eligible evidence from History to a
+                  folder you choose. This is not a reusable package export.
                 </p>
               </article>
             </div>

@@ -80,6 +80,12 @@ pub fn run() {
             credentials::initialize(app.handle(), &credential_store);
             app.manage(credential_store);
             let conn = database::init(&app_data).map_err(std::io::Error::other)?;
+            // Bundled examples are recoverable app assets, not a prerequisite
+            // for opening the terminal. Seed them eagerly and let Runbooks list
+            // retry reconciliation if the filesystem was temporarily unavailable.
+            if let Err(error) = commands::runbooks::initialize_builtin_sources(&app_data, &conn) {
+                log::warn!("initialize built-in runbooks failed: {error}");
+            }
             app.manage(database::DbState(std::sync::Mutex::new(conn)));
             app.manage(app_exit::AppExitCoordinator::default());
             // Document buckets live in their OWN database file, opened lazily — the
@@ -270,6 +276,7 @@ pub fn run() {
             commands::runbooks::runbooks_refresh,
             commands::runbooks::runbooks_list,
             commands::runbooks::runbooks_remove,
+            commands::runbooks::runbooks_restore_builtins,
             commands::runbooks::runbooks_get_definition,
             commands::runbooks::runbooks_start,
             commands::runbooks::runbooks_get,
@@ -284,6 +291,7 @@ pub fn run() {
             commands::runbooks::runbooks_delete,
             commands::runbooks::runbooks_report,
             commands::runbooks::runbooks_export,
+            commands::runbooks::runbooks_export_package,
             // vision sidecar
             commands::vision::vision_catalog,
             commands::vision::vision_download,

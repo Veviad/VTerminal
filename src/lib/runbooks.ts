@@ -13,6 +13,7 @@ import { prefixCommandEnvironment } from "./ptyExecShell";
  */
 
 export type RunbookSourceState = "valid" | "invalid" | "missing";
+export type RunbookSourceKind = "user" | "builtin";
 export type EvidenceMode = "none" | "tail" | "full";
 export type OnFailure = "pause" | "stop" | "continue";
 export type RunbookActionKind = "shell" | "agent" | "manual" | "ansible.playbook";
@@ -24,6 +25,7 @@ export interface RunbookValidationIssue {
 
 export interface RunbookSource {
   source_id: string;
+  source_kind: RunbookSourceKind;
   package_path: string;
   definition_id: string | null;
   version: string | null;
@@ -37,6 +39,7 @@ export interface RunbookSource {
 
 export interface RunbookSourceWire {
   id: string;
+  source_kind: RunbookSourceKind;
   package_path: string;
   definition_id: string;
   definition_version: string;
@@ -734,6 +737,11 @@ export const runbooksList = () =>
 export const runbooksRemove = (sourceId: string) =>
   invoke<void>("runbooks_remove", { source_id: sourceId });
 
+export const runbooksRestoreBuiltins = () =>
+  invoke<RunbookSourceWire[]>("runbooks_restore_builtins").then((sources) =>
+    sources.map(normalizeRunbookSource)
+  );
+
 export const runbooksGetDefinition = (sourceId: string) =>
   invoke<RunbookDefinition>("runbooks_get_definition", { source_id: sourceId });
 
@@ -891,6 +899,12 @@ export const runbooksReport = (runId: string) =>
 export const runbooksExport = (runId: string, destination: string) =>
   invoke<RunbookExportResult>("runbooks_export", { run_id: runId, destination });
 
+export const runbooksExportPackage = (sourceId: string, destination: string) =>
+  invoke<RunbookExportResult>("runbooks_export_package", {
+    source_id: sourceId,
+    destination,
+  });
+
 /** Historical deletion is always an explicit, confirmed UI gesture. Removing a
  * package registration remains a separate operation and never calls this. */
 export const runbooksDelete = (runId: string) =>
@@ -1038,6 +1052,7 @@ export function normalizeRunbookReport(report: RunbookReportWire): RunbookReport
 export function normalizeRunbookSource(source: RunbookSourceWire): RunbookSource {
   return {
     source_id: source.id,
+    source_kind: source.source_kind ?? "user",
     package_path: source.package_path,
     definition_id: source.definition_id,
     version: source.definition_version,

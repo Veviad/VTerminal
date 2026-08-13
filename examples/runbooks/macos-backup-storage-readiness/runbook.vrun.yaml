@@ -1,0 +1,137 @@
+apiVersion: runbooks.veviad.com/v1alpha1
+kind: Runbook
+
+metadata:
+  id: macos-backup-storage-readiness
+  version: 1.0.0
+  title: "macOS Backup & Storage Readiness"
+  description: |
+    Assess disk capacity, filesystem format, and Time Machine readiness on a
+    macOS 13 or newer workstation without changing backup or storage settings.
+  tags: [macos, backup, storage, assessment]
+
+spec:
+  target:
+    kind: active-terminal
+
+  inputs:
+    minimumFreeSpaceGb:
+      type: integer
+      description: Minimum required free space in GiB. Accepted assessment range is 1 through 1000.
+      default: 20
+    maximumBackupAgeDays:
+      type: integer
+      description: Maximum acceptable age of the latest Time Machine backup date recorded by macOS. Accepted range is 1 through 365 days.
+      default: 7
+    requireLocalSnapshots:
+      type: boolean
+      description: Whether at least one local Time Machine snapshot must be present.
+      default: false
+
+  declaredCapabilities:
+    network: false
+    privilege: none
+    writes: []
+
+  defaults:
+    onFailure: continue
+
+  steps:
+    - id: supported-macos-target
+      title: Target is running macOS 13 or newer
+      required: true
+      onFailure: stop
+      check:
+        uses: shell
+        with:
+          command: 'test "$(uname -s)" = Darwin && major="$(sw_vers -productVersion | cut -d. -f1)" && test "$major" -ge 13 || exit 64'
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]
+
+    - id: free-space-input-in-range
+      title: Minimum free-space input is between 1 and 1000 GiB
+      required: true
+      check:
+        uses: shell
+        with:
+          command: 'test "$VRUN_MINIMUM_FREE_SPACE_GB" -ge 1 && test "$VRUN_MINIMUM_FREE_SPACE_GB" -le 1000'
+          env:
+            VRUN_MINIMUM_FREE_SPACE_GB: minimumFreeSpaceGb
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]
+
+    - id: backup-age-input-in-range
+      title: Maximum backup-age input is between 1 and 365 days
+      required: true
+      check:
+        uses: shell
+        with:
+          command: 'test "$VRUN_MAXIMUM_BACKUP_AGE_DAYS" -ge 1 && test "$VRUN_MAXIMUM_BACKUP_AGE_DAYS" -le 365'
+          env:
+            VRUN_MAXIMUM_BACKUP_AGE_DAYS: maximumBackupAgeDays
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]
+
+    - id: minimum-free-space-available
+      title: The startup disk meets the configured free-space minimum
+      required: true
+      check:
+        uses: shell
+        with:
+          command: 'df -Pk / | awk -v minimum="$VRUN_MINIMUM_FREE_SPACE_GB" ''NR == 2 { found = 1; ok = ($4 / 1048576) >= minimum } END { exit (found && ok) ? 0 : 1 }'''
+          env:
+            VRUN_MINIMUM_FREE_SPACE_GB: minimumFreeSpaceGb
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]
+
+    - id: time-machine-destination-configured
+      title: A Time Machine destination is configured
+      required: true
+      check:
+        uses: shell
+        with:
+          command: "tmutil destinationinfo 2>/dev/null | grep -q '^ID *:'"
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]
+
+    - id: latest-backup-recent
+      title: The latest recorded Time Machine backup is within the configured age
+      required: true
+      check:
+        uses: shell
+        with:
+          command: 'if count="$(defaults export /Library/Preferences/com.apple.TimeMachine - 2>/dev/null | plutil -extract SnapshotDates raw -o - - 2>/dev/null)" && test "$count" -gt 0 && latest="$(defaults export /Library/Preferences/com.apple.TimeMachine - 2>/dev/null | plutil -extract "SnapshotDates.$((count - 1))" raw -o - - 2>/dev/null)" && modified="$(date -ju -f ''%Y-%m-%dT%H:%M:%SZ'' "$latest" +%s 2>/dev/null)" && now="$(date +%s)" && age="$((now - modified))" && test "$age" -ge 0 && test "$age" -le "$((VRUN_MAXIMUM_BACKUP_AGE_DAYS * 86400))"; then true; else false; fi'
+          env:
+            VRUN_MAXIMUM_BACKUP_AGE_DAYS: maximumBackupAgeDays
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]
+
+    - id: root-volume-uses-apfs
+      title: The startup volume uses APFS
+      required: true
+      check:
+        uses: shell
+        with:
+          command: "diskutil info / | grep -Eq 'File System Personality: *APFS|Type \\(Bundle\\): *apfs'"
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]
+
+    - id: local-snapshot-present-when-required
+      title: A local Time Machine snapshot exists when requested
+      required: true
+      check:
+        uses: shell
+        with:
+          command: 'test "$VRUN_REQUIRE_LOCAL_SNAPSHOTS" = false || tmutil listlocalsnapshots / | grep -q ''com.apple.TimeMachine'''
+          env:
+            VRUN_REQUIRE_LOCAL_SNAPSHOTS: requireLocalSnapshots
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]

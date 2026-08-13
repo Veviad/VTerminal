@@ -1,5 +1,5 @@
 import { History, Library, ListChecks, PlayCircle, X } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 
 import { useRunbooks } from "../../hooks/useRunbooks";
 import { useRunbookStore, type RunbooksView } from "../../stores/runbookStore";
@@ -23,9 +23,15 @@ export function RunbooksWorkspace({
   const setNotice = useRunbookStore((state) => state.setNotice);
   const run = useRunbookStore((state) => state.activeRun);
   const { initialize } = useRunbooks();
+  const initialized = useRef(false);
 
   useEffect(() => {
     setWorkspaceOpen(true);
+    // React StrictMode intentionally replays mount effects in development.
+    // Initial library/history hydration is idempotent but should still issue
+    // only one request per mounted workspace.
+    if (initialized.current) return;
+    initialized.current = true;
     void initialize();
   }, [initialize, setWorkspaceOpen]);
 

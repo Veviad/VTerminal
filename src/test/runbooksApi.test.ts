@@ -13,7 +13,14 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(),
 }));
 
-import { runbooksDelete, type RunbookDeleteResult } from "../lib/runbooks";
+import {
+  runbooksDelete,
+  runbooksExportPackage,
+  runbooksRestoreBuiltins,
+  type RunbookDeleteResult,
+  type RunbookExportResult,
+  type RunbookSourceWire,
+} from "../lib/runbooks";
 
 beforeEach(() => invokeMock.mockReset());
 
@@ -37,5 +44,46 @@ describe("runbooks API", () => {
       run_id: "run-1",
       confirmed: true,
     });
+  });
+
+  it("passes source and destination to package export without using report export", async () => {
+    const result: RunbookExportResult = {
+      destination: "/exports/runbook-security-v1.0.0",
+      files: ["runbook.vrun.yaml", "README.md"],
+    };
+    invokeMock.mockResolvedValue(result);
+
+    await expect(runbooksExportPackage("builtin-security", "/exports")).resolves.toEqual(result);
+    expect(invokeMock).toHaveBeenCalledWith("runbooks_export_package", {
+      source_id: "builtin-security",
+      destination: "/exports",
+    });
+  });
+
+  it("normalizes restored built-ins and preserves their source kind", async () => {
+    const source: RunbookSourceWire = {
+      id: "builtin-security",
+      source_kind: "builtin",
+      package_path: "/app-data/runbooks/macos-security-posture",
+      definition_id: "macos-security-posture",
+      definition_version: "1.0.0",
+      title: "macOS Security Posture",
+      source_sha256: "source-digest",
+      canonical_sha256: "canonical-digest",
+      valid: true,
+      validation_error: null,
+      created_at: "2026-08-13T12:00:00Z",
+      updated_at: "2026-08-13T12:00:00Z",
+    };
+    invokeMock.mockResolvedValue([source]);
+
+    await expect(runbooksRestoreBuiltins()).resolves.toEqual([
+      expect.objectContaining({
+        source_id: "builtin-security",
+        source_kind: "builtin",
+        state: "valid",
+      }),
+    ]);
+    expect(invokeMock).toHaveBeenCalledWith("runbooks_restore_builtins");
   });
 });

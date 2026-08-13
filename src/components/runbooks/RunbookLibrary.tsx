@@ -1,15 +1,22 @@
 import {
   AlertTriangle,
   CheckCircle2,
+  Download,
+  EyeOff,
   FolderOpen,
   Loader2,
   RefreshCw,
+  RotateCcw,
   Trash2,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { useRunbooks } from "../../hooks/useRunbooks";
-import { chooseRunbookPackage, type EvidenceMode } from "../../lib/runbooks";
+import {
+  chooseRunbookExportFolder,
+  chooseRunbookPackage,
+  type EvidenceMode,
+} from "../../lib/runbooks";
 import { useRunbookStore } from "../../stores/runbookStore";
 import { RunbookDefinitionPreview } from "./RunbookDefinitionPreview";
 import { RunbookPreflight } from "./RunbookPreflight";
@@ -28,6 +35,8 @@ export function RunbookLibrary({ sessionId }: { sessionId: string | null }) {
     selectSource,
     refreshSource,
     removeSource,
+    exportPackage,
+    restoreBuiltins,
     start,
   } = useRunbooks();
   const [screen, setScreen] = useState<"definition" | "preflight">("definition");
@@ -42,6 +51,12 @@ export function RunbookLibrary({ sessionId }: { sessionId: string | null }) {
     if (path) await importPackage(path);
   };
 
+  const pickAndExport = async () => {
+    if (!selected || selected.state !== "valid") return;
+    const destination = await chooseRunbookExportFolder();
+    if (destination) await exportPackage(selected.source_id, destination);
+  };
+
   const begin = async (
     inputs: Record<string, string | number | boolean>,
     evidence: EvidenceMode,
@@ -53,18 +68,36 @@ export function RunbookLibrary({ sessionId }: { sessionId: string | null }) {
   return (
     <div className="flex min-h-0 flex-1">
       <aside className="flex w-48 shrink-0 flex-col border-e border-border-subtle bg-bg-primary">
-        <div className="flex items-center gap-1 border-b border-border-subtle p-2">
-          <button onClick={() => void pickAndImport()} className={`${secondaryButton} min-w-0 flex-1`}>
-            <FolderOpen size={12} /> Import
-          </button>
+        <div className="space-y-1 border-b border-border-subtle p-2">
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => void pickAndImport()}
+              disabled={busyAction !== null}
+              className={`${secondaryButton} min-w-0 flex-1`}
+            >
+              <FolderOpen size={12} /> Import
+            </button>
+            <button
+              onClick={() => void loadLibrary()}
+              disabled={loadingLibrary || busyAction !== null}
+              title="Refresh library"
+              aria-label="Refresh library"
+              className="rounded-md border border-border-subtle p-1.5 text-text-muted hover:bg-bg-hover hover:text-text-secondary disabled:opacity-40"
+            >
+              <RefreshCw size={12} className={loadingLibrary ? "animate-spin" : ""} />
+            </button>
+          </div>
           <button
-            onClick={() => void loadLibrary()}
-            disabled={loadingLibrary}
-            title="Refresh library"
-            aria-label="Refresh library"
-            className="rounded-md border border-border-subtle p-1.5 text-text-muted hover:bg-bg-hover hover:text-text-secondary disabled:opacity-40"
+            onClick={() => void restoreBuiltins()}
+            disabled={busyAction !== null}
+            className={`${secondaryButton} w-full justify-center`}
           >
-            <RefreshCw size={12} className={loadingLibrary ? "animate-spin" : ""} />
+            {busyAction === "restore-builtins" ? (
+              <Loader2 size={12} className="animate-spin" />
+            ) : (
+              <RotateCcw size={12} />
+            )}
+            {busyAction === "restore-builtins" ? "Restoring…" : "Restore examples"}
           </button>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto py-1">
@@ -75,9 +108,9 @@ export function RunbookLibrary({ sessionId }: { sessionId: string | null }) {
           )}
           {!loadingLibrary && sources.length === 0 && (
             <div className="space-y-1 px-3 py-5 text-center">
-              <p className="text-[11px] text-text-secondary">No runbooks imported</p>
+              <p className="text-[11px] text-text-secondary">No runbooks available</p>
               <p className="text-[10px] leading-relaxed text-text-muted">
-                Choose a folder containing one root runbook.vrun.yaml.
+                Import a package or restore the included examples.
               </p>
             </div>
           )}
@@ -103,6 +136,11 @@ export function RunbookLibrary({ sessionId }: { sessionId: string | null }) {
                   <span className="block truncate font-mono text-[9px] text-text-muted">
                     {source.version ? `v${source.version}` : source.state}
                   </span>
+                  {source.source_kind === "builtin" && (
+                    <span className="mt-1 inline-block rounded border border-accent/30 bg-accent/10 px-1 py-0.5 text-[8px] leading-none text-accent">
+                      Included with VTerminal
+                    </span>
+                  )}
                 </span>
               </button>
             );
@@ -135,19 +173,40 @@ export function RunbookLibrary({ sessionId }: { sessionId: string | null }) {
                     sha256:{selected.digest_sha256}
                   </p>
                 )}
+                {selected.source_kind === "builtin" && (
+                  <span className="mt-1 inline-block rounded border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[9px] text-accent">
+                    Included with VTerminal
+                  </span>
+                )}
               </div>
-              <div className="flex shrink-0 gap-1">
+              <div className="flex shrink-0 flex-wrap justify-end gap-1">
                 <button
-                  onClick={() => void refreshSource(selected.source_id)}
-                  disabled={busyAction !== null}
-                  title="Revalidate from disk"
-                  className="rounded p-1.5 text-text-muted hover:bg-bg-hover hover:text-text-secondary disabled:opacity-40"
+                  onClick={() => void pickAndExport()}
+                  disabled={busyAction !== null || selected.state !== "valid"}
+                  title={selected.state === "valid" ? "Export this reusable runbook package" : "Fix package validation before exporting"}
+                  className={secondaryButton}
                 >
-                  <RefreshCw
-                    size={12}
-                    className={busyAction === `refresh:${selected.source_id}` ? "animate-spin" : ""}
-                  />
+                  {busyAction === `export-package:${selected.source_id}` ? (
+                    <Loader2 size={11} className="animate-spin" />
+                  ) : (
+                    <Download size={11} />
+                  )}
+                  {busyAction === `export-package:${selected.source_id}` ? "Exporting…" : "Export runbook"}
                 </button>
+                {selected.source_kind !== "builtin" && (
+                  <button
+                    onClick={() => void refreshSource(selected.source_id)}
+                    disabled={busyAction !== null}
+                    title="Revalidate from disk"
+                    aria-label="Refresh runbook from disk"
+                    className="rounded p-1.5 text-text-muted hover:bg-bg-hover hover:text-text-secondary disabled:opacity-40"
+                  >
+                    <RefreshCw
+                      size={12}
+                      className={busyAction === `refresh:${selected.source_id}` ? "animate-spin" : ""}
+                    />
+                  </button>
+                )}
                 <button
                   onClick={() => {
                     if (confirmRemove === selected.source_id) {
@@ -159,12 +218,23 @@ export function RunbookLibrary({ sessionId }: { sessionId: string | null }) {
                   }}
                   onBlur={() => setConfirmRemove(null)}
                   disabled={busyAction !== null}
-                  title={confirmRemove === selected.source_id ? "Click again to remove" : "Remove registration"}
-                  className={`rounded p-1.5 hover:bg-bg-hover disabled:opacity-40 ${
+                  title={
+                    confirmRemove === selected.source_id
+                      ? `Click again to confirm ${selected.source_kind === "builtin" ? "hiding" : "removal"}`
+                      : selected.source_kind === "builtin"
+                        ? "Hide included example"
+                        : "Remove registration"
+                  }
+                  className={`inline-flex items-center gap-1 rounded px-1.5 py-1 text-[10px] hover:bg-bg-hover disabled:opacity-40 ${
                     confirmRemove === selected.source_id ? "text-error" : "text-text-muted hover:text-error"
                   }`}
                 >
-                  <Trash2 size={12} />
+                  {selected.source_kind === "builtin" ? <EyeOff size={12} /> : <Trash2 size={12} />}
+                  {confirmRemove === selected.source_id
+                    ? `Confirm ${selected.source_kind === "builtin" ? "hide" : "remove"}`
+                    : selected.source_kind === "builtin"
+                      ? "Hide example"
+                      : "Remove"}
                 </button>
               </div>
             </div>

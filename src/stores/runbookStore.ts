@@ -113,7 +113,13 @@ export const useRunbookStore = create<RunbookStoreState>((set) => ({
       const sources = found
         ? state.sources.map((item) => (item.source_id === source.source_id ? source : item))
         : [source, ...state.sources];
-      return { sources };
+      // Imports remain newest-first within their group, while bundled examples
+      // always retain the first positions supplied by the backend.
+      return {
+        sources: [...sources].sort(
+          (left, right) => Number(left.source_kind === "user") - Number(right.source_kind === "user"),
+        ),
+      };
     }),
   deleteSource: (sourceId) =>
     set((state) => ({
