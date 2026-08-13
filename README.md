@@ -43,7 +43,7 @@ Modern AI terminals tend to be Electron apps that phone home for every completio
 - **Agent mode** — multi-step runs that propose commands, execute them in your *visible* terminal, and read the real output
 - **Per-model reasoning effort** — `off → low → medium → high → max`, showing only the rungs each model actually accepts
 - **Image & file attachments** — drag, paste, or pick. An optional on-device vision sidecar transcribes screenshots so even a non-vision chat model can use them.
-- **Reusable Runbooks** *(experimental)* — versioned YAML checklists with immutable run snapshots, per-mutation approvals, visible-terminal execution, evidence, and canonical JSON/Markdown reports. See [the authoring guide](docs/RUNBOOKS.md).
+- **Reusable Runbooks** *(coming in 0.1.6; experimental and currently available from source)* — versioned YAML checklists with immutable run snapshots, per-mutation approvals, visible-terminal execution, evidence, and canonical JSON/Markdown reports. See [the authoring guide](docs/RUNBOOKS.md).
 
 **Interface**
 - Six themes — Veviad Developer UI (default), Veviad UI, Midnight, Nord, Solarized Dark, Light — each with a matched terminal ANSI palette
