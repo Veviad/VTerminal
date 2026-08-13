@@ -5,6 +5,7 @@ import {
   hardenCommand,
   installerFor,
   parsePrivateToken,
+  prefixCommandEnvironment,
   sanitizeCommand,
   sentinelSuffix,
   shellFromProbe,
@@ -131,6 +132,14 @@ describe("hardenCommand", () => {
     expect(applied).toEqual(["pager"]);
   });
 
+  it("keeps both guards when a runbook input environment is attached", () => {
+    const hardened = hardenCommand("systemctl status sshd");
+    const line = prefixCommandEnvironment(hardened.line, { VRUN_CONFIG_PATH: "/etc/sshd config" });
+    expect(line).toContain("env VRUN_CONFIG_PATH='/etc/sshd config' /bin/sh -c '");
+    expect(line).toContain("systemctl status sshd < /dev/null");
+    expect(line).toMatch(/'$/);
+  });
+
   // Regression: the stdin guard used to be applied here too, which appended
   // `< /dev/null` to the pipeline's LAST stage — the one that must read the
   // pipe. `printf x | head -c 5 < /dev/null` prints nothing in bash, sh and
@@ -197,7 +206,7 @@ describe("hardenCommand", () => {
 
   it("composes with the sentinel, which must stay last for $? to be the command's", () => {
     const line = hardenCommand("id").line + sentinelSuffix("posix", "n1");
-    expect(line).toMatch(/id < \/dev\/null; printf .*\$\?$/);
+    expect(line).toMatch(/id < \/dev\/null; \/usr\/bin\/printf .*\$\?$/);
   });
 
   it("introduces no control characters", () => {

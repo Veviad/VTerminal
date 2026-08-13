@@ -6,6 +6,7 @@ pub mod docs;
 pub mod models;
 pub mod provider;
 mod pty;
+pub mod runbooks;
 mod ssh_config;
 
 use tauri::Manager;
@@ -86,6 +87,9 @@ pub fn run() {
             app.manage(agent::SteerState::default());
             app.manage(models::DownloadState::default());
             app.manage(commands::updates::UpdateState::default());
+            app.manage(std::sync::Arc::new(
+                commands::runbooks::RunbookCommandState::new(app_data.clone()),
+            ));
             #[cfg(feature = "local-llm")]
             {
                 // ONE permit shared by the chat host and the vision sidecar. Two
@@ -191,6 +195,25 @@ pub fn run() {
             commands::docs::docs_put_text,
             commands::docs::docs_search,
             commands::docs::docs_destroy,
+            // reusable runbooks (experimental; every command gated on runbooks_enabled)
+            commands::runbooks::runbooks_import,
+            commands::runbooks::runbooks_refresh,
+            commands::runbooks::runbooks_list,
+            commands::runbooks::runbooks_remove,
+            commands::runbooks::runbooks_get_definition,
+            commands::runbooks::runbooks_start,
+            commands::runbooks::runbooks_get,
+            commands::runbooks::runbooks_resume,
+            commands::runbooks::runbooks_cancel,
+            commands::runbooks::runbooks_respond_approval,
+            commands::runbooks::runbooks_decide,
+            commands::runbooks::runbooks_claim_terminal_dispatch,
+            commands::runbooks::runbooks_submit_terminal_result,
+            commands::runbooks::runbooks_submit_manual,
+            commands::runbooks::runbooks_history,
+            commands::runbooks::runbooks_delete,
+            commands::runbooks::runbooks_report,
+            commands::runbooks::runbooks_export,
             // vision sidecar
             commands::vision::vision_catalog,
             commands::vision::vision_download,

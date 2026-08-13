@@ -16,6 +16,7 @@ import { clearPendingConnect, takePendingConnect } from "../lib/sshConnect";
 import { replayScrollback, subscribeTerm } from "../lib/termRegistry";
 import { trackSession } from "../lib/sessionPersistence";
 import { archiveOnClose } from "../lib/sessionArchive";
+import { forgetRunbookTerminal } from "../lib/runbookTerminalPrivacy";
 import { replayBanner } from "../lib/replayBanner";
 import { nextOrdinal, shortenCommand } from "../lib/sessionTitle";
 import { cancelNaming } from "../lib/sessionNaming";
@@ -481,6 +482,7 @@ export function useSessions() {
     //   before removeSession — which drops aiStreams[id] UNREAD, and the AI
     //                          transcript exists nowhere else in the app
     await archiveOnClose(sessionId);
+    forgetRunbookTerminal(sessionId);
     disposeTerm(sessionId);
     useAppStore.getState().removeSession(sessionId);
     // Re-acquire WebGL on the newly active tab

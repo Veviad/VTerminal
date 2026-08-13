@@ -13,6 +13,7 @@ import { toggleAiPanel } from "../../lib/aiPanel";
 import { describeSshTarget } from "../../lib/ssh";
 import { S } from "../../lib/strings";
 import type { HistoryEntry, SshHost } from "../../lib/types";
+import { useRunbookStore } from "../../stores/runbookStore";
 
 interface PaletteItem {
   id: string;
@@ -131,6 +132,17 @@ export function CommandPalette() {
         keywords: "archive reopen closed tabs recent",
         run: () => live().setSessionBrowserOpen(true),
       },
+      ...(live().runbooksEnabled
+        ? [
+            {
+              id: "act-runbooks",
+              section: "actions" as const,
+              label: "Open Runbooks",
+              keywords: "checklist automation security install infrastructure",
+              run: () => useRunbookStore.getState().setWorkspaceOpen(true),
+            },
+          ]
+        : []),
       {
         id: "act-settings",
         section: "actions",

@@ -1,0 +1,57 @@
+apiVersion: runbooks.veviad.com/v1alpha1
+kind: Runbook
+
+metadata:
+  id: idempotent-software-install
+  version: 1.0.0
+  title: Idempotent package installation
+  description: |
+    Install a named package only when its executable is absent, then verify it.
+    Running the runbook again should stop after the compliant check.
+  tags: [linux, software, idempotent]
+
+spec:
+  target:
+    kind: active-terminal
+
+  inputs:
+    packageName:
+      type: string
+      description: Package and executable name accepted by the target package manager.
+      default: jq
+
+  declaredCapabilities:
+    network: true
+    privilege: root
+    writes: [/usr/bin, /usr/local/bin]
+
+  defaults:
+    onFailure: pause
+
+  steps:
+    - id: package-installed
+      title: Requested package is installed
+      required: true
+      check:
+        uses: shell
+        with:
+          command: 'command -v "$VRUN_PACKAGE" >/dev/null 2>&1'
+          env:
+            VRUN_PACKAGE: packageName
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]
+      apply:
+        uses: shell
+        with:
+          command: 'if command -v apt-get >/dev/null 2>&1; then sudo apt-get install -y "$VRUN_PACKAGE"; elif command -v dnf >/dev/null 2>&1; then sudo dnf install -y "$VRUN_PACKAGE"; else exit 64; fi'
+          env:
+            VRUN_PACKAGE: packageName
+        successExitCodes: [0]
+      verify:
+        uses: shell
+        with:
+          command: 'command -v "$VRUN_PACKAGE" >/dev/null 2>&1'
+          env:
+            VRUN_PACKAGE: packageName
+        passExitCodes: [0]

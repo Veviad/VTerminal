@@ -1,0 +1,582 @@
+{
+  "$defs": {
+    "AnsiblePlaybookAction": {
+      "additionalProperties": false,
+      "properties": {
+        "inputVars": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Ansible variable name to runbook input ID.",
+          "type": "object"
+        },
+        "inventory": {
+          "default": null,
+          "description": "Optional package-relative static inventory.  Interactive credentials are\nintentionally not representable in v1alpha1.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "playbook": {
+          "description": "Package-relative path beneath `ansible/`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "playbook"
+      ],
+      "type": "object"
+    },
+    "ApplyAction": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "successExitCodes": {
+              "default": [
+                0
+              ],
+              "items": {
+                "format": "int32",
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "uses": {
+              "const": "shell",
+              "type": "string"
+            },
+            "with": {
+              "$ref": "#/$defs/ShellAction"
+            }
+          },
+          "required": [
+            "uses",
+            "with"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "instructions": {
+              "type": "string"
+            },
+            "uses": {
+              "const": "agent",
+              "type": "string"
+            }
+          },
+          "required": [
+            "uses",
+            "instructions"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "instructions": {
+              "type": "string"
+            },
+            "uses": {
+              "const": "manual",
+              "type": "string"
+            }
+          },
+          "required": [
+            "uses",
+            "instructions"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "uses": {
+              "const": "ansible.playbook",
+              "type": "string"
+            },
+            "with": {
+              "$ref": "#/$defs/AnsiblePlaybookAction"
+            }
+          },
+          "required": [
+            "uses",
+            "with"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "CheckAction": {
+      "description": "A check must distinguish a compliant result from a non-compliant result.\nAny other shell exit code is an execution error, not merely non-compliance.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "outcomes": {
+              "$ref": "#/$defs/CheckOutcomes"
+            },
+            "uses": {
+              "const": "shell",
+              "type": "string"
+            },
+            "with": {
+              "$ref": "#/$defs/ShellAction"
+            }
+          },
+          "required": [
+            "uses",
+            "with",
+            "outcomes"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "instructions": {
+              "type": "string"
+            },
+            "uses": {
+              "const": "agent",
+              "type": "string"
+            }
+          },
+          "required": [
+            "uses",
+            "instructions"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "instructions": {
+              "type": "string"
+            },
+            "uses": {
+              "const": "manual",
+              "type": "string"
+            }
+          },
+          "required": [
+            "uses",
+            "instructions"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "uses": {
+              "const": "ansible.playbook",
+              "type": "string"
+            },
+            "with": {
+              "$ref": "#/$defs/AnsiblePlaybookAction"
+            }
+          },
+          "required": [
+            "uses",
+            "with"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "CheckOutcomes": {
+      "additionalProperties": false,
+      "properties": {
+        "compliantExitCodes": {
+          "items": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "noncompliantExitCodes": {
+          "items": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "compliantExitCodes",
+        "noncompliantExitCodes"
+      ],
+      "type": "object"
+    },
+    "DeclaredCapabilities": {
+      "additionalProperties": false,
+      "properties": {
+        "network": {
+          "default": false,
+          "type": "boolean"
+        },
+        "privilege": {
+          "$ref": "#/$defs/Privilege",
+          "default": "none"
+        },
+        "writes": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "Defaults": {
+      "additionalProperties": false,
+      "properties": {
+        "onFailure": {
+          "$ref": "#/$defs/FailurePolicy",
+          "default": "pause"
+        }
+      },
+      "type": "object"
+    },
+    "FailurePolicy": {
+      "enum": [
+        "pause",
+        "stop",
+        "continue"
+      ],
+      "type": "string"
+    },
+    "InputDefinition": {
+      "additionalProperties": false,
+      "properties": {
+        "default": {
+          "default": null
+        },
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "required": {
+          "default": false,
+          "type": "boolean"
+        },
+        "type": {
+          "$ref": "#/$defs/InputType"
+        },
+        "values": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    "InputType": {
+      "enum": [
+        "string",
+        "integer",
+        "boolean",
+        "path",
+        "enum"
+      ],
+      "type": "string"
+    },
+    "Metadata": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "tags": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "title": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "version",
+        "title"
+      ],
+      "type": "object"
+    },
+    "Privilege": {
+      "enum": [
+        "none",
+        "root"
+      ],
+      "type": "string"
+    },
+    "ShellAction": {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "type": "string"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Environment variable name to input ID.  Values are never interpolated into\nthe shell command itself.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "Spec": {
+      "additionalProperties": false,
+      "properties": {
+        "declaredCapabilities": {
+          "$ref": "#/$defs/DeclaredCapabilities",
+          "default": {
+            "network": false,
+            "privilege": "none",
+            "writes": []
+          }
+        },
+        "defaults": {
+          "$ref": "#/$defs/Defaults",
+          "default": {
+            "onFailure": "pause"
+          }
+        },
+        "inputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/InputDefinition"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/Step"
+          },
+          "type": "array"
+        },
+        "target": {
+          "$ref": "#/$defs/Target"
+        }
+      },
+      "required": [
+        "target",
+        "steps"
+      ],
+      "type": "object"
+    },
+    "Step": {
+      "additionalProperties": false,
+      "properties": {
+        "apply": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApplyAction"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "check": {
+          "$ref": "#/$defs/CheckAction"
+        },
+        "id": {
+          "type": "string"
+        },
+        "onFailure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FailurePolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "required": {
+          "default": true,
+          "type": "boolean"
+        },
+        "title": {
+          "type": "string"
+        },
+        "verify": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VerifyAction"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "check"
+      ],
+      "type": "object"
+    },
+    "Target": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/TargetKind"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
+    },
+    "TargetKind": {
+      "enum": [
+        "active-terminal"
+      ],
+      "type": "string"
+    },
+    "VerifyAction": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "passExitCodes": {
+              "items": {
+                "format": "int32",
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "uses": {
+              "const": "shell",
+              "type": "string"
+            },
+            "with": {
+              "$ref": "#/$defs/ShellAction"
+            }
+          },
+          "required": [
+            "uses",
+            "with",
+            "passExitCodes"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "instructions": {
+              "type": "string"
+            },
+            "uses": {
+              "const": "agent",
+              "type": "string"
+            }
+          },
+          "required": [
+            "uses",
+            "instructions"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "instructions": {
+              "type": "string"
+            },
+            "uses": {
+              "const": "manual",
+              "type": "string"
+            }
+          },
+          "required": [
+            "uses",
+            "instructions"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "uses": {
+              "const": "ansible.playbook",
+              "type": "string"
+            },
+            "with": {
+              "$ref": "#/$defs/AnsiblePlaybookAction"
+            }
+          },
+          "required": [
+            "uses",
+            "with"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "$id": "https://schemas.veviad.com/runbooks/v1alpha1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": {
+      "const": "runbooks.veviad.com/v1alpha1",
+      "type": "string"
+    },
+    "kind": {
+      "const": "Runbook",
+      "type": "string"
+    },
+    "metadata": {
+      "$ref": "#/$defs/Metadata"
+    },
+    "spec": {
+      "$ref": "#/$defs/Spec"
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "title": "Veviad Runbook v1alpha1",
+  "type": "object"
+}

@@ -1,0 +1,20 @@
+apiVersion: runbooks.veviad.com/v1alpha1
+kind: Runbook
+metadata:
+  id: invalid-duplicate-step-id
+  version: 1.0.0
+  title: Duplicate step fixture
+spec:
+  target:
+    kind: active-terminal
+  steps:
+    - id: repeated-step
+      title: First occurrence
+      check:
+        uses: manual
+        instructions: Confirm the first control.
+    - id: repeated-step
+      title: Second occurrence
+      check:
+        uses: manual
+        instructions: Confirm the second control.

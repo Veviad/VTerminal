@@ -27,7 +27,7 @@ export type PrivateToken =
  * `\033`/`\007` rather than `\e`/`ESC \`: `\e` is not POSIX printf, and BEL
  * avoids the doubled-backslash ST terminator entirely.
  */
-export const PROBE = `printf '\\033]6973;RS;%s;%s;%s;%s\\007' "$ZSH_VERSION" "$BASH_VERSION" "$FISH_VERSION" "$VV_RX"`;
+export const PROBE = `/usr/bin/printf '\\033]6973;RS;%s;%s;%s;%s\\007' "$ZSH_VERSION" "$BASH_VERSION" "$FISH_VERSION" "$VV_RX"`;
 
 /**
  * One-time, in-memory exit-code hook for a remote shell. Writes NOTHING to the
@@ -47,17 +47,17 @@ export const PROBE = `printf '\\033]6973;RS;%s;%s;%s;%s\\007' "$ZSH_VERSION" "$B
 export function installerFor(shell: "zsh" | "bash", nonce: string): string {
   if (shell === "zsh") {
     return (
-      `[ -n "$VV_RX" ] || { __vv_pc(){ printf '\\033]6973;RD;%s;%s\\007' "$?" "$PWD"; }; ` +
+      `[ -n "$VV_RX" ] || { __vv_pc(){ /usr/bin/printf '\\033]6973;RD;%s;%s\\007' "$?" "$PWD"; }; ` +
       `precmd_functions=(__vv_pc ${"${precmd_functions:#__vv_pc}"}); VV_RX=1; }; ` +
-      `printf '\\033]6973;RH;${nonce};zsh\\007'`
+      `/usr/bin/printf '\\033]6973;RH;${nonce};zsh\\007'`
     );
   }
   return (
-    `[ -n "$VV_RX" ] || { __vv_pc(){ local e=$?; printf '\\033]6973;RD;%s;%s\\007' "$e" "$PWD"; return $e; }; ` +
+    `[ -n "$VV_RX" ] || { __vv_pc(){ local e=$?; /usr/bin/printf '\\033]6973;RD;%s;%s\\007' "$e" "$PWD"; return $e; }; ` +
     // bash 5.1 allows an ARRAY PROMPT_COMMAND; assigning a string would destroy it.
     `case "$(declare -p PROMPT_COMMAND 2>/dev/null)" in *"declare -a"*) PROMPT_COMMAND=(__vv_pc "\${PROMPT_COMMAND[@]}");; ` +
     `*) PROMPT_COMMAND="__vv_pc\${PROMPT_COMMAND:+;$PROMPT_COMMAND}";; esac; VV_RX=1; }; ` +
-    `printf '\\033]6973;RH;${nonce};bash\\007'`
+    `/usr/bin/printf '\\033]6973;RH;${nonce};bash\\007'`
   );
 }
 
@@ -69,7 +69,7 @@ export function installerFor(shell: "zsh" | "bash", nonce: string): string {
  */
 export function sentinelSuffix(kind: "posix" | "fish", nonce: string): string {
   const status = kind === "fish" ? "$status" : "$?";
-  return `; printf '\\033]6973;RD;%s;${nonce}\\007' ${status}`;
+  return `; /usr/bin/printf '\\033]6973;RD;%s;${nonce}\\007' ${status}`;
 }
 
 /** Commands whose own pager environment is safer than a global `PAGER=cat`. */
@@ -91,7 +91,7 @@ const SYSTEMD_PAGER_COMMANDS = new Set([
 /** Debian tools that may invoke debconf while an AI command owns the TTY. */
 const DEBIAN_COMMANDS = new Set(["apt", "apt-get", "aptitude", "dpkg"]);
 
-/** Reserved words a `VAR=v ` prefix cannot precede — `A=1 if …` is a syntax error. */
+/** Reserved words the pager guard cannot precede — `A=1 if …` is a syntax error. */
 const SHELL_KEYWORDS = new Set([
   "if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done",
   "case", "esac", "function", "select", "time", "coproc", "!",
@@ -105,6 +105,35 @@ export interface HardenedCommand {
   line: string;
   /** Which guards were applied, for the UI note. Empty when nothing changed. */
   applied: ("pager" | "stdin")[];
+}
+
+/**
+ * Attach validated Runbook inputs to a child shell without mutating the user's
+ * interactive shell. Argument expansion in the parent happens before temporary
+ * assignments take effect, so `VRUN_X=v command "$VRUN_X"` is incorrect. The
+ * child-shell wrapper also works when the approved command begins with `if`.
+ */
+export function prefixCommandEnvironment(
+  command: string,
+  environment: Record<string, string>,
+): string {
+  const entries = Object.entries(environment).sort(([left], [right]) => left.localeCompare(right));
+  if (entries.length === 0) return command;
+  const assignments = entries.map(([name, value]) => {
+    if (!/^VRUN_[A-Za-z0-9_]+$/.test(name)) {
+      throw new Error(`Invalid runbook environment variable: ${name}`);
+    }
+    if (/[\0-\x1f\x7f]/.test(value)) {
+      throw new Error(`Runbook environment value for ${name} contains control characters.`);
+    }
+    return `${name}='${value.replaceAll("'", `'"'"'`)}'`;
+  });
+  const quote = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
+  const line = `env ${assignments.join(" ")} /bin/sh -c ${quote(command)}`;
+  if (line.length > 4_096) {
+    throw new Error("Runbook command plus its input environment exceeds 4,096 characters.");
+  }
+  return line;
 }
 
 /**

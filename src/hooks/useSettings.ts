@@ -2,6 +2,9 @@ import { useCallback } from "react";
 import * as api from "../lib/tauri";
 import type { SettingsPatch } from "../lib/types";
 import { useAppStore } from "../stores/appStore";
+import { useRunbookStore } from "../stores/runbookStore";
+import { abortSession, interruptJob } from "../lib/ptyExec";
+import { revokeAllLiveRunbookRuns } from "../lib/runbookLiveJobs";
 import { updateAllTermOptions } from "../lib/termRegistry";
 import { clampPanelRatio } from "../lib/panelRatio";
 
@@ -50,6 +53,7 @@ export function useSettings() {
       aiWebAccess: s.ai_web_access,
       autoUpdateEnabled: s.auto_update_enabled,
       docsEnabled: s.docs_enabled,
+      runbooksEnabled: s.runbooks_enabled,
       hasApiKey: {
         anthropic: s.has_anthropic_api_key,
         openai: s.has_openai_api_key,
@@ -60,7 +64,39 @@ export function useSettings() {
   }, [hydrateSettings]);
 
   const save = useCallback(async (patch: Partial<SettingsPatch>) => {
-    await api.saveSettings(patch);
+    // Disabling Runbooks is a capability revocation, so the webview gate must
+    // close before the persistence IPC. A terminal claim response may already
+    // be in flight; setting this mirror synchronously makes its final canWrite
+    // check fail even if Rust persisted the setting a moment earlier.
+    if (patch.runbooks_enabled === false) {
+      useAppStore.setState({ runbooksEnabled: false });
+      const runbooks = useRunbookStore.getState();
+      // The selected run and capped event feed are presentation state, not PTY
+      // ownership. Revoke every exact live job before persistence can yield so
+      // concurrent background runs cannot keep executing through disable.
+      for (const job of revokeAllLiveRunbookRuns()) {
+        interruptJob(job.sessionId, job.attemptId);
+        abortSession(job.sessionId, "cancelled", job.attemptId);
+      }
+      runbooks.setWorkspaceOpen(false);
+    }
+    try {
+      await api.saveSettings(patch);
+    } catch (error) {
+      // A rejected save can still have changed durable state: for example, the
+      // JSON write may succeed before its owner-only permission check fails.
+      // Never guess which fields committed. Re-read the complete backend view;
+      // if that also fails, keep any Runbooks toggle closed rather than
+      // restoring capability from a stale frontend snapshot.
+      try {
+        await loadSettings();
+      } catch {
+        if (patch.runbooks_enabled !== undefined) {
+          useAppStore.setState({ runbooksEnabled: false });
+        }
+      }
+      throw error;
+    }
     const store = useAppStore.getState();
     if (patch.theme !== undefined) store.setTheme(patch.theme);
     if (patch.font_size !== undefined) {
@@ -135,6 +171,9 @@ export function useSettings() {
       useAppStore.setState({ autoUpdateEnabled: patch.auto_update_enabled });
     if (patch.docs_enabled !== undefined)
       useAppStore.setState({ docsEnabled: patch.docs_enabled });
+    if (patch.runbooks_enabled !== undefined) {
+      useAppStore.setState({ runbooksEnabled: patch.runbooks_enabled });
+    }
     // Keys are write-only. Mirror only whether one is now present — the value
     // itself is never held frontend-side.
     for (const [key, provider] of [
@@ -145,7 +184,7 @@ export function useSettings() {
       const v = patch[key];
       if (v !== undefined) store.setHasApiKey(provider, v.trim().length > 0);
     }
-  }, []);
+  }, [loadSettings]);
 
   return { loadSettings, save };
 }

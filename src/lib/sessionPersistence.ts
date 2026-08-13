@@ -19,6 +19,7 @@ import { useAppStore, type AppState } from "../stores/appStore";
 import { getTerm, serializeSession, subscribeTerm } from "./termRegistry";
 import { archiveTranscriptOnly, buildArchiveRow } from "./sessionArchive";
 import type { SessionSnapshotInput } from "./types";
+import { isRunbookTerminalProtected } from "./runbookTerminalPrivacy";
 
 /** Metadata debounce: quiet enough not to write on every keystroke-driven cwd
  *  change, tight enough that a crash costs at most this much. */
@@ -135,7 +136,12 @@ function buildSnapshot(withScrollback: Set<string>): {
     // what lets the cheap metadata tick run constantly without shipping bytes.
     let scrollback: string | null = null;
     let scrollbackLines: number | null = null;
-    if (maxLines > 0 && withScrollback.has(session.id) && isQuiescent(session.id)) {
+    if (isRunbookTerminalProtected(session.id)) {
+      // Empty, rather than null, actively clears an older raw snapshot.
+      scrollback = "";
+      scrollbackLines = 0;
+      dirtyScrollback.delete(session.id);
+    } else if (maxLines > 0 && withScrollback.has(session.id) && isQuiescent(session.id)) {
       const captured = serializeSession(session.id, Math.min(maxLines, state.scrollbackLines));
       if (captured) {
         scrollback = captured.data;

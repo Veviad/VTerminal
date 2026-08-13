@@ -1,0 +1,16 @@
+apiVersion: runbooks.veviad.com/v1alpha1
+kind: Runbook
+metadata:
+  <<: *hidden_metadata
+  id: malicious-yaml-merge
+  version: 1.0.0
+  title: YAML merge fixture
+spec:
+  target:
+    kind: active-terminal
+  steps:
+    - id: inspect-host
+      title: Inspect host
+      check:
+        uses: manual
+        instructions: Confirm the host identity.

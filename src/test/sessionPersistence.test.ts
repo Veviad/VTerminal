@@ -36,6 +36,10 @@ import {
   markScrollbackDirty,
   startPersistence,
 } from "../lib/sessionPersistence";
+import {
+  protectRunbookTerminal,
+  resetRunbookTerminalPrivacyForTests,
+} from "../lib/runbookTerminalPrivacy";
 import { useAppStore, emptySessionUi } from "../stores/appStore";
 import type { ArchiveSessionInput, Session, WorkspaceSnapshotInput } from "../lib/types";
 
@@ -86,11 +90,13 @@ beforeEach(() => {
   termEntry.streaming = false;
   termEntry.disposed = false;
   __resetPersistenceForTests();
+  resetRunbookTerminalPrivacyForTests();
   seed([makeSession("a")], "a");
 });
 
 afterEach(() => {
   __resetPersistenceForTests();
+  resetRunbookTerminalPrivacyForTests();
   vi.useRealTimers();
 });
 
@@ -205,6 +211,18 @@ describe("metadata snapshots", () => {
 });
 
 describe("scrollback capture", () => {
+  it("actively clears stored scrollback and never serializes a Runbook-bound terminal", async () => {
+    startPersistence();
+    protectRunbookTerminal("a");
+    markScrollbackDirty("a");
+    await vi.advanceTimersByTimeAsync(3500);
+
+    expect(serializeMock).not.toHaveBeenCalled();
+    const arg = lastSnapshot();
+    expect(arg.sessions[0].scrollback).toBe("");
+    expect(arg.sessions[0].scrollback_lines).toBe(0);
+  });
+
   it("serializes a dirty, quiet session", async () => {
     startPersistence();
     markScrollbackDirty("a");

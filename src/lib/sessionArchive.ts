@@ -20,6 +20,7 @@ import * as api from "./tauri";
 import { useAppStore } from "../stores/appStore";
 import { getTerm, serializeSession } from "./termRegistry";
 import type { AiMessage, ArchiveMessageInput, ArchiveSessionInput } from "./types";
+import { isRunbookTerminalProtected } from "./runbookTerminalPrivacy";
 
 /**
  * Budget for the archive write on the close path.
@@ -113,7 +114,12 @@ export function buildArchiveRow(
 
   let scrollback: string | null = null;
   let scrollbackLines: number | null = null;
-  if (opts.withScrollback && maxLines > 0) {
+  if (opts.withScrollback && isRunbookTerminalProtected(sessionId)) {
+    // Empty actively clears any older archived blob. `null` would preserve it
+    // through the Rust COALESCE update and undermine the sticky privacy gate.
+    scrollback = "";
+    scrollbackLines = 0;
+  } else if (opts.withScrollback && maxLines > 0) {
     // Deliberately NOT gated on quiescence. That guard exists so the periodic
     // snapshot never captures mid-`cat`; at close there is no later chance, so a
     // slightly ragged capture beats no capture at all.

@@ -1,5 +1,5 @@
 use serde_json::{json, Value};
-use tauri::Wry;
+use tauri::{Manager, Wry};
 use tauri_plugin_store::StoreExt;
 
 pub const STORE_NAME: &str = "settings.json";
@@ -90,6 +90,10 @@ pub fn get_settings(app: tauri::AppHandle<Wry>) -> Result<Value, String> {
         // command refuses. So a default install has no retrieval capability, no
         // `docs.db` on disk, and no new surface reachable from a stale frontend.
         "docs_enabled": get("docs_enabled", json!(false)),
+        // Reusable Runbooks are experimental and can execute commands in the
+        // active terminal. Keep the backend capability unreachable until the
+        // user explicitly opts in; every `runbooks_*` command enforces this.
+        "runbooks_enabled": get("runbooks_enabled", json!(false)),
         "log_level": get("log_level", json!("info")),
     }))
 }
@@ -136,9 +140,11 @@ pub fn save_settings(
     ai_web_access: Option<bool>,
     auto_update_enabled: Option<bool>,
     docs_enabled: Option<bool>,
+    runbooks_enabled: Option<bool>,
     log_level: Option<String>,
 ) -> Result<(), String> {
     let store = app.store(STORE_NAME).map_err(|e| e.to_string())?;
+    let runbooks_gate_change = runbooks_enabled;
 
     // Credentials never enter the JSON store. Do these first so a Keychain
     // failure cannot make a mixed request appear successful.
@@ -307,11 +313,26 @@ pub fn save_settings(
     if let Some(v) = docs_enabled {
         store.set("docs_enabled", json!(v));
     }
+    if let Some(v) = runbooks_enabled {
+        store.set("runbooks_enabled", json!(v));
+    }
     if let Some(v) = log_level {
         store.set("log_level", json!(v));
     }
 
     store.save().map_err(|e| e.to_string())?;
+    if let Some(v) = runbooks_gate_change {
+        if let Some(command_state) =
+            app.try_state::<std::sync::Arc<crate::commands::runbooks::RunbookCommandState>>()
+        {
+            if v {
+                command_state.cancellations.enable();
+            } else {
+                command_state.cancellations.cancel_all();
+                command_state.pty.cancel_all();
+            }
+        }
+    }
     secure_settings_permissions(&app)
 }
 

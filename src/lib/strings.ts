@@ -304,6 +304,7 @@ export const S = {
       agent: "Agent",
       docs: "Docs",
       updates: "Updates",
+      runbooks: "Runbooks",
       appearance: "Appearance",
       terminal: "Terminal",
       hosts: "SSH hosts",
@@ -624,6 +625,18 @@ export const S = {
       restartWarning:
         "Installing restarts VTerminal. Running terminal processes will stop; saved tabs return with new shells.",
       progress: (downloaded: string, total: string) => `${downloaded} of ${total}`,
+    },
+    runbooks: {
+      title: "Runbooks",
+      intro:
+        "Run a reusable, versioned checklist against the visible terminal. Checks, approved changes, verification, evidence and operator decisions are retained in a durable report.",
+      enable: "Enable Runbooks",
+      enableHint:
+        "Experimental. Runbooks may execute commands in the selected terminal. Every visible-terminal shell action and every model action requires explicit approval.",
+      disabledNotice:
+        "While disabled, Rust refuses every Runbooks command and the workspace is hidden.",
+      enabledNotice:
+        "Definitions are imported from local folders and edited outside the app. Runs keep an immutable snapshot even if the source changes later.",
     },
     about: {
       version: "Version",

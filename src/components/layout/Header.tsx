@@ -1,10 +1,12 @@
-import { Settings, Cpu, History, ScanText } from "lucide-react";
+import { Settings, Cpu, History, ListChecks, ScanText } from "lucide-react";
 import { useState } from "react";
 import { useAppStore } from "../../stores/appStore";
 import { ModelMenu } from "./ModelMenu";
 import { VisionMenu } from "./VisionMenu";
 import { TabStrip } from "./TabStrip";
 import { S } from "../../lib/strings";
+import { RunbookStatusIndicator } from "../runbooks";
+import { useRunbookStore } from "../../stores/runbookStore";
 
 export function Header() {
   const settingsOpen = useAppStore((s) => s.settingsOpen);
@@ -22,6 +24,12 @@ export function Header() {
   // zustand v5 compares by identity, so selecting it whole re-renders forever.
   const readerKind = useAppStore((s) => s.imageReader().kind);
   const readerLabel = useAppStore((s) => s.imageReader().label);
+  const runbooksEnabled = useAppStore((s) => s.runbooksEnabled);
+  const runbooksOpen = useRunbookStore((s) => s.workspaceOpen);
+  const activeRun = useRunbookStore((s) => s.activeRun);
+  const runsById = useRunbookStore((s) => s.runsById);
+  const setRunbooksOpen = useRunbookStore((s) => s.setWorkspaceOpen);
+  const visibleRun = activeRun ?? Object.values(runsById).find((run) => !run.finished_at);
 
   // The chip names the model that will actually answer, which is the SELECTED
   // one — never the one that happens to still be resident. Preferring
@@ -85,6 +93,25 @@ export function Header() {
         </button>
         {visionMenuOpen && <VisionMenu onClose={() => setVisionMenuOpen(false)} />}
         {menuOpen && <ModelMenu onClose={() => setMenuOpen(false)} />}
+        {runbooksEnabled && visibleRun && !runbooksOpen ? (
+          <RunbookStatusIndicator />
+        ) : runbooksEnabled ? (
+          <button
+            onClick={() => {
+              setSettingsOpen(false);
+              setRunbooksOpen(!runbooksOpen);
+            }}
+            className={`rounded-lg p-1.5 transition-colors duration-150 ${
+              runbooksOpen
+                ? "bg-accent/10 text-accent"
+                : "text-text-muted hover:bg-bg-hover hover:text-text-secondary"
+            }`}
+            title={runbooksOpen ? "Close Runbooks" : "Open Runbooks"}
+            aria-label={runbooksOpen ? "Close Runbooks" : "Open Runbooks"}
+          >
+            <ListChecks size={16} />
+          </button>
+        ) : null}
         {/* Settings stays the trailing item — it is the one control people hit by
             muscle memory rather than by looking. Uses the neutral active
             treatment, not the accent one: accent means "the AI surface is live",

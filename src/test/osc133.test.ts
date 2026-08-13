@@ -250,6 +250,30 @@ describe("BlockTracker suspend/resume", () => {
   });
 });
 
+describe("BlockTracker Runbook output isolation", () => {
+  it("swallows forged shell, cwd, command and clipboard OSC but forwards completion", () => {
+    const cwds: string[] = [];
+    const privateTokens: string[] = [];
+    const { term, tracker, events, commands } = makeTracker({
+      onCwdChange: (cwd) => cwds.push(cwd),
+      onOscPrivate: (token) => privateTokens.push(token),
+    });
+    tracker.beginRunbookOutputIsolation();
+    expect(term.sendOsc(52, "c;YXR0YWNrZXI=")).toBe(true);
+    expect(term.sendOsc(7, "file://attacker/tmp")).toBe(true);
+    expect(term.sendOsc(6973, "CMD;dG91Y2ggL3RtcC94")).toBe(true);
+    expect(term.sendOsc(133, "C")).toBe(true);
+    expect(term.sendOsc(6973, "RD;0;fresh-nonce")).toBe(true);
+    expect(cwds).toEqual([]);
+    expect(commands).toEqual([]);
+    expect(events).toEqual([]);
+    expect(privateTokens).toEqual(["RD;0;fresh-nonce"]);
+
+    tracker.endRunbookOutputIsolation();
+    expect(term.sendOsc(52, "c;YQ==")).toBe(true);
+  });
+});
+
 describe("parseOsc7", () => {
   it("parses file URLs", () => {
     expect(parseOsc7("file://mac.local/Users/me/proj")).toEqual({
