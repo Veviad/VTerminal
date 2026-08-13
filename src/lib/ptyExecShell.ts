@@ -72,21 +72,24 @@ export function sentinelSuffix(kind: "posix" | "fish", nonce: string): string {
   return `; printf '\\033]6973;RD;%s;${nonce}\\007' ${status}`;
 }
 
-/**
- * Environment that makes a TTY-attached command behave like a piped one.
- *
- * The pager is the biggest self-inflicted agent hang: `git log`, `journalctl`
- * and `systemctl status` all page when stdout is a TTY, and the agent has no way
- * to press `q`. `LESS=FRX` covers tools that invoke `less` directly — quit if it
- * fits one screen, keep colour, and skip the termcap init so nothing is stranded
- * on the alternate screen.
- *
- * KNOWN LIMIT: sudo's `env_reset` drops all of this, so `sudo systemctl status`
- * can still page. That case is caught downstream instead — the stall classifier
- * surfaces it and `prompts::AGENT` asks for `--no-pager`.
- */
-const HARDEN_ENV =
-  "PAGER=cat GIT_PAGER=cat SYSTEMD_PAGER=cat SYSTEMD_PAGELESS=1 LESS=FRX DEBIAN_FRONTEND=noninteractive";
+/** Commands whose own pager environment is safer than a global `PAGER=cat`. */
+const SYSTEMD_PAGER_COMMANDS = new Set([
+  "busctl",
+  "coredumpctl",
+  "hostnamectl",
+  "journalctl",
+  "localectl",
+  "loginctl",
+  "machinectl",
+  "networkctl",
+  "resolvectl",
+  "systemctl",
+  "systemd-analyze",
+  "timedatectl",
+]);
+
+/** Debian tools that may invoke debconf while an AI command owns the TTY. */
+const DEBIAN_COMMANDS = new Set(["apt", "apt-get", "aptitude", "dpkg"]);
 
 /** Reserved words a `VAR=v ` prefix cannot precede — `A=1 if …` is a syntax error. */
 const SHELL_KEYWORDS = new Set([
@@ -110,17 +113,18 @@ export interface HardenedCommand {
  * Both guards attach to ONE command, which is why the exclusions look fussy: an
  * env prefix binds to the first command of a chain and a trailing redirect binds
  * to the last, so `a && b` can only ever be half-covered. A simple command gets
- * both guards; a pipeline gets the pager guard only (its first stage is the one
- * that could page, and a trailing redirect would sever the pipe — see
- * `canRedirectStdin`); anything else is left verbatim for the mid-flight
+ * both guards; a pipeline may get an environment guard on its first stage but
+ * never a trailing redirect, which would sever the pipe (see
+ * `canRedirectStdin`). Anything else is left verbatim for the mid-flight
  * detector to handle.
  */
 export function hardenCommand(command: string): HardenedCommand {
   const applied: HardenedCommand["applied"] = [];
   let line = command;
 
-  if (canPrefixEnv(command)) {
-    line = `${HARDEN_ENV} ${line}`;
+  const env = hardeningEnv(command);
+  if (env) {
+    line = `${env} ${line}`;
     applied.push("pager");
   }
   if (canRedirectStdin(command)) {
@@ -130,18 +134,36 @@ export function hardenCommand(command: string): HardenedCommand {
   return { line, applied };
 }
 
-/** Whether a `VAR=v ` prefix is valid AND has no side effect on the shell. */
-function canPrefixEnv(command: string): boolean {
+/**
+ * Return the smallest environment guard needed by the first command, or null.
+ *
+ * An environment assignment before a pipeline applies only to its first stage,
+ * so that is the only stage classified here. Compound command lists are left
+ * alone: a prefix would cover only one branch while making the visible command
+ * look fully guarded. `sudo` is deliberately not unwrapped because its
+ * `env_reset` commonly discards caller-provided values; the agent prompt tells
+ * it to use explicit `--no-pager` and non-interactive flags in that case.
+ */
+function hardeningEnv(command: string): string | null {
   const head = command.trimStart();
-  // A compound command's env has to be set inside it, not in front of it.
-  if (head.startsWith("(") || head.startsWith("{")) return false;
+  if (head.startsWith("(") || head.startsWith("{")) return null;
+  if (command.includes(";") || command.includes("&&") || command.includes("||")) return null;
+  if (BARE_AMP.test(command)) return null;
+
   const first = /^[^\s;|&<>]+/.exec(head)?.[0] ?? "";
-  if (SHELL_KEYWORDS.has(first)) return false;
+  if (!first || SHELL_KEYWORDS.has(first)) return null;
   // The command already opens with its own assignment. Prefixing an
-  // assignment-ONLY line (`FOO=bar`) would leak PAGER=cat into the user's shell
+  // assignment-only line (`FOO=bar`) would leak the guard into the user's shell
   // permanently, and `FOO=bar cmd` means the model is managing env itself.
-  if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(first)) return false;
-  return true;
+  if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(first)) return null;
+
+  const executable = first.slice(first.lastIndexOf("/") + 1);
+  if (executable === "git") return "GIT_PAGER=cat";
+  if (SYSTEMD_PAGER_COMMANDS.has(executable)) return "SYSTEMD_PAGER=cat";
+  if (DEBIAN_COMMANDS.has(executable) || executable.startsWith("debconf-")) {
+    return "DEBIAN_FRONTEND=noninteractive";
+  }
+  return null;
 }
 
 /** Whether `< /dev/null` can be appended without changing what it binds to. */
