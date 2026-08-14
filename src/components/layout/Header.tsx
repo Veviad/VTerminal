@@ -6,7 +6,7 @@ import { VisionMenu } from "./VisionMenu";
 import { TabStrip } from "./TabStrip";
 import { S } from "../../lib/strings";
 import { RunbookStatusIndicator } from "../runbooks";
-import { useRunbookStore } from "../../stores/runbookStore";
+import { selectLiveRunbookRun, useRunbookStore } from "../../stores/runbookStore";
 
 export function Header() {
   const settingsOpen = useAppStore((s) => s.settingsOpen);
@@ -29,7 +29,7 @@ export function Header() {
   const activeRun = useRunbookStore((s) => s.activeRun);
   const runsById = useRunbookStore((s) => s.runsById);
   const setRunbooksOpen = useRunbookStore((s) => s.setWorkspaceOpen);
-  const visibleRun = activeRun ?? Object.values(runsById).find((run) => !run.finished_at);
+  const visibleRun = selectLiveRunbookRun(activeRun, runsById);
 
   // The chip names the model that will actually answer, which is the SELECTED
   // one — never the one that happens to still be resident. Preferring
