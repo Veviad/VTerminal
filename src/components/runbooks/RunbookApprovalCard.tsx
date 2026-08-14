@@ -1,8 +1,20 @@
-import { AlertTriangle, Network, Play, ShieldAlert, Square, TerminalSquare } from "lucide-react";
+import {
+  AlertTriangle,
+  Network,
+  Play,
+  ShieldAlert,
+  Square,
+  TerminalSquare,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 
 import type { RunbookApprovalRequest } from "../../lib/runbooks";
-import { dangerButton, primaryButton, runbookInputClass, secondaryButton } from "./runbookUi";
+import {
+  dangerButton,
+  primaryButton,
+  runbookInputClass,
+  secondaryButton,
+} from "./runbookUi";
 
 export function RunbookApprovalCard({
   approval,
@@ -16,7 +28,11 @@ export function RunbookApprovalCard({
   approval: RunbookApprovalRequest;
   busy: boolean;
   targetLabel: string;
-  onRespond(approved: boolean, command: string | null, shellAttested: boolean): void;
+  onRespond(
+    approved: boolean,
+    command: string | null,
+    shellAttested: boolean,
+  ): void;
   onApproveAll?: () => void;
   onCancelApproveAll?: () => void;
   autoApproving?: boolean;
@@ -27,14 +43,18 @@ export function RunbookApprovalCard({
     setCommand(approval.command);
   }, [approval.approval_id, approval.command]);
 
-  const modelInvocation = approval.command.startsWith("model://configured-agent/");
+  const modelInvocation = approval.command.startsWith(
+    "model://configured-agent/",
+  );
   const edited = command !== approval.command;
   const invalid =
     !command.trim() || command.length > 4_096 || /[\r\n\0]/.test(command);
   const classification = approval.classification;
   const phaseDeviation =
     approval.phase !== "apply" &&
-    (classification.network || classification.privileged || classification.opaque);
+    (classification.network ||
+      classification.privileged ||
+      classification.opaque);
 
   return (
     <section className="space-y-3 rounded-md border border-warning/40 bg-warning/5 p-3">
@@ -51,20 +71,32 @@ export function RunbookApprovalCard({
       </div>
 
       <div className="flex flex-wrap gap-1">
-        {!classification.read_only && !modelInvocation && <Tag tone="warning">may write</Tag>}
-        {modelInvocation && <Tag tone="warning">model data processing</Tag>}
-        {classification.network && <Tag tone="warning"><Network size={9} /> network</Tag>}
-        {classification.privileged && <Tag tone="warning"><ShieldAlert size={9} /> privileged</Tag>}
-        {classification.opaque && <Tag tone="warning">opaque</Tag>}
-        {classification.read_only && !classification.network && !classification.privileged && !classification.opaque && (
-          <Tag tone="neutral">read-only</Tag>
+        {!classification.read_only && !modelInvocation && (
+          <Tag tone="warning">may write</Tag>
         )}
+        {modelInvocation && <Tag tone="warning">model data processing</Tag>}
+        {classification.network && (
+          <Tag tone="warning">
+            <Network size={9} /> network
+          </Tag>
+        )}
+        {classification.privileged && (
+          <Tag tone="warning">
+            <ShieldAlert size={9} /> privileged
+          </Tag>
+        )}
+        {classification.opaque && <Tag tone="warning">opaque</Tag>}
+        {classification.read_only &&
+          !classification.network &&
+          !classification.privileged &&
+          !classification.opaque && <Tag tone="neutral">read-only</Tag>}
       </div>
 
       {phaseDeviation && (
         <p className="flex items-start gap-1.5 rounded border border-warning/30 bg-warning/10 px-2 py-1.5 text-[10px] leading-relaxed text-warning">
           <AlertTriangle size={10} className="mt-0.5 shrink-0" />
-          This {approval.phase} is not a local read-only action. Approving it is recorded as a phase deviation.
+          This {approval.phase} is not a local read-only action. Approving it is
+          recorded as a phase deviation.
         </p>
       )}
 
@@ -73,16 +105,21 @@ export function RunbookApprovalCard({
           <span className="flex items-center gap-1 text-[10px] text-text-muted">
             <Network size={10} /> Configured model invocation
           </span>
-          <code className="block break-all text-[10px] text-text-secondary">{approval.command}</code>
+          <code className="block break-all text-[10px] text-text-secondary">
+            {approval.command}
+          </code>
           <span className="block text-[9px] leading-relaxed text-text-muted">
-            No terminal command is executed by this approval. Step instructions and bounded run context may be sent to the configured model. Any terminal command it proposes requires a separate approval.
+            No terminal command is executed by this approval. Step instructions
+            and bounded run context may be sent to the configured model. Any
+            terminal command it proposes requires a separate approval.
           </span>
         </div>
       ) : (
         <div className="space-y-2">
           <label className="block space-y-1">
             <span className="flex items-center gap-1 text-[10px] text-text-muted">
-              <TerminalSquare size={10} /> Exact command to run in the visible terminal
+              <TerminalSquare size={10} /> Exact command to run in the visible
+              terminal
             </span>
             <textarea
               value={command}
@@ -91,7 +128,9 @@ export function RunbookApprovalCard({
               rows={3}
               className={`${runbookInputClass} resize-none font-mono text-[10px] leading-relaxed ${invalid ? "border-error" : ""}`}
             />
-            <span className={`block text-[9px] ${invalid ? "text-error" : "text-text-muted"}`}>
+            <span
+              className={`block text-[9px] ${invalid ? "text-error" : "text-text-muted"}`}
+            >
               {invalid
                 ? "Commands must be one non-empty line of at most 4,096 characters."
                 : edited
@@ -99,7 +138,9 @@ export function RunbookApprovalCard({
                   : "Approve when the visible terminal row is the bound target. The command is used once."}
             </span>
             <span className="block text-[9px] leading-relaxed text-text-muted">
-              This approval attests that the command runs in <strong>{targetLabel}</strong> under an operator-confirmed visible prompt.
+              This approval attests that the command runs in{" "}
+              <strong>{targetLabel}</strong> under an operator-confirmed visible
+              prompt.
             </span>
           </label>
         </div>
@@ -125,11 +166,18 @@ export function RunbookApprovalCard({
         ) : (
           <>
             <button
-              onClick={() => onRespond(true, modelInvocation ? null : command, !modelInvocation)}
+              onClick={() => {
+                onRespond(
+                  true,
+                  modelInvocation ? null : command,
+                  !modelInvocation,
+                );
+              }}
               disabled={busy || (!modelInvocation && invalid)}
               className={`${primaryButton} flex-1`}
             >
-              <Play size={10} /> {busy
+              <Play size={10} />{" "}
+              {busy
                 ? "Responding…"
                 : modelInvocation
                   ? "Allow model once"
@@ -139,7 +187,9 @@ export function RunbookApprovalCard({
             </button>
             {onApproveAll && (
               <button
-                onClick={() => onApproveAll()}
+                onClick={() => {
+                  onApproveAll();
+                }}
                 disabled={busy}
                 className={`${secondaryButton} flex-1`}
                 title="Acknowledge and approve the current approval and all remaining approvals in this run."
@@ -154,13 +204,21 @@ export function RunbookApprovalCard({
   );
 }
 
-function Tag({ children, tone }: { children: React.ReactNode; tone: "warning" | "neutral" }) {
+function Tag({
+  children,
+  tone,
+}: {
+  children: React.ReactNode;
+  tone: "warning" | "neutral";
+}) {
   return (
-    <span className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[9px] ${
-      tone === "warning"
-        ? "border-warning/30 bg-warning/10 text-warning"
-        : "border-border-subtle bg-bg-card text-text-muted"
-    }`}>
+    <span
+      className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[9px] ${
+        tone === "warning"
+          ? "border-warning/30 bg-warning/10 text-warning"
+          : "border-border-subtle bg-bg-card text-text-muted"
+      }`}
+    >
       {children}
     </span>
   );
