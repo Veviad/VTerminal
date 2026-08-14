@@ -1030,6 +1030,9 @@ export interface KnowledgeBucketDescriptor {
    * whose success or precise 403 teaches the backend the real capability. */
   write_capability?: "unknown" | "read_only" | "read_write";
   manageable: boolean;
+  /** The backend verified this is an owned collection whose deletion may be
+   * attempted. Qdrant still performs the actual permission check. */
+  deletable?: boolean;
   file_count: number;
   chunk_count: number;
   pending_count: number;
@@ -1098,6 +1101,9 @@ export interface KnowledgeDocumentPage {
   documents: KnowledgeDocumentSummary[];
   /** Qdrant cursors are opaque: pass this value back without parsing or incrementing. */
   next_cursor: KnowledgePointId | null;
+  /** Exact active totals are included on first-page reads when counting succeeds. */
+  file_count?: number;
+  chunk_count?: number;
 }
 
 export interface KnowledgeDocumentMetadataUpdate {

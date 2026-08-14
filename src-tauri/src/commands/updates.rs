@@ -1,10 +1,9 @@
-//! Signed application updates from GitHub Releases.
-//!
-//! GitHub's `/releases/latest` route deliberately excludes prereleases. The
-//! experimental channel includes them, so the small discovery step below asks
-//! the releases API, chooses the greatest published SemVer carrying a
-//! `latest.json` asset, and then hands that release-specific manifest to
-//! Tauri. Tauri still owns download, signature verification, and installation.
+//! Signed application updates discovered through VTerminal's static release
+//! catalog. The Pages release renderer builds that catalog from authenticated
+//! GitHub data whenever a release is published, including prereleases. Desktop
+//! clients therefore do not share GitHub's small unauthenticated API quota.
+//! Tauri still owns manifest parsing, download, signature verification, and
+//! installation.
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -17,7 +16,8 @@ use serde::{Deserialize, Serialize};
 use tauri::{ipc::Channel, AppHandle, State, Wry};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
-const RELEASES_URL: &str = "https://api.github.com/repos/Veviad/VTerminal/releases?per_page=100";
+const RELEASE_CATALOG_URL: &str = "https://vterminal.veviad.com/release.json";
+const RELEASE_DOWNLOAD_BASE: &str = "https://github.com/Veviad/VTerminal/releases/download/";
 const MANIFEST_NAME: &str = "latest.json";
 const MANIFEST_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -31,19 +31,17 @@ pub struct UpdateState {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct GithubAsset {
-    name: String,
-    browser_download_url: String,
+struct ReleaseCatalog {
+    schema_version: u32,
+    release: CatalogRelease,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct GithubRelease {
-    tag_name: String,
-    draft: bool,
+struct CatalogRelease {
+    tag: String,
+    version: String,
     prerelease: bool,
     published_at: Option<String>,
-    body: Option<String>,
-    assets: Vec<GithubAsset>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -87,30 +85,35 @@ fn parse_tag(tag: &str) -> Option<Version> {
     Version::parse(tag.strip_prefix('v').unwrap_or(tag)).ok()
 }
 
-fn select_release(
-    releases: &[GithubRelease],
-    current: &Version,
-) -> Option<(GithubRelease, String)> {
-    releases
-        .iter()
-        .filter(|release| !release.draft)
-        .filter_map(|release| {
-            let version = parse_tag(&release.tag_name)?;
-            if version <= *current {
-                return None;
-            }
-            let manifest = release
-                .assets
-                .iter()
-                .find(|asset| asset.name == MANIFEST_NAME)?;
-            Some((
-                version,
-                release.clone(),
-                manifest.browser_download_url.clone(),
-            ))
-        })
-        .max_by(|a, b| a.0.cmp(&b.0))
-        .map(|(_, release, manifest)| (release, manifest))
+fn validate_catalog(catalog: &ReleaseCatalog) -> Result<Version, String> {
+    if catalog.schema_version != 1 {
+        return Err(format!(
+            "unsupported release catalog schema {}",
+            catalog.schema_version
+        ));
+    }
+    let tag_version = parse_tag(&catalog.release.tag)
+        .ok_or_else(|| "release catalog has an invalid tag".to_string())?;
+    let declared_version = Version::parse(&catalog.release.version)
+        .map_err(|e| format!("release catalog has an invalid version: {e}"))?;
+    if tag_version != declared_version {
+        return Err("release catalog tag and version do not match".into());
+    }
+    if catalog.release.prerelease != !declared_version.pre.is_empty() {
+        return Err("release catalog prerelease flag and version do not match".into());
+    }
+    Ok(declared_version)
+}
+
+fn manifest_url(tag: &str) -> Result<url::Url, String> {
+    let mut url = url::Url::parse(RELEASE_DOWNLOAD_BASE)
+        .map_err(|e| format!("invalid updater download base URL: {e}"))?;
+    url.path_segments_mut()
+        .map_err(|_| "updater download base URL cannot contain path segments".to_string())?
+        .pop_if_empty()
+        .push(tag)
+        .push(MANIFEST_NAME);
+    Ok(url)
 }
 
 #[tauri::command]
@@ -123,29 +126,28 @@ pub async fn update_check(
     let current_version = app.package_info().version.to_string();
     let current = Version::parse(&current_version)
         .map_err(|e| format!("invalid installed version {current_version}: {e}"))?;
-    let releases = reqwest::Client::builder()
+    let catalog = reqwest::Client::builder()
         .user_agent(format!("VTerminal/{current_version}"))
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| e.to_string())?
-        .get(RELEASES_URL)
+        .get(RELEASE_CATALOG_URL)
         .send()
         .await
-        .map_err(|e| format!("could not reach GitHub Releases: {e}"))?
+        .map_err(|e| format!("could not reach the release catalog: {e}"))?
         .error_for_status()
-        .map_err(|e| format!("GitHub Releases returned an error: {e}"))?
-        .json::<Vec<GithubRelease>>()
+        .map_err(|e| format!("the release catalog returned an error: {e}"))?
+        .json::<ReleaseCatalog>()
         .await
-        .map_err(|e| format!("could not read GitHub Releases: {e}"))?;
+        .map_err(|e| format!("could not read the release catalog: {e}"))?;
 
-    let Some((release, manifest_url)) = select_release(&releases, &current) else {
+    let release_version = validate_catalog(&catalog)?;
+    if release_version <= current {
         *state.pending.lock().map_err(|e| e.to_string())? = None;
         return Ok(None);
-    };
+    }
 
-    let endpoint = manifest_url
-        .parse()
-        .map_err(|e| format!("invalid updater manifest URL: {e}"))?;
+    let endpoint = manifest_url(&catalog.release.tag)?;
     let updater = app
         .updater_builder()
         .endpoints(vec![endpoint])
@@ -161,22 +163,19 @@ pub async fn update_check(
         *state.pending.lock().map_err(|e| e.to_string())? = None;
         return Ok(None);
     };
-    let release_version = parse_tag(&release.tag_name)
-        .ok_or_else(|| "selected GitHub release has an invalid version".to_string())?;
     let manifest_version = Version::parse(&update.version)
         .map_err(|e| format!("signed updater manifest has an invalid version: {e}"))?;
     if manifest_version != release_version {
         return Err(format!(
-            "signed updater manifest version {manifest_version} does not match GitHub release {}",
-            release.tag_name
+            "signed updater manifest version {manifest_version} does not match release catalog version {release_version}"
         ));
     }
     let metadata = UpdateMetadata {
         current_version,
         version: update.version.clone(),
-        notes: release.body.unwrap_or_default(),
-        published_at: release.published_at,
-        prerelease: release.prerelease,
+        notes: update.body.clone().unwrap_or_default(),
+        published_at: catalog.release.published_at,
+        prerelease: catalog.release.prerelease,
     };
     *state.pending.lock().map_err(|e| e.to_string())? = Some(update);
     Ok(Some(metadata))
@@ -228,55 +227,45 @@ pub fn app_restart(app: AppHandle<Wry>) {
 mod tests {
     use super::*;
 
-    fn release(tag: &str, draft: bool, manifest: bool) -> GithubRelease {
-        GithubRelease {
-            tag_name: tag.into(),
-            draft,
-            prerelease: tag.contains('-'),
-            published_at: Some("2026-08-13T00:00:00Z".into()),
-            body: Some(format!("notes for {tag}")),
-            assets: if manifest {
-                vec![GithubAsset {
-                    name: MANIFEST_NAME.into(),
-                    browser_download_url: format!("https://example.test/{tag}/latest.json"),
-                }]
-            } else {
-                vec![]
+    fn catalog(tag: &str, version: &str, prerelease: bool) -> ReleaseCatalog {
+        ReleaseCatalog {
+            schema_version: 1,
+            release: CatalogRelease {
+                tag: tag.into(),
+                version: version.into(),
+                prerelease,
+                published_at: Some("2026-08-13T00:00:00Z".into()),
             },
         }
     }
 
     #[test]
-    fn selects_highest_published_version_including_prereleases() {
-        let releases = vec![
-            release("v0.2.0", false, true),
-            release("v0.3.0-beta.2", false, true),
-            release("v0.3.0-beta.1", false, true),
-        ];
-        let (picked, _) = select_release(&releases, &Version::new(0, 1, 0)).unwrap();
-        assert_eq!(picked.tag_name, "v0.3.0-beta.2");
-        assert!(picked.prerelease);
+    fn accepts_a_consistent_prerelease_catalog() {
+        let catalog = catalog("v0.3.0-beta.2", "0.3.0-beta.2", true);
+        assert_eq!(
+            validate_catalog(&catalog).unwrap(),
+            Version::parse("0.3.0-beta.2").unwrap()
+        );
+        assert_eq!(
+            manifest_url(&catalog.release.tag).unwrap().as_str(),
+            "https://github.com/Veviad/VTerminal/releases/download/v0.3.0-beta.2/latest.json"
+        );
     }
 
     #[test]
-    fn ignores_drafts_invalid_tags_missing_manifests_and_downgrades() {
-        let releases = vec![
-            release("v9.0.0", true, true),
-            release("nightly", false, true),
-            release("v3.0.0", false, false),
-            release("v1.9.0", false, true),
-        ];
-        assert!(select_release(&releases, &Version::new(2, 0, 0)).is_none());
-    }
+    fn rejects_catalog_schema_or_release_identity_drift() {
+        let mut wrong_schema = catalog("v1.2.0", "1.2.0", false);
+        wrong_schema.schema_version = 2;
+        assert!(validate_catalog(&wrong_schema).is_err());
 
-    #[test]
-    fn stable_release_beats_its_own_prerelease() {
-        let releases = vec![
-            release("v1.2.0-rc.1", false, true),
-            release("v1.2.0", false, true),
-        ];
-        let (picked, _) = select_release(&releases, &Version::new(1, 1, 0)).unwrap();
-        assert_eq!(picked.tag_name, "v1.2.0");
+        let wrong_version = catalog("v1.2.0", "1.2.1", false);
+        assert!(validate_catalog(&wrong_version).is_err());
+
+        let wrong_channel = catalog("v1.2.0-rc.1", "1.2.0-rc.1", false);
+        assert!(validate_catalog(&wrong_channel).is_err());
+
+        let invalid_tag = catalog("nightly", "1.2.0", false);
+        assert!(validate_catalog(&invalid_tag).is_err());
     }
 
     #[test]

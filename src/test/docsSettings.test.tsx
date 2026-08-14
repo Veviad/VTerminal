@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { S } from "../lib/strings";
-import type { DocBucket } from "../lib/types";
+import type { DocBucket, KnowledgeBucketDescriptor } from "../lib/types";
 
 // The Docs tab is the ONLY place the experimental toggle can be reached, so it is
 // registered in `SettingsPage` unconditionally — three separate edits (the `Tab` union,
@@ -24,7 +24,8 @@ const api = {
   docsSearch: vi.fn(() => Promise.resolve([])),
   docsReadSource: vi.fn(),
   docsPutText: vi.fn(),
-  knowledgeBucketsList: vi.fn(() => Promise.resolve([])),
+  knowledgeBucketsList: vi.fn(() => Promise.resolve([] as KnowledgeBucketDescriptor[])),
+  knowledgeBucketDelete: vi.fn(() => Promise.resolve()),
   knowledgeEmbeddingModelsList: vi.fn(() => Promise.resolve([])),
   knowledgeQdrantConnectionsList: vi.fn(() => Promise.resolve([])),
   knowledgeJobsList: vi.fn(() => Promise.resolve([])),
@@ -75,7 +76,14 @@ beforeEach(() => {
   vi.clearAllMocks();
   api.docsBucketsList.mockResolvedValue([]);
   api.docsFilesList.mockResolvedValue([]);
-  useAppStore.setState({ docsEnabled: false, docBuckets: [], docsIndexing: {}, docsError: null });
+  api.knowledgeBucketsList.mockResolvedValue([]);
+  useAppStore.setState({
+    docsEnabled: false,
+    docBuckets: [],
+    knowledgeBuckets: [],
+    docsIndexing: {},
+    docsError: null,
+  });
 });
 
 describe("the Docs tab is reachable", () => {
@@ -189,6 +197,54 @@ describe("bucket rendering", () => {
     // And the stop affordance replaces the start one while a pass is live.
     expect(screen.getByText(S.settings.docs.cancel)).toBeInTheDocument();
     expect(screen.queryByText(S.settings.docs.indexNow)).not.toBeInTheDocument();
+  });
+
+  it("confirms deletion in-app before checking the Qdrant manage permission", async () => {
+    const remote: KnowledgeBucketDescriptor = {
+      ref: { source: "qdrant", connection_id: "q1", collection: "engineering" },
+      label: "Engineering",
+      connection_label: "Production Qdrant",
+      profile: null,
+      compatibility: "attach_only",
+      compatibility_reason: "Managed VTerminal collection with an exact embedding profile.",
+      attachable: true,
+      writable: false,
+      write_capability: "unknown",
+      manageable: false,
+      deletable: true,
+      file_count: 2,
+      chunk_count: 8,
+      pending_count: 0,
+      stale: false,
+      error: null,
+      imported: false,
+    };
+    api.knowledgeBucketsList.mockResolvedValue([remote]);
+    useAppStore.setState({ docsEnabled: true });
+
+    render(<DocsSettings />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Delete Qdrant collection Engineering" }),
+    );
+
+    const dialog = screen.getByRole("dialog", {
+      name: "Delete Qdrant collection Engineering",
+    });
+    const confirmation = within(dialog).getByRole("textbox", {
+      name: "Type engineering to confirm deletion",
+    });
+    const deleteButton = within(dialog).getByRole("button", { name: "Delete collection" });
+
+    expect(deleteButton).toBeDisabled();
+    fireEvent.change(confirmation, { target: { value: "Engineering" } });
+    expect(deleteButton).toBeDisabled();
+    expect(api.knowledgeBucketDelete).not.toHaveBeenCalled();
+
+    fireEvent.change(confirmation, { target: { value: "engineering" } });
+    expect(deleteButton).toBeEnabled();
+    fireEvent.click(deleteButton);
+
+    await waitFor(() => expect(api.knowledgeBucketDelete).toHaveBeenCalledWith(remote.ref));
   });
 });
 

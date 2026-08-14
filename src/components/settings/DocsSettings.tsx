@@ -613,6 +613,7 @@ export function RemoteBucketCard({
   const [results, setResults] = useState<DocSearchPreview[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [deleteConfirmation, setDeleteConfirmation] = useState<string | null>(null);
   const [profileBusy, setProfileBusy] = useState(false);
   const [requiredInstall, setRequiredInstall] = useState<{
     phase: "downloading" | "verifying" | "loading";
@@ -625,6 +626,13 @@ export function RemoteBucketCard({
   const hasMistralKey = useAppStore((state) => state.hasApiKey.mistral ?? false);
   if (bucket.ref.source !== "qdrant") return null;
   const remoteRef = bucket.ref;
+  // Older backends do not send `deletable`. Their non-imported managed/attach-only
+  // states already required exact VTerminal metadata, so retain deletion there while
+  // allowing an explicit false from current backends to protect unowned collections.
+  const canAttemptDelete =
+    bucket.deletable ??
+    (!bucket.imported &&
+      (bucket.compatibility === "managed_compatible" || bucket.compatibility === "attach_only"));
 
   const startRequiredLocalModel = () => {
     const modelId = bucket.required_builtin_model_id;
@@ -709,16 +717,13 @@ export function RemoteBucketCard({
   };
 
   const remove = async () => {
-    if (!bucket.manageable) return;
-    const typed = window.prompt(
-      `Delete Qdrant collection “${bucket.label}” and every document in it? Type the collection name to confirm.`,
-    );
-    if (typed !== remoteRef.collection) return;
+    if (!canAttemptDelete || deleteConfirmation !== remoteRef.collection) return;
     setBusy(true);
     setError(null);
     try {
       await api.knowledgeBucketDelete(bucket.ref);
       await onChanged();
+      setDeleteConfirmation(null);
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -753,11 +758,14 @@ export function RemoteBucketCard({
             {bucket.compatibility_reason ? ` — ${bucket.compatibility_reason}` : ""}
           </p>
         </div>
-        {bucket.manageable && (
+        {canAttemptDelete && (
           <button
             type="button"
             disabled={busy}
-            onClick={() => void remove()}
+            onClick={() => {
+              setError(null);
+              setDeleteConfirmation("");
+            }}
             aria-label={`Delete Qdrant collection ${bucket.label}`}
             title="Delete remote collection"
             className="shrink-0 rounded p-1 text-text-muted hover:bg-bg-hover hover:text-error disabled:opacity-50"
@@ -776,13 +784,85 @@ export function RemoteBucketCard({
               : "Documents: read only"}
         </span>
         <span className="rounded bg-bg-elevated px-1.5 py-0.5">
-          {bucket.manageable ? "Collection: manage" : "Collection: no manage access"}
+          {bucket.manageable
+            ? "Collection: manage"
+            : canAttemptDelete
+              ? "Delete permission checked on use"
+              : "Collection: no manage access"}
         </span>
         {bucket.stale && <span className="rounded bg-warning/10 px-1.5 py-0.5 text-warning">Stale status</span>}
       </div>
 
       {bucket.error && <p className="text-[10px] text-error">{bucket.error}</p>}
       {error && <p className="text-[10px] text-error">{error}</p>}
+
+      {deleteConfirmation !== null && (
+        <div
+          className="fixed inset-0 z-[60] flex items-start justify-center bg-black/55 px-4 pt-20"
+          onMouseDown={() => {
+            if (!busy) setDeleteConfirmation(null);
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Delete Qdrant collection ${bucket.label}`}
+            className="w-full max-w-md space-y-3 rounded-lg border border-border-subtle bg-bg-card p-4 shadow-lg"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="space-y-1">
+              <h2 className="text-[14px] font-medium text-text-primary">
+                Delete Qdrant collection?
+              </h2>
+              <p className="text-[11px] leading-relaxed text-text-secondary">
+                This permanently deletes <span className="font-medium">{bucket.label}</span> and
+                every document in it from Qdrant.
+              </p>
+            </div>
+
+            <label className="block space-y-1 text-[11px] text-text-secondary">
+              <span>
+                Type <code className="text-text-primary">{remoteRef.collection}</code> to confirm.
+              </span>
+              <input
+                autoFocus
+                className={inputClass}
+                value={deleteConfirmation}
+                aria-label={`Type ${remoteRef.collection} to confirm deletion`}
+                disabled={busy}
+                onChange={(event) => setDeleteConfirmation(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape" && !busy) setDeleteConfirmation(null);
+                  if (event.key === "Enter" && deleteConfirmation === remoteRef.collection) {
+                    void remove();
+                  }
+                }}
+              />
+            </label>
+
+            {error && <p className="text-[10px] text-error">{error}</p>}
+
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setDeleteConfirmation(null)}
+                className="rounded-md px-2.5 py-1.5 text-[11px] text-text-secondary hover:bg-bg-hover disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={busy || deleteConfirmation !== remoteRef.collection}
+                onClick={() => void remove()}
+                className="rounded-md bg-error px-2.5 py-1.5 text-[11px] font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {busy ? "Deleting…" : "Delete collection"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {bucket.compatibility === "requires_profile" && (
         <div className="rounded border border-warning/30 bg-warning/10 p-2 text-[9px] leading-relaxed text-warning">

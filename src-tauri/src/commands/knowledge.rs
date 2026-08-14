@@ -15,7 +15,9 @@ use tauri::{Manager, State, Wry};
 
 use crate::docs::chunk::ChunkSpec;
 use crate::docs::{index, semantic};
-use crate::knowledge::contract::{classify_collection, CompatibilityContext};
+use crate::knowledge::contract::{
+    classify_collection, validate_vterminal_collection_deletable, CompatibilityContext,
+};
 use crate::knowledge::embedding::{
     self, EmbeddingInput, EmbeddingProfile, EmbeddingProviderDialect, EmbeddingPurpose,
 };
@@ -219,6 +221,10 @@ pub struct KnowledgeBucketView {
     pub compatibility: String,
     pub compatibility_reason: Option<String>,
     pub attachable: bool,
+    /// Safe to attempt remote collection deletion based on immutable ownership
+    /// markers. Qdrant can still reject the attempt for insufficient key access.
+    #[serde(default)]
+    pub deletable: bool,
     pub writable: bool,
     /// Discovery is intentionally read-only, so `unknown` means an explicit user
     /// upload may be attempted and its real 403/success cached afterwards.
@@ -294,8 +300,7 @@ fn remember_manage_denied(
     store::update_connection_if_current(app, &snapshot, |connection| {
         let mut found = false;
         for value in &mut connection.collections {
-            let Ok(mut bucket) = serde_json::from_value::<KnowledgeBucketView>(value.clone())
-            else {
+            let Some(mut bucket) = cached_bucket_from_value(value) else {
                 continue;
             };
             if matches!(
@@ -369,6 +374,7 @@ fn remote_bucket_view(
         compatibility: compatibility_name(raw.compatibility).into(),
         compatibility_reason: Some(raw.compatibility_reason),
         attachable: raw.attachable,
+        deletable: raw.deletable,
         writable: raw.access.can_write_points(),
         write_capability: write_capability(raw.access).into(),
         manageable: raw.access.can_manage(),
@@ -427,6 +433,7 @@ fn unreadable_bucket(
         compatibility: "unreadable".into(),
         compatibility_reason: Some(error.clone()),
         attachable: false,
+        deletable: false,
         writable: false,
         write_capability: "unknown".into(),
         manageable: false,
@@ -446,19 +453,79 @@ fn unreadable_bucket(
     }
 }
 
+fn should_migrate_legacy_deletable(
+    value: &serde_json::Value,
+    imported: bool,
+    compatibility: &str,
+) -> bool {
+    value.get("deletable").is_none()
+        && !imported
+        && matches!(compatibility, "managed_compatible" | "attach_only")
+}
+
+fn cached_bucket_from_value(value: &serde_json::Value) -> Option<KnowledgeBucketView> {
+    let mut bucket: KnowledgeBucketView = serde_json::from_value(value.clone()).ok()?;
+    if should_migrate_legacy_deletable(value, bucket.imported, &bucket.compatibility) {
+        bucket.deletable = true;
+    }
+    Some(bucket)
+}
+
 fn cached_bucket_views(connection: &QdrantConnectionRecord) -> Vec<KnowledgeBucketView> {
     connection
         .collections
         .iter()
-        .filter_map(|value| serde_json::from_value(value.clone()).ok())
-        .map(|mut bucket: KnowledgeBucketView| {
+        .filter_map(|value| {
+            let mut bucket = cached_bucket_from_value(value)?;
             bucket.stale |= connection.status == "stale";
             if connection.status == "stale" && bucket.error.is_none() {
                 bucket.error = connection.error.clone();
             }
-            bucket
+            Some(bucket)
         })
         .collect()
+}
+
+fn apply_remote_document_counts(bucket: &mut KnowledgeBucketView, counts: (u64, u64)) {
+    bucket.file_count = counts.0;
+    bucket.chunk_count = counts.1;
+    if !bucket.imported
+        && matches!(
+            bucket.compatibility.as_str(),
+            "managed_compatible" | "attach_only"
+        )
+    {
+        bucket.attachable = counts.1 > 0;
+    }
+}
+
+fn cache_remote_document_counts(
+    app: &tauri::AppHandle<Wry>,
+    connection_id: &str,
+    collection: &str,
+    counts: (u64, u64),
+) -> Result<(), String> {
+    let connections = store::read_connections(app);
+    let snapshot = store::find_connection(&connections, connection_id)?.clone();
+    store::update_connection_if_current(app, &snapshot, |connection| {
+        for value in &mut connection.collections {
+            let Some(mut bucket) = cached_bucket_from_value(value) else {
+                continue;
+            };
+            if matches!(
+                &bucket.bucket_ref,
+                KnowledgeBucketRef::Qdrant {
+                    connection_id: id,
+                    collection: name,
+                } if id == connection_id && name == collection
+            ) {
+                apply_remote_document_counts(&mut bucket, counts);
+                *value = serde_json::to_value(bucket).map_err(|error| error.to_string())?;
+            }
+        }
+        Ok(())
+    })
+    .map(|_| ())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -553,6 +620,23 @@ async fn resolve_managed_collection(
         ));
     }
     Ok((client, info, version))
+}
+
+async fn resolve_deletable_collection(
+    app: &tauri::AppHandle<Wry>,
+    connection_id: &str,
+    collection: &str,
+) -> Result<QdrantClient, String> {
+    let connections = store::read_connections(app);
+    let connection = store::find_connection(&connections, connection_id)?;
+    let client = qdrant_client(app, connection)?;
+    let info = client
+        .collection_info(collection)
+        .await
+        .map_err(|error| error.to_string())?;
+    validate_vterminal_collection_deletable(&info)
+        .map_err(|reason| format!("refusing to delete an unowned Qdrant collection: {reason}"))?;
+    Ok(client)
 }
 
 fn imported_bindings(
@@ -848,6 +932,7 @@ pub fn knowledge_buckets_list(
                     compatibility: "managed_compatible".into(),
                     compatibility_reason: None,
                     attachable: bucket.chunk_count > 0,
+                    deletable: false,
                     writable: true,
                     write_capability: "read_write".into(),
                     manageable: true,
@@ -1045,8 +1130,7 @@ pub async fn knowledge_buckets_delete(
             if confirmation.as_deref() != Some(collection.as_str()) {
                 return Err("type the exact collection name to confirm remote deletion".into());
             }
-            let (client, _, _) =
-                resolve_managed_collection(&app, &docs, &connection_id, &collection).await?;
+            let client = resolve_deletable_collection(&app, &connection_id, &collection).await?;
             match client.delete_collection(&collection).await {
                 Ok(()) => {}
                 Err(error @ QdrantError::Permission { .. }) => {
@@ -1072,9 +1156,7 @@ pub async fn knowledge_buckets_delete(
             let snapshot = store::find_connection(&connections, &connection_id)?.clone();
             store::update_connection_if_current(&app, &snapshot, |current| {
                 current.collections.retain(|value| {
-                    serde_json::from_value::<KnowledgeBucketView>(value.clone())
-                        .ok()
-                        .is_none_or(|bucket| bucket.label != collection)
+                    cached_bucket_from_value(value).is_none_or(|bucket| bucket.label != collection)
                 });
                 Ok(())
             })
@@ -1333,8 +1415,7 @@ pub async fn knowledge_qdrant_import_remove(
     {
         store::update_connection_if_current(&app, &snapshot, move |connection| {
             for value in &mut connection.collections {
-                let Ok(mut bucket) = serde_json::from_value::<KnowledgeBucketView>(value.clone())
-                else {
+                let Some(mut bucket) = cached_bucket_from_value(value) else {
                     continue;
                 };
                 if bucket.label != collection {
@@ -1347,6 +1428,7 @@ pub async fn knowledge_qdrant_import_remove(
                         .into(),
                 );
                 bucket.attachable = false;
+                bucket.deletable = false;
                 bucket.vector_name = None;
                 bucket.imported = false;
                 bucket.required_builtin_model_id = None;
@@ -1377,10 +1459,28 @@ pub async fn knowledge_documents_list(
     };
     let (client, _, _) =
         resolve_managed_collection(&app, &docs, &connection_id, &collection).await?;
-    client
-        .scroll_documents(&collection, cursor, limit.unwrap_or(50).clamp(1, 200))
-        .await
-        .map_err(|error| error.to_string())
+    let page_size = limit.unwrap_or(50).clamp(1, 200);
+    if cursor.is_none() {
+        let (page, counts) = tokio::join!(
+            client.scroll_documents(&collection, cursor, page_size),
+            client.active_document_counts(&collection),
+        );
+        let mut page = page.map_err(|error| error.to_string())?;
+        // The document page remains useful if supplemental counting fails. A
+        // successful count is returned for immediate UI reconciliation and also
+        // persisted so later cached reads stay correct.
+        if let Ok(counts) = counts {
+            page.file_count = Some(counts.0);
+            page.chunk_count = Some(counts.1);
+            let _ = cache_remote_document_counts(&app, &connection_id, &collection, counts);
+        }
+        Ok(page)
+    } else {
+        client
+            .scroll_documents(&collection, cursor, page_size)
+            .await
+            .map_err(|error| error.to_string())
+    }
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -1582,8 +1682,7 @@ pub async fn knowledge_qdrant_turbo_quant_set(
             .collections
             .iter_mut()
             .find(|value| {
-                serde_json::from_value::<KnowledgeBucketView>((*value).clone())
-                    .ok()
+                cached_bucket_from_value(value)
                     .is_some_and(|bucket| bucket.bucket_ref == view.bucket_ref)
             })
             .ok_or_else(|| {
@@ -1770,6 +1869,33 @@ mod tests {
         assert!(!discovery_result_is_stale(Some(9), 10));
         assert!(discovery_result_is_stale(Some(10), 10));
         assert!(discovery_result_is_stale(Some(11), 10));
+    }
+
+    #[test]
+    fn only_a_missing_legacy_deletable_field_is_migrated() {
+        let legacy = serde_json::json!({ "compatibility": "managed_compatible" });
+        assert!(should_migrate_legacy_deletable(
+            &legacy,
+            false,
+            "managed_compatible"
+        ));
+
+        let current = serde_json::json!({ "deletable": false });
+        assert!(!should_migrate_legacy_deletable(
+            &current,
+            false,
+            "managed_compatible"
+        ));
+        assert!(!should_migrate_legacy_deletable(
+            &legacy,
+            true,
+            "managed_compatible"
+        ));
+        assert!(!should_migrate_legacy_deletable(
+            &legacy,
+            false,
+            "unmanaged"
+        ));
     }
 
     #[test]

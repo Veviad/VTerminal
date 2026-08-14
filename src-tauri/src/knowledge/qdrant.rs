@@ -267,19 +267,27 @@ impl QdrantClient {
         if info.metadata.valid().is_none() {
             return Ok(());
         }
-        info.active_document_count = Some(
-            self.count_points(collection, active_manifests_filter())
-                .await?,
-        );
-        info.active_chunk_count = Some(
-            self.count_points(collection, active_chunks_filter())
-                .await?,
-        );
+        let (documents, chunks) = self.active_document_counts(collection).await?;
+        info.active_document_count = Some(documents);
+        info.active_chunk_count = Some(chunks);
         info.pending_point_count = Some(
             self.count_points(collection, staging_points_filter())
                 .await?,
         );
         Ok(())
+    }
+
+    /// Return exact active manifest and chunk totals without relying on Qdrant's
+    /// optimizer/index counters. This lightweight pair is also used when the UI
+    /// opens a document list so cached card totals reconcile after mutations.
+    pub async fn active_document_counts(
+        &self,
+        collection: &str,
+    ) -> Result<(u64, u64), QdrantError> {
+        tokio::try_join!(
+            self.count_points(collection, active_manifests_filter()),
+            self.count_points(collection, active_chunks_filter()),
+        )
     }
 
     async fn count_points(&self, collection: &str, filter: Value) -> Result<u64, QdrantError> {
@@ -533,6 +541,8 @@ impl QdrantClient {
         Ok(DocumentPage {
             documents,
             next_cursor: envelope.result.next_page_offset,
+            file_count: None,
+            chunk_count: None,
         })
     }
 
@@ -1466,6 +1476,69 @@ fn parse_operation_receipt(value: Value) -> Result<OperationReceipt, QdrantError
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn read_http_request(socket: &mut tokio::net::TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut expected = None;
+        loop {
+            let mut buffer = [0u8; 2048];
+            let read = socket.read(&mut buffer).await.unwrap_or(0);
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if expected.is_none() {
+                if let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers.lines().find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    });
+                    expected = Some(header_end + 4 + content_length.unwrap_or(0));
+                }
+            }
+            if expected.is_some_and(|length| request.len() >= length) || request.len() >= 64 * 1024
+            {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&request).to_string()
+    }
+
+    async fn count_server() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        tokio::spawn(async move {
+            for _ in 0..2 {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let request = read_http_request(&mut socket).await;
+                let count = if request.contains(r#""value":"manifest""#) {
+                    1
+                } else if request.contains(r#""value":"chunk""#) {
+                    15
+                } else {
+                    0
+                };
+                log.lock().unwrap().push(request);
+                let body = format!(r#"{{"status":"ok","result":{{"count":{count}}}}}"#);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        (base, seen)
+    }
 
     #[test]
     fn endpoint_blocks_keyed_cleartext_except_loopback() {
@@ -1484,6 +1557,27 @@ mod tests {
         assert!(QdrantEndpoint::parse("https://key@example.com", false, false).is_err());
         assert!(QdrantEndpoint::parse("file:///tmp/qdrant", false, false).is_err());
         assert!(QdrantEndpoint::parse("example.com:6333", false, false).is_err());
+    }
+
+    #[tokio::test]
+    async fn active_document_counts_use_exact_manifest_and_chunk_filters() {
+        let (base, seen) = count_server().await;
+        let endpoint = QdrantEndpoint::parse(&base, false, false).unwrap();
+        let client = QdrantClient::new(endpoint, None).unwrap();
+
+        assert_eq!(
+            client.active_document_counts("docs").await.unwrap(),
+            (1, 15)
+        );
+
+        let requests = seen.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|request| {
+            request.starts_with("POST /collections/docs/points/count ")
+                && request.contains(r#""exact":true"#)
+                && request.contains(r#""_vterminal.state""#)
+                && request.contains(r#""value":"active""#)
+        }));
     }
 
     #[test]

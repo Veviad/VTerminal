@@ -226,6 +226,9 @@ pub struct KnowledgeBucketDescriptor {
     pub quantization: QuantizationStatus,
     /// Empty buckets may be managed but are not offered in the attachment picker.
     pub attachable: bool,
+    /// True when immutable VTerminal ownership markers make a destructive
+    /// collection-delete attempt safe. This is independent of cached key access.
+    pub deletable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -331,6 +334,12 @@ pub struct DocumentSummary {
 pub struct DocumentPage {
     pub documents: Vec<DocumentSummary>,
     pub next_cursor: Option<PointId>,
+    /// Exact active totals are attached by the command on a first-page read.
+    /// Lower-level scroll callers and later pages leave them absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

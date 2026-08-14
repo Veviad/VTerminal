@@ -500,6 +500,90 @@ describe("remote document management", () => {
     expect(api.knowledgeDocumentsList.mock.calls[1][1]).toBe("opaque-cursor");
   });
 
+  it("reconciles stale cached bucket totals from an exact first-page count", async () => {
+    const stale = remote();
+    stale.file_count = 0;
+    stale.chunk_count = 0;
+    stale.pending_count = 2;
+    stale.attachable = false;
+    useAppStore.setState({ knowledgeBuckets: [stale] });
+    const counted = page();
+    counted.documents[0].manifest.chunk_count = 15;
+    counted.file_count = 1;
+    counted.chunk_count = 15;
+    api.knowledgeDocumentsList.mockResolvedValue(counted);
+
+    function ConnectedDocuments() {
+      const current = useAppStore((state) => state.knowledgeBuckets[0]);
+      return <RemoteDocumentsPanel bucket={current} onChanged={vi.fn()} />;
+    }
+
+    render(<ConnectedDocuments />);
+    fireEvent.click(screen.getByRole("button", { name: /Documents\s*\(0\)/ }));
+
+    expect(await screen.findByText("Deploy guide")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Documents\s*\(1\)/ })).toBeInTheDocument();
+      expect(useAppStore.getState().knowledgeBuckets[0]).toMatchObject({
+        file_count: 1,
+        chunk_count: 15,
+        pending_count: 2,
+        attachable: true,
+      });
+    });
+  });
+
+  it("does not revive attachability after a newer incompatible refresh", async () => {
+    const stale = remote();
+    stale.file_count = 0;
+    stale.chunk_count = 0;
+    stale.attachable = false;
+    useAppStore.setState({ knowledgeBuckets: [stale] });
+
+    let resolvePage!: (value: KnowledgeDocumentPage) => void;
+    api.knowledgeDocumentsList.mockImplementation(
+      () =>
+        new Promise<KnowledgeDocumentPage>((resolve) => {
+          resolvePage = resolve;
+        }),
+    );
+
+    function ConnectedDocuments() {
+      const current = useAppStore((state) => state.knowledgeBuckets[0]);
+      return <RemoteDocumentsPanel bucket={current} onChanged={vi.fn()} />;
+    }
+
+    render(<ConnectedDocuments />);
+    fireEvent.click(screen.getByRole("button", { name: /Documents\s*\(0\)/ }));
+    await waitFor(() => expect(api.knowledgeDocumentsList).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      useAppStore.setState({
+        knowledgeBuckets: [
+          {
+            ...useAppStore.getState().knowledgeBuckets[0],
+            compatibility: "incompatible",
+            attachable: false,
+          },
+        ],
+      });
+    });
+
+    const counted = page();
+    counted.file_count = 1;
+    counted.chunk_count = 15;
+    await act(async () => resolvePage(counted));
+
+    await waitFor(() => {
+      expect(useAppStore.getState().knowledgeBuckets[0]).toMatchObject({
+        compatibility: "incompatible",
+        file_count: 1,
+        chunk_count: 15,
+        attachable: false,
+      });
+    });
+  });
+
   it("updates metadata and deletes using the exact document id", async () => {
     api.knowledgeDocumentsList.mockResolvedValue(page());
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
