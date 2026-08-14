@@ -1,3 +1,9 @@
+// `get_settings` builds the whole settings object in one `json!` literal, and
+// serde_json expands that recursively — one key per level. The default limit of
+// 128 is reached at the current key count, so adding a setting fails to compile
+// with a recursion error pointing at whichever key happens to be last.
+#![recursion_limit = "256"]
+
 pub mod agent;
 mod app_exit;
 mod commands;
@@ -297,6 +303,7 @@ pub fn run() {
             commands::runbooks::runbooks_history,
             commands::runbooks::runbooks_delete,
             commands::runbooks::runbooks_report,
+            commands::runbooks::runbooks_evidence_read,
             commands::runbooks::runbooks_export,
             commands::runbooks::runbooks_export_package,
             // vision sidecar

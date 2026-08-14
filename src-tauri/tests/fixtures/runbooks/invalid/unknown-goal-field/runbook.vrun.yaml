@@ -1,0 +1,26 @@
+apiVersion: runbooks.veviad.com/v1alpha1
+kind: Runbook
+metadata:
+  id: invalid-unknown-goal-field
+  version: 1.0.0
+  title: Unknown goal field fixture
+spec:
+  target:
+    kind: active-terminal
+  steps:
+    - id: docker-running
+      title: Docker daemon is running
+      goal:
+        intent: |
+          Docker Engine is installed and enabled at boot.
+        checks:
+          - command: "command -v docker"
+            expect: [0]
+        # The goal block is closed like every other struct: a field the engine
+        # does not implement must not be accepted and silently ignored, or an
+        # author would believe a bound was in force that nothing enforces.
+        retries: 3
+      apply:
+        uses: agent
+        instructions: |
+          Install Docker Engine for this distribution.

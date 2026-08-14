@@ -64,7 +64,10 @@ export function RunbookApprovalCard({
           <h3 className="text-[12px] font-medium text-text-primary">
             Approval required · {approval.phase}
           </h3>
-          <p className="mt-0.5 text-[10px] leading-relaxed text-text-muted">
+          {/* `whitespace-pre-line`: a model approval's explanation carries the
+              step's goal and its enforced bounds on their own lines, and one
+              run-on paragraph about objective, scope and refusals is not read. */}
+          <p className="mt-0.5 whitespace-pre-line text-[10px] leading-relaxed text-text-muted">
             {approval.explanation}
           </p>
         </div>

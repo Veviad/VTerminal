@@ -1,105 +1,116 @@
-# Veviad Runbooks v1alpha1
+# Veviad Runbooks
 
-Runbooks are reusable, versioned checklists that assess and, with explicit
-approval, change the system in the currently visible terminal. The feature is
-experimental and is disabled by default in **Settings → Runbooks**.
+A runbook is a reusable, versioned checklist that VTerminal runs against the
+terminal you are looking at. It checks things, and — with your approval on every
+single command — changes them, then proves the change worked and writes a report
+you can hand to someone else.
 
-## Package layout
+The feature is experimental and **off by default**. Turn it on in
+**Settings → Runbooks**. While it is off, Rust refuses every runbook command, so
+the switch is a capability gate and not a UI preference.
 
-A package is a local directory with exactly one definition at its root:
+- [Five-minute tour](#five-minute-tour)
+- [Writing one without YAML: the wizard](#writing-one-without-yaml-the-wizard)
+- [Writing YAML](#writing-yaml)
+- [Goal-directed steps](#goal-directed-steps)
+- [Approvals and the trust model](#approvals-and-the-trust-model)
+- [Evidence and reports](#evidence-and-reports)
+- [Sharing and versioning](#sharing-and-versioning)
+- [Reference](#reference)
+
+---
+
+## Five-minute tour
+
+Open **Runbooks** from the header. Three tabs: **Library** (what you can run),
+**Run** (what is running), **History** (what has run).
+
+VTerminal ships three macOS assessments that change nothing, so you can watch
+one work without risk:
+
+- **macOS Security Posture** — FileVault, SIP, Gatekeeper, the application
+  firewall, automatic updates.
+- **macOS Developer Workstation Health** — Xcode CLT, the SDK, Git, Rosetta,
+  free space, optionally Homebrew.
+- **macOS Backup & Storage Readiness** — free space, the Time Machine
+  destination and backup age, APFS, optional local snapshots.
+
+Pick one, press **Run**, and you get a preflight screen: which terminal it will
+bind to, any inputs, and how much output to keep. Press **Start runbook**.
+
+From there every command appears as an approval card. You see the exact line,
+you can edit it, and nothing is typed into your terminal until you approve. When
+the run ends you get a report; **History** keeps it.
+
+Four more examples ship in [`examples/runbooks`](../examples/runbooks) as
+importable folders, including the two that use AI.
+
+---
+
+## Writing one without YAML: the wizard
+
+**Library → New** opens a four-stage wizard. It works offline, saves as you
+type, and never calls a model — including to write the runbook itself.
+
+| Stage | What you set |
+|---|---|
+| **Basics** | id, version, title, description, tags, target platform (macOS 13+, Linux, Any), default failure policy, whether the runbook needs network or root |
+| **Inputs** | string, integer, boolean, path or enum, each with a description, a default and whether it is required |
+| **Checks** | ordered steps, each either a shell command with explicit `VRUN_*` input mappings and exit codes, or a manual question for the operator |
+| **Review** | validation issues you can click to jump to, three summary tiles, and the exact YAML that will be published |
+
+Choosing macOS or Linux adds a locked first step that stops the run on the wrong
+platform. **Any** adds no guard, so your commands must handle portability
+themselves.
+
+**The wizard writes assessments only.** It declares an empty write set and
+cannot author `apply`, `verify`, `agent`, `goal` or Ansible actions. That is
+deliberate: the wizard is for "tell me the state of this machine", and anything
+that changes a machine deserves to be read as YAML before it runs. When you need
+more, publish what you have, export it, and edit the file — see below.
+
+Drafts stay out of the Library until **Publish to Library** succeeds.
+Publication generates `runbook.vrun.yaml` and `README.md` and then applies the
+same strict parsing, secret-like content checks and digest registration as any
+imported package. The first publication defaults to `1.0.0`; publishing changes
+requires a strictly greater version. Publishing an unchanged draft does nothing.
+
+You can reopen a wizard project later. Removing the Library source leaves the
+draft available to republish; discarding a published draft detaches the wizard
+project only — the published runbook and its run history stay.
+
+---
+
+## Writing YAML
+
+### The authoring loop
+
+1. **Export runbook** from the Library — you get a folder named
+   `runbook-<id>-v<version>`.
+2. Edit `runbook.vrun.yaml` and `README.md` in any editor.
+3. Keep `metadata.id` if it serves the same purpose, bump `metadata.version`,
+   and keep step IDs stable for controls that have not changed.
+4. **Import** the folder.
+
+Registrations are path-based: re-importing the same folder refreshes that
+source, while importing a copy from elsewhere creates a second one. Exporting a
+bundled example imports back as a normal user source, so the original stays.
+
+### Package layout
 
 ```text
 my-runbook/
 ├── runbook.vrun.yaml   required
 ├── README.md           optional
-└── ansible/            reserved for the follow-on Ansible adapter
+└── ansible/            reserved for a follow-on adapter
 ```
 
-Other root files, symbolic links, includes, remote references, and package
-scripts are rejected. Native v1 never uploads a local script into an SSH or
-container session. See [`examples/runbooks`](../examples/runbooks) for complete
-packages and
+Anything else at the root is rejected, as are symlinks, includes, remote
+references and package scripts. The generated JSON Schema is
 [`runbook-v1alpha1.schema.json`](../src-tauri/schemas/runbook-v1alpha1.schema.json)
-for the generated JSON Schema.
+if your editor can use it.
 
-## Included macOS examples
-
-VTerminal includes three assessment-only packages for macOS 13 and newer. They
-use no model actions, declare no network, privilege, or write capability, and
-never remediate a setting:
-
-- [macOS Security Posture](../examples/runbooks/macos-security-posture) checks
-  FileVault, SIP, Gatekeeper, the application firewall, and automatic critical
-  and system-data updates. It is the first included Runbook selected when no
-  valid selection exists.
-- [macOS Developer Workstation Health](../examples/runbooks/macos-developer-workstation-health)
-  checks Xcode Command Line Tools, the macOS SDK, Git, Rosetta translation,
-  configurable free space, and optional Homebrew availability.
-- [macOS Backup & Storage Readiness](../examples/runbooks/macos-backup-storage-readiness)
-  checks configurable free space, the Time Machine destination and backup age,
-  APFS, and optional local snapshots.
-
-Included sources carry an **Included with VTerminal** badge. Removing one hides
-it from the Library without deleting its package or historical runs. Use
-**Restore examples** to make all hidden included sources visible again.
-
-## Create an assessment with the wizard
-
-Choose **New** in the Library to create a check-only Runbook without writing
-YAML. The deterministic wizard works offline and supports:
-
-- resumable app-managed drafts;
-- macOS 13+, Linux, or Any target selection;
-- string, integer, boolean, path, and enum inputs;
-- ordered shell checks with explicit `VRUN_*` input mappings and exit codes;
-- manual operator checks; and
-- declared network/root capabilities and failure policies.
-
-The macOS and Linux choices add a locked first step that stops on an unsupported
-target. **Any** adds no guard, so every command must handle portability itself.
-The wizard always declares an empty write set and cannot author apply, verify,
-agent, or Ansible actions. Export the published package when advanced YAML
-authoring is required.
-
-Drafts autosave locally and do not appear in the runnable Library until
-**Publish to Library** succeeds. Publication generates `runbook.vrun.yaml` and
-`README.md`, then applies the same strict parsing, secret-like content checks,
-package validation, and digest registration as an imported package. Published
-packages live in app-managed storage and remain portable through **Export
-runbook**.
-
-Wizard-created Runbooks can be reopened. The first publication defaults to
-`1.0.0`; changed publications require a strictly greater semantic version.
-Unchanged publication is a no-op. Removing the Library source leaves its draft
-available for republishing, while discarding a published draft only detaches the
-wizard project—the already published source and historical run snapshots remain.
-
-## Export, edit, and import a package
-
-**Export runbook** in the Library creates a complete import-ready folder named
-`runbook-<id>-v<version>`. It contains the exact validated
-`runbook.vrun.yaml`, optional `README.md`, and allowed `ansible/` tree from the
-registered source. VTerminal revalidates package digests before export, rejects
-symlinks and path escapes, and never merges into or overwrites an existing
-destination.
-
-A practical advanced-authoring loop is:
-
-1. Export an included or imported Runbook from the Library.
-2. Edit its YAML and README with any text editor.
-3. Keep `metadata.id` for the same operational purpose, bump
-   `metadata.version`, and keep durable step IDs for unchanged controls.
-4. Import the edited folder. An exported included example imports as a normal
-   user source, so the bundled original remains available separately.
-
-Registrations are path-based. Importing the same folder refreshes that source;
-importing a copy at another path creates a separate user source.
-
-Package export is for reuse and authoring. **Export report** in History is a
-different operation: it exports a completed run's `report.json`, `report.md`,
-and eligible evidence. Report output is not an importable Runbook package.
-
-## Definition
+### A complete definition
 
 ```yaml
 apiVersion: runbooks.veviad.com/v1alpha1
@@ -110,7 +121,7 @@ metadata:
   version: 1.0.0
   title: Inspect a POSIX host
   description: |
-    Markdown shown during preflight.
+    Markdown, shown during preflight.
   tags: [linux, assessment]
 
 spec:
@@ -144,130 +155,384 @@ spec:
           noncompliantExitCodes: [1]
 ```
 
-The definition is immutable during a run. At creation, VTerminal stores the
-original YAML, canonical JSON, and a SHA-256 digest of each. Editing the package
-afterward can affect a future run only after refresh; it cannot change a live or
-historical run.
+A definition is frozen at run creation: VTerminal stores the original YAML, its
+canonical JSON and a SHA-256 of each. Editing the package afterwards affects
+future runs only after a refresh — never a live or historical one.
 
 ### Inputs
 
-Supported types are `string`, `integer`, `boolean`, `path`, and `enum`. Inputs
-are non-secret and are retained in the report. Secret-like input identifiers
-are rejected; do not enter passwords, tokens, private keys, or credentials.
+Types are `string`, `integer`, `boolean`, `path` and `enum`.
 
-Shell actions can receive an input only through an explicit `env` mapping. The
-environment name must use the dedicated `VRUN_` namespace. The engine quotes
-the value into an isolated `/bin/sh` child-shell wrapper, classifies and records
-that exact wrapper, and requests approval because the wrapper is opaque. This
-prevents process-control variables such as `PATH`, `BASH_ENV`, or
-`GIT_EXTERNAL_DIFF` from becoming an approval bypass. There are no arbitrary
-template expressions or string interpolation.
+Inputs are **not secrets**. Identifiers that look like one (`password`, `token`,
+`api_key`, `client_secret`, …) are rejected outright, and every value is
+retained in the report. Never put a password, token or private key in an input,
+a comment or a manual evidence note.
 
-### Steps and actions
+A shell action reaches an input only through an explicit `env` mapping in the
+dedicated `VRUN_` namespace:
 
-Every step has a `check`. An optional `apply` must be followed by `verify`.
-Available native action kinds are:
+```yaml
+with:
+  command: "test -r \"$VRUN_CONFIG\""
+  env:
+    VRUN_CONFIG: configPath
+```
 
-- `shell`: one inline command, no control characters, newlines, heredocs, or
-  here-strings, and at most 4,096 characters.
-- `agent`: bounded Markdown instructions for the selected model. Agent commands
-  use the same visible terminal and each mutation has its own approval.
-- `manual`: asks the operator for an outcome, required comment, and optional
-  evidence note.
+The engine quotes the value into an isolated `/bin/sh -c` wrapper, classifies
+and records that exact wrapper, and asks for approval because the wrapper is
+opaque. This is what stops `PATH`, `BASH_ENV` or `GIT_EXTERNAL_DIFF` becoming an
+approval bypass. **There is no templating and no string interpolation anywhere
+in a definition.**
 
-`ansible.playbook` is parsed and validated but deliberately unavailable at
-runtime until the dedicated Runner adapter ships. It never falls back to a
-generic shell command.
+### Steps, phases and actions
 
-A shell check declares disjoint compliant and non-compliant exit codes. Any
-other code is an execution error. Apply success alone never checks a step;
-verification must pass. Only `already_compliant` and `remediated_verified`
-appear checked in the final report.
+A step runs up to three phases: **check** → **apply** → **verify**. Check
+decides whether work is needed; apply does it; verify proves it.
 
-`onFailure` is `pause`, `stop`, or `continue` and defaults to `pause`. A paused
-operator may retry from a fresh check, skip, waive with actor/reason/timestamp,
-or stop. Mutations are never replayed automatically.
+Every step needs a check phase — from `check:` or from `goal.checks`. An
+`apply:` is never complete without verification, so it needs `verify:` or
+`goal.checks`. A `verify:` without an `apply:` is an error.
 
-## Approval and target model
+Each phase is one action:
 
-Each run binds to one visible terminal and its observed local, SSH, or container
-context. The engine pauses on a session or target change. Two runs cannot drive
-the same terminal concurrently.
+| `uses:` | Behaviour |
+|---|---|
+| `shell` | One inline command. No control characters, newlines, heredocs or here-strings; 4,096 characters maximum. |
+| `agent` | Bounded Markdown instructions for the configured model. It proposes commands; each one is approved separately in the same visible terminal. |
+| `manual` | Asks you for an outcome, a required comment and an optional evidence note. |
+| `ansible.playbook` | Parsed and validated, but **not runnable** until the dedicated adapter ships. It never falls back to a shell command. |
 
-- Apply actions always require a one-time approval.
-- Native v1 requires approval for every visible-terminal shell action,
-  including checks and verification. An existing interactive shell can alter
-  apparently harmless commands through aliases, exported functions, PATH
-  shims, loader variables, or already-root SSH/container context, so it cannot
-  be proven read-only from command text alone.
-- Every shell approval displays the immutable run target and requires an
-  operator to attest that the visible row is a POSIX shell prompt on that
-  host/container and that the session's shell, functions, aliases, and PATH are
-  trusted. The app binds that click to the exact terminal row, cursor, and
-  input/output epoch for 30 seconds; any intervening terminal change prevents
-  dispatch. A compromised interactive shell remains outside v1's trust model.
-- Networked, privileged, or opaque checks and verifies require approval and are
+A shell check declares disjoint compliant and non-compliant exit codes; any
+other code is an execution error, not a non-compliance.
+
+**Apply success alone never checks a step.** Only `already_compliant` and
+`remediated_verified` appear as checked in the final report.
+
+`onFailure` is `pause` (default), `stop` or `continue`. A paused step lets you
+retry from a fresh check, skip, waive with an actor/reason/timestamp, or stop.
+Mutations are never replayed automatically. An **unknown** outcome always pauses
+for you, even under `continue` — not knowing what happened is not a result you
+can carry forward.
+
+---
+
+## Goal-directed steps
+
+### The problem
+
+Write a runbook that installs Docker. On Debian that is `apt-get`, on RHEL
+`dnf`, on Arch `pacman`. Write a runbook that enables a firewall: `ufw`,
+`firewalld` or `nft`. A fixed command list needs one runbook per distribution,
+and the day a target does not match, it fails.
+
+Handing the whole thing to a model instead swaps that for a different problem:
+the model decides both what to do *and* whether it worked, and a model that
+believes it succeeded reports success.
+
+A **goal** splits those apart. You state what must be true and the exact
+conditions that prove it. The model picks the commands. The engine runs the
+conditions and decides.
+
+```yaml
+- id: docker-running
+  title: Docker Engine is installed and running
+  goal:
+    intent: |
+      Docker Engine is installed from the distribution's own repository and
+      its daemon is running and enabled at boot.
+    checks:
+      - command: "command -v docker"
+        expect: [0]
+      - command: "docker info >/dev/null 2>&1"
+        expect: [0]
+  apply:
+    uses: agent
+    instructions: |
+      Install Docker Engine using this distribution's package manager.
+```
+
+The goal is met only when **every** condition exits with a code it declares. All
+of them run even after one fails, so the report can say which two of four
+conditions are unmet rather than just "something".
+
+Notice there is no `check:` and no `verify:`. The goal serves as both — one
+statement of the condition instead of the same command written twice, which is
+two places for one truth to drift.
+
+Goal conditions are ordinary commands in your visible terminal, so they carry
+the same assurance as any other: `shell_observed`, not attested. Nothing here
+claims a more trustworthy executor. What changed is *who reads the result*.
+
+### Bounds
+
+`constraints` narrow what an agent phase may do. Put them on a step, or in
+`spec.defaults.constraints` for the whole document — a step that declares its
+own block replaces the defaults entirely, so reading the step tells you what
+applies.
+
+```yaml
+constraints:
+  maxCommands: 12    # proposals, refusals included
+  maxSeconds: 900    # wall clock for the phase
+  maxRounds: 6       # model turns; may only LOWER your global setting
+  network: false     # refuse anything that looks networked
+  privilege: none    # refuse sudo, doas, pkexec, su
+```
+
+Every field narrows. Nothing here widens what you already allow, and
+`network: true` / `privilege: root` refuse nothing — they are a statement of
+expectation, and the model is told about neither, because promising a rule that
+is not applied is a lie.
+
+A refused proposal comes back to the model as "not allowed here, try something
+else", so it can adapt. It still spends a command from the budget, or a model
+could re-propose the same forbidden thing forever. Running out of budget stops
+the phase and hands the step to you.
+
+Refusals happen **before an approval card is drawn**. Checking later would draw
+a card, take your click, and only then refuse.
+
+> **These bounds are best-effort. They are not a sandbox.**
+> They read command text. They cannot see through a script the model wrote in an
+> earlier step, an alias in your dotfiles, `$(…)`, or `python -c`. They narrow
+> what a careless model does. They do not contain a hostile one, and nothing in
+> VTerminal should be read as claiming otherwise.
+
+### What the model is allowed to know
+
+Nothing reaches the model implicitly.
+
+```yaml
+context:
+  inputs: [sshdConfig]   # resolved VALUES of these inputs
+  priorSteps: true       # earlier steps' ids, statuses and summaries
+```
+
+`inputs` is an allowlist by id, mirroring how a shell action must name every
+input it wants. Without it, instructions that say "use the configured path"
+refer to something the model cannot see.
+
+### Discovering the target
+
+Document-level probes run **once**, before the first step:
+
+```yaml
+spec:
+  context:
+    discover:
+      - name: os_release
+        command: "cat /etc/os-release"
+      - name: package_manager
+        command: "command -v apt-get dnf yum pacman zypper apk"
+```
+
+Their output is shown to every agent phase in the run. This is what lets one
+runbook serve Debian, RHEL and Arch.
+
+- Each probe is approved like any other command. There is no exemption for a
+  "read-only" one — read-only cannot be proven from command text on a shell
+  whose aliases and functions are not attested.
+- They run once per run, not per step, because `/etc/os-release` does not change
+  between steps and every probe costs you a click.
+- A probe that fails is skipped, not fatal. A host without `apt-get` should
+  leave that fact absent rather than stop the run.
+- They are skipped entirely if the runbook has no agent action, since nothing
+  would read them.
+- **Their output is data, never instructions.** It is fenced and labelled as
+  command output in the prompt. A target that could make the model take orders
+  from its own output would undo every approval gate downstream.
+
+### A worked example
+
+[`examples/runbooks/linux-host-hardening`](../examples/runbooks/linux-host-hardening)
+is the whole feature in one file: four discovery probes, then firewall, Docker
+and SSH steps, each with a goal, its conditions and its bounds — including
+`network: false` on the two steps that only edit a local config file.
+
+[`linux-server-security-baseline`](../examples/runbooks/linux-server-security-baseline)
+is the smaller version, if you want to read one screen instead of four.
+
+---
+
+## Approvals and the trust model
+
+Every run binds to one visible terminal and the local, SSH or container context
+observed there. The engine pauses if the session or target changes. Two runs
+cannot drive the same terminal at once.
+
+- **Every visible-terminal shell action needs approval** — checks and
+  verifications included, not just changes. An existing interactive shell can
+  alter an apparently harmless command through aliases, exported functions,
+  `PATH` shims, loader variables, or an already-root SSH context, so no command
+  can be proven read-only from its text alone.
+- Every shell approval shows the immutable run target and asks you to attest
+  that the visible row is a POSIX prompt on that host, and that the shell's
+  functions, aliases and `PATH` are trusted. That click binds to the exact
+  terminal row, cursor and input/output epoch for 30 seconds; any intervening
+  terminal change prevents dispatch. **A compromised interactive shell is
+  outside the trust model.**
+- Approvals are single-click. In a live run you can also
+  **Acknowledge and approve all remaining steps**, which stops at the first
+  non-approval pause, terminal-status change, repeated approval id or command
+  validation issue. Runbooks do not mirror the agent panel's `Auto all`.
+- **A model phase has its own approval**, separate from the shell approvals for
+  the commands it later proposes. That card names the step's goal and its
+  enforced bounds, because a model phase is opaque and this is the only moment
+  you see the objective before the model has it. It also reports whether the
+  provider is networked.
+- Networked, privileged or opaque checks and verifications are approved and then
   reported as phase deviations.
-- Runbook approvals are single-click by default. In live mode, you can also use
-  **Acknowledge and approve all remaining steps** to continue through later
-  approvals automatically. The flow stops at the first non-approval pause,
-  terminal-status change, repeated approval-id, or command validation issue.
-- Model phases are opaque and still require their own approval action; this is
-  separate from shell approvals and still reports any model/provider network use.
-- Runbooks do not mirror the agent panel’s `Auto all` behavior for any phase.
-- The proposed and executed commands are both retained when an operator edits a
-  command.
-- Visible-terminal shell checks and verification are reported as
-  `shell_observed`, not as an attested deterministic executor. The per-attempt
-  token prevents stale/replayed terminal output from settling a different
-  attempt; it cannot prove that an operator-trusted interactive shell evaluated
-  the textual line exactly. The shell and its startup configuration remain part
-  of the explicitly attested target trust boundary.
-- Once a terminal executes a Runbook action, its raw scrollback is excluded
-  from restore/archive persistence and OSC 52 clipboard writes remain disabled
-  for that terminal's lifetime. Semantic shell/cwd markers are quarantined
-  while each attempt is observed; delayed descendant output after completion
-  remains part of the explicitly trusted target session.
-- You can revisit the definition while a run is active by opening **Review
-  runbook** from the live checklist header.
+- Editing a command keeps both the proposed and the executed text in the report.
+- Visible-terminal checks and verifications are reported as `shell_observed`,
+  never as an attested deterministic executor. A per-attempt token stops stale
+  or replayed terminal output settling a different attempt; it cannot prove your
+  interactive shell evaluated the line exactly.
+- Once a terminal has run a runbook action, its raw scrollback is excluded from
+  restore/archive persistence and OSC 52 clipboard writes stay disabled for that
+  terminal's lifetime. Semantic shell/cwd markers are quarantined while an
+  attempt is observed.
+- **Review runbook** in the live header reopens the definition mid-run.
 
-A timeout means the outcome is unknown; it does not kill or retry the command.
-Cancelling an active run sends SIGINT to the owned foreground job and stops
+A timeout means the outcome is *unknown*: the command is not killed and not
+retried. Cancelling sends SIGINT to the owned foreground job and stops
 observation, but cannot prove the process stopped, terminate detached work, or
-undo mutations already made; the active step is therefore reported `unknown`.
-After a process restart, active runs become `interrupted`, in-flight attempts
-become `unknown`, and resumption requires an explicit terminal rebind.
+undo what already happened — the active step is reported `unknown`. After a
+process restart, active runs become `interrupted`, in-flight attempts become
+`unknown`, and resuming requires an explicit terminal rebind.
+
+---
 
 ## Evidence and reports
 
-Run creation discloses one of three evidence modes:
+### How much output is kept
 
-- `none`: metadata only.
-- `tail` (default): an 8 KiB redacted output tail per attempt.
-- `full`: a redacted artifact capped at 1 MiB per attempt.
+Three levels:
 
-Common credential patterns, CLI/URL credentials, token prefixes, and
-private-key blocks are rejected or redacted before display, persistence, or
-export. Detection is intentionally conservative but necessarily best-effort:
-an arbitrary secret without a recognizable name or shape cannot be identified
-reliably. Never place a secret in a definition, input, comment, or manual
-evidence field. Redaction and truncation are explicit in the report.
+| Mode | Kept per attempt |
+|---|---|
+| `none` | Nothing. Results, timestamps, approvals and operator comments only. |
+| `tail` | Up to 8 KiB of redacted output. |
+| `full` | The 8 KiB tail **plus** a redacted artifact of up to 1 MiB on disk. |
 
-Every terminal outcome—successful, exceptional, failed, or cancelled—produces
-canonical `report.json`. `report.md` is generated only from that validated JSON.
-**Export report** contains both reports and eligible evidence artifacts. This is
-separate from **Export runbook**, which creates a reusable package from a Library
-source. Removing a package registration never deletes its historical runs.
+**Settings → Runbooks → Record terminal output** sets the floor:
 
-Step and executive summaries are derived from the engine-fixed statuses and
-bounded structured evidence. Native v1 uses deterministic summaries by default;
-it never sends report evidence to a model merely to improve prose. Agent action
-summaries returned during an explicitly approved model phase are retained.
+| Setting | Meaning |
+|---|---|
+| **Never** | Off by default. Nothing is kept unless you raise a single run before starting it. |
+| **As the runbook asks** (default) | Each package decides via `spec.audit.recordOutput`; one that asks for nothing gets `tail`. |
+| **Always, in full** | Every attempt keeps an artifact, and no run can opt out. |
 
-## Versioning guidance
+Preflight shows the resolved level and only offers levels at or above it. You
+can raise a single run, never lower it, and the clamp is applied in Rust — a
+stale frontend cannot reduce your audit level. **Never** is "off by default"
+rather than "recording forbidden", so a run you specifically want evidence for
+is still possible.
 
-Keep `metadata.id` stable for the same operational purpose. Bump the semantic
-version whenever behavior, requirements, inputs, or step meaning changes. Step
-IDs are durable report identifiers: never reuse an ID for a different check.
-Prefer idempotent checks and the smallest safe apply action, then verify the
-observable end state independently.
+### Reading it back
+
+A report shows each attempt's redacted tail inline. Where a full artifact
+exists, **View recorded output** opens it. The recorded digest is re-verified on
+every read: an artifact that has been deleted, resized or altered since the run
+is reported as no longer readable rather than shown, because bytes that no
+longer match what was recorded are worse than none — you cannot tell by looking.
+
+The same viewer serves the report at the end of a run and the same run reopened
+from History months later.
+
+### Limits, honestly
+
+- **Redaction is best-effort.** Common credential patterns, CLI and URL
+  credentials, token prefixes and private-key blocks are redacted before
+  display, persistence or export. A secret with no recognisable name or shape
+  cannot be found reliably.
+- **`full` is bounded by your scrollback.** Capture reads what xterm still
+  holds (10,000 lines by default). A chatty command still yields an honest
+  tail, not a complete transcript, and the report marks truncation explicitly.
+- **A run can fill its evidence budget** (2,048 artifacts or 64 MiB). When it
+  does, remaining attempts keep tails only and the report records that once, as
+  an unresolved risk. The run does not fail for it.
+- **Recorded output is kept until you delete the run.** There is no automatic
+  expiry, deliberately: marking an aged artifact missing would downgrade a
+  finished run from *succeeded* to *completed with exceptions* at the next
+  startup, rewriting history because time passed. Deleting a run removes its
+  artifacts from disk.
+- Under **Always, in full**, the runbook artifact is the *only* durable copy of
+  that terminal's output, since a runbook terminal's raw scrollback is already
+  excluded from the session archive.
+
+### Reports
+
+Every terminal outcome — succeeded, exceptional, failed or cancelled — produces
+a canonical `report.json`. `report.md` is generated only from that validated
+JSON. **Export report** writes both plus eligible evidence artifacts; it is not
+an importable package. Removing a package registration never deletes its runs.
+
+Step and executive summaries come from engine-fixed statuses and bounded
+structured evidence. **Report evidence is never sent to a model to improve
+prose.** Summaries an agent returns during a model phase you approved are
+retained, and that is a different thing: audit retention and model input are
+separate, and recording more output does not feed more of it to a model.
+
+---
+
+## Sharing and versioning
+
+Keep `metadata.id` stable while a runbook serves the same purpose. Bump the
+semantic version whenever behaviour, requirements, inputs or the meaning of a
+step changes. Step IDs are durable report identifiers — never reuse one for a
+different check.
+
+Prefer idempotent checks, the smallest safe apply, and a verification of the
+observable end state rather than of the command that produced it.
+
+> **A runbook using goals, constraints or discovery is rejected by an older
+> VTerminal**, with an opaque YAML error. `apiVersion` is matched exactly and
+> every structure refuses unknown fields, so there is no partial understanding —
+> which is safer than silently ignoring a bound the author relied on, but worth
+> knowing before you share a file.
+
+---
+
+## Reference
+
+### Step
+
+| Field | Required | Notes |
+|---|---|---|
+| `id`, `title` | yes | `id` is a durable report identifier |
+| `required` | no, default true | An optional step does not downgrade the run |
+| `check` | unless `goal` | One action |
+| `apply` | no | Needs `verify` or `goal` |
+| `verify` | unless `goal` when `apply` is set | Cannot appear without `apply` |
+| `goal` | no | `intent` plus 1–8 `checks` |
+| `constraints` | no | Replaces `spec.defaults.constraints` wholesale |
+| `context` | no | `inputs` (≤16 ids), `priorSteps` |
+| `onFailure` | no, default from `spec.defaults` | `pause` \| `stop` \| `continue` |
+
+### Spec
+
+| Field | Notes |
+|---|---|
+| `target.kind` | `active-terminal` |
+| `inputs` | Map of id → definition |
+| `declaredCapabilities` | `network`, `privilege`, `writes` — preflight disclosure, not enforcement |
+| `defaults` | `onFailure`, `constraints` |
+| `audit.recordOutput` | `none` \| `tail` \| `full`; your Settings floor can only raise it |
+| `context.discover` | Up to 6 probes, run once before the first step |
+| `steps` | 1–256 |
+
+### Limits
+
+| Thing | Limit |
+|---|---|
+| Definition file | 1 MiB |
+| Shell command | 4,096 characters, one line |
+| Markdown (`description`, `instructions`, `goal.intent`) | 16,384 characters |
+| Titles | 160 characters, single line |
+| Steps | 256 |
+| Goal conditions per step | 8 |
+| Discovery probes per document | 6 |
+| Context inputs per step | 16 |
+| Output tail per attempt | 8 KiB |
+| Full artifact per attempt | 1 MiB |
+| Evidence per run | 2,048 artifacts / 64 MiB |

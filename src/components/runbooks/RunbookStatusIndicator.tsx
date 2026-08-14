@@ -1,7 +1,11 @@
-import { CheckCircle2, ListChecks, Loader2, PauseCircle, TriangleAlert } from "lucide-react";
+import { ListChecks, Loader2, PauseCircle } from "lucide-react";
 
-import { isCheckedStepState, isTerminalRunState } from "../../lib/runbooks";
-import { useRunbookStore } from "../../stores/runbookStore";
+import { isCheckedStepState } from "../../lib/runbooks";
+import {
+  selectLiveRunbookRun,
+  selectLiveRunbookRuns,
+  useRunbookStore,
+} from "../../stores/runbookStore";
 import { humanizeRunbookState, runStateTone } from "./runbookUi";
 
 /** Compact companion for the header/status bar while the workspace is closed. */
@@ -17,18 +21,22 @@ export function RunbookStatusIndicator({
   const runsById = useRunbookStore((state) => state.runsById);
   const setWorkspaceOpen = useRunbookStore((state) => state.setWorkspaceOpen);
   const setActiveRun = useRunbookStore((state) => state.setActiveRun);
-  const liveRuns = Object.values(runsById).filter((candidate) => !isTerminalRunState(candidate.status));
-  const run = selectedRun ?? liveRuns[0] ?? null;
+  const liveRuns = selectLiveRunbookRuns(runsById);
+  const run = selectLiveRunbookRun(selectedRun, runsById);
   if (open || !run) return null;
 
   const checked = run.steps.filter((step) => isCheckedStepState(step.status)).length;
-  const icon = isTerminalRunState(run.status) ? (
-    run.status === "succeeded" ? <CheckCircle2 size={11} /> : <TriangleAlert size={11} />
-  ) : run.status === "paused" || run.status === "waiting_approval" || run.status === "waiting_operator" || run.status === "interrupted" ? (
-    <PauseCircle size={11} />
-  ) : (
-    <Loader2 size={11} className="animate-spin" />
-  );
+  // `run` is live by construction, so there is no terminal icon here. A green
+  // check on this pill meant a finished run had captured the header slot.
+  const icon =
+    run.status === "paused" ||
+    run.status === "waiting_approval" ||
+    run.status === "waiting_operator" ||
+    run.status === "interrupted" ? (
+      <PauseCircle size={11} />
+    ) : (
+      <Loader2 size={11} className="animate-spin" />
+    );
 
   return (
     <button

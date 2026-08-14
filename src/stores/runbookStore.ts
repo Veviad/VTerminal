@@ -1,5 +1,6 @@
 import { create } from "zustand";
 
+import { isTerminalRunState } from "../lib/runbooks";
 import type {
   RunbookDefinition,
   RunbookEvent,
@@ -314,6 +315,26 @@ function mergeRun(current: RunbookRun | null, incoming: RunbookRun): RunbookRun 
           ? current.pending_manual
           : null,
   };
+}
+
+/** Runs that are still going. Terminal runs stay in `runsById` so their report
+ * remains openable, so membership there is NOT liveness. */
+export function selectLiveRunbookRuns(
+  runsById: Record<string, RunbookRun>,
+): RunbookRun[] {
+  return Object.values(runsById).filter((run) => !isTerminalRunState(run.status));
+}
+
+/** The one run allowed to occupy the header slot, or null for the neutral
+ * launcher. `activeRun` is only the UI SELECTION and deliberately outlives its
+ * run so the end-of-run report stays open — treating it as "a run is live" is
+ * what pinned a finished run's pill to the header until the app restarted. */
+export function selectLiveRunbookRun(
+  activeRun: RunbookRun | null,
+  runsById: Record<string, RunbookRun>,
+): RunbookRun | null {
+  if (activeRun && !isTerminalRunState(activeRun.status)) return activeRun;
+  return selectLiveRunbookRuns(runsById)[0] ?? null;
 }
 
 function replaceStep(steps: RunbookStepRun[], next: RunbookStepRun): RunbookStepRun[] {

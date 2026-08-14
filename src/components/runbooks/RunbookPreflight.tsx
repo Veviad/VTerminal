@@ -2,7 +2,11 @@ import { ArrowLeft, Database, Eye, Play, ShieldAlert, TerminalSquare } from "luc
 import { useEffect, useState } from "react";
 
 import {
+  atLeastEvidence,
   defaultRunbookInputs,
+  definitionRecordOutput,
+  evidenceFloor,
+  evidenceModesAtOrAbove,
   type EvidenceMode,
   type RunbookDefinition,
   type RunbookInputDefinition,
@@ -31,13 +35,39 @@ export function RunbookPreflight({
   const [values, setValues] = useState<Record<string, string | number | boolean>>(() =>
     defaultRunbookInputs(definition),
   );
-  const [evidenceMode, setEvidenceMode] = useState<EvidenceMode>("tail");
+  // The operator's policy and the package's request together set the least this
+  // run may keep. `runbooks_start` applies the same clamp, so this only decides
+  // what the picker offers — never what is actually retained.
+  const policy = useAppStore((state) => state.runbooksOutputRecording);
+  const declared = definitionRecordOutput(definition);
+  const floor = evidenceFloor(policy, declared);
+  const [requested, setRequested] = useState<EvidenceMode>(floor);
+  const evidenceMode = atLeastEvidence(requested, floor);
   const [submitted, setSubmitted] = useState(false);
 
   useEffect(() => {
     setValues(defaultRunbookInputs(definition));
     setSubmitted(false);
   }, [definition]);
+
+  // A package with its own request, or a changed policy, moves the floor. Reset
+  // rather than clamp so the control never shows a stale higher choice the
+  // operator did not make for THIS runbook.
+  useEffect(() => {
+    setRequested(floor);
+  }, [floor]);
+
+  const choices = evidenceModesAtOrAbove(floor);
+  // Name whichever source actually raised the floor, so a greyed-out choice is
+  // never unexplained. The policy wins when both would apply.
+  const floorReason =
+    policy === "all"
+      ? "Settings → Runbooks records every run in full."
+      : policy === "none"
+        ? null
+        : declared
+          ? `This runbook asks to keep ${declared === "none" ? "no output" : declared === "tail" ? "a redacted tail" : "full artifacts"}.`
+          : null;
 
   const target = (() => {
     if (!sessionId) return { context: null, error: "Open and select a terminal first." };
@@ -129,14 +159,19 @@ export function RunbookPreflight({
         <h3 className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-widest text-text-muted">
           <Eye size={11} /> Evidence capture
         </h3>
-        <div className="grid grid-cols-3 gap-1 rounded-md border border-border-subtle bg-bg-card p-1">
-          {(["none", "tail", "full"] as const).map((mode) => (
+        <div
+          className="grid gap-1 rounded-md border border-border-subtle bg-bg-card p-1"
+          style={{ gridTemplateColumns: `repeat(${choices.length}, minmax(0, 1fr))` }}
+        >
+          {choices.map((mode) => (
             <button
               key={mode}
               type="button"
               role="radio"
               aria-checked={evidenceMode === mode}
-              onClick={() => setEvidenceMode(mode)}
+              onClick={() => {
+                setRequested(mode);
+              }}
               className={`rounded px-2 py-1.5 text-[10px] transition-colors ${
                 evidenceMode === mode
                   ? "bg-accent text-bg-primary"
@@ -154,6 +189,11 @@ export function RunbookPreflight({
               ? "Up to 8 KiB of redacted output per attempt is stored in the app database."
               : "Redacted output artifacts are capped at 1 MiB per attempt and stored in protected app data."}
         </p>
+        {floorReason && (
+          <p className="text-[10px] leading-relaxed text-text-muted">
+            {floorReason} You can keep more for this run, not less.
+          </p>
+        )}
       </section>
 
       <section className="rounded-md border border-border-subtle bg-bg-card p-3">

@@ -16,7 +16,12 @@ macro_rules! string_enum {
         }
     ) => {
         $(#[$meta])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        // `JsonSchema` reads the serde attributes below, so the generated
+        // schema and the wire spelling cannot drift apart. Only the enums
+        // reachable from `RunbookDefinition` actually reach the artifact.
+        #[derive(
+            Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema,
+        )]
         #[serde(rename_all = "snake_case")]
         pub enum $name {
             $($variant),+
@@ -294,6 +299,70 @@ impl Default for EvidenceCaptureMode {
     }
 }
 
+impl EvidenceCaptureMode {
+    /// How much a mode retains, so a request can be clamped up to a policy
+    /// floor. Deliberately not an `Ord` derive: declaration order is a
+    /// serialization detail and must not silently become a retention ranking.
+    pub const fn retention_rank(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::Tail => 1,
+            Self::Full => 2,
+        }
+    }
+
+    /// Raise this mode to `floor` when it retains less. Never lowers, which is
+    /// the whole point of the operator policy below.
+    pub const fn at_least(self, floor: Self) -> Self {
+        if self.retention_rank() >= floor.retention_rank() {
+            self
+        } else {
+            floor
+        }
+    }
+}
+
+string_enum! {
+    /// Operator policy from Settings → Runbooks for how much terminal output a
+    /// run keeps as an audit record.
+    ///
+    /// This is NOT a capture mode and its spelling must never reach SQLite:
+    /// `runbook_runs.evidence_mode` and `runbook_evidence.mode` both CHECK
+    /// against none/tail/full. It is resolved together with the definition's own
+    /// request into an `EvidenceCaptureMode` before a run row exists.
+    pub enum EvidenceRecordingPolicy {
+        None => "none",
+        Runbook => "runbook",
+        All => "all",
+    }
+}
+
+// Defaulting to `Runbook` keeps a fresh install behaving exactly as it did
+// before the policy existed: whatever the definition asks for, else tail.
+#[allow(clippy::derivable_impls)]
+impl Default for EvidenceRecordingPolicy {
+    fn default() -> Self {
+        Self::Runbook
+    }
+}
+
+impl EvidenceRecordingPolicy {
+    /// The least capture a run may use, given what the definition asked for.
+    ///
+    /// An operator may raise the mode for one run but never lower it, so `All`
+    /// is an audit floor rather than a suggestion. `None` is deliberately
+    /// "off by default" and not "recording forbidden" — a run the operator
+    /// wants evidence for can still be raised, which keeps the setting from
+    /// becoming a reason to avoid recording anything at all.
+    pub fn floor(self, declared: Option<EvidenceCaptureMode>) -> EvidenceCaptureMode {
+        match self {
+            Self::All => EvidenceCaptureMode::Full,
+            Self::None => EvidenceCaptureMode::None,
+            Self::Runbook => declared.unwrap_or_default(),
+        }
+    }
+}
+
 /// Terminal identity captured at preflight and checked again before dispatch.
 /// A local working directory is part of the approval boundary: changing it can
 /// change the meaning of relative paths. Remote integrations deliberately leave
@@ -430,5 +499,73 @@ mod tests {
         observed.remote_kind = Some("ssh".into());
         observed.remote_target = Some("staging".into());
         assert!(!target.same_execution_context(&observed));
+    }
+
+    #[test]
+    fn the_recording_policy_never_borrows_a_capture_mode_spelling() {
+        // These two enums are adjacent and easy to confuse. `runbook` has no
+        // capture-mode counterpart, and the policy spelling must never be
+        // accepted where a mode is expected: both SQLite columns CHECK against
+        // none/tail/full and would reject it at the persistence boundary.
+        assert_eq!(EvidenceRecordingPolicy::None.as_str(), "none");
+        assert_eq!(EvidenceRecordingPolicy::Runbook.as_str(), "runbook");
+        assert_eq!(EvidenceRecordingPolicy::All.as_str(), "all");
+        assert!("runbook".parse::<EvidenceCaptureMode>().is_err());
+        assert!("all".parse::<EvidenceCaptureMode>().is_err());
+        assert!("tail".parse::<EvidenceRecordingPolicy>().is_err());
+        assert!("full".parse::<EvidenceRecordingPolicy>().is_err());
+        // `as_str` and the serde spelling are the same name written twice.
+        for policy in [
+            EvidenceRecordingPolicy::None,
+            EvidenceRecordingPolicy::Runbook,
+            EvidenceRecordingPolicy::All,
+        ] {
+            let wire = serde_json::to_string(&policy).expect("policy serializes");
+            assert_eq!(wire, format!("\"{}\"", policy.as_str()));
+            assert_eq!(
+                policy.as_str().parse::<EvidenceRecordingPolicy>(),
+                Ok(policy)
+            );
+        }
+    }
+
+    #[test]
+    fn the_policy_is_a_floor_the_operator_may_only_raise() {
+        use EvidenceCaptureMode::{Full, None as NoCapture, Tail};
+
+        // `all` pins the floor at full, so no per-run choice can reduce it.
+        assert_eq!(EvidenceRecordingPolicy::All.floor(None), Full);
+        assert_eq!(EvidenceRecordingPolicy::All.floor(Some(NoCapture)), Full);
+        for requested in [NoCapture, Tail, Full] {
+            assert_eq!(requested.at_least(Full), Full);
+        }
+
+        // `none` is off by default, not forbidden: nothing is kept unless the
+        // operator deliberately raises this run.
+        assert_eq!(EvidenceRecordingPolicy::None.floor(Some(Full)), NoCapture);
+        assert_eq!(NoCapture.at_least(NoCapture), NoCapture);
+        assert_eq!(Full.at_least(NoCapture), Full);
+
+        // `runbook` defers to the definition and falls back to the documented
+        // tail default when it asks for nothing.
+        assert_eq!(EvidenceRecordingPolicy::Runbook.floor(None), Tail);
+        assert_eq!(EvidenceRecordingPolicy::Runbook.floor(Some(Full)), Full);
+        assert_eq!(
+            EvidenceRecordingPolicy::Runbook.floor(Some(NoCapture)),
+            NoCapture
+        );
+        // Raising above the floor is allowed; lowering is not.
+        assert_eq!(NoCapture.at_least(Tail), Tail);
+        assert_eq!(Full.at_least(Tail), Full);
+    }
+
+    #[test]
+    fn retention_rank_orders_modes_by_what_they_keep() {
+        assert!(
+            EvidenceCaptureMode::None.retention_rank() < EvidenceCaptureMode::Tail.retention_rank()
+        );
+        assert!(
+            EvidenceCaptureMode::Tail.retention_rank() < EvidenceCaptureMode::Full.retention_rank()
+        );
     }
 }

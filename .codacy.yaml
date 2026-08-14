@@ -1,0 +1,21 @@
+---
+# Runbook definitions are DATA, not GitHub workflows.
+#
+# A runbook step writes `uses: shell` / `uses: agent` to name its executor —
+# `uses:` is part of the v1alpha1 schema and predates nothing. A YAML scanner
+# that assumes any `uses:` key is a GitHub Action reference reports every step
+# as "a third-party action not pinned to a full length commit SHA", which is
+# neither true nor actionable: the key cannot be renamed without breaking every
+# published package.
+#
+# The test fixtures are excluded for a second reason. `tests/fixtures/runbooks/
+# malicious/` is deliberately hostile YAML — anchors, merge keys, tag
+# directives, path traversal — because its whole job is to prove the parser
+# rejects them. A scanner flagging it is agreeing with the fixture, loudly.
+#
+# Their correctness is enforced by `src-tauri/tests/runbook_fixtures.rs`, which
+# asserts both that every shipped example loads and that every invalid fixture
+# fails closed with the expected error class.
+exclude_paths:
+  - "examples/runbooks/**"
+  - "src-tauri/tests/fixtures/runbooks/**"
