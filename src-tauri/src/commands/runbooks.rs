@@ -936,6 +936,67 @@ pub fn runbooks_draft_validate(
     Ok(validate_draft_preview(&stored.draft.document))
 }
 
+/// Author a draft with the active model. Returns the document WITHOUT storing
+/// it: the frontend passes it to `runbooks_draft_create`, so a generated
+/// runbook enters the wizard by exactly the path a hand-written one does and
+/// there is no persistence, no publish and no run that is special-cased for AI.
+///
+/// Non-streaming, like `ai_name_session`: a partial JSON object is not
+/// something the operator can be shown, so there is nothing to stream. It does
+/// register with `AiState`, which is what makes `ai_cancel` work on it.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn runbooks_ai_generate(
+    app: tauri::AppHandle<Wry>,
+    ai_state: State<'_, crate::agent::AiState>,
+    request_id: String,
+    requirements: String,
+    terminal_context: Option<String>,
+) -> Result<RunbookDraftDocument, String> {
+    use crate::runbooks::authoring::{MAX_CONTEXT_CHARS, MAX_REQUIREMENTS_CHARS};
+
+    gate(&app)?;
+    // Byte budgets over the char limits the authoring module trims to: this is
+    // the IPC boundary refusing an absurd payload, not the shaping step.
+    validate_small_text(
+        &requirements,
+        "runbook requirements",
+        MAX_REQUIREMENTS_CHARS * 4,
+        true,
+    )?;
+    if let Some(context) = terminal_context.as_deref() {
+        validate_small_text(context, "terminal context", MAX_CONTEXT_CHARS * 4, false)?;
+    }
+
+    // Resolved BEFORE the await, matching `runbooks_resume`: the model must be
+    // the one selected when the operator pressed Generate.
+    let model = crate::commands::ai::active_model(&app);
+    let resolved = crate::commands::ai::resolve_provider_for_model(&app, model).await?;
+
+    let cancel = ai_state.register(&request_id);
+    let authored = crate::runbooks::authoring::author_draft(
+        resolved.provider.as_ref(),
+        &requirements,
+        terminal_context.as_deref(),
+        resolved.effort,
+        cancel,
+        // The same gate publishing uses, so a document that would be refused at
+        // save time comes back with that refusal as an editable issue instead.
+        &|document| validate_draft_preview(document).issues,
+    )
+    .await;
+    ai_state.finish(&request_id);
+
+    let authored = authored?;
+    if !authored.issues.is_empty() {
+        // Not an error: the wizard shows these against an editable document.
+        log::info!(
+            "generated runbook has {} unresolved issue(s) after one repair round",
+            authored.issues.len()
+        );
+    }
+    Ok(authored.document)
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub fn runbooks_draft_discard(
     app: tauri::AppHandle<Wry>,
@@ -4890,6 +4951,8 @@ spec:
                 compliant_exit_codes: vec![0],
                 noncompliant_exit_codes: vec![1],
             },
+            apply: None,
+            verify: None,
         });
         let preview = validate_draft_preview(&document);
         assert!(preview.issues.iter().any(|issue| issue.path == "document"));

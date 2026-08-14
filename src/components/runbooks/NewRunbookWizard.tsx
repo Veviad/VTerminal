@@ -32,6 +32,7 @@ import {
   type RunbookInputType,
   type RunbookSource,
 } from "../../lib/runbooks";
+import { RunbookAiGenerator } from "./RunbookAiGenerator";
 import { secondaryButton } from "./runbookUi";
 
 const stages = ["Basics", "Inputs", "Checks", "Review"] as const;
@@ -73,13 +74,16 @@ export function NewRunbookWizard({
     if (open && !draft) void loadSummaries();
   }, [draft, loadSummaries, open]);
 
-  const installDraft = (next: RunbookDraft) => {
+  /** `atStage` exists for the AI path: a generated draft is fully populated, so
+   *  Basics is the wrong place to land — the issue list on Review is what the
+   *  operator needs to see before they trust any of it. */
+  const installDraft = (next: RunbookDraft, atStage = 0) => {
     setDraft(next);
     setDocument(next.document);
     revisionRef.current = next.revision;
     savedJsonRef.current = JSON.stringify(next.document);
     setPreview(null);
-    setStage(0);
+    setStage(atStage);
   };
 
   const enqueueSave = useCallback((snapshot: RunbookDraftDocument, draftId: string) => {
@@ -145,6 +149,27 @@ export function NewRunbookWizard({
     setError(null);
     try {
       installDraft(await runbooksDraftCreate());
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * A generated draft opens on Review, already validated.
+   *
+   * Landing on Basics would ask the operator to page through four stages before
+   * seeing whether the thing is even publishable. The preview is fetched here
+   * rather than by calling `review()` because that reads `draft` from state,
+   * which has not committed yet on this tick.
+   */
+  const installGenerated = async (created: RunbookDraft) => {
+    installDraft(created, 3);
+    setBusy(true);
+    setError(null);
+    try {
+      setPreview(await runbooksDraftValidate(created.id));
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -226,6 +251,8 @@ export function NewRunbookWizard({
       const guardOffset = document?.platform === "any" ? 0 : 1;
       const index = Math.max(0, Number(match?.[1] ?? guardOffset) - guardOffset);
       target = `wizard-step-id-${index}`;
+    } else if (path.startsWith("spec.declaredCapabilities.writes")) {
+      target = "wizard-writes";
     } else if (path === "metadata.version") {
       target = "wizard-version";
     } else if (path === "metadata.title") {
@@ -265,7 +292,7 @@ export function NewRunbookWizard({
               {draft ? "New runbook wizard" : "Runbook drafts"}
             </h2>
             <p className="text-[9px] text-text-muted">
-              Assessment-only authoring · saved locally · no AI generation
+              Checks and remediation · saved locally · every command approved when run
             </p>
           </div>
           <button type="button" autoFocus onClick={close} aria-label="Close wizard" className="text-text-muted hover:text-text-primary">
@@ -279,6 +306,7 @@ export function NewRunbookWizard({
             busy={busy}
             error={error}
             onCreate={() => void create()}
+            onGenerated={installGenerated}
             onResume={(id) => void resume(id)}
             onDiscard={(summary) => void discard(summary)}
           />
@@ -347,19 +375,23 @@ export function NewRunbookWizard({
   );
 }
 
-function DraftChooser({ summaries, busy, error, onCreate, onResume, onDiscard }: {
+function DraftChooser({ summaries, busy, error, onCreate, onGenerated, onResume, onDiscard }: {
   summaries: RunbookDraftSummary[];
   busy: boolean;
   error: string | null;
   onCreate: () => void;
+  onGenerated: (draft: RunbookDraft) => Promise<void>;
   onResume: (id: string) => void;
   onDiscard: (summary: RunbookDraftSummary) => void;
 }) {
   return (
     <div className="min-h-64 overflow-y-auto p-4">
       <button type="button" disabled={busy} onClick={onCreate} className="mb-4 flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-accent/50 bg-accent/5 px-3 py-4 text-[11px] text-accent hover:bg-accent/10 disabled:opacity-50">
-        {busy ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />} Create a new assessment
+        {busy ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />} Start from scratch
       </button>
+      {/* Sibling of the manual path, not a mode: a generated draft is an
+          ordinary draft, and both land in the same stages. */}
+      <RunbookAiGenerator disabled={busy} onGenerated={onGenerated} />
       {summaries.length === 0 && !busy ? <p className="py-6 text-center text-[10px] text-text-muted">No saved drafts yet.</p> : null}
       <div className="space-y-2">
         {summaries.map((summary) => (
@@ -415,7 +447,7 @@ function Basics({ document, onChange }: EditorProps) {
       </div>
       {document.platform === "any" && <p className="rounded border border-warning/30 bg-warning/10 p-2 text-[9px] text-warning">No operating-system guard will be generated. Every command must be portable or handle platform differences itself.</p>}
       <fieldset className="rounded-lg border border-border-subtle p-3">
-        <legend className="px-1 text-[9px] text-text-muted">Declared assessment capabilities</legend>
+        <legend className="px-1 text-[9px] text-text-muted">Declared capabilities</legend>
         <div className="flex flex-wrap gap-4 text-[10px] text-text-secondary">
           <label className="flex items-center gap-1.5"><input type="checkbox" checked={document.network} onChange={(event) => {
             onChange({ ...document, network: event.target.checked });
@@ -424,7 +456,14 @@ function Basics({ document, onChange }: EditorProps) {
             onChange({ ...document, privilege: event.target.checked ? "root" : "none" });
           }} /> Requires root privilege</label>
         </div>
-        <p className="mt-2 text-[8px] text-text-muted">Writes are always empty. This wizard creates check-only assessments.</p>
+        <div className="mt-2">
+          <TextField inputId="wizard-writes" label="Paths this runbook writes to (comma separated, absolute)" value={document.writes.join(", ")} placeholder="/etc/nginx, /usr/local/etc" onChange={(value) => {
+            onChange({ ...document, writes: value.split(",").map((path) => path.trim()).filter(Boolean) });
+          }} />
+        </div>
+        {/* Shown before anything runs, so an omission is a broken promise
+            rather than a cosmetic gap. Only relevant once a step remediates. */}
+        <p className="mt-2 text-[8px] text-text-muted">{document.steps.some((step) => step.apply) ? "This runbook changes the target. Every path it writes to belongs here — the operator sees this list before the first command runs." : "Leave empty for a check-only assessment."}</p>
       </fieldset>
     </div>
   );
@@ -478,7 +517,7 @@ function Inputs({ document, onChange }: EditorProps) {
 
 function Checks({ document, onChange }: EditorProps) {
   const add = () => {
-    onChange({ ...document, steps: [...document.steps, { id: "", title: "", required: true, onFailure: null, check: { kind: "shell", command: "", env: {}, compliantExitCodes: [0], noncompliantExitCodes: [1] } }] });
+    onChange({ ...document, steps: [...document.steps, { id: "", title: "", required: true, onFailure: null, check: { kind: "shell", command: "", env: {}, compliantExitCodes: [0], noncompliantExitCodes: [1] }, apply: null, verify: null }] });
   };
   const update = (index: number, step: RunbookDraftStep) => {
     onChange({ ...document, steps: document.steps.map((item, itemIndex) => itemIndex === index ? step : item) });
@@ -486,7 +525,7 @@ function Checks({ document, onChange }: EditorProps) {
   const move = (index: number, delta: number) => { const steps = [...document.steps]; const [step] = steps.splice(index, 1); steps.splice(index + delta, 0, step); onChange({ ...document, steps }); };
   return (
     <div className="mx-auto max-w-3xl space-y-3">
-      <div className="flex items-center justify-between"><div><h3 className="text-[12px] text-text-primary">Assessment checks</h3><p className="text-[9px] text-text-muted">Each shell command still requires operator approval when run.</p></div><button type="button" onClick={add} className={secondaryButton}><Plus size={11} /> Add check</button></div>
+      <div className="flex items-center justify-between"><div><h3 className="text-[12px] text-text-primary">Steps</h3><p className="text-[9px] text-text-muted">A check decides whether work is needed. Add remediation to also do it. Every command still requires operator approval when run.</p></div><button type="button" onClick={add} className={secondaryButton}><Plus size={11} /> Add step</button></div>
       {document.steps.length === 0 && <Empty>Add at least one shell or manual check.</Empty>}
       {document.steps.map((step, index) => (
         <article key={index} className="rounded-lg border border-border-subtle bg-bg-card p-3">
@@ -518,6 +557,9 @@ function Checks({ document, onChange }: EditorProps) {
           }} /> : <label className={`${labelClass} mt-2`}>Operator instructions<textarea className={`${fieldClass} min-h-24`} value={step.check.instructions} onChange={(event) => {
             update(index, { ...step, check: { kind: "manual", instructions: event.target.value } });
           }} /></label>}
+          <Remediation step={step} onChange={(next) => {
+            update(index, next);
+          }} />
         </article>
       ))}
     </div>
@@ -536,11 +578,125 @@ function ShellCheck({ check, onChange }: { check: Extract<RunbookDraftStep["chec
   }} /></div></details></div>;
 }
 
+/**
+ * Apply and verify, which turn a step from a report into a repair.
+ *
+ * The two are added and removed TOGETHER because the backend rejects an apply
+ * with nothing to prove it worked. Offering them separately would let the
+ * operator build a document that cannot be published and only find out on the
+ * Review stage.
+ */
+function Remediation({ step, onChange }: { step: RunbookDraftStep; onChange: (step: RunbookDraftStep) => void }) {
+  const enabled = step.apply !== null;
+  const enable = () => {
+    onChange({
+      ...step,
+      apply: { kind: "shell", command: "", env: {}, successExitCodes: [0] },
+      // Re-running the check is the usual proof, so seed it with that.
+      verify: step.check.kind === "shell"
+        ? { kind: "shell", command: step.check.command, env: step.check.env, passExitCodes: [0] }
+        : { kind: "shell", command: "", env: {}, passExitCodes: [0] },
+    });
+  };
+  return (
+    <div className="mt-3 border-t border-border-subtle pt-2">
+      <label className="flex items-center gap-1.5 text-[9px] text-text-secondary"><input type="checkbox" checked={enabled} onChange={(event) => {
+        if (event.target.checked) enable();
+        else onChange({ ...step, apply: null, verify: null });
+      }} /> Remediate when this check fails</label>
+      {enabled && step.apply && (
+        <div className="mt-2 space-y-3">
+          <PhaseFields
+            legend="Apply — the change. Must be safe to run twice."
+            kind={step.apply.kind}
+            onKind={(kind) => {
+              onChange({ ...step, apply: kind === "manual" ? { kind: "manual", instructions: "" } : { kind: "shell", command: "", env: {}, successExitCodes: [0] } });
+            }}
+            action={step.apply}
+            codesLabel="Success codes"
+            codes={step.apply.kind === "shell" ? step.apply.successExitCodes : []}
+            onAction={(command, env) => {
+              onChange({ ...step, apply: { kind: "shell", command, env, successExitCodes: step.apply?.kind === "shell" ? step.apply.successExitCodes : [0] } });
+            }}
+            onCodes={(codes) => {
+              if (step.apply?.kind === "shell") onChange({ ...step, apply: { ...step.apply, successExitCodes: codes } });
+            }}
+            onInstructions={(instructions) => {
+              onChange({ ...step, apply: { kind: "manual", instructions } });
+            }}
+          />
+          {step.verify && (
+            <PhaseFields
+              legend="Verify — proof it worked. Required."
+              kind={step.verify.kind}
+              onKind={(kind) => {
+                onChange({ ...step, verify: kind === "manual" ? { kind: "manual", instructions: "" } : { kind: "shell", command: "", env: {}, passExitCodes: [0] } });
+              }}
+              action={step.verify}
+              codesLabel="Pass codes"
+              codes={step.verify.kind === "shell" ? step.verify.passExitCodes : []}
+              onAction={(command, env) => {
+                onChange({ ...step, verify: { kind: "shell", command, env, passExitCodes: step.verify?.kind === "shell" ? step.verify.passExitCodes : [0] } });
+              }}
+              onCodes={(codes) => {
+                if (step.verify?.kind === "shell") onChange({ ...step, verify: { ...step.verify, passExitCodes: codes } });
+              }}
+              onInstructions={(instructions) => {
+                onChange({ ...step, verify: { kind: "manual", instructions } });
+              }}
+            />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** One phase's editor. Apply and verify differ only in what their exit codes
+ *  are called, which is why they share this. */
+function PhaseFields({ legend, kind, onKind, action, codesLabel, codes, onAction, onCodes, onInstructions }: {
+  legend: string;
+  kind: "shell" | "manual";
+  onKind: (kind: "shell" | "manual") => void;
+  action: { kind: "shell"; command: string; env: Record<string, string> } | { kind: "manual"; instructions: string };
+  codesLabel: string;
+  codes: number[];
+  onAction: (command: string, env: Record<string, string>) => void;
+  onCodes: (codes: number[]) => void;
+  onInstructions: (instructions: string) => void;
+}) {
+  return (
+    <fieldset className="rounded-md border border-border-subtle p-2">
+      <legend className="px-1 text-[9px] text-text-muted">{legend}</legend>
+      <label className={labelClass}>Type<select className={fieldClass} value={kind} onChange={(event) => {
+        onKind(event.target.value as "shell" | "manual");
+      }}><option value="shell">Shell</option><option value="manual">Manual</option></select></label>
+      {action.kind === "shell" ? (
+        <div className="mt-2 space-y-2">
+          <label className={labelClass}>Single-line command<textarea className={`${fieldClass} min-h-16 font-mono`} value={action.command} onChange={(event) => {
+            onAction(event.target.value, action.env);
+          }} /></label>
+          <label className={labelClass}>Input mappings (one <code>VRUN_NAME=inputId</code> per line)<textarea className={`${fieldClass} min-h-14 font-mono`} value={Object.entries(action.env).map(([name, id]) => `${name}=${id}`).join("\n")} onChange={(event) => {
+            onAction(action.command, parseMappings(event.target.value));
+          }} /></label>
+          <details><summary className="cursor-pointer text-[9px] text-text-muted">Advanced exit codes</summary><div className="mt-2"><TextField label={codesLabel} value={codes.join(", ")} onChange={(value) => {
+            onCodes(parseCodes(value));
+          }} /></div></details>
+        </div>
+      ) : (
+        <label className={`${labelClass} mt-2`}>Operator instructions<textarea className={`${fieldClass} min-h-20`} value={action.instructions} onChange={(event) => {
+          onInstructions(event.target.value);
+        }} /></label>
+      )}
+    </fieldset>
+  );
+}
+
 function Review({ preview, document, onIssue }: { preview: RunbookDraftPreview | null; document: RunbookDraftDocument; onIssue: (path: string) => void }) {
   if (!preview) return <p className="py-10 text-center text-[10px] text-text-muted">Saving and validating preview…</p>;
   return <div className="mx-auto max-w-3xl space-y-3"><div className={`rounded-lg border p-3 ${preview.issues.length ? "border-error/30 bg-error/10" : "border-success/30 bg-success/10"}`}><p className="text-[11px] font-medium text-text-primary">{preview.issues.length ? `${preview.issues.length} issue${preview.issues.length === 1 ? "" : "s"} must be fixed` : "Ready to publish"}</p>{preview.issues.map((issue, index) => <button type="button" key={`${issue.path}:${index}`} onClick={() => {
     onIssue(issue.path);
-  }} className="mt-1 block text-start text-[9px] text-error hover:underline"><code>{issue.path}</code>: {issue.message}</button>)}</div><div className="grid grid-cols-3 gap-2 text-[9px]"><Summary label="Platform" value={document.platform === "macos13" ? "macOS 13+" : document.platform === "linux" ? "Linux" : "Any"} /><Summary label="Inputs" value={String(document.inputs.length)} /><Summary label="Checks" value={String(document.steps.length + (document.platform === "any" ? 0 : 1))} /></div>{preview.sourceYaml && <details open><summary className="cursor-pointer text-[10px] text-text-secondary">Generated runbook.vrun.yaml</summary><pre className="mt-2 max-h-80 overflow-auto rounded-lg border border-border-subtle bg-bg-primary p-3 text-[9px] text-text-muted">{preview.sourceYaml}</pre></details>}</div>;
+  }} className="mt-1 block text-start text-[9px] text-error hover:underline"><code>{issue.path}</code>: {issue.message}</button>)}</div><div className="grid grid-cols-3 gap-2 text-[9px]"><Summary label="Platform" value={document.platform === "macos13" ? "macOS 13+" : document.platform === "linux" ? "Linux" : "Any"} /><Summary label="Inputs" value={String(document.inputs.length)} /><Summary label="Steps" value={`${document.steps.length + (document.platform === "any" ? 0 : 1)}${document.steps.some((step) => step.apply) ? ` · ${document.steps.filter((step) => step.apply).length} remediating` : ""}`} /></div>{preview.sourceYaml && <details open><summary className="cursor-pointer text-[10px] text-text-secondary">Generated runbook.vrun.yaml</summary><pre className="mt-2 max-h-80 overflow-auto rounded-lg border border-border-subtle bg-bg-primary p-3 text-[9px] text-text-muted">{preview.sourceYaml}</pre></details>}</div>;
 }
 
 type EditorProps = { document: RunbookDraftDocument; onChange: (document: RunbookDraftDocument) => void };

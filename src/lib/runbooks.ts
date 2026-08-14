@@ -44,12 +44,36 @@ export type RunbookDraftCheck =
     }
   | { kind: "manual"; instructions: string };
 
+/** Remediation. Its exit codes mean "the work succeeded", not "compliant". */
+export type RunbookDraftApply =
+  | {
+      kind: "shell";
+      command: string;
+      env: Record<string, string>;
+      successExitCodes: number[];
+    }
+  | { kind: "manual"; instructions: string };
+
+/** Proof the remediation worked. Required whenever `apply` is present. */
+export type RunbookDraftVerify =
+  | {
+      kind: "shell";
+      command: string;
+      env: Record<string, string>;
+      passExitCodes: number[];
+    }
+  | { kind: "manual"; instructions: string };
+
 export interface RunbookDraftStep {
   id: string;
   title: string;
   required: boolean;
   onFailure: OnFailure | null;
   check: RunbookDraftCheck;
+  /** Null for an assessment-only step. */
+  apply: RunbookDraftApply | null;
+  /** The backend REJECTS an apply without one, so the two move together. */
+  verify: RunbookDraftVerify | null;
 }
 
 export interface RunbookDraftDocument {
@@ -62,6 +86,8 @@ export interface RunbookDraftDocument {
   network: boolean;
   privilege: "none" | "root";
   defaultOnFailure: OnFailure;
+  /** Absolute paths the runbook may write to, disclosed in preflight. */
+  writes: string[];
   inputs: RunbookDraftInput[];
   steps: RunbookDraftStep[];
 }
@@ -894,6 +920,25 @@ export const runbooksDraftSave = (
 
 export const runbooksDraftValidate = (draftId: string) =>
   invoke<RunbookDraftPreview>("runbooks_draft_validate", { draft_id: draftId });
+
+/**
+ * Author a draft with the active model. Collected, not streamed: a partial JSON
+ * object is nothing the operator can be shown.
+ *
+ * Nothing is stored — the caller passes the result to `runbooksDraftCreate`, so
+ * a generated runbook enters the wizard by the same path a hand-written one
+ * does. Cancel with the shared `aiCancel(requestId)`.
+ */
+export const runbooksAiGenerate = (
+  requestId: string,
+  requirements: string,
+  terminalContext: string | null,
+) =>
+  invoke<RunbookDraftDocument>("runbooks_ai_generate", {
+    request_id: requestId,
+    requirements,
+    terminal_context: terminalContext,
+  });
 
 export const runbooksDraftPublish = (draftId: string, expectedRevision: number) =>
   invoke<RunbookSourceWire>("runbooks_draft_publish", {
