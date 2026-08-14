@@ -60,6 +60,13 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
     string | null
   >(null);
 
+  const ignoreAsync = (operation: Promise<unknown> | void) => {
+    if (!operation || typeof operation.then !== "function") return;
+    operation.catch((error) => {
+      useRunbookStore.getState().setError(String(error));
+    });
+  };
+
   if (!run) {
     return (
       <div className="flex min-h-0 flex-1 items-center justify-center p-5 text-center">
@@ -201,7 +208,7 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
               {terminal && (
                 <button
                   onClick={() => {
-                    openReport();
+                    ignoreAsync(openReport());
                   }}
                   className={primaryButton}
                 >
@@ -210,7 +217,7 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
               )}
               <button
                 onClick={() => {
-                  openRunbookReview();
+                  ignoreAsync(openRunbookReview());
                 }}
                 disabled={definitionReviewLoading}
                 className={secondaryButton}
@@ -220,7 +227,7 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
               {run.status === "interrupted" && sessionId && (
                 <button
                   onClick={() => {
-                    resume(run.run_id, sessionId);
+                    ignoreAsync(resume(run.run_id, sessionId));
                   }}
                   disabled={busyAction === "resume"}
                   className={primaryButton}
@@ -234,7 +241,7 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
                     onClick={() => {
                       if (confirmCancel) {
                         setConfirmCancel(false);
-                        cancel(run.run_id);
+                        ignoreAsync(cancel(run.run_id));
                       } else {
                         setConfirmCancel(true);
                       }
@@ -299,18 +306,20 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
               busy={busyAction !== null}
               autoApproving={autoApproving}
               onApproveAll={() => {
-                approveAllPendingSteps(run.run_id);
+                ignoreAsync(approveAllPendingSteps(run.run_id));
               }}
               onCancelApproveAll={() => {
-                cancelApproveAll(run.run_id);
+                ignoreAsync(cancelApproveAll(run.run_id));
               }}
               onRespond={(approved, command, shellAttested) => {
-                respondApproval(
-                  run.run_id,
-                  pendingApproval.approval_id,
-                  approved,
-                  command,
-                  shellAttested,
+                ignoreAsync(
+                  respondApproval(
+                    run.run_id,
+                    pendingApproval.approval_id,
+                    approved,
+                    command,
+                    shellAttested,
+                  ),
                 );
               }}
             />
@@ -322,12 +331,14 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
             request={pendingManual}
             busy={busyAction === `manual:${pendingManual.step_id}`}
             onSubmit={(outcome, comment, evidence) => {
-              submitManual(
-                run.run_id,
-                pendingManual.step_id,
-                outcome,
-                comment,
-                evidence,
+              ignoreAsync(
+                submitManual(
+                  run.run_id,
+                  pendingManual.step_id,
+                  outcome,
+                  comment,
+                  evidence,
+                ),
               );
             }}
           />
@@ -338,12 +349,14 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
             request={pendingOperator}
             busy={busyAction?.startsWith("decision:") ?? false}
             onDecide={(kind, reason) => {
-              decide(run.run_id, {
-                kind,
-                step_id: pendingOperator.step_id,
-                actor: "operator",
-                reason,
-              });
+              ignoreAsync(
+                decide(run.run_id, {
+                  kind,
+                  step_id: pendingOperator.step_id,
+                  actor: "operator",
+                  reason,
+                }),
+              );
             }}
           />
         )}
