@@ -2108,20 +2108,6 @@ a:hover {
   line-height: 1.5;
 }
 
-/* Gatekeeper has two routes and each needs its own emphasis; a plain <p> run
-   made them read as one paragraph of prose. */
-.route {
-  margin: 1rem 0 0;
-}
-
-.route > strong {
-  display: block;
-  margin-bottom: 0.3rem;
-  color: var(--text);
-  font-size: 0.88rem;
-  font-weight: 750;
-}
-
 /* -------------------------------------------------------------- keyboard */
 
 .keys-grid {
