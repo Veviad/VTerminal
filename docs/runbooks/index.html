@@ -89,6 +89,7 @@
             <li><a href="#package-format">Package format</a></li>
             <li><a href="#export-and-reuse">Export &amp; reuse</a></li>
             <li><a href="#lifecycle">Lifecycle</a></li>
+            <li><a href="#goals">Goal-directed steps</a></li>
             <li><a href="#actions">Actions &amp; approvals</a></li>
             <li><a href="#reports">Evidence &amp; reports</a></li>
             <li><a href="#ansible">Ansible status</a></li>
@@ -133,8 +134,8 @@
                 <div>
                   <strong>Review the preflight</strong>
                   Choose the terminal, confirm its observed target, enter only
-                  non-secret inputs, review declared capabilities, and select an
-                  evidence mode.
+                  non-secret inputs, review declared capabilities, and confirm
+                  how much output this run keeps.
                 </div>
               </li>
               <li>
@@ -524,6 +525,104 @@ spec:
 
           <section
             class="guide-section"
+            id="goals"
+            aria-labelledby="goals-title"
+          >
+            <p class="eyebrow">Adaptive Remediation</p>
+            <h2 id="goals-title">State the Goal, Not the Commands</h2>
+            <p>
+              Installing Docker is <code>apt-get</code> on Debian,
+              <code>dnf</code> on RHEL and <code>pacman</code> on Arch. A fixed
+              command list needs one runbook per distribution. Handing the whole
+              job to a model swaps that for a worse problem: the model decides
+              both what to do and whether it worked.
+            </p>
+            <p>
+              A goal splits those apart. You state what must be true and the
+              exact conditions that prove it. The model picks the commands. The
+              engine runs the conditions and decides.
+            </p>
+
+            <pre class="guide-code"><code>- id: docker-running
+  title: Docker Engine is installed and running
+  goal:
+    intent: |
+      Docker Engine is installed from the distribution's own
+      repository and its daemon is running and enabled at boot.
+    checks:
+      - command: "command -v docker"
+        expect: [0]
+      - command: "docker info &gt;/dev/null 2&gt;&amp;1"
+        expect: [0]
+  constraints:
+    maxCommands: 12
+    privilege: root
+  apply:
+    uses: agent
+    instructions: |
+      Install Docker Engine using this distribution's package manager.</code></pre>
+
+            <p>
+              There is no <code>check</code> and no <code>verify</code>: the
+              goal serves as both, so one condition is written once instead of
+              twice. Goal conditions are ordinary commands in your visible
+              terminal and carry the same <code>shell_observed</code> assurance
+              as any other. Nothing claims a more trustworthy executor — what
+              changed is who reads the result.
+            </p>
+
+            <div class="guide-grid">
+              <article class="guide-card">
+                <h3>Discover the target first</h3>
+                <p>
+                  <code>spec.context.discover</code> runs a few probes once,
+                  before the first step, each individually approved. Their
+                  output is shown to every model phase as
+                  <strong>data, never instructions</strong>, so one runbook can
+                  serve Debian, RHEL and Arch.
+                </p>
+              </article>
+              <article class="guide-card">
+                <h3>Bounds that narrow</h3>
+                <p>
+                  <code>constraints</code> cap commands, wall clock and model
+                  rounds, and can refuse network access or privilege
+                  escalation. Every field narrows; none can widen what you
+                  already allow.
+                </p>
+              </article>
+              <article class="guide-card">
+                <h3>Refused before the card</h3>
+                <p>
+                  A proposal that breaks a bound is refused before an approval
+                  card is drawn, so it costs the model a round rather than
+                  costing you a click. The refusal returns to the model, which
+                  can then try something allowed.
+                </p>
+              </article>
+              <article class="guide-card">
+                <h3>Nothing implicit</h3>
+                <p>
+                  <code>context.inputs</code> names which input values the model
+                  may see and <code>context.priorSteps</code> whether it learns
+                  what earlier steps did. Both are opt-in per step.
+                </p>
+              </article>
+            </div>
+
+            <div class="guide-callout">
+              <strong>Best-effort bounds, not a sandbox.</strong>
+              <p>
+                They read command text. They cannot see through a script the
+                model wrote in an earlier step, an alias in your dotfiles, or
+                <code>python -c</code>. They narrow what a careless model does;
+                they do not contain a hostile one.
+              </p>
+            </div>
+          </section>
+
+          <section
+            class="guide-section"
             id="actions"
             aria-labelledby="actions-title"
           >
@@ -541,8 +640,12 @@ spec:
               <article class="guide-card">
                 <h3><code>agent</code></h3>
                 <p>
-                  Gives bounded Markdown instructions to the current model. Each
-                  mutation it proposes receives its own approval.
+                  Gives bounded Markdown instructions to the current model, plus
+                  whatever the step's <a href="#goals">goal and context</a>
+                  allow it to know. Each command it proposes receives its own
+                  approval, and the model phase itself is approved separately —
+                  that card names the goal and the enforced bounds before the
+                  model has them.
                 </p>
               </article>
               <article class="guide-card">
@@ -645,7 +748,11 @@ spec:
               </article>
               <article class="guide-card">
                 <h3><code>full</code></h3>
-                <p>Keep a redacted artifact capped at 1 MiB per attempt.</p>
+                <p>
+                  Keep the tail plus a redacted artifact capped at 1 MiB per
+                  attempt, readable from the report with
+                  <strong>View recorded output</strong>.
+                </p>
               </article>
               <article class="guide-card">
                 <h3>Export report</h3>
@@ -654,6 +761,29 @@ spec:
                   folder you choose. This is not a reusable package export.
                 </p>
               </article>
+            </div>
+
+            <p>
+              <strong>Settings → Runbooks → Record terminal output</strong> sets
+              the floor: <em>Never</em>, <em>As the runbook asks</em> (the
+              default, honouring <code>spec.audit.recordOutput</code>), or
+              <em>Always, in full</em>. Preflight offers only levels at or above
+              it, so a single run can be raised but never lowered, and the clamp
+              is applied in Rust rather than in the picker.
+            </p>
+
+            <div class="guide-callout">
+              <strong>What a recording is and is not.</strong>
+              <p>
+                Redaction catches recognisable credential shapes, not every
+                secret. Capture reads what the terminal still holds in
+                scrollback, so a chatty command yields an honest tail rather
+                than a complete transcript, and truncation is marked. An
+                artifact's digest is re-verified on every read: one altered
+                since the run is reported unreadable rather than shown.
+                Recorded output is kept until you delete the run, and report
+                evidence is never sent to a model to improve prose.
+              </p>
             </div>
 
             <p>
