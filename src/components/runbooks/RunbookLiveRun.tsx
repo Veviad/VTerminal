@@ -60,6 +60,20 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
     string | null
   >(null);
 
+  // LAST HOOK IN THIS COMPONENT. Everything below is guarded by early returns —
+  // no run selected, the report sub-view, the definition sub-view — so a hook
+  // placed after them is skipped on those renders and React tears the whole app
+  // down with "rendered fewer hooks than expected". This effect used to sit
+  // below two of them, which made **View report** on a finished run a
+  // guaranteed crash: that button only exists once the run is terminal.
+  const activeRunId = run?.run_id ?? null;
+  useEffect(() => {
+    setShowDefinitionReview(false);
+    setDefinitionReview(null);
+    setDefinitionReviewLoading(false);
+    setDefinitionReviewError(null);
+  }, [activeRunId]);
+
   const ignoreAsync = (operation?: Promise<unknown>) => {
     if (!operation || typeof operation.then !== "function") return;
     operation.catch((error) => {
@@ -108,13 +122,6 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
   const pendingApproval = run.pending_approval;
   const pendingManual = run.pending_manual;
   const pendingOperator = run.pending_operator;
-
-  useEffect(() => {
-    setShowDefinitionReview(false);
-    setDefinitionReview(null);
-    setDefinitionReviewLoading(false);
-    setDefinitionReviewError(null);
-  }, [run.run_id]);
 
   const openReport = async () => {
     if (report?.run_id !== run.run_id) await loadReport(run.run_id);
