@@ -1,11 +1,36 @@
 import { useSettings } from "../../hooks/useSettings";
-import {
-  EVIDENCE_RECORDING_POLICIES,
-  type EvidenceRecordingPolicy,
-} from "../../lib/runbooks";
+import { type EvidenceRecordingPolicy } from "../../lib/runbooks";
 import { S } from "../../lib/strings";
 import { useAppStore } from "../../stores/appStore";
 import { Field, Toggle, inputClass } from "../ui/Row";
+
+/** The three policies, least to most retaining, with their copy attached.
+ *
+ * A list rather than a lookup keyed by the stored value: the value arrives from
+ * the settings store as a plain string, and indexing a copy map with it would
+ * be an unchecked object access for no gain. Here the union is checked at the
+ * literals and the order is the order the picker shows. */
+const RECORDING_CHOICES: {
+  value: EvidenceRecordingPolicy;
+  label: string;
+  description: string;
+}[] = [
+  {
+    value: "none",
+    label: S.settings.runbooks.recordingOptions.none,
+    description: S.settings.runbooks.recordingDescriptions.none,
+  },
+  {
+    value: "runbook",
+    label: S.settings.runbooks.recordingOptions.runbook,
+    description: S.settings.runbooks.recordingDescriptions.runbook,
+  },
+  {
+    value: "all",
+    label: S.settings.runbooks.recordingOptions.all,
+    description: S.settings.runbooks.recordingDescriptions.all,
+  },
+];
 
 /** Capability gate for the experimental Runbooks subsystem.
  *
@@ -49,15 +74,15 @@ export function RunbooksSettings() {
                 void save({ runbooks_output_recording: event.target.value })
               }
             >
-              {EVIDENCE_RECORDING_POLICIES.map((policy) => (
-                <option key={policy} value={policy}>
-                  {S.settings.runbooks.recordingOptions[policy]}
+              {RECORDING_CHOICES.map((choice) => (
+                <option key={choice.value} value={choice.value}>
+                  {choice.label}
                 </option>
               ))}
             </select>
           </Field>
           <p className="text-[11px] leading-relaxed text-text-secondary">
-            {S.settings.runbooks.recordingDescriptions[recording as EvidenceRecordingPolicy]}
+            {RECORDING_CHOICES.find((choice) => choice.value === recording)?.description}
           </p>
           <p className="text-[10px] leading-relaxed text-text-muted">
             {S.settings.runbooks.recordingRetention}

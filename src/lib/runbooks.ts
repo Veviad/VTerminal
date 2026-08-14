@@ -21,11 +21,6 @@ export const EVIDENCE_MODES: readonly EvidenceMode[] = ["none", "tail", "full"];
  * spellings from `EvidenceMode`: `runbook` is not a capture mode and both
  * SQLite columns would reject it. */
 export type EvidenceRecordingPolicy = "none" | "runbook" | "all";
-export const EVIDENCE_RECORDING_POLICIES: readonly EvidenceRecordingPolicy[] = [
-  "none",
-  "runbook",
-  "all",
-];
 export type OnFailure = "pause" | "stop" | "continue";
 export type RunbookActionKind = "shell" | "agent" | "manual" | "ansible.playbook";
 export type RunbookDraftPlatform = "macos13" | "linux" | "any";
