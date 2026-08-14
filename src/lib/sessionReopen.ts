@@ -16,7 +16,7 @@ import { useAppStore } from "../stores/appStore";
 import { getTerm } from "./termRegistry";
 import { setAiPanelOpen } from "./aiPanel";
 import { hydrateAttachments } from "./attachInput";
-import { replayBanner } from "./replayBanner";
+import { replayBanner, stripReplayBanners } from "./replayBanner";
 import { archiveTranscriptOnly } from "./sessionArchive";
 import type { AiMessage, ArchivedMessage, LaunchSpec } from "./types";
 
@@ -97,7 +97,9 @@ export async function reopenSession(
   const dims = useAppStore.getState().termDims;
 
   const replay = scrollback
-    ? scrollback +
+    ? // Strip BEFORE appending: the fresh banner is the one that belongs, and
+      // an archive row written before captures were clean carries its own.
+      stripReplayBanners(scrollback) +
       replayBanner(
         {
           kind: "reopened",
