@@ -194,6 +194,12 @@ impl ApprovalState {
             map.retain(|_, (rid, _)| rid != request_id);
         }
     }
+
+    pub fn drain_all(&self) {
+        if let Ok(mut map) = self.pending.lock() {
+            map.clear();
+        }
+    }
 }
 
 /// What the frontend observed after typing a command into the live PTY.
@@ -246,6 +252,12 @@ impl PtyExecState {
             map.retain(|_, (rid, _)| rid != request_id);
         }
     }
+
+    pub fn drain_all(&self) {
+        if let Ok(mut map) = self.pending.lock() {
+            map.clear();
+        }
+    }
 }
 
 /// Cancellation registry: request_id → watch sender flipped true on cancel
@@ -277,6 +289,25 @@ impl AiState {
         if let Ok(mut map) = self.cancel.lock() {
             map.remove(request_id);
         }
+    }
+
+    /// Signal every active generation without removing its registry entry.
+    /// Keeping entries until `finish` gives updater shutdown a truthful idle
+    /// predicate instead of declaring success before providers/subprocesses
+    /// have observed cancellation.
+    pub fn cancel_all(&self) {
+        if let Ok(map) = self.cancel.lock() {
+            for sender in map.values() {
+                let _ = sender.send(true);
+            }
+        }
+    }
+
+    pub fn is_idle(&self) -> bool {
+        self.cancel
+            .lock()
+            .map(|map| map.is_empty())
+            .unwrap_or(false)
     }
 }
 
@@ -370,6 +401,12 @@ impl SteerState {
     pub fn drain_for_request(&self, request_id: &str) {
         if let Ok(mut map) = self.pending.lock() {
             map.remove(request_id);
+        }
+    }
+
+    pub fn drain_all(&self) {
+        if let Ok(mut map) = self.pending.lock() {
+            map.clear();
         }
     }
 }

@@ -1,25 +1,32 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, renderHook } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import type { UpdateDownloadEvent, UpdateMetadata } from "../lib/types";
 
 const updateCheck = vi.fn<() => Promise<UpdateMetadata | null>>();
-const updateInstall = vi.fn<(onEvent: (event: UpdateDownloadEvent) => void) => Promise<void>>();
+const updateDownload = vi.fn<(onEvent: (event: UpdateDownloadEvent) => void) => Promise<string>>();
+const updateCancel = vi.fn<() => Promise<void>>();
+const updateApply = vi.fn<(downloadId: string) => Promise<void>>();
 const appRestart = vi.fn<() => Promise<void>>();
-const flushAll = vi.fn<(opts?: { final?: boolean; strict?: boolean }) => Promise<void>>();
+const preparePersistenceForExit = vi.fn<() => Promise<void>>();
+const resumePersistenceAfterFailedExit = vi.fn<() => Promise<void>>();
 
 vi.mock("../lib/tauri", () => ({
   updateCheck: () => updateCheck(),
-  updateInstall: (onEvent: (event: UpdateDownloadEvent) => void) => updateInstall(onEvent),
+  updateDownload: (onEvent: (event: UpdateDownloadEvent) => void) => updateDownload(onEvent),
+  updateCancel: () => updateCancel(),
+  updateApply: (downloadId: string) => updateApply(downloadId),
   appRestart: () => appRestart(),
 }));
 vi.mock("../lib/sessionPersistence", () => ({
-  flushAll: (opts: { final?: boolean; strict?: boolean }) => flushAll(opts),
+  preparePersistenceForExit: () => preparePersistenceForExit(),
+  resumePersistenceAfterFailedExit: () => resumePersistenceAfterFailedExit(),
 }));
 
 const {
   UPDATE_CHECK_INTERVAL_MS,
   __resetAppUpdatesForTests,
   checkForUpdates,
+  cancelPendingUpdate,
   dismissUpdatePrompt,
   installPendingUpdate,
   startAutoUpdateChecks,
@@ -42,8 +49,12 @@ beforeEach(() => {
   useUpdateStore.setState({ workspaceReady: true });
   useAppStore.setState({ settingsLoaded: false, autoUpdateEnabled: false });
   updateCheck.mockResolvedValue(available);
+  updateDownload.mockResolvedValue("download-1");
+  updateCancel.mockResolvedValue();
+  updateApply.mockResolvedValue();
   appRestart.mockResolvedValue();
-  flushAll.mockResolvedValue();
+  preparePersistenceForExit.mockResolvedValue();
+  resumePersistenceAfterFailedExit.mockResolvedValue();
 });
 
 afterEach(() => vi.useRealTimers());
@@ -165,7 +176,7 @@ describe("installation", () => {
     await checkForUpdates();
     useUpdateStore.setState({ workspaceReady: false });
     await installPendingUpdate();
-    expect(updateInstall).not.toHaveBeenCalled();
+    expect(updateDownload).not.toHaveBeenCalled();
     expect(useUpdateStore.getState().error).toMatch(/Finish restoring the workspace/);
   });
 
@@ -176,54 +187,172 @@ describe("installation", () => {
       status: "error",
       error: "No update is available to install.",
     });
-    expect(updateInstall).not.toHaveBeenCalled();
+    expect(updateDownload).not.toHaveBeenCalled();
   });
 
-  it("streams progress, flushes sessions, and restarts only after install", async () => {
-    updateInstall.mockImplementation(async (onEvent) => {
-      onEvent({ event: "Started", data: { contentLength: 100 } });
-      onEvent({ event: "Progress", data: { chunkLength: 40 } });
-      onEvent({ event: "Progress", data: { chunkLength: 60 } });
-      onEvent({ event: "Finished" });
+  it("uses absolute progress and moves through every verified exit phase", async () => {
+    updateDownload.mockImplementation(async (onEvent) => {
+      onEvent({ event: "Started", data: { totalBytes: 100 } });
+      onEvent({ event: "Progress", data: { downloadedBytes: 40, totalBytes: 100 } });
+      // Repeated cumulative events are idempotent; they are not chunk deltas.
+      onEvent({ event: "Progress", data: { downloadedBytes: 40, totalBytes: 100 } });
+      onEvent({ event: "Progress", data: { downloadedBytes: 100, totalBytes: 100 } });
+      onEvent({ event: "Verifying" });
+      onEvent({ event: "ReadyToInstall" });
+      return "download-1";
     });
     await checkForUpdates();
+    const statuses: string[] = [];
+    const unsubscribe = useUpdateStore.subscribe((state) => statuses.push(state.status));
     await installPendingUpdate();
+    unsubscribe();
 
     expect(useUpdateStore.getState()).toMatchObject({
-      status: "installing",
+      status: "restarting",
       downloadedBytes: 100,
       totalBytes: 100,
     });
-    expect(flushAll).toHaveBeenCalledTimes(1);
-    expect(flushAll).toHaveBeenCalledWith({ final: true, strict: true });
+    expect(statuses.filter((status, index) => status !== statuses[index - 1])).toEqual([
+      "downloading",
+      "verifying",
+      "saving",
+      "installing",
+      "restarting",
+    ]);
+    expect(preparePersistenceForExit).toHaveBeenCalledTimes(1);
+    expect(updateApply).toHaveBeenCalledWith("download-1");
     expect(appRestart).toHaveBeenCalledTimes(1);
-    expect(flushAll.mock.invocationCallOrder[0]).toBeLessThan(appRestart.mock.invocationCallOrder[0]);
+    expect(preparePersistenceForExit.mock.invocationCallOrder[0]).toBeLessThan(
+      updateApply.mock.invocationCallOrder[0],
+    );
+    expect(updateApply.mock.invocationCallOrder[0]).toBeLessThan(appRestart.mock.invocationCallOrder[0]);
+    expect(resumePersistenceAfterFailedExit).not.toHaveBeenCalled();
   });
 
-  it("does not restart when the required final snapshot fails", async () => {
-    updateInstall.mockResolvedValue();
-    flushAll.mockRejectedValue(new Error("snapshot failed"));
+  it("cancels an in-flight download without preparing or applying the update", async () => {
+    let rejectDownload: ((reason?: unknown) => void) | undefined;
+    updateDownload.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        rejectDownload = reject;
+      }),
+    );
+    updateCancel.mockImplementation(async () => {
+      rejectDownload?.(new Error("update download cancelled"));
+    });
+    await checkForUpdates();
+    const statuses: string[] = [];
+    const unsubscribe = useUpdateStore.subscribe((state) => statuses.push(state.status));
+    const installation = installPendingUpdate();
+    await waitFor(() => expect(useUpdateStore.getState().status).toBe("downloading"));
+
+    const cancellation = cancelPendingUpdate();
+    await Promise.all([installation, cancellation]);
+    unsubscribe();
+
+    expect(statuses).toContain("cancelling");
+    expect(updateCancel).toHaveBeenCalledTimes(1);
+    expect(preparePersistenceForExit).not.toHaveBeenCalled();
+    expect(updateApply).not.toHaveBeenCalled();
+    expect(appRestart).not.toHaveBeenCalled();
+    expect(useUpdateStore.getState()).toMatchObject({
+      status: "available",
+      error: null,
+      promptOpen: true,
+      downloadedBytes: 0,
+      totalBytes: null,
+    });
+  });
+
+  it("ignores non-monotonic and late transfer events", async () => {
+    updateDownload.mockImplementation(async (onEvent) => {
+      onEvent({ event: "Started", data: { totalBytes: 100 } });
+      onEvent({ event: "Progress", data: { downloadedBytes: 80, totalBytes: 100 } });
+      onEvent({ event: "Progress", data: { downloadedBytes: 20, totalBytes: 100 } });
+      expect(useUpdateStore.getState()).toMatchObject({
+        status: "downloading",
+        downloadedBytes: 80,
+        totalBytes: 100,
+      });
+
+      onEvent({ event: "Verifying" });
+      onEvent({ event: "Progress", data: { downloadedBytes: 100, totalBytes: 200 } });
+      onEvent({ event: "Started", data: { totalBytes: 200 } });
+      expect(useUpdateStore.getState()).toMatchObject({
+        status: "verifying",
+        downloadedBytes: 80,
+        totalBytes: 100,
+      });
+
+      onEvent({ event: "ReadyToInstall" });
+      return "download-1";
+    });
+
+    await checkForUpdates();
+    await installPendingUpdate();
+    expect(useUpdateStore.getState()).toMatchObject({
+      status: "restarting",
+      downloadedBytes: 80,
+      totalBytes: 100,
+    });
+  });
+
+  it("does not apply when preparing the durable exit fails", async () => {
+    updateDownload.mockResolvedValue("download-1");
+    preparePersistenceForExit.mockRejectedValue(new Error("snapshot failed"));
     await checkForUpdates();
     await installPendingUpdate();
 
     expect(appRestart).not.toHaveBeenCalled();
+    expect(updateApply).not.toHaveBeenCalled();
     expect(useUpdateStore.getState()).toMatchObject({
       status: "error",
       error: "snapshot failed",
       promptOpen: true,
     });
+    expect(resumePersistenceAfterFailedExit).not.toHaveBeenCalled();
+  });
+
+  it("resumes persistence after apply fails and preserves the install error", async () => {
+    updateApply.mockRejectedValue(new Error("installer failed"));
+    await checkForUpdates();
+    await installPendingUpdate();
+
+    expect(resumePersistenceAfterFailedExit).toHaveBeenCalledTimes(1);
+    expect(appRestart).not.toHaveBeenCalled();
+    expect(useUpdateStore.getState()).toMatchObject({
+      status: "error",
+      error: "installer failed",
+      promptOpen: true,
+    });
+  });
+
+  it("keeps the original error and adds recovery guidance when resume fails", async () => {
+    updateApply.mockRejectedValue(new Error("installer failed"));
+    resumePersistenceAfterFailedExit.mockRejectedValue(new Error("resume failed"));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    await checkForUpdates();
+    await installPendingUpdate();
+
+    expect(useUpdateStore.getState().error).toMatch(
+      /^installer failed\. Workspace autosave could not be resumed/,
+    );
+    expect(consoleError).toHaveBeenCalledWith(
+      "Could not resume persistence after a failed update exit:",
+      expect.any(Error),
+    );
+    consoleError.mockRestore();
   });
 
   it("rechecks before retrying a consumed failed update", async () => {
-    updateInstall
+    updateDownload
       .mockRejectedValueOnce(new Error("signature failed"))
-      .mockResolvedValueOnce(undefined);
+      .mockResolvedValueOnce("download-2");
     await checkForUpdates();
     await installPendingUpdate();
     expect(useUpdateStore.getState().error).toMatch(/signature failed/);
 
     await installPendingUpdate();
     expect(updateCheck).toHaveBeenCalledTimes(2);
-    expect(updateInstall).toHaveBeenCalledTimes(2);
+    expect(updateDownload).toHaveBeenCalledTimes(2);
   });
 });

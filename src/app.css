@@ -246,6 +246,28 @@ textarea:focus {
   animation: slide-in-from-right 200ms ease-out;
 }
 
+/* Honest indeterminate updater progress: move a short segment through the
+   track instead of fading a fixed one-third fill that resembles 33% complete. */
+@keyframes update-progress-indeterminate {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(300%);
+  }
+}
+.update-progress-indeterminate {
+  width: 33.333%;
+  animation: update-progress-indeterminate 1.2s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .update-progress-indeterminate {
+    width: 100%;
+    opacity: 0.55;
+    animation: none;
+  }
+}
+
 /* Terminal host — xterm mounts into this */
 .terminal-host {
   position: absolute;

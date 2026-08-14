@@ -188,13 +188,48 @@ fn profile_operational(
     }
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct CloudProviderPresence {
+    openai: bool,
+    mistral: bool,
+}
+
+fn cloud_provider_presence(
+    providers: impl IntoIterator<Item = EmbeddingProviderDialect>,
+    mut has: impl FnMut(&crate::credentials::CredentialId) -> Result<bool, String>,
+) -> Result<CloudProviderPresence, String> {
+    let mut needs_openai = false;
+    let mut needs_mistral = false;
+    for provider in providers {
+        needs_openai |= provider == EmbeddingProviderDialect::OpenAi;
+        needs_mistral |= provider == EmbeddingProviderDialect::Mistral;
+    }
+    Ok(CloudProviderPresence {
+        openai: needs_openai && has(&crate::credentials::CredentialId::OpenAi)?,
+        mistral: needs_mistral && has(&crate::credentials::CredentialId::Mistral)?,
+    })
+}
+
 fn available_profiles(
     app: &tauri::AppHandle<Wry>,
     docs: &crate::docs::db::DocsDb,
 ) -> Result<Vec<AvailableProfile>, String> {
-    Ok(stored_profiles(docs)?
+    let profiles = stored_profiles(docs)?;
+    let credentials = crate::credentials::state(app);
+    let cloud = cloud_provider_presence(
+        profiles
+            .iter()
+            .map(|stored| stored.profile.semantic().provider),
+        |id| credentials.has(id),
+    )?;
+
+    Ok(profiles
         .into_iter()
-        .filter(|stored| profile_operational(app, &stored.profile).is_ok())
+        .filter(|stored| match stored.profile.semantic().provider {
+            EmbeddingProviderDialect::OpenAi => cloud.openai,
+            EmbeddingProviderDialect::Mistral => cloud.mistral,
+            _ => profile_operational(app, &stored.profile).is_ok(),
+        })
         .collect())
 }
 
@@ -543,20 +578,32 @@ pub struct QdrantConnectionView {
     pub hidden_unmanaged_count: usize,
 }
 
-fn connection_view(
-    app: &tauri::AppHandle<Wry>,
+fn connection_views_with_presence(
+    connections: &[QdrantConnectionRecord],
+    mut has: impl FnMut(&QdrantConnectionRecord) -> Result<bool, String>,
+) -> Result<Vec<QdrantConnectionView>, String> {
+    connections
+        .iter()
+        .map(|connection| {
+            has(connection).map(|present| connection_view_with_presence(connection, present))
+        })
+        .collect()
+}
+
+fn connection_view_with_presence(
     connection: &QdrantConnectionRecord,
-) -> Result<QdrantConnectionView, String> {
+    has_api_key: bool,
+) -> QdrantConnectionView {
     let cached = cached_bucket_views(connection);
     let hidden_unmanaged_count = cached
         .iter()
         .filter(|bucket| bucket.compatibility == "unmanaged")
         .count();
-    Ok(QdrantConnectionView {
+    QdrantConnectionView {
         id: connection.id.clone(),
         label: connection.label.clone(),
         url: connection.url.clone(),
-        has_api_key: store::has_api_key(app, &connection.id)?,
+        has_api_key,
         allow_insecure: connection.allow_insecure,
         status: connection.status.clone(),
         server_version: connection.server_version.clone(),
@@ -567,17 +614,30 @@ fn connection_view(
             .filter(|bucket| bucket.compatibility != "unmanaged")
             .collect(),
         hidden_unmanaged_count,
-    })
+    }
+}
+
+fn qdrant_client_with_key(
+    connection: &QdrantConnectionRecord,
+    key: Option<crate::credentials::Secret>,
+) -> Result<QdrantClient, String> {
+    let endpoint = QdrantEndpoint::parse(&connection.url, key.is_some(), connection.allow_insecure)
+        .map_err(|error| error.to_string())?;
+    QdrantClient::new(endpoint, key).map_err(|error| error.to_string())
+}
+
+fn qdrant_client_with_reader(
+    connection: &QdrantConnectionRecord,
+    mut read: impl FnMut(&QdrantConnectionRecord) -> Result<Option<crate::credentials::Secret>, String>,
+) -> Result<QdrantClient, String> {
+    qdrant_client_with_key(connection, read(connection)?)
 }
 
 fn qdrant_client(
     app: &tauri::AppHandle<Wry>,
     connection: &QdrantConnectionRecord,
 ) -> Result<QdrantClient, String> {
-    let key = store::read_api_key(app, connection)?;
-    let endpoint = QdrantEndpoint::parse(&connection.url, key.is_some(), connection.allow_insecure)
-        .map_err(|error| error.to_string())?;
-    QdrantClient::new(endpoint, key).map_err(|error| error.to_string())
+    qdrant_client_with_reader(connection, |record| store::read_api_key(app, record))
 }
 
 async fn resolve_managed_collection(
@@ -660,10 +720,10 @@ pub fn knowledge_connections_list(
     app: tauri::AppHandle<Wry>,
 ) -> Result<Vec<QdrantConnectionView>, String> {
     gate(&app)?;
-    store::read_connections(&app)
-        .iter()
-        .map(|connection| connection_view(&app, connection))
-        .collect::<Result<Vec<_>, _>>()
+    let connections = store::read_connections(&app);
+    connection_views_with_presence(&connections, |connection| {
+        store::has_api_key_for(&app, connection)
+    })
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -809,8 +869,15 @@ pub async fn knowledge_connections_refresh(
         })
         .collect();
 
+    // A refresh needs the secret exactly once. Reuse that result for the
+    // serialized presence bit instead of reading Keychain again after the
+    // network operation. If the secret read itself was denied, a UI-suppressed
+    // metadata query can still keep the row's presence indicator accurate.
+    let api_key = store::read_api_key(&app, &snapshot);
+    let known_has_api_key = api_key.as_ref().ok().map(Option::is_some);
+
     let refresh = async {
-        let client = qdrant_client(&app, &snapshot)?;
+        let client = qdrant_client_with_key(&snapshot, api_key?)?;
         let info = client
             .server_info()
             .await
@@ -902,7 +969,11 @@ pub async fn knowledge_connections_refresh(
             Ok(())
         })?,
     };
-    connection_view(&app, &updated)
+    let has_api_key = match known_has_api_key {
+        Some(present) => present,
+        None => store::has_api_key_for(&app, &snapshot)?,
+    };
+    Ok(connection_view_with_presence(&updated, has_api_key))
 }
 
 #[tauri::command]
@@ -1842,6 +1913,85 @@ pub async fn knowledge_jobs_retry(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn qdrant_record(id: &str) -> QdrantConnectionRecord {
+        QdrantConnectionRecord {
+            id: id.into(),
+            label: format!("Qdrant {id}"),
+            url: "http://localhost:6333".into(),
+            allow_insecure: false,
+            status: "unchecked".into(),
+            server_version: None,
+            last_checked_at: None,
+            error: None,
+            collections: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn knowledge_presence_checks_each_needed_cloud_provider_once() {
+        let providers = [
+            EmbeddingProviderDialect::OpenAi,
+            EmbeddingProviderDialect::OpenAi,
+            EmbeddingProviderDialect::Mistral,
+            EmbeddingProviderDialect::Mistral,
+            EmbeddingProviderDialect::LocalLlamaCpp,
+        ];
+        let mut calls = Vec::new();
+        let presence = cloud_provider_presence(providers, |id| {
+            calls.push(id.clone());
+            Ok(true)
+        })
+        .unwrap();
+        assert_eq!(
+            calls,
+            vec![
+                crate::credentials::CredentialId::OpenAi,
+                crate::credentials::CredentialId::Mistral,
+            ]
+        );
+        assert_eq!(
+            presence,
+            CloudProviderPresence {
+                openai: true,
+                mistral: true,
+            }
+        );
+
+        let error = cloud_provider_presence([EmbeddingProviderDialect::OpenAi], |_| {
+            Err("presence denied".into())
+        })
+        .unwrap_err();
+        assert_eq!(error, "presence denied");
+    }
+
+    #[test]
+    fn qdrant_lists_use_presence_and_operations_read_one_secret() {
+        let connections = [qdrant_record("one"), qdrant_record("two")];
+        let mut presence_calls = Vec::new();
+        let views = connection_views_with_presence(&connections, |connection| {
+            presence_calls.push(connection.id.clone());
+            Ok(connection.id == "one")
+        })
+        .unwrap();
+        assert_eq!(presence_calls, vec!["one", "two"]);
+        assert!(views[0].has_api_key);
+        assert!(!views[1].has_api_key);
+
+        let error =
+            connection_views_with_presence(&connections, |_| Err("presence unavailable".into()))
+                .unwrap_err();
+        assert_eq!(error, "presence unavailable");
+
+        let mut reads = 0;
+        let client = qdrant_client_with_reader(&connections[0], |_| {
+            reads += 1;
+            Ok(Some(crate::credentials::Secret::from("qdrant-secret")))
+        })
+        .unwrap();
+        assert_eq!(reads, 1);
+        assert!(client.has_api_key());
+    }
 
     #[test]
     fn compatibility_wire_names_match_the_frontend() {

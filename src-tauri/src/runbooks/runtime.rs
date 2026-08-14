@@ -1204,10 +1204,17 @@ impl RunbookCancellationState {
     pub fn cancel_all(&self) {
         if let Ok(mut inner) = self.inner.lock() {
             inner.accepting = false;
-            for (_, sender) in inner.pending.drain() {
+            for sender in inner.pending.values() {
                 let _ = sender.send(true);
             }
         }
+    }
+
+    pub fn is_idle(&self) -> bool {
+        self.inner
+            .lock()
+            .map(|inner| inner.pending.is_empty())
+            .unwrap_or(false)
     }
 
     /// Re-open registration after the user explicitly enables Runbooks again.

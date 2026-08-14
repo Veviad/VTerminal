@@ -90,6 +90,9 @@ interface BuildOpts {
   /** Include the AI transcript. Both halves are independently optional so each
    *  writer ships only what it actually knows. */
   withTranscript: boolean;
+  /** Persist the reopen-collapse mapping without deleting its source yet. Used
+   * only by the provisional final-exit batch. */
+  stageSupersedes?: boolean;
 }
 
 /**
@@ -159,7 +162,8 @@ export function buildArchiveRow(
     // Collapse the row this tab was reopened from, but only once the run is
     // actually over: doing it on the periodic tick would delete the archived
     // original while the user might still want to reopen it again.
-    supersedes: opts.isOpen ? null : (session.archivedFrom ?? null),
+    supersedes:
+      opts.isOpen && !opts.stageSupersedes ? null : (session.archivedFrom ?? null),
   };
 }
 

@@ -745,13 +745,12 @@ export interface ArchiveAttachmentInput {
 export interface WorkspaceSnapshotInput {
   active_session_id: string | null;
   sessions: SessionSnapshotInput[];
-  final_flush?: boolean;
 }
 
 export interface WorkspaceRestore {
   sessions: SessionSnapshotMeta[];
   active_session_id: string | null;
-  /** The previous run ended without a final flush. */
+  /** The previous run ended without completing the clean-exit barrier. */
   crashed: boolean;
   /** Restore was disabled, env-overridden, or bailed out by the crash guard. */
   skipped: boolean;
@@ -1219,6 +1218,7 @@ export interface UpdateMetadata {
 }
 
 export type UpdateDownloadEvent =
-  | { event: "Started"; data: { contentLength: number | null } }
-  | { event: "Progress"; data: { chunkLength: number } }
-  | { event: "Finished" };
+  | { event: "Started"; data: { totalBytes: number | null } }
+  | { event: "Progress"; data: { downloadedBytes: number; totalBytes: number | null } }
+  | { event: "Verifying" }
+  | { event: "ReadyToInstall" };

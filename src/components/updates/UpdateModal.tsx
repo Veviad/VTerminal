@@ -1,16 +1,29 @@
-import { dismissUpdatePrompt, installPendingUpdate } from "../../lib/appUpdates";
+import {
+  cancelPendingUpdate,
+  dismissUpdatePrompt,
+  installPendingUpdate,
+} from "../../lib/appUpdates";
 import { S } from "../../lib/strings";
 import { useUpdateStore } from "../../stores/updateStore";
-import { UpdateProgress } from "../settings/UpdatesSection";
+import {
+  isUpdateCancellable,
+  isUpdateProcessing,
+  LiveUpdateProgress,
+  updateActionLabel,
+} from "../settings/UpdatesSection";
 import { ReleaseNotes } from "./ReleaseNotes";
 
 export function UpdateModal() {
-  const update = useUpdateStore();
-  const metadata = update.metadata;
-  if (!update.promptOpen || !metadata) return null;
+  const promptOpen = useUpdateStore((state) => state.promptOpen);
+  const metadata = useUpdateStore((state) => state.metadata);
+  const status = useUpdateStore((state) => state.status);
+  const workspaceReady = useUpdateStore((state) => state.workspaceReady);
+  const error = useUpdateStore((state) => state.error);
+  if (!promptOpen || !metadata) return null;
 
-  const busy = update.status === "downloading" || update.status === "installing";
-  const installDisabled = busy || !update.workspaceReady;
+  const busy = isUpdateProcessing(status);
+  const cancellable = isUpdateCancellable(status);
+  const installDisabled = busy || !workspaceReady;
   return (
     <div
       className="fixed inset-0 z-[60] flex items-start justify-center bg-black/55 px-4 pt-20"
@@ -57,29 +70,27 @@ export function UpdateModal() {
           {S.settings.updates.restartWarning}
         </p>
 
-        {busy && (
-          <UpdateProgress downloaded={update.downloadedBytes} total={update.totalBytes} />
-        )}
-        {update.error && (
+        {busy && <LiveUpdateProgress status={status} />}
+        {error && (
           <p className="rounded-md border border-error/30 bg-error/10 px-2 py-1.5 text-[11px] text-error">
-            {update.error}
+            {error}
           </p>
         )}
 
         <div className="flex justify-end gap-2">
           <button
-            onClick={dismissUpdatePrompt}
-            disabled={busy}
+            onClick={cancellable ? () => void cancelPendingUpdate() : dismissUpdatePrompt}
+            disabled={(busy && !cancellable) || status === "cancelling"}
             className="rounded-md px-2.5 py-1.5 text-[11px] text-text-secondary hover:bg-bg-hover disabled:opacity-50"
           >
-            {S.settings.updates.later}
+            {cancellable ? S.settings.updates.cancelDownload : S.settings.updates.later}
           </button>
           <button
             onClick={() => void installPendingUpdate()}
             disabled={installDisabled}
             className="rounded-md bg-accent px-2.5 py-1.5 text-[11px] font-medium text-bg-primary hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {S.settings.updates.install}
+            {updateActionLabel(status)}
           </button>
         </div>
       </div>

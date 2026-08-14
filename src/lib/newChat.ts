@@ -23,6 +23,7 @@
  */
 
 import * as api from "./tauri";
+import { trackArchiveMutation } from "./archiveWriteTracker";
 import { useAppStore, type AiStreamState, type AppState } from "../stores/appStore";
 import { buildArchiveRow } from "./sessionArchive";
 import { abortSession } from "./ptyExec";
@@ -82,82 +83,84 @@ export function hasConversation(sessionId: string): boolean {
  * Returns false when nothing happened — either there was nothing to clear, or the
  * archive write was refused and the conversation was deliberately left in place.
  */
-export async function startNewChat(sessionId: string): Promise<boolean> {
-  const store = useAppStore.getState();
-  const session = store.sessions.find((s) => s.id === sessionId);
-  if (!session) return false;
-  const stream = store.aiStreams[sessionId];
-  if (!stream || !hasConversation(sessionId)) return false;
+export function startNewChat(sessionId: string): Promise<boolean> {
+  return trackArchiveMutation(async () => {
+    const store = useAppStore.getState();
+    const session = store.sessions.find((s) => s.id === sessionId);
+    if (!session) return false;
+    const stream = store.aiStreams[sessionId];
+    if (!stream || !hasConversation(sessionId)) return false;
 
-  // Stop anything in flight first, exactly as the panel's Stop button does.
-  // Releasing the PTY job never interrupts the command itself — it is running in
-  // the user's own shell, in front of them. Late stream events are then fenced by
-  // dispatchPanelEvent's request-ownership check, because the clear below nulls
-  // `requestId`.
-  abortSession(sessionId, "cancelled");
-  if (stream.requestId) {
-    await api.aiCancel(stream.requestId).catch(() => {});
-  }
-  // Fold whatever had already streamed into a real message. `aiCancel` resolving
-  // does not mean the Cancelled event has been dispatched yet, and a partial
-  // answer lives in `streamingContent` — which the archive row does not read. Skip
-  // this and cancelling mid-answer silently drops that text from the saved copy.
-  // A no-op when the buffers are empty, and the late Cancelled event's own flush
-  // is then a no-op too.
-  useAppStore.getState().flushAiStreaming(sessionId);
-
-  if (archiveWillKeepChats()) {
-    // One build, two rows. buildArchiveRow snapshots live state synchronously
-    // into plain objects, so nothing here races the clear that follows.
-    const base = buildArchiveRow(sessionId, {
-      isOpen: false,
-      closeReason: "closed",
-      withScrollback: true,
-      withTranscript: true,
-    });
-    if (!base) return false;
-
-    const split = {
-      ...base,
-      session_id: chatArchiveId(sessionId),
-      // The chat began when the first thing was said, not when the tab opened —
-      // otherwise every chat split off a long-lived tab claims the same start.
-      opened_at: stream.messages[0]?.createdAt ?? base.opened_at,
-      // `supersedes` comes from buildArchiveRow's isOpen:false branch: a tab
-      // reopened from the archive collapses that row into THIS chat, which is the
-      // one continuing its thread of work.
-    };
-    const blanked = {
-      ...base,
-      session_id: sessionId,
-      is_open: true,
-      close_reason: null,
-      // No blob: the live tab's screen is unchanged and its stored one is fine.
-      scrollback: null,
-      scrollback_lines: null,
-      // Explicitly empty, NOT null: null means "keep the stored rows".
-      messages: [],
-      model_transcript: [],
-      model: "",
-      supersedes: null,
-    };
-
-    try {
-      await api.archivePutMany([split, blanked]);
-    } catch (err) {
-      // Keep the conversation. Losing it to a database error would be strictly
-      // worse than a click that reports why it did nothing.
-      console.warn(`archiving the chat of ${sessionId} failed:`, err);
-      useAppStore.getState().finishAiStream(sessionId, S.aiPanel.newChatFailed);
-      return false;
+    // Stop anything in flight first, exactly as the panel's Stop button does.
+    // Releasing the PTY job never interrupts the command itself — it is running in
+    // the user's own shell, in front of them. Late stream events are then fenced by
+    // dispatchPanelEvent's request-ownership check, because the clear below nulls
+    // `requestId`.
+    abortSession(sessionId, "cancelled");
+    if (stream.requestId) {
+      await api.aiCancel(stream.requestId).catch(() => {});
     }
-  }
+    // Fold whatever had already streamed into a real message. `aiCancel` resolving
+    // does not mean the Cancelled event has been dispatched yet, and a partial
+    // answer lives in `streamingContent` — which the archive row does not read. Skip
+    // this and cancelling mid-answer silently drops that text from the saved copy.
+    // A no-op when the buffers are empty, and the late Cancelled event's own flush
+    // is then a no-op too.
+    useAppStore.getState().flushAiStreaming(sessionId);
 
-  useAppStore.getState().newAiConversation(sessionId);
-  // The split row inherited the supersede, so the tab must stop claiming it:
-  // its next close is the end of a NEW thread of work.
-  if (session.archivedFrom) {
-    useAppStore.getState().updateSession(sessionId, { archivedFrom: null });
-  }
-  return true;
+    if (archiveWillKeepChats()) {
+      // One build, two rows. buildArchiveRow snapshots live state synchronously
+      // into plain objects, so nothing here races the clear that follows.
+      const base = buildArchiveRow(sessionId, {
+        isOpen: false,
+        closeReason: "closed",
+        withScrollback: true,
+        withTranscript: true,
+      });
+      if (!base) return false;
+
+      const split = {
+        ...base,
+        session_id: chatArchiveId(sessionId),
+        // The chat began when the first thing was said, not when the tab opened —
+        // otherwise every chat split off a long-lived tab claims the same start.
+        opened_at: stream.messages[0]?.createdAt ?? base.opened_at,
+        // `supersedes` comes from buildArchiveRow's isOpen:false branch: a tab
+        // reopened from the archive collapses that row into THIS chat, which is the
+        // one continuing its thread of work.
+      };
+      const blanked = {
+        ...base,
+        session_id: sessionId,
+        is_open: true,
+        close_reason: null,
+        // No blob: the live tab's screen is unchanged and its stored one is fine.
+        scrollback: null,
+        scrollback_lines: null,
+        // Explicitly empty, NOT null: null means "keep the stored rows".
+        messages: [],
+        model_transcript: [],
+        model: "",
+        supersedes: null,
+      };
+
+      try {
+        await api.archivePutMany([split, blanked]);
+      } catch (err) {
+        // Keep the conversation. Losing it to a database error would be strictly
+        // worse than a click that reports why it did nothing.
+        console.warn(`archiving the chat of ${sessionId} failed:`, err);
+        useAppStore.getState().finishAiStream(sessionId, S.aiPanel.newChatFailed);
+        return false;
+      }
+    }
+
+    useAppStore.getState().newAiConversation(sessionId);
+    // The split row inherited the supersede, so the tab must stop claiming it:
+    // its next close is the end of a NEW thread of work.
+    if (session.archivedFrom) {
+      useAppStore.getState().updateSession(sessionId, { archivedFrom: null });
+    }
+    return true;
+  }, false);
 }

@@ -35,7 +35,7 @@ pub struct RemoteServerInput {
 }
 
 /// A stored server as the UI sees it: the record plus whether a token exists.
-#[derive(serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 pub struct RemoteServerView {
     #[serde(flatten)]
     pub server: RemoteServer,
@@ -109,17 +109,34 @@ fn find_index(servers: &[RemoteServer], id: &str) -> Result<usize, String> {
         .ok_or_else(|| "no such server".to_string())
 }
 
-#[tauri::command]
-pub fn remote_servers_list(app: tauri::AppHandle<Wry>) -> Result<Vec<RemoteServerView>, String> {
-    remote::read_servers(&app)
+fn server_views_with_presence(
+    servers: Vec<RemoteServer>,
+    mut has: impl FnMut(&str) -> Result<bool, String>,
+) -> Result<Vec<RemoteServerView>, String> {
+    servers
         .into_iter()
         .map(|server| {
             Ok(RemoteServerView {
-                has_api_key: remote::has_token(&app, &server.id)?,
+                has_api_key: has(&server.id)?,
                 server,
             })
         })
         .collect()
+}
+
+fn server_with_token<'a>(
+    servers: &'a [RemoteServer],
+    id: &str,
+    mut read: impl FnMut(&str) -> Result<Option<crate::credentials::Secret>, String>,
+) -> Result<(&'a RemoteServer, Option<crate::credentials::Secret>), String> {
+    let server = &servers[find_index(servers, id)?];
+    let token = read(&server.id)?;
+    Ok((server, token))
+}
+
+#[tauri::command]
+pub fn remote_servers_list(app: tauri::AppHandle<Wry>) -> Result<Vec<RemoteServerView>, String> {
+    server_views_with_presence(remote::read_servers(&app), |id| remote::has_token(&app, id))
 }
 
 /// Returns the new server's id.
@@ -263,9 +280,9 @@ pub async fn remote_servers_probe(
     id: String,
 ) -> Result<ProbeResult, String> {
     let servers = remote::read_servers(&app);
-    let at = find_index(&servers, &id)?;
-    let server = &servers[at];
-    let token = remote::read_token(&app, &id)?;
+    let (server, token) = server_with_token(&servers, &id, |server_id| {
+        remote::read_token(&app, server_id)
+    })?;
     remote_probe::probe(
         server.kind,
         &server.base_url,
@@ -285,6 +302,45 @@ mod tests {
             label: label.into(),
             base_url: base_url.into(),
         }
+    }
+
+    fn saved_server(id: &str) -> RemoteServer {
+        RemoteServer {
+            id: id.into(),
+            kind: ServerKind::Ollama,
+            label: format!("Server {id}"),
+            base_url: "http://localhost:11434".into(),
+            models: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn remote_lists_use_presence_and_probe_setup_reads_one_token() {
+        let servers = vec![saved_server("one"), saved_server("two")];
+        let mut presence_calls = Vec::new();
+        let views = server_views_with_presence(servers.clone(), |id| {
+            presence_calls.push(id.to_owned());
+            Ok(id == "one")
+        })
+        .unwrap();
+        assert_eq!(presence_calls, vec!["one", "two"]);
+        assert!(views[0].has_api_key);
+        assert!(!views[1].has_api_key);
+
+        let error = server_views_with_presence(servers.clone(), |_| Err("presence denied".into()))
+            .unwrap_err();
+        assert_eq!(error, "presence denied");
+
+        let mut reads = 0;
+        let (selected, token) = server_with_token(&servers, "two", |id| {
+            reads += 1;
+            assert_eq!(id, "two");
+            Ok(Some(crate::credentials::Secret::from("remote-secret")))
+        })
+        .unwrap();
+        assert_eq!(reads, 1);
+        assert_eq!(selected.id, "two");
+        assert_eq!(token.unwrap().expose(), "remote-secret");
     }
 
     #[test]

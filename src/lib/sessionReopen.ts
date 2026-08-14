@@ -17,6 +17,7 @@ import { getTerm } from "./termRegistry";
 import { setAiPanelOpen } from "./aiPanel";
 import { hydrateAttachments } from "./attachInput";
 import { replayBanner } from "./replayBanner";
+import { archiveTranscriptOnly } from "./sessionArchive";
 import type { AiMessage, ArchivedMessage, LaunchSpec } from "./types";
 
 /** Archive rows -> the panel's shape. */
@@ -133,6 +134,12 @@ export async function reopenSession(
     useAppStore
       .getState()
       .restoreAiTranscript(sessionId, toAiMessages(messages), transcript, summary.closed_at);
+    // Register the live replacement before handing it back to the browser. Its
+    // attachment paths are shared with the source archive, and archive cleanup
+    // decides whether those bytes are still owned from the surviving DB rows.
+    // Without this open row, closing/pruning one of two reopens can delete the
+    // source directory while the other live tab still references it.
+    await archiveTranscriptOnly(sessionId);
     // Not awaited: the panel is usable with named chips straight away, and
     // blocking the reopen on N file reads would make a long conversation feel
     // broken. Thumbnails fill in as the reads land.

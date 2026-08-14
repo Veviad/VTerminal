@@ -64,6 +64,7 @@ vi.mock("../lib/sessionPersistence", () => ({
 
 import { useSessions } from "../hooks/useSessions";
 import { useAppStore } from "../stores/appStore";
+import { initialUpdateState, useUpdateStore } from "../stores/updateStore";
 import type { SessionSnapshotMeta } from "../lib/types";
 
 function meta(id: string, index: number, over: Partial<SessionSnapshotMeta> = {}): SessionSnapshotMeta {
@@ -91,10 +92,22 @@ beforeEach(() => {
   scrollbackMock.mockResolvedValue(null);
   spawnMock.mockClear();
   useAppStore.setState({ sessions: [], activeSessionId: null, sessionUi: {}, aiStreams: {} });
+  useUpdateStore.setState({ ...initialUpdateState });
 });
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe("session creation update barrier", () => {
+  it("refuses to add or spawn a terminal after durable update saving begins", async () => {
+    useUpdateStore.setState({ status: "saving" });
+    const { result } = renderHook(() => useSessions());
+
+    await expect(result.current.createSession()).rejects.toThrow(/applying an update/i);
+    expect(spawnMock).not.toHaveBeenCalled();
+    expect(useAppStore.getState().sessions).toHaveLength(0);
+  });
 });
 
 describe("restoreSessions", () => {

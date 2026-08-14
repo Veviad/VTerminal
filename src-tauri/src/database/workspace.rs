@@ -16,6 +16,8 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
+use super::archive;
+
 /// Restore is skipped and the table wiped once this many boots in a row have
 /// tried to restore without ever reaching `mark_healthy`.
 const MAX_RESTORE_ATTEMPTS: i64 = 2;
@@ -61,16 +63,13 @@ pub struct SessionSnapshotInput {
 pub struct WorkspaceSnapshotInput {
     pub active_session_id: Option<String>,
     pub sessions: Vec<SessionSnapshotInput>,
-    /// Set by the final flush at quit; flips `clean_exit`.
-    #[serde(default)]
-    pub final_flush: bool,
 }
 
 #[derive(Debug, Serialize)]
 pub struct WorkspaceRestore {
     pub sessions: Vec<SessionSnapshotMeta>,
     pub active_session_id: Option<String>,
-    /// The previous run ended without a final flush (crash, SIGKILL, ⌘Q).
+    /// The previous run ended without completing the clean-exit barrier.
     pub crashed: bool,
     /// Restore was skipped: disabled, env-overridden, or the crash-loop guard.
     pub skipped: bool,
@@ -286,9 +285,9 @@ pub fn snapshot(conn: &mut Connection, input: &WorkspaceSnapshotInput) -> Result
     .map_err(|e| e.to_string())?;
 
     tx.execute(
-        "UPDATE workspace_state SET active_session_id = ?1, updated_at = ?2, clean_exit = ?3
+        "UPDATE workspace_state SET active_session_id = ?1, updated_at = ?2
          WHERE id = 'default'",
-        params![input.active_session_id, now, i64::from(input.final_flush)],
+        params![input.active_session_id, now],
     )
     .map_err(|e| e.to_string())?;
 
@@ -317,6 +316,94 @@ pub fn mark_healthy(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// Record that every durable exit barrier completed successfully. This is
+/// deliberately separate from `snapshot`: routine data writes must never make
+/// an interrupted process look like a clean exit.
+#[cfg(test)]
+pub fn mark_clean_exit(conn: &Connection) -> Result<(), String> {
+    conn.execute(
+        "UPDATE workspace_state SET clean_exit = 1, updated_at = ?1 WHERE id = 'default'",
+        params![chrono::Utc::now().to_rfc3339()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Finalize every archive row owned by this run and mark the workspace clean in
+/// one SQLite transaction. Exit preparation deliberately leaves rows open; if
+/// this transaction never commits, startup's archive reaper correctly labels
+/// them as crashes instead of preserving a premature `quit` classification.
+pub fn commit_clean_exit(
+    conn: &mut Connection,
+    retention: archive::Retention,
+) -> Result<Vec<archive::ArchiveRemoval>, String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let superseded = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT pending.supersedes_session_id
+                   FROM archive_pending_supersedes pending
+                   JOIN archived_sessions current ON current.session_id = pending.session_id
+                  WHERE current.is_open = 1
+                    AND pending.supersedes_session_id != current.session_id",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        rows
+    };
+    let mut removed = Vec::new();
+    for old in superseded {
+        // Preserve the long-standing collapse semantics: attachment paths from
+        // the source can still be referenced by the replacement transcript,
+        // so only the SQLite rows cascade here, not the on-disk directory.
+        removed.push(archive::removal_for(&tx, &old)?);
+        tx.execute(
+            "DELETE FROM archived_sessions WHERE session_id = ?1",
+            params![old],
+        )
+        .map_err(|e| format!("collapse superseded archive: {e}"))?;
+    }
+    tx.execute(
+        "DELETE FROM archive_pending_supersedes
+          WHERE session_id IN (SELECT session_id FROM archived_sessions WHERE is_open = 1)",
+        [],
+    )
+    .map_err(|e| format!("clear pending archive collapses: {e}"))?;
+    tx.execute(
+        "UPDATE archived_sessions
+            SET is_open = 0, close_reason = 'quit', closed_at = ?1, updated_at = ?1
+          WHERE is_open = 1",
+        params![now],
+    )
+    .map_err(|e| format!("finalize quit archive rows: {e}"))?;
+    tx.execute(
+        "UPDATE workspace_state SET clean_exit = 1, updated_at = ?1 WHERE id = 'default'",
+        params![now],
+    )
+    .map_err(|e| format!("mark workspace clean: {e}"))?;
+    removed.extend(archive::prune_unfiltered_in(&tx, retention)?);
+    let removed = archive::finalize_removals(&tx, removed)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(removed)
+}
+
+/// Re-arm crash reporting when a prepared exit is abandoned (for example, an
+/// updater apply fails after the clean-exit barrier has completed).
+pub fn mark_running(conn: &Connection) -> Result<(), String> {
+    conn.execute(
+        "UPDATE workspace_state SET clean_exit = 0, updated_at = ?1 WHERE id = 'default'",
+        params![chrono::Utc::now().to_rfc3339()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub fn clear(conn: &Connection) -> Result<(), String> {
     conn.execute("DELETE FROM session_snapshots", [])
         .map_err(|e| e.to_string())?;
@@ -332,6 +419,11 @@ pub fn clear(conn: &Connection) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const KEEP_ALL: archive::Retention = archive::Retention {
+        max_sessions: 100,
+        max_age_days: 3650,
+    };
 
     fn mem() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -364,7 +456,6 @@ mod tests {
             &WorkspaceSnapshotInput {
                 active_session_id: Some(active.into()),
                 sessions,
-                final_flush: false,
             },
         )
         .unwrap();
@@ -462,7 +553,7 @@ mod tests {
     }
 
     #[test]
-    fn crashed_is_reported_when_there_was_no_final_flush() {
+    fn crashed_is_reported_when_there_was_no_clean_exit_marker() {
         let mut conn = mem();
         restore(&mut conn, true, 24, "test").unwrap();
         snap(&mut conn, vec![tab("a", 0)], "a");
@@ -470,19 +561,150 @@ mod tests {
     }
 
     #[test]
-    fn a_final_flush_marks_a_clean_exit() {
+    fn a_clean_exit_marker_survives_routine_snapshots() {
         let mut conn = mem();
         restore(&mut conn, true, 24, "test").unwrap();
+        mark_clean_exit(&conn).unwrap();
         snapshot(
             &mut conn,
             &WorkspaceSnapshotInput {
                 active_session_id: Some("a".into()),
                 sessions: vec![tab("a", 0)],
-                final_flush: true,
             },
         )
         .unwrap();
         assert!(!restore(&mut conn, true, 24, "test").unwrap().crashed);
+    }
+
+    #[test]
+    fn mark_running_rearms_crash_detection_after_a_prepared_exit() {
+        let mut conn = mem();
+        restore(&mut conn, true, 24, "test").unwrap();
+        snap(&mut conn, vec![tab("a", 0)], "a");
+        mark_clean_exit(&conn).unwrap();
+        mark_running(&conn).unwrap();
+        assert!(restore(&mut conn, true, 24, "test").unwrap().crashed);
+    }
+
+    #[test]
+    fn clean_exit_commit_finalizes_archives_and_marker_together() {
+        let mut conn = mem();
+        restore(&mut conn, true, 24, "test").unwrap();
+        conn.execute_batch(
+            "INSERT INTO archived_sessions
+                (session_id, opened_at, closed_at, updated_at, is_open, shell)
+             VALUES ('source', 'then', 'then', 'then', 0, '/bin/zsh'),
+                    ('a', 'then', 'then', 'then', 1, '/bin/zsh');
+             INSERT INTO archive_pending_supersedes
+                (session_id, supersedes_session_id) VALUES ('a', 'source');",
+        )
+        .unwrap();
+
+        commit_clean_exit(&mut conn, KEEP_ALL).unwrap();
+
+        let archived: (i64, String) = conn
+            .query_row(
+                "SELECT is_open, close_reason FROM archived_sessions WHERE session_id = 'a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let clean: i64 = conn
+            .query_row(
+                "SELECT clean_exit FROM workspace_state WHERE id = 'default'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(archived, (0, "quit".into()));
+        assert_eq!(clean, 1);
+        let sources: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM archived_sessions WHERE session_id = 'source'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let pending: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM archive_pending_supersedes",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sources, 0);
+        assert_eq!(pending, 0);
+    }
+
+    #[test]
+    fn failed_clean_exit_commit_leaves_archives_open_and_marker_running() {
+        let mut conn = mem();
+        restore(&mut conn, true, 24, "test").unwrap();
+        conn.execute(
+            "INSERT INTO archived_sessions
+                (session_id, opened_at, closed_at, updated_at, is_open, shell)
+             VALUES ('a', 'then', 'then', 'then', 1, '/bin/zsh')",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "CREATE TEMP TRIGGER reject_clean_exit
+             BEFORE UPDATE OF clean_exit ON workspace_state
+             WHEN NEW.clean_exit = 1
+             BEGIN SELECT RAISE(ABORT, 'injected clean-exit failure'); END;",
+        )
+        .unwrap();
+
+        assert!(commit_clean_exit(&mut conn, KEEP_ALL).is_err());
+
+        let archived: (i64, String) = conn
+            .query_row(
+                "SELECT is_open, close_reason FROM archived_sessions WHERE session_id = 'a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let clean: i64 = conn
+            .query_row(
+                "SELECT clean_exit FROM workspace_state WHERE id = 'default'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(archived, (1, "closed".into()));
+        assert_eq!(clean, 0);
+    }
+
+    #[test]
+    fn clean_exit_commit_applies_retention_after_open_rows_close() {
+        let mut conn = mem();
+        restore(&mut conn, true, 24, "test").unwrap();
+        conn.execute_batch(
+            "INSERT INTO archived_sessions
+                (session_id, opened_at, closed_at, updated_at, is_open, shell)
+             VALUES ('old', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
+                     '2026-01-01T00:00:00Z', 0, '/bin/zsh'),
+                    ('a', 'then', 'then', 'then', 1, '/bin/zsh'),
+                    ('b', 'then', 'then', 'then', 1, '/bin/zsh');",
+        )
+        .unwrap();
+
+        let removed = commit_clean_exit(
+            &mut conn,
+            archive::Retention {
+                max_sessions: 1,
+                max_age_days: 3650,
+            },
+        )
+        .unwrap();
+
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM archived_sessions", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(remaining, 1);
+        assert_eq!(removed.len(), 2);
     }
 
     #[test]

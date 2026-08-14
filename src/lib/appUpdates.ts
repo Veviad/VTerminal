@@ -1,5 +1,8 @@
 import * as api from "./tauri";
-import { flushAll } from "./sessionPersistence";
+import {
+  preparePersistenceForExit,
+  resumePersistenceAfterFailedExit,
+} from "./sessionPersistence";
 import { initialUpdateState, useUpdateStore } from "../stores/updateStore";
 
 export const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -7,8 +10,18 @@ export const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 let checkPromise: Promise<void> | null = null;
 let installPromise: Promise<void> | null = null;
 let pendingReady = false;
+let cancelRequested = false;
+
+class UpdateCancelled extends Error {
+  constructor() {
+    super("Update download cancelled.");
+    this.name = "UpdateCancelled";
+  }
+}
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
+const isCancellation = (error: unknown) =>
+  error instanceof UpdateCancelled || /update download cancelled/i.test(message(error));
 
 export function checkForUpdates(
   options: { manual?: boolean; prompt?: boolean; promptAllowed?: () => boolean } = {},
@@ -73,6 +86,8 @@ export function installPendingUpdate(): Promise<void> {
   if (installPromise) return installPromise;
 
   installPromise = (async () => {
+    let persistencePrepared = false;
+    cancelRequested = false;
     try {
       if (!useUpdateStore.getState().workspaceReady) {
         throw new Error("Finish restoring the workspace before installing the update.");
@@ -92,29 +107,112 @@ export function installPendingUpdate(): Promise<void> {
         totalBytes: null,
       });
       pendingReady = false;
-      await api.updateInstall((event) => {
-        if (event.event === "Started") {
-          useUpdateStore.setState({ totalBytes: event.data.contentLength });
-        } else if (event.event === "Progress") {
-          useUpdateStore.setState((state) => ({
-            downloadedBytes: state.downloadedBytes + event.data.chunkLength,
-          }));
-        } else {
-          useUpdateStore.setState({ status: "installing" });
+      const downloadId = await api.updateDownload((event) => {
+        switch (event.event) {
+          case "Started":
+            useUpdateStore.setState((state) =>
+              state.status === "downloading"
+                ? { totalBytes: state.totalBytes ?? event.data.totalBytes }
+                : {},
+            );
+            break;
+          case "Progress":
+            useUpdateStore.setState((state) =>
+              state.status === "downloading"
+                ? {
+                    downloadedBytes: Math.max(
+                      state.downloadedBytes,
+                      event.data.downloadedBytes,
+                    ),
+                    totalBytes: state.totalBytes ?? event.data.totalBytes,
+                  }
+                : {},
+            );
+            break;
+          case "Verifying":
+            if (useUpdateStore.getState().status === "downloading") {
+              useUpdateStore.setState({ status: "verifying" });
+            }
+            break;
+          case "ReadyToInstall":
+            if (["downloading", "verifying"].includes(useUpdateStore.getState().status)) {
+              useUpdateStore.setState({ status: "saving" });
+            }
+            break;
         }
       });
+
+      if (cancelRequested) {
+        // A verified payload may have won the race with the cancellation IPC.
+        // Clear it explicitly and never cross into persistence or installation.
+        try {
+          await api.updateCancel();
+        } catch (error) {
+          console.error("Could not clear a cancelled verified update:", error);
+        }
+        throw new UpdateCancelled();
+      }
+
+      // Freeze new writes only after the package has been signature-verified.
+      // The barrier strictly saves existing state before installation starts.
+      useUpdateStore.setState({ status: "saving" });
+      await preparePersistenceForExit();
+      persistencePrepared = true;
+
       useUpdateStore.setState({ status: "installing" });
-      // The updater replaces the bundle before returning. Flush from the still
-      // running old process, then let Tauri restart into the new one.
-      await flushAll({ final: true, strict: true });
+      await api.updateApply(downloadId);
+      useUpdateStore.setState({ status: "restarting" });
       await api.appRestart();
     } catch (error) {
-      useUpdateStore.setState({ status: "error", error: message(error), promptOpen: true });
+      if (cancelRequested || isCancellation(error)) {
+        pendingReady = false;
+        useUpdateStore.setState({
+          status: "available",
+          error: null,
+          promptOpen: true,
+          downloadedBytes: 0,
+          totalBytes: null,
+        });
+        return;
+      }
+
+      let errorMessage = message(error);
+      if (persistencePrepared) {
+        try {
+          await resumePersistenceAfterFailedExit();
+        } catch (resumeError) {
+          console.error("Could not resume persistence after a failed update exit:", resumeError);
+          const separator = /[.!?]$/.test(errorMessage.trim()) ? " " : ". ";
+          errorMessage += `${separator}Workspace autosave could not be resumed; restart VTerminal before continuing.`;
+        }
+      }
+      useUpdateStore.setState({ status: "error", error: errorMessage, promptOpen: true });
     }
   })().finally(() => {
+    cancelRequested = false;
     installPromise = null;
   });
   return installPromise;
+}
+
+export async function cancelPendingUpdate(): Promise<void> {
+  const status = useUpdateStore.getState().status;
+  if (!installPromise || !["downloading", "verifying", "cancelling"].includes(status)) {
+    return;
+  }
+  if (status === "cancelling") return installPromise;
+
+  cancelRequested = true;
+  useUpdateStore.setState({ status: "cancelling", error: null, promptOpen: true });
+  const activeInstall = installPromise;
+  try {
+    await api.updateCancel();
+  } catch (error) {
+    // Preserve the stop intent even if signalling fails. A result that races
+    // with this request is refused above and can never be installed.
+    console.error("Could not signal update download cancellation:", error);
+  }
+  await activeInstall;
 }
 
 /** Timer seam used by the hook and fake-timer tests. */
@@ -136,5 +234,6 @@ export function __resetAppUpdatesForTests(): void {
   checkPromise = null;
   installPromise = null;
   pendingReady = false;
+  cancelRequested = false;
   useUpdateStore.setState({ ...initialUpdateState });
 }

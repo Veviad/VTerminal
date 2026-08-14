@@ -313,10 +313,19 @@ impl PtySession {
     /// exit and its pid may have been recycled by an unrelated process) → drop
     /// writer/master with self.
     pub fn kill(mut self) {
+        if let Err(error) = self.kill_verified() {
+            log::warn!("PTY cleanup could not be verified: {error}");
+        }
+    }
+
+    /// Tear down the PTY while retaining the cleanup handle until the caller
+    /// knows the platform cleanup request completed.
+    pub fn kill_verified(&mut self) -> Result<(), String> {
         self.flow.shutdown();
         if !self.exited.load(Ordering::Relaxed) {
             let _ = self.child_killer.kill();
         }
+        Ok(())
     }
 }
 

@@ -229,6 +229,16 @@ pub struct Retention {
     pub max_age_days: u32,
 }
 
+/// Filesystem cleanup that must follow a committed archive deletion. A reopened
+/// transcript can keep paths under the superseded session's directory, so the
+/// removed row id alone is not enough to identify every owned byte.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ArchiveRemoval {
+    pub session_id: String,
+    pub remove_session_dir: bool,
+    pub attachment_paths: Vec<String>,
+}
+
 const SUMMARY_COLS: &str = "a.session_id, a.title, a.shell, a.cwd, a.host_id, a.remote_kind, \
      a.remote_target, a.opened_at, a.closed_at, a.close_reason, a.scrollback_lines, \
      a.message_count, a.agent_command_count, a.history_command_count, a.model, \
@@ -420,7 +430,7 @@ pub fn put(
     input: &ArchiveSessionInput,
     retention: Retention,
 ) -> Result<(), String> {
-    put_many(conn, std::slice::from_ref(input), retention)
+    put_many(conn, std::slice::from_ref(input), retention).map(|_| ())
 }
 
 /// Write many sessions in ONE transaction — the quit path archives every tab at
@@ -429,9 +439,10 @@ pub fn put_many(
     conn: &mut Connection,
     inputs: &[ArchiveSessionInput],
     retention: Retention,
-) -> Result<(), String> {
+) -> Result<Vec<ArchiveRemoval>, String> {
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().to_rfc3339();
+    let mut removed = Vec::new();
 
     for input in inputs {
         // A superseded row's opened_at is the true start of this thread of work.
@@ -658,22 +669,60 @@ pub fn put_many(
             }
         }
 
-        // Collapse the row this session was reopened from. CASCADE takes its
-        // messages. A missing row is not an error: the same archive entry may
-        // legitimately have been reopened into two tabs.
-        if let Some(old) = &input.supersedes {
-            if old != &input.session_id {
+        if input.is_open {
+            // A final-exit preparation carries `supersedes`, but the old row
+            // must survive until the clean marker commits. Ordinary open ticks
+            // carry None and clear a mapping after an abandoned exit.
+            if let Some(old) = &input.supersedes {
+                if old != &input.session_id {
+                    tx.execute(
+                        "INSERT INTO archive_pending_supersedes
+                            (session_id, supersedes_session_id)
+                         VALUES (?1, ?2)
+                         ON CONFLICT(session_id) DO UPDATE SET
+                            supersedes_session_id = excluded.supersedes_session_id",
+                        params![input.session_id, old],
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+            } else {
                 tx.execute(
-                    "DELETE FROM archived_sessions WHERE session_id = ?1",
-                    params![old],
+                    "DELETE FROM archive_pending_supersedes WHERE session_id = ?1",
+                    params![input.session_id],
                 )
                 .map_err(|e| e.to_string())?;
             }
+        } else {
+            // The ordinary tab-close path can collapse immediately. A missing
+            // source is legitimate when one archive was reopened twice.
+            if let Some(old) = &input.supersedes {
+                if old != &input.session_id {
+                    removed.push(removal_for(&tx, old)?);
+                    tx.execute(
+                        "DELETE FROM archived_sessions WHERE session_id = ?1",
+                        params![old],
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+            }
+            tx.execute(
+                "DELETE FROM archive_pending_supersedes WHERE session_id = ?1",
+                params![input.session_id],
+            )
+            .map_err(|e| e.to_string())?;
         }
     }
 
-    prune_in(&tx, retention)?;
-    tx.commit().map_err(|e| e.to_string())
+    // Exit preparation is deliberately reversible. Pruning unrelated closed
+    // history while staging an all-open batch would make a later rollback only
+    // superficially successful, and would also leak those sessions' attachment
+    // directories because this database layer cannot remove filesystem bytes.
+    if inputs.iter().any(|input| !input.is_open) {
+        removed.extend(prune_unfiltered_in(&tx, retention)?);
+    }
+    let removed = finalize_removals(&tx, removed)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(removed)
 }
 
 /// Enforce both retention limits, reporting WHICH sessions went.
@@ -681,71 +730,166 @@ pub fn put_many(
 /// `is_open = 0` on both statements is mandatory: pruning an open row would delete
 /// a live tab's transcript out from under it.
 ///
-/// The ids are returned rather than a count because attachment BYTES live on disk,
-/// outside SQLite — `ON DELETE CASCADE` clears the rows but cannot remove a file.
-/// `RETURNING` keeps the retention predicate in exactly one place; a second query
-/// that re-derived "which ones are about to go" would drift from this one and leak
-/// files silently.
-fn prune_in(conn: &Connection, retention: Retention) -> Result<Vec<String>, String> {
-    let mut removed: Vec<String> = Vec::new();
-
-    // NOT IN over a bounded subquery: rusqlite has no `array` feature here, and
-    // this is one statement either way — the same reasoning as snapshot()'s
-    // mark-and-sweep.
+/// Removal targets include both row ids and attachment paths because attachment
+/// BYTES live outside SQLite. Paths must be captured before `ON DELETE CASCADE`
+/// clears their metadata, including paths still owned by superseded sessions.
+pub(crate) fn removal_for(conn: &Connection, session_id: &str) -> Result<ArchiveRemoval, String> {
     let mut stmt = conn
         .prepare(
-            "DELETE FROM archived_sessions
-              WHERE is_open = 0
-                AND session_id NOT IN (
-                     SELECT session_id FROM archived_sessions
-                      WHERE is_open = 0 ORDER BY closed_at DESC LIMIT ?1)
-           RETURNING session_id",
+            "SELECT DISTINCT attachment.path
+               FROM archived_attachments attachment
+               JOIN archived_messages message ON message.id = attachment.message_id
+              WHERE message.session_id = ?1 AND attachment.path IS NOT NULL",
         )
         .map_err(|e| e.to_string())?;
-    let ids = stmt
-        .query_map(params![retention.max_sessions], |r| r.get::<_, String>(0))
+    let attachment_paths = stmt
+        .query_map(params![session_id], |row| row.get::<_, String>(0))
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
-    removed.extend(ids);
-    drop(stmt);
+    Ok(ArchiveRemoval {
+        session_id: session_id.to_string(),
+        remove_session_dir: true,
+        attachment_paths,
+    })
+}
+
+fn attachment_owner(path: &str) -> Option<String> {
+    std::path::Path::new(path)
+        .parent()?
+        .file_name()?
+        .to_str()
+        .map(str::to_string)
+}
+
+/// A directory is removable only when no surviving archive attachment points
+/// anywhere inside it. This is load-bearing when the same source archive is
+/// reopened into two tabs: both replacement rows share the source image path.
+pub(crate) fn finalize_removals(
+    conn: &Connection,
+    mut removed: Vec<ArchiveRemoval>,
+) -> Result<Vec<ArchiveRemoval>, String> {
+    let surviving_owners = {
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT path FROM archived_attachments WHERE path IS NOT NULL")
+            .map_err(|e| e.to_string())?;
+        let paths = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        paths
+            .into_iter()
+            .filter_map(|path| attachment_owner(&path))
+            .collect::<std::collections::HashSet<_>>()
+    };
+    for removal in &mut removed {
+        removal.remove_session_dir = !surviving_owners.contains(&removal.session_id);
+        removal.attachment_paths.retain(|path| {
+            attachment_owner(path).is_some_and(|owner| !surviving_owners.contains(&owner))
+        });
+    }
+    Ok(removed)
+}
+
+fn delete_sessions_unfiltered(
+    conn: &Connection,
+    session_ids: Vec<String>,
+) -> Result<Vec<ArchiveRemoval>, String> {
+    let mut removed = Vec::with_capacity(session_ids.len());
+    for session_id in session_ids {
+        // Capture paths before ON DELETE CASCADE removes the attachment rows.
+        removed.push(removal_for(conn, &session_id)?);
+        conn.execute(
+            "DELETE FROM archived_sessions WHERE session_id = ?1",
+            params![session_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(removed)
+}
+
+pub(crate) fn prune_unfiltered_in(
+    conn: &Connection,
+    retention: Retention,
+) -> Result<Vec<ArchiveRemoval>, String> {
+    let mut removed = Vec::new();
+
+    // Select authoritative ids once, then capture their paths and delete those
+    // exact rows. No retention predicate is re-derived after cleanup metadata
+    // has been collected.
+    let count_ids = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT session_id FROM archived_sessions
+                  WHERE is_open = 0
+                    AND session_id NOT IN (
+                         SELECT session_id FROM archived_sessions
+                          WHERE is_open = 0 ORDER BY closed_at DESC LIMIT ?1)
+                  ORDER BY closed_at ASC, session_id ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let ids = stmt
+            .query_map(params![retention.max_sessions], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        ids
+    };
+    removed.extend(delete_sessions_unfiltered(conn, count_ids)?);
 
     // Lexicographic compare is only correct because every writer in this file
     // uses `chrono::Utc::now().to_rfc3339()` — fixed-width and UTC. One
     // local-time write would break this silently.
     let cutoff = (chrono::Utc::now() - chrono::Duration::days(i64::from(retention.max_age_days)))
         .to_rfc3339();
-    let mut stmt = conn
-        .prepare(
-            "DELETE FROM archived_sessions
-              WHERE is_open = 0 AND closed_at < ?1
-           RETURNING session_id",
-        )
-        .map_err(|e| e.to_string())?;
-    let ids = stmt
-        .query_map(params![cutoff], |r| r.get::<_, String>(0))
-        .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-    removed.extend(ids);
+    let age_ids = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT session_id FROM archived_sessions
+                  WHERE is_open = 0 AND closed_at < ?1
+                  ORDER BY closed_at ASC, session_id ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let ids = stmt
+            .query_map(params![cutoff], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        ids
+    };
+    removed.extend(delete_sessions_unfiltered(conn, age_ids)?);
 
     Ok(removed)
+}
+
+pub(crate) fn prune_in(
+    conn: &Connection,
+    retention: Retention,
+) -> Result<Vec<ArchiveRemoval>, String> {
+    let removed = prune_unfiltered_in(conn, retention)?;
+    finalize_removals(conn, removed)
 }
 
 /// Standalone prune, so lowering a limit in Settings takes effect immediately
 /// rather than at the next archive write. Returns the sessions removed, so the
 /// caller can drop their attachment files too.
-pub fn prune(conn: &Connection, retention: Retention) -> Result<Vec<String>, String> {
+pub fn prune(conn: &Connection, retention: Retention) -> Result<Vec<ArchiveRemoval>, String> {
     prune_in(conn, retention)
 }
 
-pub fn delete(conn: &Connection, session_id: &str) -> Result<(), String> {
+pub fn delete(conn: &Connection, session_id: &str) -> Result<ArchiveRemoval, String> {
+    let removed = removal_for(conn, session_id)?;
     conn.execute(
         "DELETE FROM archived_sessions WHERE session_id = ?1",
         params![session_id],
     )
     .map_err(|e| e.to_string())?;
-    Ok(())
+    finalize_removals(conn, vec![removed])?
+        .pop()
+        .ok_or_else(|| "archive cleanup target disappeared".to_string())
 }
 
 /// Unconditional, including `is_open = 1` rows: the user asked for the archive to
@@ -761,9 +905,16 @@ pub fn clear(conn: &Connection) -> Result<(), String> {
 /// This is what recovers an AI conversation after `kill -9` — the one thing
 /// session restore cannot do, since it rebuilds terminals but has never known
 /// anything about transcripts. Called once per boot.
-pub fn reap_open_sessions(conn: &Connection) -> Result<u32, String> {
+pub fn reap_open_sessions(conn: &mut Connection) -> Result<u32, String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().to_rfc3339();
-    let n = conn
+    tx.execute(
+        "DELETE FROM archive_pending_supersedes
+          WHERE session_id IN (SELECT session_id FROM archived_sessions WHERE is_open = 1)",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    let n = tx
         .execute(
             "UPDATE archived_sessions
                 SET is_open = 0, close_reason = 'crash', closed_at = ?1, updated_at = ?1
@@ -771,6 +922,7 @@ pub fn reap_open_sessions(conn: &Connection) -> Result<u32, String> {
             params![now],
         )
         .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(n as u32)
 }
 
@@ -1015,7 +1167,13 @@ mod tests {
         .unwrap();
         // The IDS, not just the count: they are what the caller uses to delete the
         // matching attachment directories.
-        assert_eq!(removed, vec!["old".to_string()]);
+        assert_eq!(
+            removed
+                .iter()
+                .map(|removal| removal.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["old"]
+        );
         // Assert WHICH rows survived, not just how many.
         let ids: Vec<String> = list(&conn, 50, 0)
             .unwrap()
@@ -1082,7 +1240,7 @@ mod tests {
         // An open row is not history yet.
         assert!(list(&conn, 50, 0).unwrap().is_empty());
 
-        assert_eq!(reap_open_sessions(&conn).unwrap(), 1);
+        assert_eq!(reap_open_sessions(&mut conn).unwrap(), 1);
         let listed = list(&conn, 50, 0).unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].close_reason, "crash");
@@ -1095,7 +1253,7 @@ mod tests {
         let mut conn = mem();
         put(&mut conn, &row("a"), KEEP_ALL).unwrap();
         closed_at(&conn, "a", "2026-08-01T00:00:00+00:00");
-        assert_eq!(reap_open_sessions(&conn).unwrap(), 0);
+        assert_eq!(reap_open_sessions(&mut conn).unwrap(), 0);
         // A second reap must not rewrite an already-closed row's closed_at.
         let when: String = conn
             .query_row("SELECT closed_at FROM archived_sessions", [], |r| r.get(0))
@@ -1125,6 +1283,114 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM archived_messages", [], |r| r.get(0))
             .unwrap();
         assert_eq!(total, 2);
+    }
+
+    #[test]
+    fn provisional_supersede_survives_prepare_and_is_cleared_on_rollback() {
+        let mut conn = mem();
+        put(&mut conn, &row("source"), KEEP_ALL).unwrap();
+
+        let mut prepared = row("reopened");
+        prepared.is_open = true;
+        prepared.supersedes = Some("source".into());
+        put(&mut conn, &prepared, KEEP_ALL).unwrap();
+
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM archived_sessions", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let pending: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM archive_pending_supersedes",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 2, "preparation must not delete the source archive");
+        assert_eq!(pending, 1);
+
+        // Persistence resumed after an abandoned update/quit. The ordinary
+        // open row cancels the staged collapse but preserves both archives.
+        prepared.supersedes = None;
+        put(&mut conn, &prepared, KEEP_ALL).unwrap();
+        let pending: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM archive_pending_supersedes",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let source: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM archived_sessions WHERE session_id = 'source'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending, 0);
+        assert_eq!(source, 1);
+    }
+
+    #[test]
+    fn provisional_batches_do_not_prune_closed_history_before_rollback() {
+        let mut conn = mem();
+        put(&mut conn, &row("older"), KEEP_ALL).unwrap();
+        closed_at(&conn, "older", "2026-08-01T00:00:00+00:00");
+        put(&mut conn, &row("newer"), KEEP_ALL).unwrap();
+        closed_at(&conn, "newer", "2026-08-02T00:00:00+00:00");
+
+        let mut prepared = row("live");
+        prepared.is_open = true;
+        let retention = Retention {
+            max_sessions: 1,
+            max_age_days: 3650,
+        };
+        assert!(
+            put_many(&mut conn, std::slice::from_ref(&prepared), retention)
+                .unwrap()
+                .is_empty()
+        );
+
+        // A failed update/quit writes the same row open without its pending
+        // supersede mapping. Neither reversible write may enforce retention.
+        prepared.supersedes = None;
+        assert!(put_many(&mut conn, &[prepared], retention)
+            .unwrap()
+            .is_empty());
+        let mut closed: Vec<String> = list(&conn, 50, 0)
+            .unwrap()
+            .into_iter()
+            .map(|summary| summary.session_id)
+            .collect();
+        closed.sort();
+        assert_eq!(closed, vec!["newer".to_string(), "older".to_string()]);
+    }
+
+    #[test]
+    fn a_closed_batch_returns_every_retention_pruned_session_id() {
+        let mut conn = mem();
+        put(&mut conn, &row("oldest"), KEEP_ALL).unwrap();
+        closed_at(&conn, "oldest", "2026-08-01T00:00:00+00:00");
+        put(&mut conn, &row("middle"), KEEP_ALL).unwrap();
+        closed_at(&conn, "middle", "2026-08-02T00:00:00+00:00");
+
+        let removed = put_many(
+            &mut conn,
+            &[row("newest")],
+            Retention {
+                max_sessions: 1,
+                max_age_days: 3650,
+            },
+        )
+        .unwrap();
+        let mut removed_ids: Vec<_> = removed
+            .iter()
+            .map(|removal| removal.session_id.as_str())
+            .collect();
+        removed_ids.sort();
+        assert_eq!(removed_ids, vec!["middle", "oldest"]);
+        assert_eq!(list(&conn, 50, 0).unwrap()[0].session_id, "newest");
     }
 
     #[test]

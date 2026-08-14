@@ -154,6 +154,43 @@ pub struct CatalogEntry {
 /// Reads settings and the download registry. It must never touch the network:
 /// this runs on app start and on every visit to the settings tab, and a server
 /// that is switched off has to list its models anyway.
+fn catalog_provider_presence(
+    mut is_blocked: impl FnMut() -> bool,
+    mut has: impl FnMut(&crate::credentials::CredentialId) -> Result<bool, String>,
+) -> Result<std::collections::BTreeMap<&'static str, bool>, String> {
+    let mut presence = std::collections::BTreeMap::new();
+    for key in catalog::CATALOG
+        .iter()
+        .filter_map(|model| model.provider.api_key_setting())
+    {
+        if presence.contains_key(key) {
+            continue;
+        }
+        let id = crate::credentials::CredentialId::from_setting(key)
+            .ok_or_else(|| format!("unknown credential setting {key:?}"))?;
+        // The catalog's wire format is intentionally boolean. An item-level
+        // Keychain error means presence is unknown, not missing, so leave the
+        // model usable and let the actual credential read report the error.
+        // A globally blocked store is different: credentials are unavailable
+        // until Keychain access is restored, and no item query should run.
+        let configured = if is_blocked() {
+            false
+        } else {
+            has(&id).unwrap_or(true)
+        };
+        presence.insert(key, configured);
+    }
+    // A metadata query can be the operation that discovers Keychain is
+    // globally unavailable. Do not leave an earlier unknown item looking
+    // configured once the store has entered that blocked state.
+    if is_blocked() {
+        presence
+            .values_mut()
+            .for_each(|configured| *configured = false);
+    }
+    Ok(presence)
+}
+
 #[tauri::command]
 pub fn models_catalog(app: tauri::AppHandle<Wry>) -> Result<Vec<CatalogEntry>, String> {
     let sys = sysinfo::System::new_with_specifics(
@@ -163,6 +200,9 @@ pub fn models_catalog(app: tauri::AppHandle<Wry>) -> Result<Vec<CatalogEntry>, S
     let downloaded: std::collections::HashSet<String> = models_dir(&app)
         .map(|dir| registry::load(&dir).into_iter().map(|m| m.id).collect())
         .unwrap_or_default();
+    let credentials = crate::credentials::state(&app);
+    let provider_presence =
+        catalog_provider_presence(|| credentials.is_blocked(), |id| credentials.has(id))?;
 
     let built_in = catalog::CATALOG.iter().map(|model| {
         let (fits, is_downloaded) = match &model.local {
@@ -173,9 +213,7 @@ pub fn models_catalog(app: tauri::AppHandle<Wry>) -> Result<Vec<CatalogEntry>, S
             None => (true, false),
         };
         let configured = match model.provider.api_key_setting() {
-            Some(key) => crate::credentials::CredentialId::from_setting(key)
-                .and_then(|id| crate::credentials::state(&app).has(&id).ok())
-                .unwrap_or(false),
+            Some(key) => provider_presence.get(key).copied().unwrap_or(false),
             None => true,
         };
         CatalogEntry {
@@ -301,6 +339,70 @@ pub async fn model_status() -> Result<ModelStatus, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_presence_checks_each_provider_once_and_preserves_unknown_state() {
+        let mut calls = std::collections::BTreeMap::new();
+        let presence = catalog_provider_presence(
+            || false,
+            |id| {
+                *calls.entry(id.clone()).or_insert(0_usize) += 1;
+                Ok(true)
+            },
+        )
+        .unwrap();
+
+        let expected_settings = catalog::CATALOG
+            .iter()
+            .filter_map(|model| model.provider.api_key_setting())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(presence.len(), expected_settings.len());
+        assert_eq!(calls.len(), expected_settings.len());
+        assert!(calls.values().all(|count| *count == 1));
+        assert!(presence.values().all(|configured| *configured));
+
+        let mut mixed_calls = 0;
+        let mixed = catalog_provider_presence(
+            || false,
+            |id| {
+                mixed_calls += 1;
+                match id {
+                    crate::credentials::CredentialId::OpenAi => Err("item denied".into()),
+                    crate::credentials::CredentialId::Mistral => Ok(false),
+                    _ => Ok(true),
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(mixed_calls, expected_settings.len());
+        assert!(mixed["openai_api_key"], "unknown is not missing");
+        assert!(!mixed["mistral_api_key"], "known missing stays missing");
+        assert!(mixed["anthropic_api_key"]);
+
+        let blocked = catalog_provider_presence(
+            || true,
+            |_| panic!("a globally blocked store must not be queried"),
+        )
+        .unwrap();
+        assert!(blocked.values().all(|configured| !configured));
+
+        let discovered_block = std::cell::Cell::new(false);
+        let mut attempted = 0;
+        let blocked_during_query = catalog_provider_presence(
+            || discovered_block.get(),
+            |_| {
+                attempted += 1;
+                discovered_block.set(true);
+                Err("keychain unavailable".into())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            attempted, 1,
+            "stop querying after a global block is discovered"
+        );
+        assert!(blocked_during_query.values().all(|configured| !configured));
+    }
 
     /// The payload the settings page actually parses.
     ///

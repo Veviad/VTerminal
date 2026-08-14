@@ -4,6 +4,37 @@ use tauri_plugin_store::StoreExt;
 
 pub const STORE_NAME: &str = "settings.json";
 
+#[derive(Default)]
+struct SettingsCredentialPresence {
+    hugging_face: bool,
+    anthropic: bool,
+    openai: bool,
+    mistral: bool,
+}
+
+/// Startup needs one metadata-only lookup per settings field and must not read
+/// any secret. Keeping that contract behind a `has`-only callback makes it
+/// directly testable without constructing a Tauri runtime.
+fn settings_credential_presence(
+    blocked: bool,
+    mut has: impl FnMut(&crate::credentials::CredentialId) -> Result<bool, String>,
+) -> SettingsCredentialPresence {
+    if blocked {
+        return SettingsCredentialPresence::default();
+    }
+    // The wire format is intentionally boolean. When an item-level check cannot
+    // determine presence, treating it as configured avoids turning "unknown"
+    // into a false "missing" signal that invites an unnecessary overwrite.
+    // Actual secret use still reports the precise access error.
+    let mut present = |id| has(&id).unwrap_or(true);
+    SettingsCredentialPresence {
+        hugging_face: present(crate::credentials::CredentialId::HuggingFace),
+        anthropic: present(crate::credentials::CredentialId::Anthropic),
+        openai: present(crate::credentials::CredentialId::OpenAi),
+        mistral: present(crate::credentials::CredentialId::Mistral),
+    }
+}
+
 /// Cowork pattern: every key is read with an inline default so the frontend
 /// always receives a complete settings object.
 #[tauri::command]
@@ -11,13 +42,10 @@ pub fn get_settings(app: tauri::AppHandle<Wry>) -> Result<Value, String> {
     let store = app.store(STORE_NAME).map_err(|e| e.to_string())?;
     let get = |key: &str, default: Value| store.get(key).unwrap_or(default);
     let credentials = crate::credentials::state(&app);
-    let presence = |id: crate::credentials::CredentialId| {
-        if credentials.is_blocked() {
-            false
-        } else {
-            credentials.has(&id).unwrap_or(false)
-        }
-    };
+    let presence = settings_credential_presence(credentials.is_blocked(), |id| credentials.has(id));
+    // A presence call can discover a genuinely unavailable Keychain and set the
+    // global block, so read status after the snapshot rather than before it.
+    let credential_store_blocked = credentials.is_blocked();
     Ok(json!({
         "theme": get("theme", json!("veviad-developer")),
         "font_size": get("font_size", json!(13)),
@@ -47,13 +75,13 @@ pub fn get_settings(app: tauri::AppHandle<Wry>) -> Result<Value, String> {
         // choice IS the signal this reader is wanted. A reader you picked that is
         // not there after a restart is one you stop trusting.
         "vision_auto_load_on_start": get("vision_auto_load_on_start", json!(true)),
-        "has_hf_token": json!(presence(crate::credentials::CredentialId::HuggingFace)),
+        "has_hf_token": json!(presence.hugging_face),
         "models_dir": get("models_dir", Value::Null),
         // API keys are write-only: report presence, never the value.
-        "has_anthropic_api_key": json!(presence(crate::credentials::CredentialId::Anthropic)),
-        "has_openai_api_key": json!(presence(crate::credentials::CredentialId::OpenAi)),
-        "has_mistral_api_key": json!(presence(crate::credentials::CredentialId::Mistral)),
-        "credential_store_status": if credentials.is_blocked() { "blocked" } else { "ready" },
+        "has_anthropic_api_key": json!(presence.anthropic),
+        "has_openai_api_key": json!(presence.openai),
+        "has_mistral_api_key": json!(presence.mistral),
+        "credential_store_status": if credential_store_blocked { "blocked" } else { "ready" },
         "history_enabled": get("history_enabled", json!(true)),
         "history_capture_output": get("history_capture_output", json!(true)),
         "send_context_to_ai": get("send_context_to_ai", json!(true)),
@@ -479,7 +507,18 @@ pub fn read_credential(
     app: &tauri::AppHandle<Wry>,
     id: crate::credentials::CredentialId,
 ) -> Result<Option<crate::credentials::Secret>, String> {
-    crate::credentials::state(app).get(&id)
+    read_credential_with(id, |credential| {
+        crate::credentials::state(app).get(credential)
+    })
+}
+
+fn read_credential_with(
+    id: crate::credentials::CredentialId,
+    mut get: impl FnMut(
+        &crate::credentials::CredentialId,
+    ) -> Result<Option<crate::credentials::Secret>, String>,
+) -> Result<Option<crate::credentials::Secret>, String> {
+    get(&id)
 }
 
 pub fn read_bool(app: &tauri::AppHandle<Wry>, key: &str, default: bool) -> bool {
@@ -504,4 +543,61 @@ pub fn read_u32(app: &tauri::AppHandle<Wry>, key: &str, default: u32) -> u32 {
         .and_then(|v| v.as_u64())
         .map(|v| v as u32)
         .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::{read_credential_with, settings_credential_presence};
+
+    #[test]
+    fn startup_settings_check_each_credential_once_without_a_secret_reader() {
+        use crate::credentials::CredentialId;
+
+        let mut calls = Vec::new();
+        let presence = settings_credential_presence(false, |id| {
+            calls.push(id.clone());
+            Ok(true)
+        });
+
+        assert!(presence.hugging_face);
+        assert!(presence.anthropic);
+        assert!(presence.openai);
+        assert!(presence.mistral);
+        assert_eq!(
+            calls,
+            vec![
+                CredentialId::HuggingFace,
+                CredentialId::Anthropic,
+                CredentialId::OpenAi,
+                CredentialId::Mistral,
+            ]
+        );
+
+        let blocked = settings_credential_presence(true, |_| {
+            panic!("a globally blocked store must not be queried")
+        });
+        assert!(!blocked.hugging_face);
+        assert!(!blocked.anthropic);
+        assert!(!blocked.openai);
+        assert!(!blocked.mistral);
+
+        let unknown = settings_credential_presence(false, |_| Err("item denied".into()));
+        assert!(unknown.hugging_face);
+        assert!(unknown.anthropic);
+        assert!(unknown.openai);
+        assert!(unknown.mistral);
+    }
+
+    #[test]
+    fn actual_credential_consumers_read_the_requested_secret_once() {
+        let mut reads = Vec::new();
+        let secret = read_credential_with(crate::credentials::CredentialId::OpenAi, |id| {
+            reads.push(id.clone());
+            Ok(Some(crate::credentials::Secret::from("provider-secret")))
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(reads, vec![crate::credentials::CredentialId::OpenAi]);
+        assert_eq!(secret.expose(), "provider-secret");
+    }
 }

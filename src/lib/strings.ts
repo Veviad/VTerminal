@@ -609,8 +609,12 @@ export const S = {
       statusCurrent: "Up to date",
       statusAvailable: "Update available",
       statusDownloading: "Downloading update…",
+      statusVerifying: "Verifying download…",
+      statusCancelling: "Cancelling download…",
+      statusSaving: "Saving workspace…",
       statusInstalling: "Installing update…",
-      statusError: "Update check failed",
+      statusRestarting: "Restarting VTerminal…",
+      statusError: "Update failed",
       lastChecked: "Last checked",
       never: "Never",
       checkNow: "Check now",
@@ -621,10 +625,13 @@ export const S = {
       releaseNotes: "Release notes",
       noNotes: "No release notes were provided.",
       install: "Install & Restart",
+      cancelDownload: "Cancel download",
       later: "Later",
       restartWarning:
         "Installing restarts VTerminal. Running terminal processes will stop; saved tabs return with new shells.",
-      progress: (downloaded: string, total: string) => `${downloaded} of ${total}`,
+      progress: (downloaded: string, total: string, percent: number) =>
+        `${downloaded} of ${total} · ${percent}%`,
+      progressUnknown: (downloaded: string) => `${downloaded} downloaded`,
     },
     runbooks: {
       title: "Runbooks",
