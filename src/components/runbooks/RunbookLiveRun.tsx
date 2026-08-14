@@ -74,6 +74,22 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
     setDefinitionReviewError(null);
   }, [activeRunId]);
 
+  /** Stop the run and leave the run view.
+   *
+   * Cancelling used to strand the operator on a dead checklist. `cancel`
+   * reports failure by setting the store error rather than throwing, so the
+   * decision to navigate is made on the outcome: only a run that actually
+   * reached a terminal state gets left behind. A cancel that did not take
+   * keeps the run in front of the operator, next to its error. */
+  const abortRun = async (runId: string) => {
+    await cancel(runId);
+    const store = useRunbookStore.getState();
+    const stopped = store.runsById[runId] ?? store.activeRun;
+    if (stopped && isTerminalRunState(stopped.status)) {
+      store.setView("library");
+    }
+  };
+
   const ignoreAsync = (operation?: Promise<unknown>) => {
     if (!operation || typeof operation.then !== "function") return;
     operation.catch((error) => {
@@ -248,7 +264,7 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
                     onClick={() => {
                       if (confirmCancel) {
                         setConfirmCancel(false);
-                        ignoreAsync(cancel(run.run_id));
+                        ignoreAsync(abortRun(run.run_id));
                       } else {
                         setConfirmCancel(true);
                       }
@@ -258,13 +274,14 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
                     className={confirmCancel ? dangerButton : secondaryButton}
                   >
                     <Square size={10} />{" "}
-                    {confirmCancel ? "Confirm cancel" : "Cancel"}
+                    {confirmCancel ? "Confirm abort" : "Abort run"}
                   </button>
                   {confirmCancel && (
                     <p className="max-w-64 text-right text-[9px] leading-snug text-warning">
-                      Sends SIGINT to an owned foreground command, but cannot
-                      prove or undo changes already made. The active step will
-                      be reported unknown.
+                      Stops the run and returns to the Library. Sends SIGINT to
+                      an owned foreground command, but cannot prove or undo
+                      changes already made. The active step will be reported
+                      unknown.
                     </p>
                   )}
                 </div>
