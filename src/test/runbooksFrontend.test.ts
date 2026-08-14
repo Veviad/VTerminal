@@ -461,6 +461,70 @@ describe("evidence recording policy", () => {
   });
 });
 
+describe("durable refresh versus live events", () => {
+  it("drops a snapshot that events have overtaken", () => {
+    const store = useRunbookStore.getState();
+    store.setActiveRun(run());
+    const issuedAtRevision =
+      useRunbookStore.getState().runRevisions["run-1"] ?? 0;
+
+    // The approval arrives while the snapshot above is still in flight.
+    store.dispatchEvent({
+      type: "ApprovalRequested",
+      run_id: "run-1",
+      approval_id: "approval-1",
+      step_id: "secure-ssh",
+      phase: "check",
+      command: "sshd -T",
+      explanation: "Reads the running configuration.",
+      classification: { read_only: false, network: false, privileged: false, opaque: true },
+    });
+    expect(useRunbookStore.getState().activeRun?.pending_approval?.approval_id).toBe(
+      "approval-1",
+    );
+
+    // The pre-approval snapshot lands late. Applying it would erase the
+    // approval and leave the run spinning with nothing to click.
+    store.upsertRun({ ...run(), status: "running" }, issuedAtRevision);
+
+    const after = useRunbookStore.getState().activeRun;
+    expect(after?.pending_approval?.approval_id).toBe("approval-1");
+    expect(after?.status).toBe("waiting_approval");
+  });
+
+  it("still applies an operator-initiated read", () => {
+    // No revision means "authoritative": reopening History or the panel is how
+    // an operator recovers a run whose events were missed entirely.
+    const store = useRunbookStore.getState();
+    store.setActiveRun(run());
+    store.dispatchEvent({
+      type: "ApprovalRequested",
+      run_id: "run-1",
+      approval_id: "approval-1",
+      step_id: "secure-ssh",
+      phase: "check",
+      command: "sshd -T",
+      explanation: "Reads the running configuration.",
+      classification: { read_only: false, network: false, privileged: false, opaque: true },
+    });
+
+    store.upsertRun({ ...run(), status: "succeeded" });
+
+    expect(useRunbookStore.getState().activeRun?.status).toBe("succeeded");
+  });
+
+  it("applies a snapshot that no event has overtaken", () => {
+    const store = useRunbookStore.getState();
+    store.setActiveRun(run());
+    const issuedAtRevision =
+      useRunbookStore.getState().runRevisions["run-1"] ?? 0;
+
+    store.upsertRun({ ...run(), status: "succeeded" }, issuedAtRevision);
+
+    expect(useRunbookStore.getState().activeRun?.status).toBe("succeeded");
+  });
+});
+
 describe("header live-run selection", () => {
   it("stops presenting a run once it reaches a terminal state", () => {
     const store = useRunbookStore.getState();

@@ -167,8 +167,16 @@ const approvalPromptBindings = new Map<string, string>();
 
 export function useRunbooks() {
   const refreshRun = useCallback(async (runId: string) => {
+    // Capture the revision BEFORE the round trip. The row this reads is a
+    // snapshot of now, but it arrives whenever it arrives — and the engine is
+    // on its own connection, emitting events the whole time. Handing the
+    // revision back lets the store drop a snapshot that events have overtaken
+    // instead of rewinding to it.
+    const issuedAtRevision =
+      useRunbookStore.getState().runRevisions[runId] ?? 0;
     try {
-      useRunbookStore.getState().upsertRun(await api.runbooksGet(runId));
+      const run = await api.runbooksGet(runId);
+      useRunbookStore.getState().upsertRun(run, issuedAtRevision);
     } catch (error) {
       useRunbookStore.getState().setError(String(error));
     }
