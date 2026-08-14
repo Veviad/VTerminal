@@ -522,7 +522,10 @@ mod tests {
         ] {
             let wire = serde_json::to_string(&policy).expect("policy serializes");
             assert_eq!(wire, format!("\"{}\"", policy.as_str()));
-            assert_eq!(policy.as_str().parse::<EvidenceRecordingPolicy>(), Ok(policy));
+            assert_eq!(
+                policy.as_str().parse::<EvidenceRecordingPolicy>(),
+                Ok(policy)
+            );
         }
     }
 
@@ -547,7 +550,10 @@ mod tests {
         // tail default when it asks for nothing.
         assert_eq!(EvidenceRecordingPolicy::Runbook.floor(None), Tail);
         assert_eq!(EvidenceRecordingPolicy::Runbook.floor(Some(Full)), Full);
-        assert_eq!(EvidenceRecordingPolicy::Runbook.floor(Some(NoCapture)), NoCapture);
+        assert_eq!(
+            EvidenceRecordingPolicy::Runbook.floor(Some(NoCapture)),
+            NoCapture
+        );
         // Raising above the floor is allowed; lowering is not.
         assert_eq!(NoCapture.at_least(Tail), Tail);
         assert_eq!(Full.at_least(Tail), Full);
@@ -556,12 +562,10 @@ mod tests {
     #[test]
     fn retention_rank_orders_modes_by_what_they_keep() {
         assert!(
-            EvidenceCaptureMode::None.retention_rank()
-                < EvidenceCaptureMode::Tail.retention_rank()
+            EvidenceCaptureMode::None.retention_rank() < EvidenceCaptureMode::Tail.retention_rank()
         );
         assert!(
-            EvidenceCaptureMode::Tail.retention_rank()
-                < EvidenceCaptureMode::Full.retention_rank()
+            EvidenceCaptureMode::Tail.retention_rank() < EvidenceCaptureMode::Full.retention_rank()
         );
     }
 }

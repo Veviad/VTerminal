@@ -1832,8 +1832,7 @@ pub fn runbooks_evidence_read(
         db::find_evidence(&connection, &run_id, &evidence_id)?
             .ok_or_else(|| format!("evidence {evidence_id} does not belong to run {run_id}"))?
     };
-    let Some(bytes) =
-        db::read_complete_evidence_artifact(&command_state.app_data_dir, &evidence)?
+    let Some(bytes) = db::read_complete_evidence_artifact(&command_state.app_data_dir, &evidence)?
     else {
         return Ok(RunbookEvidenceContent {
             evidence_id,
@@ -4285,10 +4284,16 @@ mod tests {
             Full,
             "`none` is off by default, not recording forbidden",
         );
-        assert_eq!(resolved_evidence_mode(NoCapture, Policy::None, None), NoCapture);
+        assert_eq!(
+            resolved_evidence_mode(NoCapture, Policy::None, None),
+            NoCapture
+        );
 
         // `runbook` defers to the package, and to tail when it asks for nothing.
-        assert_eq!(resolved_evidence_mode(NoCapture, Policy::Runbook, None), Tail);
+        assert_eq!(
+            resolved_evidence_mode(NoCapture, Policy::Runbook, None),
+            Tail
+        );
         assert_eq!(
             resolved_evidence_mode(NoCapture, Policy::Runbook, Some(Full)),
             Full,

@@ -772,7 +772,9 @@ spec:
             snapshot_definition(ASSESSMENT, &baseline)
                 .unwrap()
                 .canonical_sha256,
-            snapshot_definition("", &requested).unwrap().canonical_sha256,
+            snapshot_definition("", &requested)
+                .unwrap()
+                .canonical_sha256,
         );
     }
 

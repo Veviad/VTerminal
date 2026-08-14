@@ -341,6 +341,10 @@ struct EngineRunner<'a> {
     checklist: Vec<ReportChecklistItem>,
     phase_summaries: Vec<Vec<String>>,
     stopped: bool,
+    /// One note per run, not per attempt: once the evidence budget is gone
+    /// every remaining attempt hits it, and repeating the same risk on each
+    /// step would bury the steps' own findings.
+    evidence_budget_noted: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -425,6 +429,7 @@ impl<'a> EngineRunner<'a> {
             spec,
             cancel,
             stopped: false,
+            evidence_budget_noted: false,
         }
     }
 
@@ -1682,6 +1687,35 @@ impl<'a> EngineRunner<'a> {
         Ok(())
     }
 
+    /// Record, once per run, that full capture stopped short of the audit the
+    /// operator asked for.
+    ///
+    /// This is an unresolved risk rather than an exception on purpose: it does
+    /// not downgrade the run (`status_from_checklist` keys off unchecked
+    /// required steps and incomplete evidence, neither of which this is), but a
+    /// report that quietly holds tails where full artifacts were promised would
+    /// be indistinguishable from one where nothing overflowed.
+    fn note_evidence_budget_exhausted(&mut self, index: usize, budget: super::db::EvidenceBudget) {
+        if self.evidence_budget_noted {
+            return;
+        }
+        self.evidence_budget_noted = true;
+        let Some(item) = self.checklist.get_mut(index) else {
+            return;
+        };
+        item.unresolved_risks.push(
+            match budget {
+                super::db::EvidenceBudget::BytesExhausted => {
+                    "this run reached its total evidence size limit; from this attempt on only the redacted output tail was kept, not a full artifact"
+                }
+                _ => {
+                    "this run reached its evidence artifact count limit; from this attempt on only the redacted output tail was kept, not a full artifact"
+                }
+            }
+            .into(),
+        );
+    }
+
     fn finish_attempt(
         &mut self,
         _index: usize,
@@ -1717,32 +1751,42 @@ impl<'a> EngineRunner<'a> {
             let mut full_evidence_for_report = None;
             if self.spec.evidence_mode == EvidenceCaptureMode::Full {
                 if let Some(captured) = &captured {
-                    super::db::ensure_evidence_budget(
+                    // Out of budget is not a failed attempt. The command already
+                    // ran in the operator's terminal, and a retry-heavy run
+                    // reaches the aggregate cap legitimately — failing here
+                    // would discard the step's RESULT to protect a cap on its
+                    // output. Fall back to the tail SQLite keeps either way and
+                    // say so once, in the report, where an audit will see it.
+                    let headroom = super::db::evidence_budget_headroom(
                         &connection,
                         &self.spec.run_id,
                         captured.stored_bytes,
                     )?;
-                    let relative_path = Some(self.full_evidence_relative_path(attempt_id)?);
-                    let mut evidence = super::db::EvidenceRecord {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        attempt_id: attempt_id.into(),
-                        run_id: self.spec.run_id.clone(),
-                        mode: self.spec.evidence_mode,
-                        availability: EvidenceAvailability::Pending,
-                        relative_path: relative_path.clone(),
-                        bytes: captured.stored_bytes,
-                        sha256: captured.sha256.clone(),
-                        redacted: captured.redacted,
-                        truncated: source_truncated || captured.truncated,
-                        created_at: timestamp(),
-                    };
-                    // Reserve metadata before touching the filesystem. A crash can
-                    // therefore leave only a tracked missing/partial artifact that
-                    // export and deletion can enumerate and fail closed around;
-                    // it can never leave untracked runbook output in app data.
-                    super::db::reserve_evidence(&connection, &evidence)?;
-                    if let Err(error) = self.write_full_evidence(attempt_id, &captured.text) {
-                        super::db::mark_evidence_missing(
+                    if headroom != super::db::EvidenceBudget::Available {
+                        self.note_evidence_budget_exhausted(_index, headroom);
+                    }
+                    if headroom == super::db::EvidenceBudget::Available {
+                        let relative_path = Some(self.full_evidence_relative_path(attempt_id)?);
+                        let mut evidence = super::db::EvidenceRecord {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            attempt_id: attempt_id.into(),
+                            run_id: self.spec.run_id.clone(),
+                            mode: self.spec.evidence_mode,
+                            availability: EvidenceAvailability::Pending,
+                            relative_path: relative_path.clone(),
+                            bytes: captured.stored_bytes,
+                            sha256: captured.sha256.clone(),
+                            redacted: captured.redacted,
+                            truncated: source_truncated || captured.truncated,
+                            created_at: timestamp(),
+                        };
+                        // Reserve metadata before touching the filesystem. A crash can
+                        // therefore leave only a tracked missing/partial artifact that
+                        // export and deletion can enumerate and fail closed around;
+                        // it can never leave untracked runbook output in app data.
+                        super::db::reserve_evidence(&connection, &evidence)?;
+                        if let Err(error) = self.write_full_evidence(attempt_id, &captured.text) {
+                            super::db::mark_evidence_missing(
                             &connection,
                             &evidence.id,
                             &self.spec.run_id,
@@ -1751,34 +1795,35 @@ impl<'a> EngineRunner<'a> {
                         .map_err(|state_error| {
                             format!("{error}; additionally failed to mark evidence missing: {state_error}")
                         })?;
-                        return Err(error);
-                    }
-                    let artifact_verified = super::db::verify_complete_evidence_artifact(
-                        self.context
-                            .evidence_root
-                            .ok_or("full evidence capture requires an evidence root")?,
-                        &evidence,
-                    )?;
-                    if !artifact_verified {
-                        super::db::mark_evidence_missing(
+                            return Err(error);
+                        }
+                        let artifact_verified = super::db::verify_complete_evidence_artifact(
+                            self.context
+                                .evidence_root
+                                .ok_or("full evidence capture requires an evidence root")?,
+                            &evidence,
+                        )?;
+                        if !artifact_verified {
+                            super::db::mark_evidence_missing(
+                                &connection,
+                                &evidence.id,
+                                &self.spec.run_id,
+                                attempt_id,
+                            )?;
+                            return Err(
+                            "full evidence artifact failed its post-write size or SHA-256 check"
+                                .into(),
+                        );
+                        }
+                        super::db::mark_evidence_complete(
                             &connection,
                             &evidence.id,
                             &self.spec.run_id,
                             attempt_id,
                         )?;
-                        return Err(
-                            "full evidence artifact failed its post-write size or SHA-256 check"
-                                .into(),
-                        );
+                        evidence.availability = EvidenceAvailability::Complete;
+                        full_evidence_for_report = Some((evidence, relative_path));
                     }
-                    super::db::mark_evidence_complete(
-                        &connection,
-                        &evidence.id,
-                        &self.spec.run_id,
-                        attempt_id,
-                    )?;
-                    evidence.availability = EvidenceAvailability::Complete;
-                    full_evidence_for_report = Some((evidence, relative_path));
                 }
             }
             super::db::finish_attempt(

@@ -2460,6 +2460,38 @@ pub fn ensure_evidence_budget(
     run_id: &str,
     additional_bytes: u64,
 ) -> Result<(), String> {
+    match evidence_budget_headroom(conn, run_id, additional_bytes)? {
+        EvidenceBudget::Available => Ok(()),
+        EvidenceBudget::ItemsExhausted => Err(format!(
+            "run reached the {MAX_REPORT_EVIDENCE_ITEMS}-item evidence audit limit"
+        )),
+        EvidenceBudget::BytesExhausted => Err(format!(
+            "runbook evidence exceeds the {MAX_REPORT_EVIDENCE_BYTES}-byte aggregate audit limit"
+        )),
+    }
+}
+
+/// Why a run can no longer keep full artifacts, or that it still can.
+///
+/// Separate from `ensure_evidence_budget` because the two callers want opposite
+/// things from the same measurement. A reservation must fail closed — writing
+/// past the cap is not an option. But an ATTEMPT that merely wanted a full
+/// artifact should not die because the run is out of budget: the command
+/// already ran in the operator's terminal, and turning "we kept less evidence
+/// than you asked for" into a failed step loses the step's result as well as
+/// its output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceBudget {
+    Available,
+    ItemsExhausted,
+    BytesExhausted,
+}
+
+pub fn evidence_budget_headroom(
+    conn: &Connection,
+    run_id: &str,
+    additional_bytes: u64,
+) -> Result<EvidenceBudget, String> {
     let (count, bytes): (i64, i64) = conn
         .query_row(
             "SELECT COUNT(*),COALESCE(SUM(bytes),0) FROM runbook_evidence WHERE run_id=?1",
@@ -2470,19 +2502,15 @@ pub fn ensure_evidence_budget(
     let count = usize::try_from(count).map_err(|_| "runbook evidence count is invalid")?;
     let bytes = u64::try_from(bytes).map_err(|_| "runbook evidence byte count is invalid")?;
     if count >= MAX_REPORT_EVIDENCE_ITEMS {
-        return Err(format!(
-            "run reached the {MAX_REPORT_EVIDENCE_ITEMS}-item evidence audit limit"
-        ));
+        return Ok(EvidenceBudget::ItemsExhausted);
     }
     if bytes
         .checked_add(additional_bytes)
         .is_none_or(|total| total > MAX_REPORT_EVIDENCE_BYTES)
     {
-        return Err(format!(
-            "runbook evidence exceeds the {MAX_REPORT_EVIDENCE_BYTES}-byte aggregate audit limit"
-        ));
+        return Ok(EvidenceBudget::BytesExhausted);
     }
-    Ok(())
+    Ok(EvidenceBudget::Available)
 }
 
 /// Reserve the final evidence identity, size, digest and confined path before
@@ -5729,7 +5757,8 @@ mod tests {
 
     /// A root holding one complete artifact at the canonical relative path.
     fn evidence_fixture(label: &str, contents: &[u8]) -> (PathBuf, EvidenceRecord) {
-        let root = std::env::temp_dir().join(format!("runbook-evidence-{label}-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("runbook-evidence-{label}-{}", uuid::Uuid::new_v4()));
         let directory = root.join("runbooks").join("run-1");
         fs::create_dir_all(&directory).unwrap();
         fs::write(directory.join("attempt-1.log"), contents).unwrap();
@@ -5752,6 +5781,57 @@ mod tests {
     }
 
     #[test]
+    fn an_exhausted_evidence_budget_is_reported_rather_than_thrown() {
+        // The reservation path must still fail closed, but an attempt that only
+        // WANTED a full artifact has to be able to carry on with a tail: the
+        // command already ran in the operator's terminal, and a retry-heavy run
+        // reaches the aggregate cap legitimately.
+        let mut conn = db();
+        let (run, attempt, _) = pending_full_evidence(&mut conn, "budget-headroom", b"captured");
+
+        assert_eq!(
+            evidence_budget_headroom(&conn, &run.id, 1024).unwrap(),
+            EvidenceBudget::Available
+        );
+
+        // Fill the run exactly to its aggregate cap. Raw insert because
+        // `reserve_evidence` caps a single row at the 1 MiB per-artifact limit,
+        // and the point here is the run-wide total. The fixture already holds
+        // one small row, so the remainder is measured rather than assumed.
+        let held: i64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(bytes),0) FROM runbook_evidence WHERE run_id=?1",
+                [&run.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO runbook_evidence
+             (id,attempt_id,run_id,mode,availability,relative_path,bytes,sha256,redacted,truncated,created_at)
+             VALUES ('bulk',?1,?2,'full','complete',NULL,?3,'digest',0,0,?4)",
+            rusqlite::params![
+                attempt.id,
+                run.id,
+                MAX_REPORT_EVIDENCE_BYTES as i64 - held,
+                now()
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            evidence_budget_headroom(&conn, &run.id, 1).unwrap(),
+            EvidenceBudget::BytesExhausted
+        );
+        // Zero further bytes still fits, so the boundary is "would exceed",
+        // not "has reached".
+        assert_eq!(
+            evidence_budget_headroom(&conn, &run.id, 0).unwrap(),
+            EvidenceBudget::Available
+        );
+        assert!(ensure_evidence_budget(&conn, &run.id, 1).is_err());
+    }
+
+    #[test]
     fn a_recorded_artifact_reads_back_only_while_it_still_matches() {
         let (root, evidence) = evidence_fixture("readback", b"permitrootlogin no\n");
         assert_eq!(
@@ -5761,12 +5841,26 @@ mod tests {
 
         // Altered on disk. The row still says complete, so trusting it would
         // present someone else's bytes as this step's proof.
-        fs::write(root.join("runbooks/run-1/attempt-1.log"), b"permitrootlogin yes").unwrap();
-        assert_eq!(read_complete_evidence_artifact(&root, &evidence).unwrap(), None);
+        fs::write(
+            root.join("runbooks/run-1/attempt-1.log"),
+            b"permitrootlogin yes",
+        )
+        .unwrap();
+        assert_eq!(
+            read_complete_evidence_artifact(&root, &evidence).unwrap(),
+            None
+        );
 
         // Truncated to a prefix: same leading bytes, wrong length and digest.
-        fs::write(root.join("runbooks/run-1/attempt-1.log"), b"permitrootlogin no").unwrap();
-        assert_eq!(read_complete_evidence_artifact(&root, &evidence).unwrap(), None);
+        fs::write(
+            root.join("runbooks/run-1/attempt-1.log"),
+            b"permitrootlogin no",
+        )
+        .unwrap();
+        assert_eq!(
+            read_complete_evidence_artifact(&root, &evidence).unwrap(),
+            None
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -5777,13 +5871,22 @@ mod tests {
 
         let mut pending = complete.clone();
         pending.availability = EvidenceAvailability::Pending;
-        assert_eq!(read_complete_evidence_artifact(&root, &pending).unwrap(), None);
+        assert_eq!(
+            read_complete_evidence_artifact(&root, &pending).unwrap(),
+            None
+        );
         let mut missing = complete.clone();
         missing.availability = EvidenceAvailability::Missing;
-        assert_eq!(read_complete_evidence_artifact(&root, &missing).unwrap(), None);
+        assert_eq!(
+            read_complete_evidence_artifact(&root, &missing).unwrap(),
+            None
+        );
 
         fs::remove_file(root.join("runbooks/run-1/attempt-1.log")).unwrap();
-        assert_eq!(read_complete_evidence_artifact(&root, &complete).unwrap(), None);
+        assert_eq!(
+            read_complete_evidence_artifact(&root, &complete).unwrap(),
+            None
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -5799,7 +5902,10 @@ mod tests {
         let artifact = root.join("runbooks/run-1/attempt-1.log");
         fs::remove_file(&artifact).unwrap();
         std::os::unix::fs::symlink(&secret, &artifact).unwrap();
-        assert_eq!(read_complete_evidence_artifact(&root, &evidence).unwrap(), None);
+        assert_eq!(
+            read_complete_evidence_artifact(&root, &evidence).unwrap(),
+            None
+        );
 
         // A traversal in the stored path is refused by the shared confinement
         // helper before any file is opened.
