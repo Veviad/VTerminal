@@ -60,7 +60,7 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
     string | null
   >(null);
 
-  const ignoreAsync = (operation: Promise<unknown> | void) => {
+  const ignoreAsync = (operation?: Promise<unknown>) => {
     if (!operation || typeof operation.then !== "function") return;
     operation.catch((error) => {
       useRunbookStore.getState().setError(String(error));
@@ -309,18 +309,17 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
                 ignoreAsync(approveAllPendingSteps(run.run_id));
               }}
               onCancelApproveAll={() => {
-                ignoreAsync(cancelApproveAll(run.run_id));
+                cancelApproveAll(run.run_id);
               }}
               onRespond={(approved, command, shellAttested) => {
-                ignoreAsync(
-                  respondApproval(
-                    run.run_id,
-                    pendingApproval.approval_id,
-                    approved,
-                    command,
-                    shellAttested,
-                  ),
+                const result = respondApproval(
+                  run.run_id,
+                  pendingApproval.approval_id,
+                  approved,
+                  command,
+                  shellAttested,
                 );
+                if (result) ignoreAsync(result);
               }}
             />
           </section>
@@ -331,15 +330,14 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
             request={pendingManual}
             busy={busyAction === `manual:${pendingManual.step_id}`}
             onSubmit={(outcome, comment, evidence) => {
-              ignoreAsync(
-                submitManual(
-                  run.run_id,
-                  pendingManual.step_id,
-                  outcome,
-                  comment,
-                  evidence,
-                ),
+              const result = submitManual(
+                run.run_id,
+                pendingManual.step_id,
+                outcome,
+                comment,
+                evidence,
               );
+              if (result) ignoreAsync(result);
             }}
           />
         )}
@@ -349,14 +347,13 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
             request={pendingOperator}
             busy={busyAction?.startsWith("decision:") ?? false}
             onDecide={(kind, reason) => {
-              ignoreAsync(
-                decide(run.run_id, {
-                  kind,
-                  step_id: pendingOperator.step_id,
-                  actor: "operator",
-                  reason,
-                }),
-              );
+              const result = decide(run.run_id, {
+                kind,
+                step_id: pendingOperator.step_id,
+                actor: "operator",
+                reason,
+              });
+              if (result) ignoreAsync(result);
             }}
           />
         )}
