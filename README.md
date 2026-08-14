@@ -4,7 +4,7 @@ A lean, AI-powered terminal for macOS — Warp-style command blocks and an AI ag
 
 **[Download the latest release for macOS](https://vterminal.veviad.com/#download)** (Apple Silicon) · **[vterminal.veviad.com](https://vterminal.veviad.com)**
 
-The sections below build from source. If you just want to run the app, take the download above — it already includes on-device inference, and a locally built app is the one case that skips the Gatekeeper prompt.
+The sections below build from source. If you just want to run the app, take the download above — published macOS releases beginning with v0.2.3 include on-device inference and are Developer ID signed with hardened runtime, notarized by Apple, and stapled for normal Gatekeeper verification. No **Open Anyway** or quarantine workaround is required.
 
 Upgrading from an older build? Quit VTerminal completely before replacing `/Applications/VTerminal.app`, eject any older VTerminal disk images, then launch the copy in Applications. Otherwise macOS can reopen the old running or mounted copy even though the new app was installed.
 
@@ -83,11 +83,13 @@ npm run tauri dev -- --features local-llm
 
 Then open **Settings → Models**, download **Qwen3.5 9B** (~5.3 GB), and press **Load**.
 
-Release build:
+Local optimized build:
 
 ```bash
 npm run tauri build -- --features local-llm
 ```
+
+This local artifact uses whatever signing identity is configured on your Mac; it does not reproduce the Developer ID-signed and notarized GitHub release unless you supply the corresponding release signing environment.
 
 ## Experimental updates
 
@@ -96,7 +98,7 @@ VTerminal includes an experimental signed update chain for macOS Apple Silicon r
 - **Automatic updates are off by default.** Enabling them checks immediately, then every 24 hours.
 - **Stable releases and prereleases share one channel.** Manual **Check now** remains available while automatic checks are disabled.
 - **Installation is never silent.** VTerminal shows the release notes and asks before downloading, installing, and restarting; running terminal processes stop during the restart.
-- **Updater archives are cryptographically verified.** This signature is separate from the app's current ad-hoc Apple code signature and Gatekeeper status.
+- **Updater archives are cryptographically verified.** The updater signature is separate from the app's Developer ID code signature, hardened runtime, and Apple notarization ticket; published macOS releases beginning with v0.2.3 carry both protections.
 
 ## Models
 

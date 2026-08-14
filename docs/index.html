@@ -326,7 +326,7 @@
           <p class="download-meta hero-download-meta">
             <span data-release-text="version">Latest release</span> · Apple Silicon ·
             <span data-release-text="dmg_size">DMG</span> ·
-            <a href="#download">not notarized, see setup</a>
+            <a href="#download">Developer ID signed &amp; notarized</a>
           </p>
           <p class="release-date">
             Published <span data-release-text="published_date">—</span>
@@ -938,7 +938,8 @@
               </span>
               <h3>Automation and advanced storage</h3>
               <p>
-                The signed standalone <code>vterminal-docs</code> CLI installs
+                The Developer ID-signed standalone <code>vterminal-docs</code>
+                CLI installs
                 from the UI into <code>~/.local/bin</code> without editing shell
                 profiles. It shares profiles, model cache, connections, chunking
                 and job records with the app for repeatable terminal automation.
@@ -1410,8 +1411,8 @@
               <div class="req-row">
                 <dt>Signature</dt>
                 <dd>
-                  ad-hoc signed, not notarized — one extra step on first
-                  launch, see step 3
+                  Developer ID signed with hardened runtime, notarized by Apple,
+                  and stapled for Gatekeeper verification
                 </dd>
               </div>
               <div class="req-row">
@@ -1433,8 +1434,9 @@
             <p class="install-note">
               Prefer to build it yourself? The
               <a href="https://github.com/Veviad/VTerminal#quick-start">README</a>
-              covers the source build, and building also sidesteps the Gatekeeper
-              step entirely, since a locally built app is never quarantined.
+              covers local development builds. Those are separate from the
+              Developer ID-signed and notarized app distributed in the published
+              disk image.
             </p>
             <p class="install-note">
               <strong>Experimental automatic updates.</strong> After installing,
@@ -1480,7 +1482,7 @@
                      published SHA256SUMS.txt cannot drift, and it is the command
                      the release notes already give. -->
                 <p>
-                  The build is not notarized, so verify it if you like. Download
+                  For an independent integrity check, download
                   <a
                     href="https://github.com/Veviad/VTerminal/releases"
                     data-release-href="checksum"
@@ -1520,45 +1522,31 @@
             <li class="step">
               <span class="step-number" aria-hidden="true">3</span>
               <div class="step-body">
-                <h3>Allow It on First Launch</h3>
+                <h3>Open VTerminal</h3>
                 <p>
-                  This build is <strong>not notarized</strong>, so
-                  Gatekeeper blocks it the first time. That is not an App Store
-                  restriction — you can run apps from anywhere. It needs a
-                  Developer ID certificate, which requires a paid Apple Developer
-                  account this project does not have yet. Either route below works,
-                  once.
+                  The published app is signed with a Developer ID certificate,
+                  notarized by Apple, and carries a stapled notarization ticket.
+                  Open it normally from Applications; Gatekeeper can verify the
+                  publisher and notarization without <strong>Open Anyway</strong>
+                  or removing the quarantine attribute.
                 </p>
 
-                <p class="route">
-                  <strong>From System Settings</strong>
-                  Try to open VTerminal, then go to <strong>Privacy &amp;
-                  Security</strong>, scroll to Security and click
-                  <strong>Open Anyway</strong>. On macOS 15 and later the old
-                  Control-click → Open shortcut no longer works, and on macOS 26
-                  the button only appears for an hour after a blocked launch.
+                <p>
+                  Upgrading from an ad-hoc release (0.2.2 or earlier) may cause
+                  macOS Keychain to request one final authorization for each
+                  existing credential when it is actually used. Choose
+                  <strong>Always Allow</strong>; later VTerminal releases signed by
+                  the same Developer ID team and app identifier can reuse that
+                  authorization. The companion <code>vterminal-docs</code>
+                  executable has its own identifier and may request its own
+                  first-use authorization.
                 </p>
 
-                <p class="route">
-                  <strong>Or from a terminal</strong>
-                  Clear the quarantine flag your browser attached, which skips the
-                  dialog entirely.
+                <p>
+                  If macOS cannot verify the app, download the disk image again
+                  and check its published SHA-256 checksum rather than bypassing
+                  Gatekeeper.
                 </p>
-                <div class="code-block">
-                  <!-- No .nowrap here, unlike the flag pair elsewhere: at 320px
-                       the path alone (218px) exceeds the line, so pinning it
-                       would overflow the box instead of wrapping. A path broken
-                       mid-token still reads unambiguously. -->
-                  <code>xattr -dr com.apple.quarantine /Applications/VTerminal.app</code>
-                  <button
-                    class="copy-button"
-                    type="button"
-                    aria-label="Copy command"
-                    data-copy
-                  >
-                    <svg class="ui-icon" aria-hidden="true"><use href="#i-copy" /></svg>
-                  </button>
-                </div>
               </div>
             </li>
           </ol>
