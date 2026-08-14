@@ -29,14 +29,12 @@ describe("RunbookApprovalCard", () => {
     );
 
     const command = "/usr/bin/env -i PATH=/usr/bin:/bin /bin/sh -c 'true'";
-    const approve = screen.getByRole("button", { name: /acknowledge and approve step/i });
+    const approve = screen.getByRole("button", {
+      name: /acknowledge and approve step/i,
+    });
     expect(approve).toBeEnabled();
     fireEvent.click(approve);
-    expect(onRespond).toHaveBeenCalledWith(
-      true,
-      command,
-      true,
-    );
+    expect(onRespond).toHaveBeenCalledWith(true, command, true);
   });
 
   it("requires a valid shell command before enabling approval", () => {
@@ -65,7 +63,9 @@ describe("RunbookApprovalCard", () => {
 
     const textarea = screen.getByRole("textbox");
     fireEvent.change(textarea, { target: { value: "line-one\nline-two" } });
-    const approve = screen.getByRole("button", { name: /acknowledge and approve/i });
+    const approve = screen.getByRole("button", {
+      name: /acknowledge and approve/i,
+    });
     expect(approve).toBeDisabled();
     fireEvent.change(textarea, { target: { value: "" } });
     expect(approve).toBeDisabled();
@@ -96,7 +96,9 @@ describe("RunbookApprovalCard", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /approve all remaining steps/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /approve all remaining steps/i }),
+    );
     expect(onApproveAll).toHaveBeenCalledOnce();
   });
 
@@ -157,6 +159,8 @@ describe("RunbookApprovalCard", () => {
     );
 
     expect(screen.queryByRole("checkbox")).toBeNull();
-    expect(screen.getByRole("button", { name: /allow model once/i })).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: /allow model once/i }),
+    ).toBeEnabled();
   });
 });
