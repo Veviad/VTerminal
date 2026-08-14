@@ -81,6 +81,7 @@ pub fn run() {
             // `docs_*` command runs, so the default (flag-off) install has no
             // `docs.db` at all. See `docs::db` for why the file is separate.
             app.manage(docs::db::DocsDb::new(app_data.clone()));
+            app.manage(knowledge::ingest::KnowledgeJobRunnerState::default());
             app.manage(pty::PtyManager::default());
             app.manage(agent::AiState::default());
             app.manage(agent::ApprovalState::default());
@@ -219,8 +220,6 @@ pub fn run() {
             commands::knowledge::knowledge_search_detailed,
             commands::knowledge::knowledge_embedding_catalog,
             commands::knowledge::knowledge_embedding_profile_create_cloud,
-            commands::knowledge::knowledge_qdrant_import_inspect,
-            commands::knowledge::knowledge_qdrant_import_save,
             commands::knowledge::knowledge_qdrant_import_remove,
             commands::knowledge::knowledge_documents_list,
             commands::knowledge::knowledge_document_delete,

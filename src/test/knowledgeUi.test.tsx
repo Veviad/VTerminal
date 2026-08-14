@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type {
+  DownloadEvent,
   EmbeddingCatalogEntry,
+  EmbeddingInstallEvent,
   EmbeddingProfile,
   KnowledgeBucketDescriptor,
   KnowledgeBucketRef,
@@ -10,15 +12,19 @@ import type {
   KnowledgeDocumentPage,
   KnowledgeJob,
   KnowledgePointId,
-  QdrantImportInspection,
-  QdrantImportInput,
   QdrantConnection,
   QdrantConnectionInput,
 } from "../lib/types";
 
 const api = vi.hoisted(() => ({
   knowledgeEmbeddingModelsList: vi.fn<() => Promise<EmbeddingCatalogEntry[]>>(),
-  knowledgeEmbeddingModelInstall: vi.fn(() => Promise.resolve()),
+  knowledgeEmbeddingModelInstall: vi.fn<
+    (
+      modelId: string,
+      onEvent: (event: EmbeddingInstallEvent | DownloadEvent) => void,
+      licenseAccepted?: boolean,
+    ) => Promise<void>
+  >(() => Promise.resolve()),
   knowledgeEmbeddingModelCancel: vi.fn(() => Promise.resolve()),
   knowledgeEmbeddingProfileCreateCloud: vi.fn(() => Promise.resolve("profile-cloud")),
   knowledgeQdrantConnectionsList: vi.fn<() => Promise<QdrantConnection[]>>(),
@@ -53,14 +59,8 @@ const api = vi.hoisted(() => ({
   knowledgeJobCancel: vi.fn(() => Promise.resolve({} as KnowledgeJob)),
   knowledgeJobRetry: vi.fn(() => Promise.resolve({} as KnowledgeJob)),
   knowledgeQdrantTurboQuantSet: vi.fn<
-    (bucket: KnowledgeBucketRef, config: unknown) => Promise<void>
-  >(() => Promise.resolve()),
-  knowledgeQdrantImportInspect: vi.fn<
-    (bucket: KnowledgeBucketRef) => Promise<QdrantImportInspection>
-  >(),
-  knowledgeQdrantImportSave: vi.fn<
-    (bucket: KnowledgeBucketRef, input: QdrantImportInput) => Promise<void>
-  >(() => Promise.resolve()),
+    (bucket: KnowledgeBucketRef, config: unknown) => Promise<KnowledgeBucketDescriptor>
+  >(() => Promise.resolve({ quantization: { state: "off" } } as KnowledgeBucketDescriptor)),
   knowledgeQdrantImportRemove: vi.fn(() => Promise.resolve()),
   knowledgeBucketEmbed: vi.fn(() => Promise.resolve({} as KnowledgeJob)),
   knowledgeBucketSemanticEnable: vi.fn(() => Promise.resolve({} as KnowledgeJob)),
@@ -79,6 +79,8 @@ const { BucketChip, BucketPicker } = await import("../components/ai/BucketPicker
 const { RemoteDocumentsPanel } = await import(
   "../components/settings/RemoteDocumentsPanel"
 );
+const { AddKnowledgeWizard } = await import("../components/settings/AddKnowledgeWizard");
+const { RemoteBucketCard } = await import("../components/settings/DocsSettings");
 const { TurboQuantPanel } = await import("../components/settings/TurboQuantPanel");
 const { QdrantImportWizard } = await import("../components/settings/QdrantImportWizard");
 const { emptyAiStream, useAppStore } = await import("../stores/appStore");
@@ -191,12 +193,6 @@ beforeEach(() => {
   api.knowledgeQdrantConnectionTest.mockResolvedValue(connection());
   api.knowledgeDocumentsList.mockResolvedValue({ documents: [], next_cursor: null });
   api.knowledgeJobsList.mockResolvedValue([]);
-  api.knowledgeQdrantImportInspect.mockResolvedValue({
-    vectors: [],
-    samples: [],
-    profiles: [],
-    binding: null,
-  });
   useAppStore.setState({
     docsEnabled: true,
     docBuckets: [],
@@ -336,7 +332,7 @@ describe("Qdrant credential UX", () => {
     await waitFor(() => expect(api.knowledgeQdrantConnectionsList).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: "Add connection" }));
     fireEvent.change(screen.getByLabelText("Connection name"), { target: { value: "Lab" } });
-    fireEvent.change(screen.getByLabelText("Qdrant URL"), {
+    fireEvent.change(screen.getByLabelText("Qdrant REST URL"), {
       target: { value: "http://qdrant.example.test:6333" },
     });
     const save = screen.getByRole("button", { name: "Save & test" });
@@ -548,6 +544,88 @@ describe("remote document management", () => {
     });
     expect(api.knowledgeDocumentIngest.mock.calls[0][0].pages[0].text).toContain("Restart");
   });
+
+  it("shows queued job status while the document list is collapsed", async () => {
+    const refresh = vi.fn(() => Promise.resolve());
+    const job: KnowledgeJob = {
+      id: "job-1",
+      kind: "remote_ingest",
+      target_ref: remote().ref,
+      stage: "embed",
+      status: "queued",
+      completed_items: 0,
+      total_items: 8,
+      error: null,
+      display_name: "runbook.md",
+      queue_position: 2,
+      waiting_reason: "Waiting for the knowledge worker",
+      created_at: 1,
+      updated_at: 2,
+    };
+    render(
+      <RemoteDocumentsPanel
+        bucket={remote()}
+        jobs={[job]}
+        onRefreshJobs={refresh}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Ingestion jobs")).toBeInTheDocument();
+    expect(screen.getByText(/runbook\.md.*embed.*queued.*queue 2/i)).toBeInTheDocument();
+    expect(screen.getByText("Waiting for the knowledge worker")).toBeInTheDocument();
+    expect(api.knowledgeDocumentsList).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(api.knowledgeJobCancel).toHaveBeenCalledWith("job-1"));
+  });
+
+  it("does not offer ingestion until a managed collection's exact profile is runnable", () => {
+    render(
+      <RemoteDocumentsPanel
+        bucket={bucket({
+          ...remote(),
+          compatibility: "requires_profile",
+          writable: true,
+          write_capability: "read_write",
+        })}
+        onChanged={vi.fn()}
+      />,
+    );
+    expect(screen.queryByLabelText("Upload documents to Engineering")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Documents/ })).toBeInTheDocument();
+  });
+});
+
+describe("Add knowledge destinations", () => {
+  it("omits proven read-only collections but keeps unknown permissions for an explicit upload", () => {
+    const readOnly = bucket({
+      ref: { source: "qdrant", connection_id: "q1", collection: "read-only" },
+      label: "Read only",
+      compatibility: "attach_only",
+      writable: false,
+      write_capability: "read_only",
+    });
+    const unknown = bucket({
+      ref: { source: "qdrant", connection_id: "q1", collection: "unknown" },
+      label: "Permission unknown",
+      compatibility: "attach_only",
+      writable: false,
+      write_capability: "unknown",
+    });
+    render(
+      <AddKnowledgeWizard
+        buckets={[readOnly, unknown]}
+        jobs={[]}
+        onCreateBucket={vi.fn()}
+        onOpenBucket={vi.fn()}
+        onChanged={vi.fn(() => Promise.resolve())}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Add knowledge" }));
+    fireEvent.click(screen.getByRole("button", { name: "Qdrant" }));
+    expect(screen.queryByRole("option", { name: /Read only/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Permission unknown/ })).toBeInTheDocument();
+  });
 });
 
 describe("TurboQuant controls", () => {
@@ -559,6 +637,10 @@ describe("TurboQuant controls", () => {
       quantization: { state: "off" },
     });
     const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
+    api.knowledgeQdrantTurboQuantSet.mockResolvedValueOnce({
+      ...remote,
+      quantization: { state: "turbo", bits: "bits2", always_ram: false },
+    });
     render(<TurboQuantPanel bucket={remote} onChanged={vi.fn()} />);
     fireEvent.click(screen.getByText("Advanced · TurboQuant"));
     const select = screen.getByRole("combobox");
@@ -574,79 +656,160 @@ describe("TurboQuant controls", () => {
     });
     confirm.mockRestore();
   });
+
+  it("keeps the confirmed TurboQuant state while a stale parent descriptor rerenders", async () => {
+    const remote = bucket({
+      ref: { source: "qdrant", connection_id: "q1", collection: "engineering" },
+      label: "Engineering",
+      connection_label: "Production Qdrant",
+      quantization: { state: "off" },
+      turbo_quant_supported: true,
+    });
+    api.knowledgeQdrantTurboQuantSet.mockResolvedValueOnce({
+      ...remote,
+      quantization: { state: "turbo", bits: "bits4", always_ram: true },
+    });
+    const view = render(<TurboQuantPanel bucket={remote} onChanged={vi.fn()} />);
+    fireEvent.click(screen.getByText("Advanced · TurboQuant"));
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "bits4" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: /Keep the compressed/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    await screen.findByText(/Saved and confirmed/);
+
+    view.rerender(<TurboQuantPanel bucket={{ ...remote }} onChanged={vi.fn()} />);
+    expect(screen.getByRole("combobox")).toHaveValue("bits4");
+    expect(screen.getByRole("button", { name: "Apply" })).toBeDisabled();
+  });
+
+  it("disables controls for unsupported servers and non-Turbo quantization", () => {
+    const remote = bucket({
+      ref: { source: "qdrant", connection_id: "q1", collection: "engineering" },
+      manageable: true,
+      turbo_quant_supported: false,
+      server_version: "1.17.4",
+      quantization: { state: "other", kind: "scalar" },
+    });
+    render(<TurboQuantPanel bucket={remote} onChanged={vi.fn()} />);
+    fireEvent.click(screen.getByText("Advanced · TurboQuant"));
+    expect(screen.getByText(/requires Qdrant 1.18/)).toBeInTheDocument();
+    expect(screen.getByText(/will not replace or disable/)).toBeInTheDocument();
+    expect(screen.getByRole("combobox")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Apply" })).toBeDisabled();
+  });
 });
 
-describe("guided Qdrant import", () => {
-  it("requires an exact compatible profile and explicit model attestation", async () => {
-    api.knowledgeQdrantImportInspect.mockResolvedValue({
-      vectors: [{ name: "content", size: 768, distance: "Cosine", data_type: "float32" }],
-      samples: [
-        { point_id: "p1", payload: { body: "hello", doc: "d1", title: "Greeting" } },
-      ],
-      profiles: [
-        {
-          id: "profile-768",
-          fingerprint: "sha256:768",
-          label: "E5 Base",
-          provider: "local",
-          model: "multilingual-e5-base",
-          revision: "r1",
-          dimensions: 768,
-          pooling: "mean",
-          normalized: true,
-          query_prefix: "query: ",
-          document_prefix: "passage: ",
-          max_tokens: 512,
-          distance: "cosine",
-          available: true,
-        },
-        {
-          id: "profile-1024",
-          fingerprint: "sha256:1024",
-          label: "Wrong dimension",
-          provider: "local",
-          model: "other",
-          revision: "r1",
-          dimensions: 1024,
-          pooling: "mean",
-          normalized: true,
-          query_prefix: null,
-          document_prefix: null,
-          max_tokens: 512,
-          distance: "cosine",
-          available: true,
-        },
-      ],
-      binding: null,
+describe("required embedding remediation", () => {
+  it("keeps the required local-model download progress and cancel action on the bucket card", async () => {
+    let emit:
+      | ((event: {
+          type: "Progress";
+          downloaded: number;
+          total_bytes: number;
+          bytes_per_sec: number;
+        }) => void)
+      | null = null;
+    api.knowledgeEmbeddingModelInstall.mockImplementationOnce(async (_modelId, onEvent) => {
+      emit = onEvent as typeof emit;
+      await new Promise<void>(() => {});
     });
     const candidate = bucket({
+      ref: { source: "qdrant", connection_id: "q1", collection: "shared" },
+      label: "Shared docs",
+      connection_label: "Production Qdrant",
+      compatibility: "requires_profile",
+      attachable: false,
+      writable: false,
+      manageable: false,
+      required_builtin_model_id: "local/qwen3-embedding-0.6b",
+      required_provider: "local",
+      profile: {
+        id: "required-profile",
+        fingerprint: "sha256:required",
+        label: "Qwen3 Embedding 0.6B",
+        provider: "local",
+        model: "Qwen/Qwen3-Embedding-0.6B",
+        revision: "r1",
+        dimensions: 1024,
+        pooling: "last_token",
+        normalized: true,
+        query_prefix: null,
+        document_prefix: null,
+        max_tokens: 32768,
+        distance: "cosine",
+        available: false,
+      },
+    });
+    render(
+      <RemoteBucketCard
+        bucket={candidate}
+        jobs={[]}
+        onRefreshJobs={vi.fn(() => Promise.resolve())}
+        onChanged={vi.fn(() => Promise.resolve())}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Download & use required model" }));
+    await act(async () => {
+      emit?.({ type: "Progress", downloaded: 50, total_bytes: 100, bytes_per_sec: 10 });
+    });
+    expect(
+      screen.getByRole("progressbar", { name: "Qwen3 Embedding 0.6B download progress" }),
+    ).toHaveAttribute("aria-valuenow", "50");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Cancel Qwen3 Embedding 0.6B download" }),
+    );
+    expect(api.knowledgeEmbeddingModelCancel).toHaveBeenCalledWith(
+      "local/qwen3-embedding-0.6b",
+    );
+  });
+
+  it("enables an exact cloud profile in one click after privacy confirmation", async () => {
+    useAppStore.setState({ hasApiKey: { openai: true } });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const candidate = bucket({
+      ref: { source: "qdrant", connection_id: "q1", collection: "cloud-shared" },
+      label: "Cloud shared",
+      compatibility: "requires_profile",
+      attachable: false,
+      required_provider: "openai",
+      profile: cloudProfile({ available: false }),
+    });
+    render(
+      <RemoteBucketCard
+        bucket={candidate}
+        jobs={[]}
+        onRefreshJobs={vi.fn(() => Promise.resolve())}
+        onChanged={vi.fn(() => Promise.resolve())}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Enable exact cloud profile" }));
+    await waitFor(() =>
+      expect(api.knowledgeEmbeddingProfileCreateCloud).toHaveBeenCalledWith(
+        "openai",
+        "text-embedding-3-small",
+        1536,
+      ),
+    );
+    expect(confirm.mock.calls[0][0]).toMatch(/document passages.*search queries/i);
+    confirm.mockRestore();
+  });
+});
+
+describe("legacy Qdrant imports", () => {
+  it("keeps existing v0.2.0 mappings read-only with Forget as the only action", async () => {
+    const legacy = bucket({
       ref: { source: "qdrant", connection_id: "q1", collection: "existing" },
       label: "Existing",
-      compatibility: "needs_import",
-      attachable: false,
+      compatibility: "legacy_import",
+      imported: true,
+      writable: false,
+      manageable: false,
     });
-    render(<QdrantImportWizard bucket={candidate} onChanged={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: /Import existing collection/ }));
-    expect(await screen.findByText("E5 Base · 768d")).toBeInTheDocument();
-    expect(screen.queryByText(/Wrong dimension/)).not.toBeInTheDocument();
-    fireEvent.change(screen.getByText("Text field *").querySelector("input")!, {
-      target: { value: "body" },
-    });
-    fireEvent.change(screen.getByText("Document ID field *").querySelector("input")!, {
-      target: { value: "doc" },
-    });
-    const save = screen.getByRole("button", { name: "Save import binding" });
-    expect(save).toBeDisabled();
-    fireEvent.click(screen.getByText(/I attest that this is the exact original model/).closest("label")!.querySelector("input")!);
-    expect(save).toBeEnabled();
-    fireEvent.click(save);
-    await waitFor(() => expect(api.knowledgeQdrantImportSave).toHaveBeenCalled());
-    expect(api.knowledgeQdrantImportSave.mock.calls[0][1]).toMatchObject({
-      vector_name: "content",
-      profile_id: "profile-768",
-      text_field: "body",
-      document_id_field: "doc",
-      model_attested: true,
-    });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<QdrantImportWizard bucket={legacy} onChanged={vi.fn()} />);
+    expect(screen.queryByText(/Map existing collection/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Forget legacy mapping" }));
+    await waitFor(() => expect(api.knowledgeQdrantImportRemove).toHaveBeenCalledWith(legacy.ref));
+    confirm.mockRestore();
   });
 });

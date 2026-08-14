@@ -10,11 +10,11 @@ use sha2::{Digest, Sha256};
 
 use super::embedding::EmbeddingProfile;
 use super::types::{
-    CollectionAccess, CollectionCompatibility, DocumentChunk, DocumentManifest, DocumentState,
-    ImportedCollectionBinding, KnowledgeBucketDescriptor, KnowledgeBucketRef, PointId,
-    QdrantCollectionInfo, VterminalCollectionMetadata, QDRANT_MANAGED_MIN_VERSION,
-    VTERMINAL_CHUNK_PIPELINE_VERSION, VTERMINAL_CONTRACT_VERSION, VTERMINAL_PAYLOAD_SCHEMA_VERSION,
-    VTERMINAL_VECTOR_NAME,
+    CollectionAccess, CollectionCompatibility, CollectionMetadataState, DocumentChunk,
+    DocumentManifest, DocumentState, ImportedCollectionBinding, KnowledgeBucketDescriptor,
+    KnowledgeBucketRef, PointId, QdrantCollectionInfo, VterminalCollectionMetadata,
+    QDRANT_MANAGED_MIN_VERSION, VTERMINAL_CHUNK_PIPELINE_VERSION, VTERMINAL_CONTRACT_VERSION,
+    VTERMINAL_PAYLOAD_SCHEMA_VERSION, VTERMINAL_VECTOR_NAME,
 };
 
 pub const PAYLOAD_TYPE_FIELD: &str = "_vterminal.type";
@@ -71,8 +71,10 @@ pub const POINT_TYPE_CHUNK: &str = "chunk";
 pub(crate) struct ContractPoint {
     pub id: PointId,
     pub payload: Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub vector: Option<Value>,
+    /// Qdrant's PointStruct requires a vector field even for a point that has
+    /// no value for any named vector. `{}` is the REST representation of that
+    /// vectorless point; omitting this field makes the whole upsert HTTP 400.
+    pub vector: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -206,7 +208,7 @@ pub(crate) fn manifest_point(manifest: &DocumentManifest) -> Result<ContractPoin
     Ok(ContractPoint {
         id: stable_manifest_point_id(&manifest.document_id, manifest.revision),
         payload,
-        vector: None,
+        vector: json!({}),
     })
 }
 
@@ -239,7 +241,7 @@ pub(crate) fn chunk_point(
     Ok(ContractPoint {
         id: stable_chunk_point_id(&chunk.document_id, chunk.revision, chunk.chunk_index),
         payload,
-        vector: Some(json!({ VTERMINAL_VECTOR_NAME: chunk.vector })),
+        vector: json!({ VTERMINAL_VECTOR_NAME: chunk.vector }),
     })
 }
 
@@ -406,6 +408,12 @@ pub(crate) fn active_manifests_filter() -> Value {
     })
 }
 
+pub(crate) fn staging_points_filter() -> Value {
+    json!({
+        "must": [match_filter(PAYLOAD_STATE_FIELD, DocumentState::Staging.as_str())]
+    })
+}
+
 pub(crate) fn document_manifests_filter(document_id: &str) -> Value {
     json!({
         "must": [
@@ -415,10 +423,15 @@ pub(crate) fn document_manifests_filter(document_id: &str) -> Value {
     })
 }
 
-pub(crate) fn other_revisions_filter(document_id: &str, keep_revision: u64) -> Value {
+pub(crate) fn lower_revisions_filter(document_id: &str, keep_revision: u64) -> Value {
     json!({
-        "must": [match_filter(PAYLOAD_DOCUMENT_ID_FIELD, document_id)],
-        "must_not": [match_filter(PAYLOAD_REVISION_FIELD, keep_revision)]
+        "must": [
+            match_filter(PAYLOAD_DOCUMENT_ID_FIELD, document_id),
+            {
+                "key": PAYLOAD_REVISION_FIELD,
+                "range": { "lt": keep_revision }
+            }
+        ]
     })
 }
 
@@ -461,40 +474,64 @@ pub fn classify_collection(
         .map(|profile| (profile.fingerprint(), profile))
         .collect();
 
-    let decision = if let Some(metadata) = &collection.metadata {
-        classify_managed(
+    let decision = match &collection.metadata {
+        CollectionMetadataState::Valid { metadata } => classify_managed(
             collection,
             metadata,
             context.server_version,
             &profile_by_fingerprint,
-        )
-    } else if let Some(binding) = context.imported_binding {
-        classify_imported(
-            collection,
-            binding,
-            context.connection_id,
-            &profile_by_fingerprint,
-        )
-    } else {
-        Decision::new(
-            CollectionCompatibility::NeedsGuidedImport,
-            "This collection has no VTerminal embedding metadata. Map its vector and payload fields in the import wizard.",
+        ),
+        CollectionMetadataState::Invalid { reason } => Decision::new(
+            CollectionCompatibility::Incompatible,
+            format!("This collection has invalid VTerminal metadata: {reason}"),
             None,
             None,
-        )
+        ),
+        CollectionMetadataState::Absent => match context.imported_binding {
+            Some(binding) => classify_imported(
+                collection,
+                binding,
+                context.connection_id,
+                &profile_by_fingerprint,
+            ),
+            None => Decision::new(
+                CollectionCompatibility::Unmanaged,
+                "This is not a VTerminal-managed collection and is hidden from Knowledge buckets.",
+                None,
+                None,
+            ),
+        },
     };
 
-    let compatibility = match (decision.compatibility, context.access) {
+    let mut access = context.access;
+    let compatibility = match (decision.compatibility, access) {
         (
             CollectionCompatibility::ManagedCompatible,
             CollectionAccess::ReadOnly | CollectionAccess::Unknown,
         ) => CollectionCompatibility::AttachOnly,
         (compatibility, _) => compatibility,
     };
-    let attachable = collection.points_count > 0
+    if compatibility == CollectionCompatibility::LegacyImport {
+        access = CollectionAccess::ReadOnly;
+    }
+    let active_documents = collection.active_document_count.unwrap_or(0);
+    let active_chunks = collection.active_chunk_count.unwrap_or({
+        if matches!(compatibility, CollectionCompatibility::LegacyImport) {
+            // Qdrant may legitimately report indexed_vectors_count=0 for a
+            // small collection below its indexing threshold. A v0.2.0 legacy
+            // binding already attested a concrete vector, so points_count is
+            // the conservative non-empty fallback for attachability.
+            collection.points_count
+        } else {
+            0
+        }
+    });
+    let attachable = active_chunks > 0
         && matches!(
             compatibility,
-            CollectionCompatibility::ManagedCompatible | CollectionCompatibility::AttachOnly
+            CollectionCompatibility::ManagedCompatible
+                | CollectionCompatibility::AttachOnly
+                | CollectionCompatibility::LegacyImport
         );
 
     KnowledgeBucketDescriptor {
@@ -502,9 +539,12 @@ pub fn classify_collection(
         name: collection.name.clone(),
         points_count: collection.points_count,
         indexed_vectors_count: collection.indexed_vectors_count,
+        active_document_count: active_documents,
+        active_chunk_count: active_chunks,
+        pending_count: collection.pending_point_count.unwrap_or(0),
         compatibility,
         compatibility_reason: decision.reason,
-        access: context.access,
+        access,
         embedding_profile: decision.profile.cloned(),
         vector_name: decision.vector.map(|vector| vector.name.clone()),
         vector_size: decision.vector.map(|vector| vector.size),
@@ -564,8 +604,8 @@ fn classify_managed<'a>(
         || metadata.chunk_pipeline_version != VTERMINAL_CHUNK_PIPELINE_VERSION
     {
         return Decision::new(
-            CollectionCompatibility::UpgradeRequired,
-            "The collection uses a different VTerminal contract, payload, or chunk-pipeline version.",
+            CollectionCompatibility::Incompatible,
+            "The collection uses an unsupported VTerminal contract, payload, or chunk-pipeline version.",
             None,
             None,
         );
@@ -574,25 +614,6 @@ fn classify_managed<'a>(
         return Decision::new(
             CollectionCompatibility::Incompatible,
             "The collection embedding profile fingerprint does not match its semantic metadata.",
-            None,
-            None,
-        );
-    }
-    let Some(profile) = profiles
-        .get(metadata.embedding_profile_fingerprint.as_str())
-        .copied()
-    else {
-        return Decision::new(
-            CollectionCompatibility::Incompatible,
-            "The exact embedding profile required to query this collection is not available.",
-            None,
-            None,
-        );
-    };
-    if profile != &metadata.embedding_profile {
-        return Decision::new(
-            CollectionCompatibility::Incompatible,
-            "A local profile has the same fingerprint but different semantic metadata.",
             None,
             None,
         );
@@ -608,15 +629,15 @@ fn classify_managed<'a>(
                 "The required named vector {:?} does not exist.",
                 metadata.vector_name
             ),
-            Some(profile),
+            Some(&metadata.embedding_profile),
             None,
         );
     };
-    if !vector_matches_profile(vector, profile) {
+    if !vector_matches_profile(vector, &metadata.embedding_profile) {
         return Decision::new(
             CollectionCompatibility::Incompatible,
             "The collection vector size, distance, or datatype differs from its embedding profile.",
-            Some(profile),
+            Some(&metadata.embedding_profile),
             Some(vector),
         );
     }
@@ -628,7 +649,26 @@ fn classify_managed<'a>(
                 "Required payload indexes are missing or use the wrong schema type: {}.",
                 index_drift.join(", ")
             ),
-            Some(profile),
+            Some(&metadata.embedding_profile),
+            Some(vector),
+        );
+    }
+    let Some(profile) = profiles
+        .get(metadata.embedding_profile_fingerprint.as_str())
+        .copied()
+    else {
+        return Decision::new(
+            CollectionCompatibility::RequiresProfile,
+            "This managed collection requires its exact embedding profile before it can be queried.",
+            Some(&metadata.embedding_profile),
+            Some(vector),
+        );
+    };
+    if profile != &metadata.embedding_profile {
+        return Decision::new(
+            CollectionCompatibility::Incompatible,
+            "A local profile has the same fingerprint but different semantic metadata.",
+            Some(&metadata.embedding_profile),
             Some(vector),
         );
     }
@@ -651,8 +691,8 @@ fn classify_imported<'a>(
         || !binding.model_attested
     {
         return Decision::new(
-            CollectionCompatibility::NeedsGuidedImport,
-            "Finish the import wizard and attest the exact embedding model and transforms.",
+            CollectionCompatibility::Incompatible,
+            "This legacy import binding is incomplete and can only be forgotten.",
             None,
             None,
         );
@@ -689,8 +729,8 @@ fn classify_imported<'a>(
         );
     }
     Decision::new(
-        CollectionCompatibility::AttachOnly,
-        "Imported collection; search uses the explicitly attested vector and payload mapping.",
+        CollectionCompatibility::LegacyImport,
+        "Legacy imported collection; retained read-only for v0.2.0 compatibility.",
         Some(profile),
         Some(vector),
     )
@@ -708,13 +748,21 @@ fn vector_matches_profile(
             .is_none_or(|data_type| data_type.eq_ignore_ascii_case("float32"))
 }
 
-pub(crate) fn metadata_from_config(
-    config_metadata: Option<&Value>,
-) -> Option<VterminalCollectionMetadata> {
-    config_metadata?
-        .get("vterminal")
-        .cloned()
-        .and_then(|value| serde_json::from_value(value).ok())
+pub(crate) fn metadata_from_config(config_metadata: Option<&Value>) -> CollectionMetadataState {
+    let Some(root) = config_metadata else {
+        return CollectionMetadataState::Absent;
+    };
+    let Some(value) = root.get("vterminal") else {
+        return CollectionMetadataState::Absent;
+    };
+    match serde_json::from_value(value.clone()) {
+        Ok(metadata) => CollectionMetadataState::Valid {
+            metadata: Box::new(metadata),
+        },
+        Err(error) => CollectionMetadataState::Invalid {
+            reason: format!("the vterminal marker does not match contract schema v1 ({error})"),
+        },
+    }
 }
 
 pub(crate) fn payload_indexes_from_schema(schema: Option<&Map<String, Value>>) -> BTreeSet<String> {
@@ -787,7 +835,12 @@ mod tests {
                     )
                 })
                 .collect(),
-            metadata: Some(collection_metadata(profile)),
+            metadata: CollectionMetadataState::Valid {
+                metadata: Box::new(collection_metadata(profile)),
+            },
+            active_document_count: Some(1),
+            active_chunk_count: Some(1),
+            pending_point_count: Some(0),
             quantization: QuantizationStatus::Off,
         }
     }
@@ -851,7 +904,7 @@ mod tests {
             vector: vec![1.0, 0.0, 0.0],
         };
         let point = chunk_point(&chunk, &profile).unwrap();
-        assert_eq!(point.vector, Some(json!({"content": [1.0, 0.0, 0.0]})));
+        assert_eq!(point.vector, json!({"content": [1.0, 0.0, 0.0]}));
         assert_eq!(point.payload["_vterminal"]["type"], "chunk");
         assert_eq!(point.payload["_vterminal"]["document_id"], "doc-a");
         assert_eq!(point.payload["page"], 7);
@@ -873,34 +926,119 @@ mod tests {
         assert!(descriptor.attachable);
 
         let missing = classify(&collection, &[], CollectionAccess::ReadOnly);
-        assert_eq!(missing.compatibility, CollectionCompatibility::Incompatible);
+        assert_eq!(
+            missing.compatibility,
+            CollectionCompatibility::RequiresProfile
+        );
         assert!(!missing.attachable);
     }
 
     #[test]
-    fn unmarked_collection_needs_guided_import() {
+    fn unmarked_collection_is_unmanaged() {
         let profile = profile();
         let mut collection = collection(&profile);
-        collection.metadata = None;
+        collection.metadata = CollectionMetadataState::Absent;
         let descriptor = classify(&collection, &[profile], CollectionAccess::ReadOnly);
+        assert_eq!(descriptor.compatibility, CollectionCompatibility::Unmanaged);
+        assert!(!descriptor.attachable);
+    }
+
+    #[test]
+    fn existing_legacy_binding_remains_attachable_when_qdrant_has_not_indexed_vectors() {
+        let profile = profile();
+        let mut collection = collection(&profile);
+        collection.metadata = CollectionMetadataState::Absent;
+        collection.indexed_vectors_count = 0;
+        collection.active_document_count = None;
+        collection.active_chunk_count = None;
+        collection.pending_point_count = None;
+        let binding = ImportedCollectionBinding {
+            connection_id: "prod".into(),
+            collection: "manuals".into(),
+            vector_name: VTERMINAL_VECTOR_NAME.into(),
+            embedding_profile_fingerprint: profile.fingerprint().into(),
+            text_field: "text".into(),
+            document_id_field: "document_id".into(),
+            title_field: None,
+            source_uri_field: None,
+            page_field: None,
+            heading_field: None,
+            model_attested: true,
+        };
+        let version = Version::new(1, 18, 0);
+        let descriptor = classify_collection(
+            &collection,
+            CompatibilityContext {
+                connection_id: "prod",
+                server_version: Some(&version),
+                runnable_profiles: std::slice::from_ref(&profile),
+                access: CollectionAccess::Manage,
+                imported_binding: Some(&binding),
+            },
+        );
         assert_eq!(
             descriptor.compatibility,
-            CollectionCompatibility::NeedsGuidedImport
+            CollectionCompatibility::LegacyImport
         );
-        assert!(!descriptor.attachable);
+        assert_eq!(descriptor.access, CollectionAccess::ReadOnly);
+        assert_eq!(descriptor.active_chunk_count, collection.points_count);
+        assert!(descriptor.attachable);
     }
 
     #[test]
     fn dimension_alone_never_makes_a_collection_compatible() {
         let profile = profile();
         let mut collection = collection(&profile);
-        collection.metadata = None;
+        collection.metadata = CollectionMetadataState::Absent;
         collection.vectors[0].size = profile.semantic().dimensions;
+        let descriptor = classify(&collection, &[profile], CollectionAccess::ReadOnly);
+        assert_eq!(descriptor.compatibility, CollectionCompatibility::Unmanaged);
+    }
+
+    #[test]
+    fn manifest_point_serializes_explicit_empty_vector_object() {
+        let manifest = DocumentManifest {
+            document_id: "doc-a".into(),
+            source_id: Some("file-a".into()),
+            revision: 2,
+            state: DocumentState::Staging,
+            content_sha256: "b".repeat(64),
+            title: "Manual".into(),
+            source_uri: "file:///manual.md".into(),
+            mime_type: "text/markdown".into(),
+            chunk_count: 1,
+            created_at: "2026-08-13T10:00:00Z".into(),
+            updated_at: "2026-08-13T10:00:00Z".into(),
+        };
+        let serialized = serde_json::to_value(manifest_point(&manifest).unwrap()).unwrap();
+        assert_eq!(serialized["vector"], json!({}));
+        assert!(serialized.as_object().unwrap().contains_key("vector"));
+    }
+
+    #[test]
+    fn superseded_cleanup_targets_only_lower_revisions() {
+        let filter = lower_revisions_filter("doc-a", 42);
+        assert_eq!(filter["must"][0]["match"]["value"], "doc-a");
+        assert_eq!(filter["must"][1]["key"], PAYLOAD_REVISION_FIELD);
+        assert_eq!(filter["must"][1]["range"]["lt"], 42);
+        assert!(filter.get("must_not").is_none());
+    }
+
+    #[test]
+    fn malformed_vterminal_metadata_fails_closed() {
+        let profile = profile();
+        let mut collection = collection(&profile);
+        collection.metadata = CollectionMetadataState::Invalid {
+            reason: "missing contract_version".into(),
+        };
         let descriptor = classify(&collection, &[profile], CollectionAccess::ReadOnly);
         assert_eq!(
             descriptor.compatibility,
-            CollectionCompatibility::NeedsGuidedImport
+            CollectionCompatibility::Incompatible
         );
+        assert!(descriptor
+            .compatibility_reason
+            .contains("invalid VTerminal metadata"));
     }
 
     #[test]

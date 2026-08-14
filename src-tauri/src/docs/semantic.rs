@@ -46,6 +46,7 @@ pub struct SemanticHit {
 pub struct KnowledgeJob {
     pub id: String,
     pub kind: String,
+    pub display_name: String,
     pub target_ref: serde_json::Value,
     pub payload: serde_json::Value,
     pub resource_key: Option<String>,
@@ -627,11 +628,11 @@ pub fn search_cosine(
 pub fn put_job(conn: &Connection, job: &KnowledgeJob) -> Result<(), String> {
     conn.execute(
         "INSERT INTO knowledge_jobs
-           (id,kind,target_ref_json,payload_json,resource_key,stage,status,completed_items,
-            total_items,error,created_at,updated_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+           (id,kind,display_name,target_ref_json,payload_json,resource_key,stage,status,
+            completed_items,total_items,error,created_at,updated_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
          ON CONFLICT(id) DO UPDATE SET payload_json=excluded.payload_json,
-           resource_key=excluded.resource_key,stage=excluded.stage,
+           display_name=excluded.display_name,resource_key=excluded.resource_key,stage=excluded.stage,
            status=CASE
              WHEN knowledge_jobs.status IN ('cancelling','cancelled')
               AND excluded.status <> 'queued'
@@ -643,6 +644,7 @@ pub fn put_job(conn: &Connection, job: &KnowledgeJob) -> Result<(), String> {
         params![
             job.id,
             job.kind,
+            job.display_name,
             job.target_ref.to_string(),
             job.payload.to_string(),
             job.resource_key,
@@ -669,28 +671,29 @@ pub fn put_job(conn: &Connection, job: &KnowledgeJob) -> Result<(), String> {
 pub fn list_jobs(conn: &Connection) -> Result<Vec<KnowledgeJob>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id,kind,target_ref_json,payload_json,resource_key,stage,status,
+            "SELECT id,kind,display_name,target_ref_json,payload_json,resource_key,stage,status,
                     completed_items,total_items,error,created_at,updated_at
                FROM knowledge_jobs ORDER BY updated_at DESC, id",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |r| {
-            let target: String = r.get(2)?;
-            let payload: String = r.get(3)?;
+            let target: String = r.get(3)?;
+            let payload: String = r.get(4)?;
             Ok(KnowledgeJob {
                 id: r.get(0)?,
                 kind: r.get(1)?,
+                display_name: r.get(2)?,
                 target_ref: serde_json::from_str(&target).unwrap_or_default(),
                 payload: serde_json::from_str(&payload).unwrap_or_default(),
-                resource_key: r.get(4)?,
-                stage: r.get(5)?,
-                status: r.get(6)?,
-                completed_items: r.get::<_, i64>(7)? as u32,
-                total_items: r.get::<_, Option<i64>>(8)?.map(|v| v as u32),
-                error: r.get(9)?,
-                created_at: r.get(10)?,
-                updated_at: r.get(11)?,
+                resource_key: r.get(5)?,
+                stage: r.get(6)?,
+                status: r.get(7)?,
+                completed_items: r.get::<_, i64>(8)? as u32,
+                total_items: r.get::<_, Option<i64>>(9)?.map(|v| v as u32),
+                error: r.get(10)?,
+                created_at: r.get(11)?,
+                updated_at: r.get(12)?,
             })
         })
         .map_err(|e| e.to_string())?;

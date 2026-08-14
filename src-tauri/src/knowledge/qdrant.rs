@@ -12,15 +12,15 @@ use thiserror::Error;
 
 use super::contract::{
     active_chunks_filter, active_manifests_filter, chunk_point, document_filter,
-    document_manifests_filter, document_metadata_payload, manifest_point, metadata_from_config,
-    metadata_value, other_revisions_filter, parse_chunk_payload, parse_manifest_payload,
-    payload_indexes_from_schema, revision_filter, REQUIRED_PAYLOAD_INDEXES,
+    document_manifests_filter, document_metadata_payload, lower_revisions_filter, manifest_point,
+    metadata_from_config, metadata_value, parse_chunk_payload, parse_manifest_payload,
+    payload_indexes_from_schema, revision_filter, staging_points_filter, REQUIRED_PAYLOAD_INDEXES,
 };
 use super::types::VTERMINAL_VECTOR_NAME;
 use super::types::{
     DocumentChunk, DocumentManifest, DocumentMetadataUpdate, DocumentPage,
-    ImportedCollectionBinding, KnowledgeBucketRef, KnowledgeHit, OperationReceipt, PayloadSample,
-    PointId, QdrantCollectionInfo, QdrantServerCapabilities, QdrantServerInfo, QuantizationStatus,
+    ImportedCollectionBinding, KnowledgeBucketRef, KnowledgeHit, OperationReceipt, PointId,
+    QdrantCollectionInfo, QdrantServerCapabilities, QdrantServerInfo, QuantizationStatus,
     TurboQuantBits, TurboQuantConfig, VectorDescriptor, QDRANT_MANAGED_MIN_VERSION,
     QDRANT_TURBO_QUANT_MIN_VERSION,
 };
@@ -121,6 +121,10 @@ impl QdrantEndpoint {
             format!("{}{}", self.base_url, path)
         }
     }
+
+    fn likely_grpc_port(&self) -> bool {
+        url::Url::parse(&self.base_url).is_ok_and(|url| url.port() == Some(6334))
+    }
 }
 
 fn is_loopback_host(host: &str) -> bool {
@@ -146,7 +150,7 @@ pub enum QdrantError {
     InvalidInput(String),
     #[error("{0}")]
     InsecureTransport(String),
-    #[error("could not reach Qdrant at {endpoint}: {detail}")]
+    #[error("could not reach the Qdrant REST endpoint at {endpoint}: {detail}")]
     Transport { endpoint: String, detail: String },
     #[error("Qdrant denied this operation (HTTP {status}); check this key's collection permissions{detail}")]
     Permission { status: u16, detail: String },
@@ -154,7 +158,7 @@ pub enum QdrantError {
     Authentication { status: u16, detail: String },
     #[error("Qdrant collection {collection:?} was not found")]
     CollectionNotFound { collection: String },
-    #[error("Qdrant returned HTTP {status}{detail}")]
+    #[error("Qdrant REST returned HTTP {status}{detail}")]
     Http { status: u16, detail: String },
     #[error("Qdrant returned an invalid response: {0}")]
     Protocol(String),
@@ -252,6 +256,49 @@ impl QdrantClient {
         parse_collection_info(collection, envelope.result)
     }
 
+    /// Populate exact contract counts using filtered count operations. Summary
+    /// counters such as `indexed_vectors_count` describe optimizer state, not
+    /// the number of searchable VTerminal passages.
+    pub async fn populate_contract_counts(
+        &self,
+        collection: &str,
+        info: &mut QdrantCollectionInfo,
+    ) -> Result<(), QdrantError> {
+        if info.metadata.valid().is_none() {
+            return Ok(());
+        }
+        info.active_document_count = Some(
+            self.count_points(collection, active_manifests_filter())
+                .await?,
+        );
+        info.active_chunk_count = Some(
+            self.count_points(collection, active_chunks_filter())
+                .await?,
+        );
+        info.pending_point_count = Some(
+            self.count_points(collection, staging_points_filter())
+                .await?,
+        );
+        Ok(())
+    }
+
+    async fn count_points(&self, collection: &str, filter: Value) -> Result<u64, QdrantError> {
+        validate_collection_name(collection)?;
+        let path = format!(
+            "/collections/{}/points/count",
+            encode_path_segment(collection)
+        );
+        let envelope: Envelope<CountResult> = self
+            .send(
+                Method::POST,
+                &path,
+                Some(json!({ "filter": filter, "exact": true })),
+            )
+            .await?;
+        ensure_ok(&envelope.status)?;
+        Ok(envelope.result.count)
+    }
+
     /// App-created collections require server-side metadata, introduced in
     /// Qdrant 1.16.  Payload indexes are created before the method returns so
     /// strict-mode filtered operations are safe immediately.
@@ -279,8 +326,8 @@ impl QdrantClient {
             "metadata": metadata_value(profile)
         });
         let path = format!("/collections/{}", encode_path_segment(collection));
-        let envelope: Envelope<Value> = self.send(Method::PUT, &path, Some(body)).await?;
-        ensure_ok(&envelope.status)?;
+        let envelope: Envelope<bool> = self.send(Method::PUT, &path, Some(body)).await?;
+        ensure_true(&envelope)?;
 
         for field in REQUIRED_PAYLOAD_INDEXES {
             self.create_payload_index(collection, field).await?;
@@ -294,8 +341,8 @@ impl QdrantClient {
             "/collections/{}?timeout=60",
             encode_path_segment(collection)
         );
-        let envelope: Envelope<Value> = self.send(Method::DELETE, &path, None).await?;
-        ensure_ok(&envelope.status)
+        let envelope: Envelope<bool> = self.send(Method::DELETE, &path, None).await?;
+        ensure_true(&envelope)
     }
 
     pub async fn create_payload_index(
@@ -537,44 +584,6 @@ impl QdrantClient {
         }
     }
 
-    pub async fn sample_payloads(
-        &self,
-        collection: &str,
-        limit: usize,
-    ) -> Result<Vec<PayloadSample>, QdrantError> {
-        validate_collection_name(collection)?;
-        if limit == 0 || limit > 20 {
-            return Err(QdrantError::InvalidInput(
-                "import sampling limit must be between 1 and 20".into(),
-            ));
-        }
-        let path = format!(
-            "/collections/{}/points/scroll",
-            encode_path_segment(collection)
-        );
-        let envelope: Envelope<ScrollResult> = self
-            .send(
-                Method::POST,
-                &path,
-                Some(json!({
-                    "limit": limit,
-                    "with_payload": true,
-                    "with_vector": false
-                })),
-            )
-            .await?;
-        ensure_ok(&envelope.status)?;
-        Ok(envelope
-            .result
-            .points
-            .into_iter()
-            .map(|point| PayloadSample {
-                point_id: point.id,
-                payload: point.payload,
-            })
-            .collect())
-    }
-
     /// Idempotently upsert one manifest plus its chunk points.  The caller owns
     /// staged-revision orchestration; deterministic ids make a retry safe.
     pub async fn upsert_document(
@@ -706,7 +715,7 @@ impl QdrantClient {
             "/collections/{}/points/payload?wait=true",
             encode_path_segment(collection)
         );
-        let filter = other_revisions_filter(document_id, keep_revision);
+        let filter = lower_revisions_filter(document_id, keep_revision);
         let state_envelope: Envelope<Value> = self
             .send(
                 Method::POST,
@@ -725,7 +734,7 @@ impl QdrantClient {
                 Method::POST,
                 &path,
                 Some(json!({
-                    "filter": other_revisions_filter(document_id, keep_revision),
+                    "filter": lower_revisions_filter(document_id, keep_revision),
                     "payload": { "updated_at": updated_at }
                 })),
             )
@@ -797,7 +806,7 @@ impl QdrantClient {
                 Method::POST,
                 &path,
                 Some(json!({
-                    "filter": other_revisions_filter(document_id, keep_revision)
+                    "filter": lower_revisions_filter(document_id, keep_revision)
                 })),
             )
             .await?;
@@ -814,34 +823,30 @@ impl QdrantClient {
         require_version(server_version, QDRANT_TURBO_QUANT_MIN_VERSION, "TurboQuant")?;
         validate_collection_name(collection)?;
         let path = format!("/collections/{}", encode_path_segment(collection));
-        let envelope: Envelope<Value> = self
+        let turbo = turbo_quant_config_value(server_version, config);
+        let envelope: Envelope<bool> = self
             .send(
                 Method::PATCH,
                 &path,
                 Some(json!({
-                    "quantization_config": {
-                        "turbo": {
-                            "bits": config.bits.as_str(),
-                            "always_ram": config.always_ram
-                        }
-                    }
+                    "quantization_config": { "turbo": turbo }
                 })),
             )
             .await?;
-        ensure_ok(&envelope.status)
+        ensure_true(&envelope)
     }
 
     pub async fn disable_quantization(&self, collection: &str) -> Result<(), QdrantError> {
         validate_collection_name(collection)?;
         let path = format!("/collections/{}", encode_path_segment(collection));
-        let envelope: Envelope<Value> = self
+        let envelope: Envelope<bool> = self
             .send(
                 Method::PATCH,
                 &path,
                 Some(json!({ "quantization_config": "Disabled" })),
             )
             .await?;
-        ensure_ok(&envelope.status)
+        ensure_true(&envelope)
     }
 
     async fn send<T: DeserializeOwned>(
@@ -863,18 +868,42 @@ impl QdrantClient {
             .await
             .map_err(|error| QdrantError::Transport {
                 endpoint: self.endpoint.base_url.clone(),
-                detail: short_transport_error(&error),
+                detail: transport_error_detail(&error, self.endpoint.likely_grpc_port()),
             })?;
         let status = response.status();
         let bytes = read_bounded(response, MAX_RESPONSE_BYTES).await?;
         if !status.is_success() {
-            return Err(status_error(status, &bytes, self.api_key.is_some()));
+            return Err(status_error(
+                status,
+                &bytes,
+                self.api_key.is_some(),
+                self.endpoint.likely_grpc_port(),
+            ));
         }
         serde_json::from_slice(&bytes).map_err(|error| {
             QdrantError::Protocol(format!(
                 "HTTP {} body was not valid JSON ({error})",
                 status.as_u16()
             ))
+        })
+    }
+}
+
+/// Qdrant 1.19 replaced the quantizer-specific `always_ram` flag with the shared
+/// memory-tier contract. Sending the current field to 1.18 would be rejected,
+/// while relying on the deprecated field on newer servers can make a successful
+/// UI selection appear to reset after refresh.
+fn turbo_quant_config_value(server_version: &Version, config: TurboQuantConfig) -> Value {
+    let memory_tiers = Version::new(1, 19, 0);
+    if server_version >= &memory_tiers {
+        json!({
+            "bits": config.bits.as_str(),
+            "memory": if config.always_ram { "pinned" } else { "cached" }
+        })
+    } else {
+        json!({
+            "bits": config.bits.as_str(),
+            "always_ram": config.always_ram
         })
     }
 }
@@ -982,7 +1011,23 @@ fn short_transport_error(error: &reqwest::Error) -> String {
     }
 }
 
-fn status_error(status: StatusCode, bytes: &[u8], authenticated: bool) -> QdrantError {
+fn transport_error_detail(error: &reqwest::Error, likely_grpc_port: bool) -> String {
+    let detail = short_transport_error(error);
+    if likely_grpc_port {
+        format!(
+            "{detail}; port 6334 is normally Qdrant gRPC, but VTerminal requires the REST endpoint (usually port 6333)"
+        )
+    } else {
+        detail
+    }
+}
+
+fn status_error(
+    status: StatusCode,
+    bytes: &[u8],
+    authenticated: bool,
+    likely_grpc_port: bool,
+) -> QdrantError {
     // A user-controlled endpoint can reflect the credential without labelling
     // it as a key. Never surface an authenticated response body over IPC/logs.
     let detail = if authenticated {
@@ -990,7 +1035,10 @@ fn status_error(status: StatusCode, bytes: &[u8], authenticated: bool) -> Qdrant
     } else {
         safe_error_detail(bytes)
     };
-    let suffix = if detail.is_empty() {
+    let suffix = if likely_grpc_port {
+        ": port 6334 is normally Qdrant gRPC; configure the REST endpoint (usually port 6333)"
+            .into()
+    } else if detail.is_empty() {
         String::new()
     } else {
         format!(": {detail}")
@@ -1098,13 +1146,25 @@ fn ensure_ok(status: &Value) -> Result<(), QdrantError> {
     if status.is_null() || status == "ok" || status == "acknowledged" {
         return Ok(());
     }
-    if let Some(error) = status.get("error").and_then(Value::as_str) {
-        return Err(QdrantError::Protocol(format!(
-            "Qdrant returned an error status: {}",
-            error.chars().take(300).collect::<String>()
-        )));
+    // The endpoint is user-controlled and can reflect an API key in an
+    // application-level error while still returning HTTP 200. Keep remote
+    // response text out of IPC and logs just as `status_error` does for
+    // authenticated non-success responses, and fail closed for every unknown
+    // status shape instead of accepting an ambiguous operation result.
+    Err(QdrantError::Protocol(
+        "Qdrant returned an application-level error status".into(),
+    ))
+}
+
+fn ensure_true(envelope: &Envelope<bool>) -> Result<(), QdrantError> {
+    ensure_ok(&envelope.status)?;
+    if envelope.result {
+        Ok(())
+    } else {
+        Err(QdrantError::Protocol(
+            "Qdrant acknowledged the collection update but reported result=false".into(),
+        ))
     }
-    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -1225,6 +1285,11 @@ struct ScrollResult {
     next_page_offset: Option<PointId>,
 }
 
+#[derive(Deserialize)]
+struct CountResult {
+    count: u64,
+}
+
 fn parse_collection_info(name: &str, result: Value) -> Result<QdrantCollectionInfo, QdrantError> {
     let status = result
         .get("status")
@@ -1267,6 +1332,9 @@ fn parse_collection_info(name: &str, result: Value) -> Result<QdrantCollectionIn
         payload_indexes,
         payload_index_types,
         metadata,
+        active_document_count: None,
+        active_chunk_count: None,
+        pending_point_count: None,
         quantization,
     })
 }
@@ -1347,6 +1415,12 @@ fn parse_quantization(value: Option<&Value>) -> QuantizationStatus {
             always_ram: turbo
                 .get("always_ram")
                 .and_then(Value::as_bool)
+                .or_else(|| {
+                    turbo
+                        .get("memory")
+                        .and_then(Value::as_str)
+                        .map(|memory| memory.eq_ignore_ascii_case("pinned"))
+                })
                 .unwrap_or(false),
         };
     }
@@ -1360,16 +1434,28 @@ fn parse_quantization(value: Option<&Value>) -> QuantizationStatus {
 
 fn parse_operation_receipt(value: Value) -> Result<OperationReceipt, QdrantError> {
     if let Some(boolean) = value.as_bool() {
-        return Ok(OperationReceipt {
-            status: if boolean { "completed" } else { "failed" }.into(),
-            operation_id: None,
-        });
+        return boolean
+            .then(|| OperationReceipt {
+                status: "completed".into(),
+                operation_id: None,
+            })
+            .ok_or_else(|| {
+                QdrantError::Protocol("Qdrant reported that the point operation failed".into())
+            });
     }
     let status = value
         .get("status")
         .and_then(Value::as_str)
-        .unwrap_or("acknowledged")
+        .ok_or_else(|| QdrantError::Protocol("Qdrant omitted the point operation status".into()))?
         .to_string();
+    if !matches!(
+        status.to_ascii_lowercase().as_str(),
+        "acknowledged" | "completed"
+    ) {
+        return Err(QdrantError::Protocol(
+            "Qdrant reported that the point operation did not complete".into(),
+        ));
+    }
     let operation_id = value.get("operation_id").and_then(Value::as_u64);
     Ok(OperationReceipt {
         status,
@@ -1495,8 +1581,100 @@ mod tests {
         let info = parse_collection_info("legacy", result).unwrap();
         assert_eq!(info.vectors[0].name, "");
         assert_eq!(info.vectors[0].distance, "Dot");
-        assert!(info.metadata.is_none());
+        assert!(info.metadata.is_absent());
         assert_eq!(info.quantization, QuantizationStatus::Off);
+    }
+
+    #[test]
+    fn malformed_vterminal_marker_is_not_treated_as_absent() {
+        let result = json!({
+            "status": "green",
+            "points_count": 0,
+            "config": {
+                "params": { "vectors": { "size": 384, "distance": "Cosine" } },
+                "metadata": { "vterminal": { "contract_version": "not-a-number" } }
+            },
+            "payload_schema": {}
+        });
+        let info = parse_collection_info("broken", result).unwrap();
+        assert!(matches!(
+            info.metadata,
+            super::super::types::CollectionMetadataState::Invalid { .. }
+        ));
+    }
+
+    #[test]
+    fn parses_newer_turbo_memory_form_without_misclassifying_other_quantizers() {
+        assert_eq!(
+            parse_quantization(Some(&json!({
+                "turbo": { "bits": "bits4", "memory": "pinned" }
+            }))),
+            QuantizationStatus::Turbo {
+                bits: TurboQuantBits::Bits4,
+                always_ram: true,
+            }
+        );
+        assert_eq!(
+            parse_quantization(Some(&json!({
+                "turbo": { "bits": "bits2", "memory": "cached" }
+            }))),
+            QuantizationStatus::Turbo {
+                bits: TurboQuantBits::Bits2,
+                always_ram: false,
+            }
+        );
+        assert!(matches!(
+            parse_quantization(Some(&json!({ "scalar": { "type": "int8" } }))),
+            QuantizationStatus::Other { .. }
+        ));
+    }
+
+    #[test]
+    fn collection_update_requires_true_result() {
+        assert!(ensure_ok(&json!("failed")).is_err());
+        let false_result = Envelope {
+            status: json!("ok"),
+            result: false,
+        };
+        assert!(ensure_true(&false_result).is_err());
+        let true_result = Envelope {
+            status: json!("ok"),
+            result: true,
+        };
+        assert!(ensure_true(&true_result).is_ok());
+        assert!(parse_operation_receipt(json!(false)).is_err());
+        assert!(parse_operation_receipt(json!({ "status": "failed" })).is_err());
+        assert!(parse_operation_receipt(json!({
+            "status": "completed",
+            "operation_id": 7
+        }))
+        .is_ok());
+    }
+
+    #[test]
+    fn turbo_quant_uses_the_server_versions_memory_contract() {
+        let config = TurboQuantConfig {
+            bits: TurboQuantBits::Bits2,
+            always_ram: true,
+        };
+        assert_eq!(
+            turbo_quant_config_value(&Version::new(1, 18, 4), config),
+            json!({ "bits": "bits2", "always_ram": true })
+        );
+        assert_eq!(
+            turbo_quant_config_value(&Version::new(1, 19, 0), config),
+            json!({ "bits": "bits2", "memory": "pinned" })
+        );
+        assert_eq!(
+            turbo_quant_config_value(
+                &Version::new(1, 19, 1),
+                TurboQuantConfig {
+                    always_ram: false,
+                    ..config
+                },
+            ),
+            json!({ "bits": "bits2", "memory": "cached" })
+        );
     }
 
     #[test]

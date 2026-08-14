@@ -145,6 +145,12 @@ pub fn save_settings(
 ) -> Result<(), String> {
     let store = app.store(STORE_NAME).map_err(|e| e.to_string())?;
     let runbooks_gate_change = runbooks_enabled;
+    let docs_gate_enabled = docs_enabled.is_some_and(|next| {
+        next && !store
+            .get("docs_enabled")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+    });
 
     // Credentials never enter the JSON store. Do these first so a Keychain
     // failure cannot make a mixed request appear successful.
@@ -333,7 +339,11 @@ pub fn save_settings(
             }
         }
     }
-    secure_settings_permissions(&app)
+    secure_settings_permissions(&app)?;
+    if docs_gate_enabled {
+        crate::knowledge::ingest::resume_pending_jobs(&app)?;
+    }
+    Ok(())
 }
 
 fn secure_settings_permissions(app: &tauri::AppHandle<Wry>) -> Result<(), String> {

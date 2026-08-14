@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Check, Cloud, Download, HardDrive, Loader2, X } from "lucide-react";
+import { Check, Cloud, Download, HardDrive, Loader2 } from "lucide-react";
 
 import { sanitizeExternalWebUrl } from "../../lib/externalUrl";
 import * as api from "../../lib/tauri";
@@ -11,7 +11,11 @@ import type {
   EmbeddingProfile,
 } from "../../lib/types";
 import { useAppStore } from "../../stores/appStore";
-import { formatBytes, formatTokens } from "./ModelRow";
+import { formatTokens } from "./ModelRow";
+import {
+  formatBytes,
+  InlineModelDownloadProgress,
+} from "./InlineModelDownloadProgress";
 
 export const BUILTIN_EMBEDDING_MODEL_IDS = [
   "local/qwen3-embedding-0.6b",
@@ -116,6 +120,7 @@ interface InstallState {
   phase: "downloading" | "verifying" | "loading";
   downloaded: number;
   total: number | null;
+  bps: number;
   error: string | null;
 }
 
@@ -153,7 +158,7 @@ export function KnowledgeModelsSection({
   const startInstall = (model: EmbeddingCatalogEntry, licenseAccepted: boolean) => {
     setInstalls((current) => ({
       ...current,
-      [model.id]: { phase: "downloading", downloaded: 0, total: null, error: null },
+      [model.id]: { phase: "downloading", downloaded: 0, total: null, bps: 0, error: null },
     }));
     void api
       .knowledgeEmbeddingModelInstall(model.id, (event) => {
@@ -171,6 +176,7 @@ export function KnowledgeModelsSection({
             phase: "downloading",
             downloaded: current[model.id]?.downloaded ?? 0,
             total: current[model.id]?.total ?? null,
+            bps: current[model.id]?.bps ?? 0,
             error: String(error),
           },
         }));
@@ -238,7 +244,6 @@ function EmbeddingModelCard({
 }) {
   const [licenseAccepted, setLicenseAccepted] = useState(false);
   const active = install && !install.error;
-  const pct = install?.total ? Math.min(100, (install.downloaded / install.total) * 100) : 0;
   return (
     <article
       className={`rounded-lg border px-3 py-2 ${
@@ -303,13 +308,9 @@ function EmbeddingModelCard({
               Coming soon
             </span>
           ) : active ? (
-            <button
-              type="button"
-              onClick={onCancel}
-              className="flex items-center gap-1 rounded-md border border-border-subtle px-2 py-1 text-[10px] text-text-secondary hover:bg-bg-hover"
-            >
-              <X size={11} /> Cancel
-            </button>
+            <span className="flex items-center gap-1 rounded-md border border-border-subtle px-2 py-1 text-[10px] text-text-muted">
+              <Loader2 size={10} className="animate-spin" /> {install.phase}
+            </span>
           ) : model.installed ? (
             <button
               type="button"
@@ -325,23 +326,20 @@ function EmbeddingModelCard({
               onClick={() => onInstall(licenseAccepted)}
               className="flex items-center gap-1 rounded-md border border-border-subtle px-2 py-1 text-[10px] text-text-secondary hover:bg-bg-hover"
             >
-              <Download size={11} /> Download &amp; use
+              <Download size={11} /> {install?.error ? "Retry" : "Download & use"}
             </button>
           )}
         </div>
       </div>
       {active && install && (
-        <div className="mt-2" aria-label={`${model.label} ${install.phase}`}>
-          <div className="flex items-center justify-between text-[9px] text-text-muted">
-            <span className="flex items-center gap-1 capitalize">
-              <Loader2 size={9} className="animate-spin" /> {install.phase}
-            </span>
-            <span>{install.total ? `${Math.round(pct)}%` : "Starting…"}</span>
-          </div>
-          <div className="mt-1 h-px bg-bg-elevated">
-            <div className="h-px bg-accent" style={{ width: `${pct}%` }} />
-          </div>
-        </div>
+        <InlineModelDownloadProgress
+          label={model.label}
+          phase={install.phase}
+          downloaded={install.downloaded}
+          total={install.total}
+          bytesPerSecond={install.bps}
+          onCancel={onCancel}
+        />
       )}
     </article>
   );
@@ -472,6 +470,7 @@ function handleInstallEvent(
       phase: "downloading" as const,
       downloaded: 0,
       total: null,
+      bps: 0,
       error: null,
     };
     if (event.type === "Started") {
@@ -482,6 +481,7 @@ function handleInstallEvent(
           phase: "downloading",
           downloaded: event.resumed_from,
           total: event.total_bytes,
+          bps: 0,
         },
       };
     }
@@ -493,6 +493,7 @@ function handleInstallEvent(
           phase: "downloading",
           downloaded: event.downloaded,
           total: event.total_bytes,
+          bps: event.bytes_per_sec,
         },
       };
     }

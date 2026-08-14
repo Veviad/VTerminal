@@ -5,7 +5,6 @@ import {
   FileText,
   Loader2,
   Pencil,
-  RefreshCw,
   RotateCcw,
   Save,
   Trash2,
@@ -29,15 +28,19 @@ const FILE_ACCEPT =
 
 interface LocalIngestState {
   file: string;
-  stage: "extracting" | "queued" | "failed";
+  stage: "extracting" | "failed";
   error: string | null;
 }
 
 export function RemoteDocumentsPanel({
   bucket,
+  jobs: allJobs = [],
+  onRefreshJobs = async () => {},
   onChanged,
 }: {
   bucket: KnowledgeBucketDescriptor;
+  jobs?: KnowledgeJob[];
+  onRefreshJobs?: () => Promise<void>;
   onChanged: () => Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
@@ -46,12 +49,18 @@ export function RemoteDocumentsPanel({
   const [loaded, setLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [jobs, setJobs] = useState<KnowledgeJob[]>([]);
   const [localIngest, setLocalIngest] = useState<LocalIngestState | null>(null);
   const [replaceTarget, setReplaceTarget] = useState<KnowledgeDocumentManifest | null>(null);
   const uploadRef = useRef<HTMLInputElement>(null);
   const replaceRef = useRef<HTMLInputElement>(null);
   const latestCompleted = useRef(0);
+  const jobs = allJobs.filter((job) => {
+    try {
+      return sameKnowledgeBucket(job.target_ref, bucket.ref);
+    } catch {
+      return false;
+    }
+  });
 
   const loadDocuments = useCallback(
     async (reset: boolean) => {
@@ -72,52 +81,35 @@ export function RemoteDocumentsPanel({
     [bucket.ref, cursor],
   );
 
-  const refreshJobs = useCallback(async () => {
-    try {
-      const all = await api.knowledgeJobsList();
-      const matching = all.filter((job) => {
-        try {
-          return sameKnowledgeBucket(job.target_ref, bucket.ref);
-        } catch {
-          return false;
-        }
-      });
-      setJobs(matching);
-      const completedAt = matching
-        .filter((job) => job.status === "completed")
-        .reduce((latest, job) => Math.max(latest, job.updated_at), 0);
-      if (completedAt > latestCompleted.current) {
-        latestCompleted.current = completedAt;
-        await Promise.all([loadDocuments(true), onChanged()]);
-      }
-    } catch {
-      // Document browsing must remain useful if the durable job list cannot be read.
-    }
-  }, [bucket.ref, loadDocuments, onChanged]);
-
   useEffect(() => {
     if (!open || loaded) return;
     void loadDocuments(true);
   }, [open, loaded, loadDocuments]);
 
   useEffect(() => {
-    if (!open) return;
-    void refreshJobs();
-    const timer = window.setInterval(() => void refreshJobs(), 2500);
-    return () => window.clearInterval(timer);
-  }, [open, refreshJobs]);
+    const completedAt = jobs
+      .filter((job) => job.status === "completed")
+      .reduce((latest, job) => Math.max(latest, job.updated_at), 0);
+    if (completedAt > latestCompleted.current) {
+      latestCompleted.current = completedAt;
+      void Promise.all([loadDocuments(true), onChanged()]);
+    }
+  }, [jobs, loadDocuments, onChanged]);
 
   if (bucket.ref.source !== "qdrant") return null;
   if (bucket.imported) {
     return (
       <p className="border-t border-border-subtle pt-2 text-[9px] leading-relaxed text-text-muted">
-        Imported collections are attach/search-only in v1. Their existing payloads are not treated
-        as VTerminal document manifests, so upload, replace, and document CRUD stay unavailable.
+        This legacy import is attach/search-only during the compatibility release. Its existing
+        payloads are not treated as VTerminal document manifests, so upload, replace, and document
+        CRUD stay unavailable.
       </p>
     );
   }
   const remoteRef = bucket.ref;
-  const canAttemptWrite = bucket.writable || bucket.write_capability === "unknown";
+  const canAttemptWrite =
+    (bucket.compatibility === "managed_compatible" || bucket.compatibility === "attach_only") &&
+    (bucket.writable || bucket.write_capability === "unknown");
 
   const ingest = async (files: File[], replacement?: KnowledgeDocumentManifest) => {
     const outcomes = await ingestKnowledgeFiles(remoteRef, files, {
@@ -126,16 +118,15 @@ export function RemoteDocumentsPanel({
         setLocalIngest({ file: file.name, stage: "extracting", error: null }),
     });
     const failed = outcomes.find((outcome) => outcome.error);
-    const last = outcomes[outcomes.length - 1];
     if (failed) {
       setLocalIngest({ file: failed.file, stage: "failed", error: failed.error });
-    } else if (last) {
-      setLocalIngest({ file: last.file, stage: "queued", error: null });
+    } else {
+      setLocalIngest(null);
     }
     setReplaceTarget(null);
     if (replaceRef.current) replaceRef.current.value = "";
     if (uploadRef.current) uploadRef.current.value = "";
-    await refreshJobs();
+    await onRefreshJobs();
     await loadDocuments(true);
   };
 
@@ -163,29 +154,33 @@ export function RemoteDocumentsPanel({
         )}
       </div>
 
-      <input
-        ref={uploadRef}
-        hidden
-        multiple
-        type="file"
-        accept={FILE_ACCEPT}
-        aria-label={`Upload documents to ${bucket.label}`}
-        onChange={(event) => {
-          const files = Array.from(event.target.files ?? []);
-          if (files.length > 0) void ingest(files);
-        }}
-      />
-      <input
-        ref={replaceRef}
-        hidden
-        type="file"
-        accept={FILE_ACCEPT}
-        aria-label={`Replace document in ${bucket.label}`}
-        onChange={(event) => {
-          const file = event.target.files?.[0];
-          if (file && replaceTarget) void ingest([file], replaceTarget);
-        }}
-      />
+      {canAttemptWrite && (
+        <>
+          <input
+            ref={uploadRef}
+            hidden
+            multiple
+            type="file"
+            accept={FILE_ACCEPT}
+            aria-label={`Upload documents to ${bucket.label}`}
+            onChange={(event) => {
+              const files = Array.from(event.target.files ?? []);
+              if (files.length > 0) void ingest(files);
+            }}
+          />
+          <input
+            ref={replaceRef}
+            hidden
+            type="file"
+            accept={FILE_ACCEPT}
+            aria-label={`Replace document in ${bucket.label}`}
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file && replaceTarget) void ingest([file], replaceTarget);
+            }}
+          />
+        </>
+      )}
 
       {localIngest && (
         <div
@@ -197,16 +192,16 @@ export function RemoteDocumentsPanel({
         >
           <p className="flex items-center gap-1.5">
             {localIngest.stage === "extracting" && <Loader2 size={10} className="animate-spin" />}
-            {localIngest.stage === "queued" && <RefreshCw size={10} />}
             {localIngest.file} — {localIngest.stage}
           </p>
           {localIngest.error && <p className="mt-0.5">{localIngest.error}</p>}
         </div>
       )}
 
+      <JobList jobs={jobs} onRefresh={onRefreshJobs} />
+
       {open && (
         <div className="space-y-2">
-          <JobList jobs={jobs} onRefresh={refreshJobs} />
           {error && <p className="text-[10px] text-error">{error}</p>}
           {loading && documents.length === 0 ? (
             <p className="flex items-center gap-1.5 text-[10px] text-text-muted">
@@ -404,7 +399,8 @@ function JobList({ jobs, onRefresh }: { jobs: KnowledgeJob[]; onRefresh: () => P
           <div key={job.id} className="space-y-1 text-[9px] text-text-muted">
             <div className="flex items-center justify-between gap-2">
               <span className="min-w-0 truncate capitalize">
-                {job.stage.replaceAll("_", " ")} · {job.status}
+                {job.display_name ?? "Document"} · {job.stage.replaceAll("_", " ")} · {job.status}
+                {job.queue_position ? ` · queue ${job.queue_position}` : ""}
               </span>
               <span className="flex shrink-0 items-center gap-1">
                 {(job.status === "queued" || job.status === "running") && (
@@ -434,6 +430,9 @@ function JobList({ jobs, onRefresh }: { jobs: KnowledgeJob[]; onRefresh: () => P
               />
             </div>
             {job.error && <p className="text-error">{job.error}</p>}
+            {!job.error && job.waiting_reason && job.status === "queued" && (
+              <p>{job.waiting_reason}</p>
+            )}
           </div>
         );
       })}

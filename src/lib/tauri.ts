@@ -36,8 +36,6 @@ import type {
   QdrantConnection,
   QdrantConnectionConfig,
   QdrantConnectionInput,
-  QdrantImportInput,
-  QdrantImportInspection,
   RemoteModel,
   RemoteProbeResult,
   RemoteServer,
@@ -561,8 +559,8 @@ export const appRestart = () => invoke<void>("app_restart");
 
 export const visionCatalog = () => invoke<VisionCatalogEntry[]>("vision_catalog");
 
-/** Two files under ONE download_id. Rust rebases the byte counts so this looks
- *  like any other download to `DownloadProgress`/`ActiveDownloads`. */
+/** Two files under ONE download_id. Rust rebases the byte counts so the model
+ * card can render one aggregate `DownloadProgress` stream. */
 export async function visionDownload(
   downloadId: string,
   modelId: string,
@@ -923,15 +921,7 @@ export const knowledgeBucketSemanticEnable = (bucketId: string, profileId: strin
 export const knowledgeQdrantTurboQuantSet = (
   bucket: KnowledgeBucketRef,
   config: TurboQuantConfig | null,
-) => invoke<void>("knowledge_qdrant_turbo_quant_set", { bucket, config });
-
-export const knowledgeQdrantImportInspect = (bucket: KnowledgeBucketRef, limit = 8) =>
-  invoke<QdrantImportInspection>("knowledge_qdrant_import_inspect", { bucket, limit });
-
-export const knowledgeQdrantImportSave = (
-  bucket: KnowledgeBucketRef,
-  input: QdrantImportInput,
-) => invoke<void>("knowledge_qdrant_import_save", { bucket, input });
+) => invoke<KnowledgeBucketDescriptor>("knowledge_qdrant_turbo_quant_set", { bucket, config });
 
 export const knowledgeQdrantImportRemove = (bucket: KnowledgeBucketRef) =>
   invoke<void>("knowledge_qdrant_import_remove", { bucket });

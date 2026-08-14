@@ -163,6 +163,10 @@ export interface AiStreamState {
 }
 
 export interface DownloadProgress {
+  /** Stable UI owner. Repository/filename are display metadata and are not
+   * unique: two catalog entries may legitimately share either. */
+  kind: "chat" | "vision";
+  modelId: string;
   repoId: string;
   filename: string;
   downloaded: number;
@@ -484,6 +488,8 @@ export interface AppState {
   downloads: Record<string, DownloadProgress>;
   updateDownload(id: string, p: DownloadProgress): void;
   clearDownload(id: string): void;
+  downloadErrors: Record<string, string>;
+  setDownloadError(kind: DownloadProgress["kind"], modelId: string, message: string | null): void;
 
   /** Whether the SELECTED model can answer right now.
    *  `modelState` alone is NOT this: it tracks the on-device ModelHost only, so
@@ -1240,6 +1246,16 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((state) => {
       const { [id]: _d, ...downloads } = state.downloads;
       return { downloads };
+    }),
+  downloadErrors: {},
+  setDownloadError: (kind, modelId, message) =>
+    set((state) => {
+      const key = `${kind}:${modelId}`;
+      if (message !== null) {
+        return { downloadErrors: { ...state.downloadErrors, [key]: message } };
+      }
+      const { [key]: _error, ...downloadErrors } = state.downloadErrors;
+      return { downloadErrors };
     }),
 
   aiBlockedReason: () => {

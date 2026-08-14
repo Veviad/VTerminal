@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Cloud, KeyRound, Loader2, Pencil, Plus, RefreshCw, Trash2, X } from "lucide-react";
 
 import * as api from "../../lib/tauri";
-import { compatibilityLabel } from "../../lib/knowledge";
+import { compatibilityLabel, isManagedQdrantBucket } from "../../lib/knowledge";
 import type {
   KnowledgeBucketDescriptor,
   QdrantConnection,
@@ -42,7 +42,7 @@ export function QdrantConnectionsSection({
   const connectionBuckets = useMemo(() => {
     const grouped = new Map<string, KnowledgeBucketDescriptor[]>();
     for (const bucket of buckets) {
-      if (bucket.ref.source !== "qdrant") continue;
+      if (!isManagedQdrantBucket(bucket) || bucket.ref.source !== "qdrant") continue;
       grouped.set(bucket.ref.connection_id, [
         ...(grouped.get(bucket.ref.connection_id) ?? []),
         bucket,
@@ -125,8 +125,8 @@ export function QdrantConnectionsSection({
             Qdrant connections
           </h3>
           <p className="mt-1 text-[11px] leading-relaxed text-text-muted">
-            Connect a cluster once. Collections allowed by its Database API Key appear
-            automatically; keys stay write-only in the backend.
+            Connect a Qdrant REST endpoint once. Managed VTerminal collections allowed by its
+            Database API Key appear automatically; keys stay write-only in the backend.
           </p>
         </div>
         {editing === null && (
@@ -194,12 +194,20 @@ export function QdrantConnectionsSection({
                       </span>
                       {connection.server_version && <span>· Qdrant {connection.server_version}</span>}
                       <span>
-                        · {remoteBuckets.length} accessible collection
+                        · {remoteBuckets.length} managed collection
                         {remoteBuckets.length === 1 ? "" : "s"}
                       </span>
                     </p>
                     {connection.error && (
                       <p className="mt-1 text-[9px] text-error">{connection.error}</p>
+                    )}
+                    {!!connection.hidden_unmanaged_count && (
+                      <p className="mt-1 text-[9px] text-text-muted">
+                        {connection.hidden_unmanaged_count} non-VTerminal collection
+                        {connection.hidden_unmanaged_count === 1 ? "" : "s"} hidden. VTerminal
+                        reads the shared collection contract from Qdrant metadata, so every client
+                        sees the same profile without a local import wizard.
+                      </p>
                     )}
                   </div>
                   <div className="flex shrink-0 items-center gap-1">
@@ -402,7 +410,7 @@ function ConnectionForm({
         value={url}
         onChange={(event) => setUrl(event.target.value)}
         placeholder="https://cluster.example.qdrant.io:6333"
-        aria-label="Qdrant URL"
+        aria-label="Qdrant REST URL"
         inputMode="url"
       />
       <input
@@ -415,8 +423,9 @@ function ConnectionForm({
         autoComplete="off"
       />
       <p className="text-[9px] leading-relaxed text-text-muted">
-        Use a Database API Key or granular cluster token, not a Qdrant Cloud management key.
-        The stored value is never shown again.
+        Enter the database REST endpoint (normally port 6333), not the gRPC endpoint (normally
+        port 6334). Use a Database API Key or granular cluster token, not a Qdrant Cloud
+        management key. The stored value is never shown again.
       </p>
       {credentialOriginChanged && connection?.has_api_key && apiKey.length === 0 && (
         <p className="rounded border border-warning/30 bg-warning/10 px-2 py-1 text-[9px] text-warning">

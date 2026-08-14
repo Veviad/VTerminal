@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use super::embedding::EmbeddingProfile;
 
@@ -63,12 +62,49 @@ pub struct VterminalCollectionMetadata {
     pub chunk_pipeline_version: u32,
 }
 
+/// The collection-level VTerminal contract must fail closed. An absent marker
+/// identifies an unrelated collection; a present but malformed marker is not
+/// equivalent to absence and must never fall through to legacy import logic.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CollectionMetadataState {
+    Absent,
+    Valid {
+        metadata: Box<VterminalCollectionMetadata>,
+    },
+    Invalid {
+        reason: String,
+    },
+}
+
+impl CollectionMetadataState {
+    pub fn valid(&self) -> Option<&VterminalCollectionMetadata> {
+        match self {
+            Self::Valid { metadata } => Some(metadata),
+            Self::Absent | Self::Invalid { .. } => None,
+        }
+    }
+
+    pub fn into_valid(self) -> Option<VterminalCollectionMetadata> {
+        match self {
+            Self::Valid { metadata } => Some(*metadata),
+            Self::Absent | Self::Invalid { .. } => None,
+        }
+    }
+
+    pub fn is_absent(&self) -> bool {
+        matches!(self, Self::Absent)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CollectionCompatibility {
     ManagedCompatible,
     AttachOnly,
-    NeedsGuidedImport,
+    RequiresProfile,
+    Unmanaged,
+    LegacyImport,
     UpgradeRequired,
     Incompatible,
     Unreadable,
@@ -163,7 +199,12 @@ pub struct QdrantCollectionInfo {
     pub vectors: Vec<VectorDescriptor>,
     pub payload_indexes: BTreeSet<String>,
     pub payload_index_types: BTreeMap<String, String>,
-    pub metadata: Option<VterminalCollectionMetadata>,
+    pub metadata: CollectionMetadataState,
+    /// Exact filtered counts are populated by managed discovery. Qdrant's
+    /// collection summary counters are approximate and include staging points.
+    pub active_document_count: Option<u64>,
+    pub active_chunk_count: Option<u64>,
+    pub pending_point_count: Option<u64>,
     pub quantization: QuantizationStatus,
 }
 
@@ -173,6 +214,9 @@ pub struct KnowledgeBucketDescriptor {
     pub name: String,
     pub points_count: u64,
     pub indexed_vectors_count: u64,
+    pub active_document_count: u64,
+    pub active_chunk_count: u64,
+    pub pending_count: u64,
     pub compatibility: CollectionCompatibility,
     pub compatibility_reason: String,
     pub access: CollectionAccess,
@@ -312,8 +356,9 @@ pub struct OperationReceipt {
     pub operation_id: Option<u64>,
 }
 
-/// Payload bindings for guided import.  It is intentionally explicit: an
-/// embedding model is never inferred from a vector's dimension.
+/// A legacy local interpretation for a collection imported before v0.2.1. New
+/// bindings are no longer created; these remain readable/searchable/removable so
+/// upgrades do not strand an existing user's knowledge source.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImportedCollectionBinding {
     pub connection_id: String,
@@ -331,14 +376,6 @@ pub struct ImportedCollectionBinding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heading_field: Option<String>,
     pub model_attested: bool,
-}
-
-/// Retained for import payload samples whose user-defined fields are not known at
-/// compile time.  Managed collections use typed payload structs instead.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PayloadSample {
-    pub point_id: PointId,
-    pub payload: Value,
 }
 
 #[cfg(test)]

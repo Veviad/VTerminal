@@ -8,7 +8,8 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::{Manager, Wry};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::{Emitter, Manager, Wry};
 
 use super::embedding::{
     embed_http_batch, EmbeddedBatch, EmbeddingEndpoint, EmbeddingInput, EmbeddingProfile,
@@ -23,6 +24,47 @@ use crate::docs::{index, semantic};
 const EMBEDDING_BATCH_SIZE: usize = 32;
 const MAX_PAGES: usize = 20_000;
 const MAX_EXTRACTED_BYTES: usize = 128 * 1024 * 1024;
+const JOB_UPDATED_EVENT: &str = "knowledge-job-updated";
+
+/// Per-application runner coordination. The operating-system writer lock still
+/// serializes each desktop app with the standalone CLI, while this state prevents
+/// a burst of file selections from spawning one waiter per file. Keeping it in
+/// Tauri state avoids one app/runtime suppressing a different app instance in the
+/// same process (notably integration tests).
+#[derive(Default)]
+pub struct KnowledgeJobRunnerState {
+    active: AtomicBool,
+}
+
+struct JobRunnerLease {
+    app: tauri::AppHandle<Wry>,
+    released: bool,
+}
+
+impl JobRunnerLease {
+    fn new(app: tauri::AppHandle<Wry>) -> Self {
+        Self {
+            app,
+            released: false,
+        }
+    }
+
+    fn release(&mut self) {
+        if self.released {
+            return;
+        }
+        if let Some(state) = self.app.try_state::<KnowledgeJobRunnerState>() {
+            state.active.store(false, Ordering::Release);
+        }
+        self.released = true;
+    }
+}
+
+impl Drop for JobRunnerLease {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IngestPage {
@@ -94,12 +136,18 @@ pub struct JobView {
     pub completed_items: u32,
     pub total_items: Option<u32>,
     pub error: Option<String>,
+    pub display_name: String,
+    pub queue_position: Option<u32>,
+    pub waiting_reason: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
 
 impl From<semantic::KnowledgeJob> for JobView {
     fn from(job: semantic::KnowledgeJob) -> Self {
+        let display_name = job_display_name(&job);
+        let waiting_reason =
+            (job.status == "queued").then(|| "Waiting for the knowledge worker".into());
         Self {
             id: job.id,
             kind: job.kind,
@@ -109,9 +157,67 @@ impl From<semantic::KnowledgeJob> for JobView {
             completed_items: job.completed_items,
             total_items: job.total_items,
             error: job.error,
+            display_name,
+            queue_position: None,
+            waiting_reason,
             created_at: job.created_at,
             updated_at: job.updated_at,
         }
+    }
+}
+
+fn job_display_name(job: &semantic::KnowledgeJob) -> String {
+    let value = job.display_name.trim();
+    if value.is_empty() {
+        "Knowledge job".into()
+    } else {
+        value.chars().take(512).collect()
+    }
+}
+
+pub fn job_views(jobs: Vec<semantic::KnowledgeJob>) -> Vec<JobView> {
+    let mut queued = jobs
+        .iter()
+        .filter(|job| job.status == "queued")
+        .map(|job| (job.created_at, job.id.clone()))
+        .collect::<Vec<_>>();
+    queued.sort();
+    let positions = queued
+        .into_iter()
+        .enumerate()
+        .map(|(index, (_, id))| (id, (index + 1) as u32))
+        .collect::<std::collections::HashMap<_, _>>();
+    jobs.into_iter()
+        .map(|job| {
+            let mut view: JobView = job.into();
+            view.queue_position = positions.get(&view.id).copied();
+            view
+        })
+        .collect()
+}
+
+fn current_job_view(docs: &crate::docs::db::DocsDb, id: &str) -> Result<Option<JobView>, String> {
+    docs.with(|connection| semantic::list_jobs(connection))
+        .map(|jobs| {
+            job_views(jobs)
+                .into_iter()
+                .find(|candidate| candidate.id == id)
+        })
+}
+
+pub fn job_view(docs: &crate::docs::db::DocsDb, id: &str) -> Result<JobView, String> {
+    current_job_view(docs, id)?.ok_or_else(|| "no such knowledge job".into())
+}
+
+pub fn notify_job_changed(app: &tauri::AppHandle<Wry>, docs: &crate::docs::db::DocsDb, id: &str) {
+    match current_job_view(docs, id) {
+        Ok(Some(view)) => {
+            if let Err(error) = app.emit(JOB_UPDATED_EVENT, view) {
+                log::warn!("emit knowledge job update failed: {error}");
+            }
+        }
+        Ok(None) => {}
+        Err(error) => log::warn!("load knowledge job update failed: {error}"),
     }
 }
 
@@ -183,12 +289,17 @@ pub fn new_ingest_job(
             connection_id,
             collection,
         } => {
+            let source_identity = document
+                .source_id
+                .as_deref()
+                .unwrap_or(&document.source_uri);
             let document_id = document.document_id.clone().unwrap_or_else(|| {
-                stable_remote_document_id(connection_id, collection, &document.source_uri)
+                stable_remote_document_id(connection_id, collection, source_identity)
             });
             remote_document_resource_key(connection_id, collection, &document_id)
         }
     };
+    let display_name = document.title.clone();
     let target_ref = serde_json::to_value(bucket).map_err(|error| error.to_string())?;
     let payload = serde_json::to_value(IngestJobPayload {
         document,
@@ -201,6 +312,7 @@ pub fn new_ingest_job(
     Ok(semantic::KnowledgeJob {
         id: uuid::Uuid::new_v4().to_string(),
         kind: "document_ingest".into(),
+        display_name,
         target_ref,
         payload,
         resource_key: Some(resource_key),
@@ -291,6 +403,7 @@ pub fn new_local_backfill_job(bucket_id: String) -> Result<semantic::KnowledgeJo
     Ok(semantic::KnowledgeJob {
         id: uuid::Uuid::new_v4().to_string(),
         kind: "bucket_embed".into(),
+        display_name: format!("Semantic search · {bucket_id}"),
         target_ref: serde_json::to_value(bucket).map_err(|error| error.to_string())?,
         payload: serde_json::to_value(LocalBackfillPayload { bucket_id })
             .map_err(|error| error.to_string())?,
@@ -323,6 +436,19 @@ fn persist_progress(
     job.error = None;
     job.updated_at = semantic::now_ms();
     persist_job(docs, job)
+}
+
+fn persist_progress_and_notify(
+    app: &tauri::AppHandle<Wry>,
+    docs: &crate::docs::db::DocsDb,
+    job: &mut semantic::KnowledgeJob,
+    stage: &str,
+    completed: u32,
+    total: Option<u32>,
+) -> Result<(), String> {
+    persist_progress(docs, job, stage, completed, total)?;
+    notify_job_changed(app, docs, &job.id);
+    Ok(())
 }
 
 fn is_cancelled(docs: &crate::docs::db::DocsDb, id: &str) -> Result<bool, String> {
@@ -410,6 +536,10 @@ fn finalize_job(
                           WHEN status='running' THEN ?4
                           ELSE error
                         END,
+                        payload_json=CASE
+                          WHEN status='running' AND ?2='completed' THEN '{}'
+                          ELSE payload_json
+                        END,
                         updated_at=?5
                   WHERE id=?1
                     AND status IN ('running','cancelling','cancelled')",
@@ -444,33 +574,6 @@ fn finalize_job(
     })
 }
 
-pub async fn run_job(
-    app: &tauri::AppHandle<Wry>,
-    docs: &crate::docs::db::DocsDb,
-    job: semantic::KnowledgeJob,
-) -> Result<(), String> {
-    let app_data = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| error.to_string())?;
-    let process_lock = super::process_lock::KnowledgeProcessLock::acquire(app_data).await?;
-    run_job_with_lock(app, docs, job, process_lock).await
-}
-
-/// Run a job while retaining an already-acquired writer guard. IPC callers use
-/// this form so persisting/queuing a job and executing it are one uninterrupted
-/// cross-process mutation.
-pub(crate) async fn run_job_with_lock(
-    app: &tauri::AppHandle<Wry>,
-    docs: &crate::docs::db::DocsDb,
-    mut job: semantic::KnowledgeJob,
-    process_lock: super::process_lock::KnowledgeProcessLock,
-) -> Result<(), String> {
-    let result = run_job_locked(app, docs, &mut job).await;
-    drop(process_lock);
-    result
-}
-
 async fn run_job_locked(
     app: &tauri::AppHandle<Wry>,
     docs: &crate::docs::db::DocsDb,
@@ -478,6 +581,7 @@ async fn run_job_locked(
 ) -> Result<(), String> {
     claim_job(docs, &job.id)?;
     job.status = "running".into();
+    notify_job_changed(app, docs, &job.id);
     let result = match ensure_knowledge_enabled(app) {
         Ok(()) => match job.kind.as_str() {
             "document_ingest" => run_document_ingest(app, docs, job).await,
@@ -487,12 +591,42 @@ async fn run_job_locked(
         Err(error) => Err(error),
     };
     match result {
-        Ok(()) => finalize_job(docs, job, true, None),
+        Ok(()) => {
+            finalize_job(docs, job, true, None)?;
+            notify_job_changed(app, docs, &job.id);
+            Ok(())
+        }
         Err(error) => {
+            // Turning Knowledge off pauses durable work. Keep the extracted text
+            // queued so enabling it again can resume without asking for the file.
+            if error.starts_with("knowledge is disabled;") {
+                requeue_paused_job(docs, job)?;
+                notify_job_changed(app, docs, &job.id);
+                return Err(error);
+            }
             finalize_job(docs, job, false, Some(&error))?;
+            notify_job_changed(app, docs, &job.id);
             Err(error)
         }
     }
+}
+
+fn requeue_paused_job(
+    docs: &crate::docs::db::DocsDb,
+    job: &mut semantic::KnowledgeJob,
+) -> Result<(), String> {
+    docs.with(|connection| {
+        connection
+            .execute(
+                "UPDATE knowledge_jobs
+                    SET status=CASE WHEN status='cancelling' THEN 'cancelled' ELSE 'queued' END,
+                        error=NULL,updated_at=?2
+                  WHERE id=?1 AND status IN ('running','cancelling')",
+                rusqlite::params![&job.id, semantic::now_ms()],
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    })
 }
 
 /// Resume work which was queued or interrupted by process shutdown. Failed and
@@ -503,65 +637,165 @@ pub fn resume_pending_jobs(app: &tauri::AppHandle<Wry>) -> Result<(), String> {
     if !crate::commands::settings::read_bool(app, "docs_enabled", false) {
         return Ok(());
     }
+    wake_job_runner(app)
+}
+
+/// Wake the durable desktop runner after an enqueue, retry, app start, or
+/// Knowledge being re-enabled. This returns before waiting for the process lock.
+pub fn wake_job_runner(app: &tauri::AppHandle<Wry>) -> Result<(), String> {
+    if !crate::commands::settings::read_bool(app, "docs_enabled", false) {
+        return Ok(());
+    }
+    let state = app
+        .try_state::<KnowledgeJobRunnerState>()
+        .ok_or_else(|| "knowledge job runner state is unavailable".to_string())?;
+    if state.active.swap(true, Ordering::AcqRel) {
+        return Ok(());
+    }
     let run_app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let app_data = match run_app.path().app_data_dir() {
-            Ok(path) => path,
-            Err(error) => {
-                log::warn!("locate knowledge job lock for resume failed: {error}");
-                return;
-            }
-        };
-        // Do not rewrite a `running` row until the process which owns it has
-        // released the writer lock. This is what lets the app start safely while
-        // a standalone CLI ingest is still active.
-        let process_lock = match super::process_lock::KnowledgeProcessLock::acquire(app_data).await
+        // The lease resets `active` even if draining unwinds unexpectedly.
+        let mut lease = JobRunnerLease::new(run_app.clone());
+        let drained = drain_pending_jobs(&run_app).await;
+        if let Err(error) = &drained {
+            log::warn!("drain knowledge jobs failed: {error}");
+        }
+        lease.release();
+
+        // Close the enqueue-vs-exit race: an insert can observe ACTIVE=true just
+        // after the runner's final empty query. Recheck after publishing false.
+        if drained.is_ok()
+            && crate::commands::settings::read_bool(&run_app, "docs_enabled", false)
+            && has_queued_jobs(&run_app).unwrap_or(false)
         {
-            Ok(lock) => lock,
-            Err(error) => {
-                log::warn!("wait to resume knowledge jobs failed: {error}");
-                return;
-            }
-        };
-        let run_docs = run_app.state::<crate::docs::db::DocsDb>();
-        // Check only after the writer hand-off: a first-ever CLI ingest may have
-        // created docs.db while the app was waiting for its lock.
-        if !run_docs.exists() {
-            drop(process_lock);
-            return;
+            let _ = wake_job_runner(&run_app);
         }
-        let jobs = run_docs.with(|connection| {
-            connection
-                .execute(
-                    "UPDATE knowledge_jobs
-                        SET status=CASE WHEN status='cancelling' THEN 'cancelled' ELSE 'queued' END,
-                            updated_at=?1
-                      WHERE status IN ('running','cancelling')",
-                    [semantic::now_ms()],
-                )
-                .map_err(|error| error.to_string())?;
-            semantic::list_jobs(connection)
-        });
-        let pending = match jobs {
-            Ok(jobs) => jobs
-                .into_iter()
-                .filter(|job| matches!(job.status.as_str(), "queued" | "running"))
-                .collect::<Vec<_>>(),
-            Err(error) => {
-                log::warn!("load resumable knowledge jobs failed: {error}");
-                return;
-            }
-        };
-        // Keep one writer guard continuously from recovery of interrupted rows
-        // through all resumed jobs. Releasing between these steps would let a
-        // CLI delete race ahead and then be undone by the resumed ingestion.
-        for mut job in pending {
-            if let Err(error) = run_job_locked(&run_app, &run_docs, &mut job).await {
-                log::warn!("resumed knowledge job failed: {error}");
-            }
-        }
-        drop(process_lock);
     });
+    Ok(())
+}
+
+fn has_queued_jobs(app: &tauri::AppHandle<Wry>) -> Result<bool, String> {
+    let Some(docs) = app.try_state::<crate::docs::db::DocsDb>() else {
+        return Ok(false);
+    };
+    if !docs.exists() {
+        return Ok(false);
+    }
+    docs.with(|connection| {
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM knowledge_jobs WHERE status='queued')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())
+    })
+}
+
+/// Release durable resource keys left in `running` by an interrupted standalone
+/// CLI process. The caller must already own
+/// [`KnowledgeProcessLock`](super::process_lock::KnowledgeProcessLock), which is
+/// what proves these rows have no live writer. Desktop startup takes a different
+/// path and requeues the same rows because it has a background worker available;
+/// a one-shot CLI invocation instead fails them explicitly so the requested new
+/// mutation can proceed without an unrecoverable active-resource conflict.
+pub fn fail_interrupted_headless_jobs(
+    docs: &crate::docs::db::DocsDb,
+) -> Result<Vec<String>, String> {
+    docs.with(|connection| {
+        let ids = {
+            let mut statement = connection
+                .prepare("SELECT id FROM knowledge_jobs WHERE status IN ('running','cancelling')")
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|error| error.to_string())?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|error| error.to_string())?;
+            rows
+        };
+        connection
+            .execute(
+                "UPDATE knowledge_jobs
+                    SET status=CASE WHEN status='cancelling' THEN 'cancelled' ELSE 'failed' END,
+                        error=CASE
+                          WHEN status='cancelling' THEN NULL
+                          ELSE 'The standalone CLI stopped before this job finished; run the command again to resume safely'
+                        END,
+                        updated_at=?1
+                  WHERE status IN ('running','cancelling')",
+                [semantic::now_ms()],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(ids)
+    })
+}
+
+async fn drain_pending_jobs(app: &tauri::AppHandle<Wry>) -> Result<(), String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    // Waiting happens only here, after IPC has returned its durable queued row.
+    // Once acquired, retain ownership through recovery and the whole queue.
+    let process_lock = super::process_lock::KnowledgeProcessLock::acquire(app_data).await?;
+    let Some(docs) = app.try_state::<crate::docs::db::DocsDb>() else {
+        drop(process_lock);
+        return Ok(());
+    };
+    if !docs.exists() {
+        drop(process_lock);
+        return Ok(());
+    }
+    let recovered = docs.with(|connection| {
+        let ids = {
+            let mut statement = connection
+                .prepare("SELECT id FROM knowledge_jobs WHERE status IN ('running','cancelling')")
+                .map_err(|error| error.to_string())?;
+            let ids = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|error| error.to_string())?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|error| error.to_string())?;
+            ids
+        };
+        connection
+            .execute(
+                "UPDATE knowledge_jobs
+                    SET status=CASE WHEN status='cancelling' THEN 'cancelled' ELSE 'queued' END,
+                        updated_at=?1
+                  WHERE status IN ('running','cancelling')",
+                [semantic::now_ms()],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(ids)
+    })?;
+    for id in recovered {
+        notify_job_changed(app, &docs, &id);
+    }
+
+    loop {
+        if !crate::commands::settings::read_bool(app, "docs_enabled", false) {
+            break;
+        }
+        let next = docs.with(|connection| {
+            let mut queued = semantic::list_jobs(connection)?
+                .into_iter()
+                .filter(|job| job.status == "queued")
+                .collect::<Vec<_>>();
+            queued.sort_by(|left, right| {
+                left.created_at
+                    .cmp(&right.created_at)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            Ok(queued.into_iter().next())
+        })?;
+        let Some(mut job) = next else { break };
+        if let Err(error) = run_job_locked(app, &docs, &mut job).await {
+            log::warn!("knowledge job {} failed: {error}", job.id);
+        }
+    }
+    drop(process_lock);
     Ok(())
 }
 
@@ -597,7 +831,7 @@ async fn ingest_local(
     bucket_id: &str,
     payload: IngestJobPayload,
 ) -> Result<(), String> {
-    persist_progress(docs, job, "chunk", 0, None)?;
+    persist_progress_and_notify(app, docs, job, "chunk", 0, None)?;
     let document_id = payload
         .document
         .document_id
@@ -676,7 +910,7 @@ async fn ingest_local(
             .map(|file| file.chunk_count)
             .unwrap_or(0))
     })?;
-    persist_progress(docs, job, "embed", 0, Some(chunks))?;
+    persist_progress_and_notify(app, docs, job, "embed", 0, Some(chunks))?;
     embed_pending_local(app, docs, job, bucket_id).await
 }
 
@@ -707,7 +941,7 @@ async fn embed_pending_local(
             .map(|value| value as u32)
             .map_err(|error| error.to_string())
     })?;
-    persist_progress(docs, job, "embed", 0, Some(total))?;
+    persist_progress_and_notify(app, docs, job, "embed", 0, Some(total))?;
     let mut completed = 0u32;
     loop {
         ensure_knowledge_enabled(app)?;
@@ -740,7 +974,7 @@ async fn embed_pending_local(
             )
         })?;
         completed = completed.saturating_add(rows.len() as u32);
-        persist_progress(docs, job, "embed", completed, Some(total))?;
+        persist_progress_and_notify(app, docs, job, "embed", completed, Some(total))?;
     }
     Ok(())
 }
@@ -754,7 +988,7 @@ async fn ingest_qdrant(
     mut payload: IngestJobPayload,
 ) -> Result<(), String> {
     let (client, profile) = managed_qdrant_target(app, connection_id, collection).await?;
-    persist_progress(docs, job, "chunk", 0, None)?;
+    persist_progress_and_notify(app, docs, job, "chunk", 0, None)?;
     let spec = ChunkSpec::default();
     let source_pages = source_pages(&payload.pages);
     let chunks = chunk::chunk_pages(&source_pages, spec);
@@ -762,7 +996,7 @@ async fn ingest_qdrant(
         return Err("the extracted document produced no non-empty chunks".into());
     }
     let total = chunks.len() as u32;
-    persist_progress(docs, job, "embed", 0, Some(total))?;
+    persist_progress_and_notify(app, docs, job, "embed", 0, Some(total))?;
 
     let (document_id, _old_revision, revision) =
         resolve_remote_revision(docs, job, &client, connection_id, collection, &mut payload)
@@ -803,7 +1037,8 @@ async fn ingest_qdrant(
                 vector,
             });
         }
-        persist_progress(
+        persist_progress_and_notify(
+            app,
             docs,
             job,
             "embed",
@@ -825,22 +1060,34 @@ async fn ingest_qdrant(
         created_at: now.clone(),
         updated_at: now.clone(),
     };
-    persist_progress(docs, job, "upload", 0, Some(total))?;
+    persist_progress_and_notify(app, docs, job, "upload", 0, Some(total))?;
     ensure_knowledge_enabled(app)?;
     if !already_active {
         match client
             .upsert_document(collection, &profile, &manifest, &embedded_chunks)
             .await
         {
-            Ok(_) => remember_point_access(app, connection_id, collection, true)?,
+            Ok(_) => {
+                if let Err(error) = remember_point_access(app, connection_id, collection, true) {
+                    log::warn!("remember Qdrant point-write access failed: {error}");
+                }
+            }
             Err(error @ QdrantError::Permission { .. }) => {
-                remember_point_access(app, connection_id, collection, false)?;
+                if let Err(cache_error) =
+                    remember_point_access(app, connection_id, collection, false)
+                {
+                    log::warn!("remember Qdrant read-only access failed: {cache_error}");
+                }
                 return Err(error.to_string());
             }
-            Err(error) => return Err(error.to_string()),
+            Err(error) => {
+                return Err(format!(
+                    "upload the document manifest and chunks through Qdrant REST: {error}"
+                ))
+            }
         }
     }
-    persist_progress(docs, job, "upload", total, Some(total))?;
+    persist_progress_and_notify(app, docs, job, "upload", total, Some(total))?;
 
     // Activation is the commit point. Repeating every operation is safe because
     // point ids and revision filters are deterministic and Qdrant upserts replace.
@@ -849,6 +1096,12 @@ async fn ingest_qdrant(
     }
     ensure_knowledge_enabled(app)?;
     if !already_active {
+        // Another client can stage and activate while this client is embedding.
+        // Re-read immediately before the commit point so an older job cannot
+        // overwrite or clean up a newer revision.
+        if remote_revision_already_active(&client, collection, &document_id, revision).await? {
+            return Ok(());
+        }
         client
             .set_document_revision_state(
                 collection,
@@ -858,17 +1111,18 @@ async fn ingest_qdrant(
                 &chrono::Utc::now().to_rfc3339(),
             )
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("activate the document revision in Qdrant: {error}"))?;
     }
+    retire_revision_if_superseded(&client, collection, &document_id, revision).await?;
     let committed_at = chrono::Utc::now().to_rfc3339();
     client
         .deactivate_other_document_revisions(collection, &document_id, revision, &committed_at)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("hide lower document revisions in Qdrant: {error}"))?;
     client
         .delete_other_document_revisions(collection, &document_id, revision)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("delete lower document revisions from Qdrant: {error}"))?;
     Ok(())
 }
 
@@ -904,8 +1158,32 @@ fn stable_local_document_id(bucket: &str, source_uri: &str) -> String {
     stable_uuid(format!("vterminal:local:{bucket}:{source_uri}").as_bytes())
 }
 
-fn stable_remote_document_id(connection: &str, collection: &str, source_uri: &str) -> String {
-    stable_uuid(format!("vterminal:qdrant:{connection}:{collection}:{source_uri}").as_bytes())
+fn stable_remote_document_id(_connection: &str, collection: &str, source_identity: &str) -> String {
+    let source = normalized_source_identity(source_identity);
+    stable_uuid(format!("vterminal:qdrant:{collection}:{source}").as_bytes())
+}
+
+/// Normalize the identity fields which are safe to normalize without changing
+/// what resource a URI addresses. Most importantly, the local connection id is
+/// not part of a shared Qdrant document id, so two clients connected to the same
+/// collection converge on the same manifest.
+fn normalized_source_identity(source_uri: &str) -> String {
+    let source_uri = source_uri.trim();
+    let Ok(mut url) = url::Url::parse(source_uri) else {
+        return source_uri.to_owned();
+    };
+    url.set_fragment(None);
+    let default_port = matches!(
+        (url.scheme(), url.port()),
+        ("http", Some(80)) | ("https", Some(443))
+    );
+    if default_port {
+        let _ = url.set_port(None);
+    }
+    if url.scheme() == "file" && url.host_str() == Some("localhost") {
+        let _ = url.set_host(None);
+    }
+    url.to_string()
 }
 
 /// Deterministic RFC 4122-shaped identifier derived from SHA-256. Setting the
@@ -961,7 +1239,7 @@ async fn managed_qdrant_target(
         .await
         .map_err(|error| error.to_string())?;
     let payload_index_drift = super::contract::required_payload_index_drift(&info);
-    let metadata = info.metadata.ok_or_else(|| {
+    let metadata = info.metadata.into_valid().ok_or_else(|| {
         "upload requires a managed VTerminal collection with exact embedding metadata".to_string()
     })?;
     let profile = metadata.embedding_profile;
@@ -1003,13 +1281,21 @@ async fn resolve_remote_revision(
         return Ok((document_id, payload.prior_revision, revision));
     }
     let document_id = payload.document.document_id.clone().unwrap_or_else(|| {
-        stable_remote_document_id(connection_id, collection, &payload.document.source_uri)
+        stable_remote_document_id(
+            connection_id,
+            collection,
+            payload
+                .document
+                .source_id
+                .as_deref()
+                .unwrap_or(&payload.document.source_uri),
+        )
     });
     let (prior, highest) = client
         .document_revision_head(collection, &document_id)
         .await
         .map_err(|error| error.to_string())?;
-    let revision = highest.unwrap_or(0).saturating_add(1).max(1);
+    let revision = allocate_remote_revision(highest)?;
     payload.resolved_document_id = Some(document_id.clone());
     payload.prior_revision = prior;
     payload.revision = Some(revision);
@@ -1017,6 +1303,26 @@ async fn resolve_remote_revision(
     job.updated_at = semantic::now_ms();
     persist_job(docs, job)?;
     Ok((document_id, prior, revision))
+}
+
+/// Generate a JSON-safe, microsecond-sortable revision. Using the full Unix
+/// microsecond timestamp makes a collision between independent clients much less
+/// likely than splitting a millisecond into a small random suffix, while still
+/// preserving exact integer values over JSON/TypeScript for centuries. The
+/// remote head still wins when a clock moved backwards.
+fn allocate_remote_revision(highest: Option<u64>) -> Result<u64, String> {
+    const MAX_JSON_SAFE_INTEGER: u64 = (1_u64 << 53) - 1;
+    let clock_revision = u64::try_from(chrono::Utc::now().timestamp_micros())
+        .map_err(|_| "the system clock cannot allocate a document revision")?;
+    let head_revision = highest
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| "the collection exhausted its document revision range".to_string())?;
+    let revision = clock_revision.max(head_revision).max(1);
+    if revision > MAX_JSON_SAFE_INTEGER {
+        return Err("the collection document revision exceeds the JSON-safe integer range".into());
+    }
+    Ok(revision)
 }
 
 async fn remote_revision_already_active(
@@ -1029,20 +1335,66 @@ async fn remote_revision_already_active(
         .document_revision_head(collection, document_id)
         .await
         .map_err(|error| error.to_string())?;
-    saved_revision_is_active(active_revision, saved_revision)
+    saved_revision_is_current(active_revision, saved_revision)
 }
 
-fn saved_revision_is_active(
+fn saved_revision_is_current(
     active_revision: Option<u64>,
     saved_revision: u64,
 ) -> Result<bool, String> {
-    match active_revision {
-        Some(active) if active > saved_revision => Err(format!(
-            "this job's saved document revision {saved_revision} was superseded by active revision {active}; start a new replacement instead"
-        )),
-        Some(active) => Ok(active == saved_revision),
-        None => Ok(false),
+    // A higher staging manifest is not a committed replacement. It may belong
+    // to a cancelled or crashed client, so it must not suppress the last active
+    // revision. If that client later activates, the post-commit check below will
+    // deterministically retire this lower revision.
+    if let Some(newer) = active_revision.filter(|revision| *revision > saved_revision) {
+        return Err(format!(
+            "this job's saved document revision {saved_revision} was superseded by newer revision {newer}; start a new replacement instead"
+        ));
     }
+    Ok(active_revision == Some(saved_revision))
+}
+
+fn superseding_revision(active_revision: Option<u64>, saved_revision: u64) -> Option<u64> {
+    active_revision.filter(|revision| *revision > saved_revision)
+}
+
+/// Close the final activation race without ever touching a newer revision. If
+/// another client activated a newer manifest between our pre-commit read and
+/// activation, retire exactly this saved revision and let the newer job win.
+async fn retire_revision_if_superseded(
+    client: &QdrantClient,
+    collection: &str,
+    document_id: &str,
+    saved_revision: u64,
+) -> Result<(), String> {
+    let (active_revision, _) = client
+        .document_revision_head(collection, document_id)
+        .await
+        .map_err(|error| format!("confirm the activated Qdrant revision: {error}"))?;
+    let Some(newer) = superseding_revision(active_revision, saved_revision) else {
+        return Ok(());
+    };
+
+    let demote = client
+        .set_document_revision_state(
+            collection,
+            document_id,
+            saved_revision,
+            DocumentState::Staging,
+            &chrono::Utc::now().to_rfc3339(),
+        )
+        .await;
+    let delete = client
+        .delete_document_revision(collection, document_id, saved_revision)
+        .await;
+    if demote.is_err() && delete.is_err() {
+        return Err(format!(
+            "document revision {saved_revision} was superseded by newer revision {newer}, but Qdrant could neither hide nor delete the older active revision"
+        ));
+    }
+    Err(format!(
+        "document revision {saved_revision} was superseded by newer revision {newer}; the older revision was retired"
+    ))
 }
 
 async fn embed_documents(
@@ -1465,7 +1817,7 @@ async fn ingest_qdrant_headless(
         .collection_info(collection)
         .await
         .map_err(|error| error.to_string())?;
-    let metadata = info.metadata.ok_or_else(|| {
+    let metadata = info.metadata.into_valid().ok_or_else(|| {
         "upload requires a managed VTerminal collection with exact embedding metadata".to_string()
     })?;
     let profile = metadata.embedding_profile;
@@ -1542,7 +1894,13 @@ async fn ingest_qdrant_headless(
         client
             .upsert_document(collection, &profile, &manifest, &document_chunks)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| {
+                format!("upload the document manifest and chunks through Qdrant REST: {error}")
+            })?;
+        if remote_revision_already_active(&client, collection, &document_id, revision).await? {
+            persist_progress(docs, job, "upload", total, Some(total))?;
+            return Ok(());
+        }
         client
             .set_document_revision_state(
                 collection,
@@ -1552,17 +1910,18 @@ async fn ingest_qdrant_headless(
                 &chrono::Utc::now().to_rfc3339(),
             )
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("activate the document revision in Qdrant: {error}"))?;
     }
+    retire_revision_if_superseded(&client, collection, &document_id, revision).await?;
     let committed_at = chrono::Utc::now().to_rfc3339();
     client
         .deactivate_other_document_revisions(collection, &document_id, revision, &committed_at)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("hide lower document revisions in Qdrant: {error}"))?;
     client
         .delete_other_document_revisions(collection, &document_id, revision)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("delete lower document revisions from Qdrant: {error}"))?;
     persist_progress(docs, job, "upload", total, Some(total))
 }
 
@@ -1643,7 +2002,7 @@ async fn embed_documents_headless(
 
 /// Remember only a capability learned through the user's explicit upload action.
 /// Discovery itself remains read-only and never sends a probe point.
-fn remember_point_access(
+pub(crate) fn remember_point_access(
     app: &tauri::AppHandle<Wry>,
     connection_id: &str,
     collection: &str,
@@ -1652,6 +2011,8 @@ fn remember_point_access(
     let connections = store::read_connections(app);
     let snapshot = store::find_connection(&connections, connection_id)?.clone();
     store::update_connection_if_current(app, &snapshot, |connection| {
+        let observed_at = semantic::now_ms();
+        let mut found = false;
         for value in &mut connection.collections {
             let Ok(mut bucket) = serde_json::from_value::<
                 crate::commands::knowledge::KnowledgeBucketView,
@@ -1662,6 +2023,7 @@ fn remember_point_access(
                 &bucket.bucket_ref,
                 KnowledgeBucketRef::Qdrant { collection: name, .. } if name == collection
             ) {
+                found = true;
                 bucket.access = Some(if writable {
                     match bucket.access {
                         Some(super::types::CollectionAccess::Manage) => {
@@ -1681,6 +2043,20 @@ fn remember_point_access(
                 *value = serde_json::to_value(bucket).map_err(|error| error.to_string())?;
             }
         }
+        if found {
+            // This explicit operation reached the current endpoint after any
+            // refresh that was already in flight. Advancing the cache observation
+            // timestamp prevents that older refresh from restoring `unknown`
+            // access over the result learned from the user's upload.
+            connection.last_checked_at = Some(
+                connection
+                    .last_checked_at
+                    .unwrap_or(i64::MIN)
+                    .max(observed_at),
+            );
+            connection.status = "connected".into();
+            connection.error = None;
+        }
         Ok(())
     })
     .map(|_| ())
@@ -1695,7 +2071,7 @@ pub fn cancel_job(
             .execute(
                 "UPDATE knowledge_jobs
                     SET status=CASE
-                          WHEN status IN ('queued','running') THEN 'cancelling'
+                          WHEN status='running' THEN 'cancelling'
                           ELSE 'cancelled'
                         END,
                         updated_at=?2
@@ -1795,7 +2171,11 @@ fn derive_job_resource_key(job: &semantic::KnowledgeJob) -> Result<String, Strin
                     stable_remote_document_id(
                         &connection_id,
                         &collection,
-                        &payload.document.source_uri,
+                        payload
+                            .document
+                            .source_id
+                            .as_deref()
+                            .unwrap_or(&payload.document.source_uri),
                     )
                 });
             Ok(remote_document_resource_key(
@@ -1820,6 +2200,15 @@ pub fn load_job(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runner_state_is_isolated_per_application_instance() {
+        let first = KnowledgeJobRunnerState::default();
+        let second = KnowledgeJobRunnerState::default();
+        first.active.store(true, Ordering::Release);
+        assert!(first.active.load(Ordering::Acquire));
+        assert!(!second.active.load(Ordering::Acquire));
+    }
 
     fn test_docs() -> (std::path::PathBuf, crate::docs::db::DocsDb) {
         let dir =
@@ -1877,13 +2266,49 @@ mod tests {
     }
 
     #[test]
-    fn stable_ids_change_with_backend_scope() {
+    fn stable_ids_are_collection_scoped_across_qdrant_connections() {
         let local = stable_local_document_id("a", "file:///guide.md");
         assert_eq!(local, stable_local_document_id("a", "file:///guide.md"));
         assert_ne!(local, stable_local_document_id("b", "file:///guide.md"));
         let remote = stable_remote_document_id("c", "docs", "file:///guide.md");
         assert_ne!(local, remote);
+        assert_eq!(
+            remote,
+            stable_remote_document_id("another-client", "docs", "file://localhost/guide.md#page=1")
+        );
+        assert_ne!(
+            remote,
+            stable_remote_document_id("c", "another-collection", "file:///guide.md")
+        );
         assert_eq!(uuid::Uuid::parse_str(&remote).unwrap().get_version_num(), 8);
+    }
+
+    #[test]
+    fn explicit_source_id_controls_shared_remote_identity() {
+        let mut first = remote_job_for("client-a", "docs", "temporary-id");
+        let mut second = remote_job_for("client-b", "docs", "temporary-id");
+        for job in [&mut first, &mut second] {
+            let mut payload: IngestJobPayload =
+                serde_json::from_value(job.payload.clone()).unwrap();
+            payload.document.document_id = None;
+            payload.document.source_id = Some("shared-source".into());
+            payload.document.source_uri = format!("file:///client/{}/guide.pdf", job.id);
+            job.payload = serde_json::to_value(payload).unwrap();
+        }
+        let first_payload: IngestJobPayload = serde_json::from_value(first.payload).unwrap();
+        let second_payload: IngestJobPayload = serde_json::from_value(second.payload).unwrap();
+        assert_eq!(
+            stable_remote_document_id(
+                "client-a",
+                "docs",
+                first_payload.document.source_id.as_deref().unwrap()
+            ),
+            stable_remote_document_id(
+                "client-b",
+                "docs",
+                second_payload.document.source_id.as_deref().unwrap()
+            )
+        );
     }
 
     #[test]
@@ -1927,6 +2352,70 @@ mod tests {
         assert!(json.contains("extracted"));
         assert!(!json.contains("binary"));
         assert!(!json.contains("api_key"));
+    }
+
+    #[test]
+    fn job_views_expose_safe_names_and_fifo_queue_positions() {
+        let mut later = remote_job("later");
+        later.id = "b".into();
+        later.created_at = 20;
+        let mut earlier = remote_job("earlier");
+        earlier.id = "a".into();
+        earlier.created_at = 10;
+        let views = job_views(vec![later, earlier]);
+        let first = views.iter().find(|view| view.id == "a").unwrap();
+        let second = views.iter().find(|view| view.id == "b").unwrap();
+        assert_eq!(first.queue_position, Some(1));
+        assert_eq!(second.queue_position, Some(2));
+        assert_eq!(first.display_name, "Guide");
+        assert_eq!(
+            first.waiting_reason.as_deref(),
+            Some("Waiting for the knowledge worker")
+        );
+        assert!(!serde_json::to_string(first).unwrap().contains("extracted"));
+    }
+
+    #[test]
+    fn cancelling_a_queued_job_is_terminal_immediately() {
+        let (dir, docs) = test_docs();
+        let job = remote_job("queued-cancel");
+        docs.with(|connection| semantic::put_job(connection, &job))
+            .unwrap();
+        assert_eq!(cancel_job(&docs, &job.id).unwrap().status, "cancelled");
+        assert!(prepare_retry(&docs, &job.id).is_ok());
+        docs.destroy().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn interrupted_headless_jobs_release_their_resource_keys_safely() {
+        let (dir, docs) = test_docs();
+        let mut running = remote_job("interrupted");
+        running.status = "running".into();
+        docs.with(|connection| semantic::put_job(connection, &running))
+            .unwrap();
+
+        assert_eq!(
+            fail_interrupted_headless_jobs(&docs).unwrap(),
+            vec![running.id.clone()]
+        );
+        let stored = docs
+            .with(|connection| load_job(connection, &running.id))
+            .unwrap();
+        assert_eq!(stored.status, "failed");
+        assert!(stored
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("standalone CLI stopped")));
+
+        // The partial job remains available for UI Retry, but its partial unique
+        // index no longer blocks the user's next CLI attempt for that document.
+        let replacement = remote_job("interrupted");
+        docs.with(|connection| semantic::put_job(connection, &replacement))
+            .unwrap();
+
+        docs.destroy().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -2041,17 +2530,47 @@ mod tests {
         assert_eq!(stored.status, "completed");
         assert_eq!(stored.error.as_deref(), Some("original terminal value"));
 
+        let mut succeeded = remote_job("document-5");
+        succeeded.status = "running".into();
+        docs.with(|connection| semantic::put_job(connection, &succeeded))
+            .unwrap();
+        finalize_job(&docs, &mut succeeded, true, None).unwrap();
+        let stored = docs
+            .with(|connection| load_job(connection, &succeeded.id))
+            .unwrap();
+        assert_eq!(stored.status, "completed");
+        assert_eq!(stored.display_name, "Guide");
+        assert_eq!(stored.payload, serde_json::json!({}));
+
+        let mut failed = remote_job("document-6");
+        failed.status = "running".into();
+        docs.with(|connection| semantic::put_job(connection, &failed))
+            .unwrap();
+        finalize_job(&docs, &mut failed, false, Some("temporary failure")).unwrap();
+        let stored = docs
+            .with(|connection| load_job(connection, &failed.id))
+            .unwrap();
+        assert_eq!(stored.status, "failed");
+        assert!(stored.payload.to_string().contains("extracted"));
+        assert_eq!(prepare_retry(&docs, &failed.id).unwrap().status, "queued");
+
         docs.destroy().unwrap();
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn a_saved_revision_cannot_replace_a_newer_active_revision() {
-        assert!(saved_revision_is_active(Some(4), 3)
+        assert!(saved_revision_is_current(Some(4), 3)
             .unwrap_err()
             .contains("superseded"));
-        assert!(saved_revision_is_active(Some(3), 3).unwrap());
-        assert!(!saved_revision_is_active(Some(2), 3).unwrap());
-        assert!(!saved_revision_is_active(None, 3).unwrap());
+        assert!(saved_revision_is_current(Some(3), 3).unwrap());
+        assert!(!saved_revision_is_current(Some(2), 3).unwrap());
+        assert!(!saved_revision_is_current(None, 3).unwrap());
+        assert_eq!(superseding_revision(Some(4), 3), Some(4));
+        assert_eq!(superseding_revision(Some(3), 3), None);
+        assert_eq!(superseding_revision(None, 3), None);
+        let allocated = allocate_remote_revision(Some(10)).unwrap();
+        assert!(allocated > 10);
+        assert!(allocated < (1_u64 << 53));
     }
 }

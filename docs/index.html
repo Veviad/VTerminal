@@ -878,23 +878,28 @@
               </span>
               <h3>Qdrant collections are buckets</h3>
               <p>
-                Add a Qdrant URL and granular database key. VTerminal lists only
-                collections that key may see, explains compatibility, and keeps
-                attachment read-only unless the credential allows document or
-                collection management.
+                Add a Qdrant database REST URL (normally port 6333) and granular
+                database key. VTerminal uses REST only, lists managed collections
+                that key may see, and keeps attachment read-only unless the
+                credential allows document or collection management.
               </p>
               <ul>
                 <li>Mix local and remote buckets in one request</li>
                 <li>The attachment picker shows only exact runnable profiles</li>
                 <li>Upload, replace, edit or delete individual documents</li>
-                <li>Import existing collections with an explicit profile attestation</li>
+                <li>Managed metadata is shared by every VTerminal client</li>
+                <li>Shared source identities and staged revisions coordinate concurrent clients</li>
                 <li>Source-qualified citations keep every result traceable</li>
               </ul>
               <p class="knowledge-caveat">
-                Managed buckets require Qdrant 1.16+. Qdrant stores extracted
-                chunks, metadata and vectors—not original binaries. Matching
-                dimensions are not proof of compatibility: existing collections
-                need the exact original embedding profile.
+                Managed buckets require Qdrant 1.16+. Their immutable
+                <code>metadata.vterminal</code> contract stores the exact profile,
+                vector and payload schema in Qdrant itself. Unmarked collections
+                stay hidden instead of asking every client to recreate a fragile
+                local field mapping. Existing v0.2.0 local bindings remain under
+                Advanced for this compatibility release as read-only search
+                sources. Qdrant stores extracted chunks, metadata and vectors—not
+                original binaries.
                 Profiles fingerprint the model, revision, dimensions and exact
                 query/document transforms; changing one creates a new profile
                 and requires re-embedding.
@@ -909,8 +914,10 @@
               <p>
                 Pick files or folders, preview estimated chunks and cloud
                 transfer, then follow persistent Extract → Chunk → Embed → Upload
-                progress. Jobs resume safely after interruption, and failed jobs
-                can be retried without duplicating documents.
+                progress, even while the document list is collapsed. Jobs are
+                queued immediately, run automatically, resume safely after
+                interruption, and failed jobs can be retried without selecting the
+                source again or duplicating documents.
               </p>
               <ul>
                 <li>Keyword-only local buckets remain usable</li>
@@ -944,8 +951,9 @@
                 <li>Qdrant 1.18+ TurboQuant bits4 as an opt-in sidecar</li>
               </ul>
               <p class="knowledge-caveat">
-                TurboQuant is advanced and off by default. It keeps the original
-                vectors, so it can be disabled; bits2, bits1.5 and bits1 are
+                TurboQuant is advanced and off by default. VTerminal confirms the
+                saved configuration from Qdrant before updating the UI. It keeps
+                the original vectors, so it can be disabled; bits2, bits1.5 and bits1 are
                 advanced choices that trade recall for lower memory use and a
                 different search-speed profile. The
                 CLI handles text, structured text, page JSON and text-layer PDFs;
@@ -965,7 +973,7 @@
           <div class="runbooks-heading">
             <div>
               <p class="eyebrow">
-                Available in 0.1.6 · Experimental · Disabled by Default
+                Experimental · Disabled by Default
               </p>
               <h2 class="section-heading" id="runbooks-title">
                 Repeat the Operation. Keep the Evidence.
@@ -1224,7 +1232,9 @@
               <h3 class="package-card__title">On-Device</h3>
               <p class="package-card__description">
                 GGUF weights running inside the app via llama.cpp with Metal
-                acceleration. Downloads are resumable and range-checked.
+                acceleration. Downloads are resumable and range-checked, with
+                live progress, speed, ETA, cancel and retry directly on each
+                chat or vision model card.
               </p>
               <ul>
                 <li>

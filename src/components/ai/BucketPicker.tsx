@@ -19,8 +19,8 @@ async function refreshPickerBuckets(): Promise<void> {
 }
 
 /** Source-aware knowledge picker. Only proven-compatible, non-empty buckets are
- * attachable here; every accessible but incompatible collection remains visible in
- * Settings where the user can inspect or import it deliberately. */
+ * attachable here. Settings shows managed buckets that need remediation, while
+ * unmarked collections remain hidden and legacy v0.2.0 bindings stay Advanced-only. */
 export function BucketPicker({ sessionId }: { sessionId: string }) {
   const docsEnabled = useAppStore((s) => s.docsEnabled);
   const buckets = useAppStore((s) => s.knowledgeBuckets);

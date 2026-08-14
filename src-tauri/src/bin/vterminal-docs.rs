@@ -68,9 +68,10 @@ async fn run(mut args: Vec<String>, json_output: bool) -> Result<(), String> {
         return Ok(());
     }
     let app_data = app_data_dir()?;
+    let mutating = is_mutating_command(&args);
     // Serialize only writes. Listing, testing connections, and searching stay
     // available while either the desktop or another CLI writer is active.
-    let _process_lock = is_mutating_command(&args)
+    let _process_lock = mutating
         .then(|| {
             vterminal_lib::knowledge::process_lock::KnowledgeProcessLock::try_acquire(&app_data)
         })
@@ -87,6 +88,12 @@ async fn run(mut args: Vec<String>, json_output: bool) -> Result<(), String> {
         settings,
         docs,
     };
+    if mutating {
+        // Owning the process lock proves any persisted running row was left by a
+        // terminated writer (most commonly Ctrl-C). Mark it retryable before the
+        // requested mutation tries to claim the same durable resource key.
+        vterminal_lib::knowledge::ingest::fail_interrupted_headless_jobs(&context.docs)?;
+    }
     match args[0].as_str() {
         "profile" => profile_command(&context, &args[1..]).await,
         "connection" => connection_command(&context, &args[1..]).await,
@@ -526,7 +533,8 @@ async fn search_command(context: &Context, args: &[String]) -> Result<(), String
                     .map_err(|error| error.to_string())?;
                 let metadata = info
                     .metadata
-                    .ok_or("collection is unmarked; import it in the UI first")?;
+                    .into_valid()
+                    .ok_or("collection is not a valid VTerminal-managed collection")?;
                 let vector = embed_query_cli(context, &metadata.embedding_profile, query).await?;
                 let hits = client
                     .query(

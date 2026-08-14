@@ -139,6 +139,9 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
     if version < 4 {
         migrate_v4(conn)?;
     }
+    if version < 5 {
+        migrate_v5(conn)?;
+    }
 
     Ok(())
 }
@@ -260,6 +263,32 @@ fn migrate_v4(conn: &Connection) -> Result<(), String> {
         "#,
     )
     .map_err(|e| format!("docs migrate v4: {e}"))
+}
+
+/// Retain a small, safe label outside the resumable payload. Successful jobs can
+/// then discard extracted document text while failed/cancelled jobs keep it for
+/// Retry without asking the user to select the source file again.
+fn migrate_v5(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        BEGIN;
+
+        ALTER TABLE knowledge_jobs ADD COLUMN display_name TEXT NOT NULL DEFAULT 'Knowledge job';
+        UPDATE knowledge_jobs
+           SET display_name=CASE
+             WHEN kind='document_ingest' AND json_valid(payload_json)
+             THEN COALESCE(NULLIF(substr(json_extract(payload_json, '$.document.title'), 1, 512), ''), 'Knowledge job')
+             WHEN kind='bucket_embed' AND json_valid(payload_json)
+             THEN 'Semantic search · ' || COALESCE(NULLIF(substr(json_extract(payload_json, '$.bucket_id'), 1, 480), ''), 'Local bucket')
+             ELSE 'Knowledge job'
+           END;
+        UPDATE knowledge_jobs SET payload_json='{}' WHERE status='completed';
+
+        INSERT INTO schema_version (version) VALUES (5);
+        COMMIT;
+        "#,
+    )
+    .map_err(|e| format!("docs migrate v5: {e}"))
 }
 
 fn migrate_v1(conn: &Connection) -> Result<(), String> {
@@ -411,7 +440,7 @@ mod tests {
 
     /// The head version, asserted so adding a migration forces this to be updated
     /// alongside it.
-    const HEAD: i64 = 4;
+    const HEAD: i64 = 5;
 
     fn mem() -> Connection {
         let conn = Connection::open_in_memory().expect("open in-memory db");
@@ -517,6 +546,38 @@ mod tests {
             )
             .unwrap();
         assert_eq!(completed, "completed");
+    }
+
+    #[test]
+    fn v5_retains_a_safe_name_and_compacts_completed_payloads() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys=ON;
+             CREATE TABLE schema_version (version INTEGER PRIMARY KEY);",
+        )
+        .unwrap();
+        migrate_v1(&conn).unwrap();
+        migrate_v2(&conn).unwrap();
+        migrate_v3(&conn).unwrap();
+        migrate_v4(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO knowledge_jobs
+               (id,kind,target_ref_json,payload_json,stage,status,created_at,updated_at)
+             VALUES ('done','document_ingest','{}',?1,'upload','completed',1,1)",
+            [r#"{"document":{"title":"Guide"},"pages":[{"text":"private text"}]}"#],
+        )
+        .unwrap();
+
+        migrate_v5(&conn).unwrap();
+        let (name, payload): (String, String) = conn
+            .query_row(
+                "SELECT display_name,payload_json FROM knowledge_jobs WHERE id='done'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(name, "Guide");
+        assert_eq!(payload, "{}");
     }
 
     /// The whole delete story. Chunks cascade from the file, and the FTS rows go

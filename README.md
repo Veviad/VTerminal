@@ -102,7 +102,9 @@ VTerminal includes an experimental signed update chain for macOS Apple Silicon r
 
 Chat, vision and embedding models have separate jobs. Chat models write answers and commands; the optional vision sidecar transcribes attached images; embedding models turn document chunks and queries into vectors for Knowledge retrieval.
 
-**On-device** (GGUF, downloaded from Hugging Face with resumable transfers)
+**On-device** (GGUF, downloaded from Hugging Face with resumable transfers). Chat and vision model
+cards keep their own live progress, speed, ETA, cancel, failure and retry controls directly beneath
+the model being downloaded.
 
 | Model | Notes |
 |---|---|
@@ -137,9 +139,9 @@ Settings → Knowledge manages local and remote document buckets, embedding prof
 
 The built-in artifacts are pinned, checksum-verified, loaded and tested by the app. Users never compile, convert, run Python or choose arbitrary files. OpenAI and Mistral are the only guided cloud embedding providers; Anthropic has no embedding model. Ollama and LM Studio are available only under Advanced after a real embedding probe.
 
-**Qdrant** — add a cluster URL and granular database key. The app lists only collections the key can see and explains whether each one is managed-compatible, attach-only, importable, upgrade-required or incompatible. Managed buckets require Qdrant 1.16+. Existing collections are never identified by dimensions alone: importing one requires an exact embedding profile and an attestation of the original model, revision and transforms.
+**Qdrant** — add the database REST endpoint (normally port 6333) and a granular database key. VTerminal uses REST only; it does not require or configure Qdrant's gRPC port. Normal Knowledge views show only managed VTerminal collections. Each app-created collection stores its complete, immutable `metadata.vterminal` contract—including profile fingerprint, vector name and payload schema—in Qdrant itself, so another VTerminal client discovers the same bucket without repeating a local mapping wizard. Document identities are derived from the collection and source identity rather than a client-local connection ID, while monotonic staged revisions keep concurrent clients from overwriting newer content. Unmarked collections stay hidden; a v0.2.0 local import binding remains available for one compatibility release as an Advanced, read-only legacy entry.
 
-Qdrant receives extracted manifests, chunks, metadata and vectors, not original binaries. Read-only credentials can attach and search; wider permissions unlock document upload, replace and deletion or collection management. TurboQuant is an advanced, opt-in sidecar for Qdrant 1.18+; bits4 is recommended, original vectors remain, and it can be disabled.
+Qdrant receives extracted manifests, chunks, metadata and vectors, not original binaries. Read-only credentials can attach and search; wider permissions unlock document upload, replace and deletion or collection management. Upload jobs persist immediately, run automatically in the background and stay visible through Extract → Chunk → Embed → Upload, including retryable failures. TurboQuant is an advanced, opt-in sidecar for Qdrant 1.18+; bits4 is recommended, original vectors remain, and confirmed state is read back from Qdrant before the UI reports success.
 
 The signed standalone `vterminal-docs` CLI installs from the UI into `~/.local/bin` without editing shell profiles. It shares the app's saved profiles, connections, model cache, chunking and job records. It can list profiles; list/test connections; list/create/delete buckets; list/ingest/replace/delete documents; and search, with JSON output and stdin support. Text, structured text, page JSON and text-layer PDFs work headlessly; OCR-required inputs direct you to the UI.
 

@@ -52,13 +52,41 @@ export function compatibilityLabel(status: KnowledgeCompatibility): string {
       return "Compatible";
     case "attach_only":
       return "Read only";
-    case "needs_import":
-      return "Import required";
+    case "requires_profile":
+      return "Model required";
+    case "unmanaged":
+      return "Not a VTerminal collection";
+    case "legacy_import":
+      return "Legacy read only";
     case "upgrade_required":
       return "Upgrade required";
     case "incompatible":
       return "Incompatible";
     case "unreadable":
       return "No access";
+    default:
+      // A cached descriptor from an older app must fail closed rather than
+      // reviving a removed workflow such as the v0.2.0 import wizard.
+      return "Unavailable";
+  }
+}
+
+/** True only for shared-contract Qdrant collections that belong in the normal
+ * Knowledge UI. Legacy local bindings have their own Advanced compatibility
+ * surface; unknown statuses from an older cache stay hidden. */
+export function isManagedQdrantBucket(bucket: KnowledgeBucketDescriptor): boolean {
+  if (bucket.ref.source !== "qdrant" || bucket.imported) return false;
+  switch (bucket.compatibility) {
+    case "managed_compatible":
+    case "attach_only":
+    case "requires_profile":
+    case "upgrade_required":
+    case "incompatible":
+    case "unreadable":
+      return true;
+    case "unmanaged":
+    case "legacy_import":
+    default:
+      return false;
   }
 }

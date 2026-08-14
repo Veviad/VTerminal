@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   FileText,
@@ -14,17 +14,24 @@ import {
 
 import { useAppStore } from "../../stores/appStore";
 import { useSettings } from "../../hooks/useSettings";
+import { useKnowledgeJobs } from "../../hooks/useKnowledgeJobs";
 import { S } from "../../lib/strings";
 import * as api from "../../lib/tauri";
 import { indexBucket, refreshBuckets, refreshKnowledgeBuckets } from "../../lib/docsIndex";
 import { formatAttachmentBytes } from "../../lib/attachments";
-import { compatibilityLabel, knowledgeBucketKey } from "../../lib/knowledge";
+import {
+  compatibilityLabel,
+  isManagedQdrantBucket,
+  knowledgeBucketKey,
+} from "../../lib/knowledge";
 import { Toggle, inputClass } from "../ui/Row";
 import type {
   DocBucket,
   DocFile,
   DocSearchPreview,
   KnowledgeBucketDescriptor,
+  DownloadEvent,
+  EmbeddingInstallEvent,
   EmbeddingProfile,
   KnowledgeJob,
 } from "../../lib/types";
@@ -35,6 +42,7 @@ import { TurboQuantPanel } from "./TurboQuantPanel";
 import { QdrantImportWizard } from "./QdrantImportWizard";
 import { AddKnowledgeWizard } from "./AddKnowledgeWizard";
 import { CredentialStoreBanner } from "./ModelsSettings";
+import { InlineModelDownloadProgress } from "./InlineModelDownloadProgress";
 
 /** The Docs tab.
  *
@@ -56,6 +64,8 @@ export function DocsSettings() {
   const [newLabel, setNewLabel] = useState("");
   const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null);
   const [focusBucketId, setFocusBucketId] = useState<string | null>(null);
+  const { jobs: knowledgeJobs, refresh: refreshKnowledgeJobs } = useKnowledgeJobs(docsEnabled);
+  const lastTerminalJob = useRef<number | null>(null);
 
   const readyProfiles = useMemo(() => {
     const byId = new Map<string, EmbeddingProfile>();
@@ -64,6 +74,15 @@ export function DocsSettings() {
     }
     return [...byId.values()];
   }, [knowledgeBuckets]);
+  const legacyImports = useMemo(
+    () =>
+      knowledgeBuckets.filter(
+        (bucket) =>
+          bucket.ref.source === "qdrant" &&
+          (bucket.compatibility === "legacy_import" || bucket.imported),
+      ),
+    [knowledgeBuckets],
+  );
 
   const refreshKnowledge = useCallback(async () => {
     await refreshBuckets();
@@ -82,6 +101,20 @@ export function DocsSettings() {
       setSelectedProfileId(readyProfiles[0].id);
     }
   }, [readyProfiles, selectedProfileId]);
+
+  useEffect(() => {
+    const latest = knowledgeJobs
+      .filter((job) => job.status === "completed" || job.status === "failed")
+      .reduce((value, job) => Math.max(value, job.updated_at), 0);
+    if (lastTerminalJob.current === null) {
+      lastTerminalJob.current = latest;
+      return;
+    }
+    if (latest > lastTerminalJob.current) {
+      lastTerminalJob.current = latest;
+      void refreshKnowledge();
+    }
+  }, [knowledgeJobs, refreshKnowledge]);
 
   const create = async () => {
     const label = newLabel.trim();
@@ -132,6 +165,7 @@ export function DocsSettings() {
 
           <AddKnowledgeWizard
             buckets={knowledgeBuckets}
+            jobs={knowledgeJobs}
             onCreateBucket={() =>
               document.getElementById("knowledge-buckets-title")?.scrollIntoView({ behavior: "smooth" })
             }
@@ -221,15 +255,41 @@ export function DocsSettings() {
                 />
               ))}
               {knowledgeBuckets
-                .filter((bucket) => bucket.ref.source === "qdrant")
+                .filter(isManagedQdrantBucket)
                 .map((bucket) => (
                   <RemoteBucketCard
                     key={knowledgeBucketKey(bucket.ref)}
                     bucket={bucket}
+                    jobs={knowledgeJobs}
+                    onRefreshJobs={refreshKnowledgeJobs}
                     onChanged={refreshKnowledge}
                   />
                 ))}
             </div>
+          )}
+
+          {legacyImports.length > 0 && (
+            <details className="rounded-md border border-warning/30 bg-warning/5 p-3">
+              <summary className="cursor-pointer text-[10px] font-medium text-warning">
+                Advanced · Legacy v0.2.0 imports ({legacyImports.length})
+              </summary>
+              <p className="mt-2 text-[9px] leading-relaxed text-text-muted">
+                These local, attested mappings remain search-only for one compatibility release.
+                They are not shared with another client. Create a managed VTerminal collection to
+                store the immutable profile and payload contract in Qdrant metadata.
+              </p>
+              <div className="mt-3 space-y-3">
+                {legacyImports.map((bucket) => (
+                  <RemoteBucketCard
+                    key={knowledgeBucketKey(bucket.ref)}
+                    bucket={bucket}
+                    jobs={knowledgeJobs}
+                    onRefreshJobs={refreshKnowledgeJobs}
+                    onChanged={refreshKnowledge}
+                  />
+                ))}
+              </div>
+            </details>
           )}
 
           <KnowledgeCliInstall />
@@ -538,19 +598,102 @@ function BucketCard({
   );
 }
 
-function RemoteBucketCard({
+export function RemoteBucketCard({
   bucket,
+  jobs,
+  onRefreshJobs,
   onChanged,
 }: {
   bucket: KnowledgeBucketDescriptor;
+  jobs: KnowledgeJob[];
+  onRefreshJobs: () => Promise<void>;
   onChanged: () => Promise<void>;
 }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<DocSearchPreview[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [profileBusy, setProfileBusy] = useState(false);
+  const [requiredInstall, setRequiredInstall] = useState<{
+    phase: "downloading" | "verifying" | "loading";
+    downloaded: number;
+    total: number | null;
+    bps: number;
+  } | null>(null);
+  const [requiredLicenseAccepted, setRequiredLicenseAccepted] = useState(false);
+  const hasOpenAiKey = useAppStore((state) => state.hasApiKey.openai ?? false);
+  const hasMistralKey = useAppStore((state) => state.hasApiKey.mistral ?? false);
   if (bucket.ref.source !== "qdrant") return null;
   const remoteRef = bucket.ref;
+
+  const startRequiredLocalModel = () => {
+    const modelId = bucket.required_builtin_model_id;
+    if (!modelId) return;
+    setProfileBusy(true);
+    setError(null);
+    setRequiredInstall({ phase: "downloading", downloaded: 0, total: null, bps: 0 });
+    void api
+      .knowledgeEmbeddingModelInstall(
+        modelId,
+        (event: EmbeddingInstallEvent | DownloadEvent) => {
+          if (event.type === "Started") {
+            setRequiredInstall({
+              phase: "downloading",
+              downloaded: event.resumed_from,
+              total: event.total_bytes,
+              bps: 0,
+            });
+          } else if (event.type === "Progress") {
+            setRequiredInstall({
+              phase: "downloading",
+              downloaded: event.downloaded,
+              total: event.total_bytes,
+              bps: event.bytes_per_sec,
+            });
+          } else if (event.type === "Phase") {
+            setRequiredInstall((current) =>
+              current ? { ...current, phase: event.phase } : current,
+            );
+          } else if (event.type === "Ready") {
+            setRequiredInstall(null);
+            void onChanged();
+          } else if (event.type === "Cancelled") {
+            setRequiredInstall(null);
+          } else if (event.type === "Error") {
+            setRequiredInstall(null);
+            setError(event.message);
+          }
+        },
+        modelId === "local/embeddinggemma-300m" && requiredLicenseAccepted,
+      )
+      .catch((reason) => {
+        setRequiredInstall(null);
+        setError(String(reason));
+      })
+      .finally(() => setProfileBusy(false));
+  };
+
+  const enableRequiredCloudProfile = () => {
+    const provider = bucket.required_provider;
+    const profile = bucket.profile;
+    if ((provider !== "openai" && provider !== "mistral") || !profile) return;
+    const providerLabel = provider === "openai" ? "OpenAI" : "Mistral";
+    // eslint-disable-next-line no-alert
+    if (
+      !window.confirm(
+        `Enable this exact ${providerLabel} embedding profile? Document passages and future search queries sent for this bucket will leave the device.`,
+      )
+    ) {
+      return;
+    }
+    setProfileBusy(true);
+    setError(null);
+    void api
+      .knowledgeEmbeddingProfileCreateCloud(provider, profile.model, profile.dimensions)
+      .then(onChanged)
+      .catch((reason) => setError(String(reason)))
+      .finally(() => setProfileBusy(false));
+  };
 
   const search = async () => {
     if (!query.trim()) return;
@@ -641,7 +784,88 @@ function RemoteBucketCard({
       {bucket.error && <p className="text-[10px] text-error">{bucket.error}</p>}
       {error && <p className="text-[10px] text-error">{error}</p>}
 
-      <RemoteDocumentsPanel bucket={bucket} onChanged={onChanged} />
+      {bucket.compatibility === "requires_profile" && (
+        <div className="rounded border border-warning/30 bg-warning/10 p-2 text-[9px] leading-relaxed text-warning">
+          {bucket.required_builtin_model_id ? (
+            <>
+              <p>
+                This collection is self-describing, but its exact local embedding model is not
+                installed on this client.
+              </p>
+              {bucket.required_builtin_model_id === "local/embeddinggemma-300m" && (
+                <label className="mt-1.5 flex items-start gap-1.5">
+                  <input
+                    type="checkbox"
+                    checked={requiredLicenseAccepted}
+                    onChange={(event) => setRequiredLicenseAccepted(event.target.checked)}
+                  />
+                  I accept EmbeddingGemma&apos;s upstream model license.
+                </label>
+              )}
+              <button
+                type="button"
+                disabled={
+                  profileBusy ||
+                  (bucket.required_builtin_model_id === "local/embeddinggemma-300m" &&
+                    !requiredLicenseAccepted)
+                }
+                onClick={startRequiredLocalModel}
+                className="mt-1.5 flex items-center gap-1 rounded border border-warning/30 px-2 py-1 hover:bg-warning/10 disabled:opacity-50"
+              >
+                {profileBusy && <Loader2 size={9} className="animate-spin" />}
+                Download &amp; use required model
+              </button>
+              {requiredInstall && (
+                <InlineModelDownloadProgress
+                  label={bucket.profile?.label ?? "Required embedding model"}
+                  phase={requiredInstall.phase}
+                  downloaded={requiredInstall.downloaded}
+                  total={requiredInstall.total}
+                  bytesPerSecond={requiredInstall.bps}
+                  onCancel={() =>
+                    void api.knowledgeEmbeddingModelCancel(bucket.required_builtin_model_id!)
+                  }
+                />
+              )}
+            </>
+          ) : bucket.required_provider === "openai" || bucket.required_provider === "mistral" ? (
+            <>
+              <p>
+                This collection requires its exact{" "}
+                {bucket.required_provider === "openai" ? "OpenAI" : "Mistral"} embedding profile.
+              </p>
+              {(bucket.required_provider === "openai" ? hasOpenAiKey : hasMistralKey) ? (
+                <button
+                  type="button"
+                  disabled={profileBusy}
+                  onClick={enableRequiredCloudProfile}
+                  className="mt-1.5 flex items-center gap-1 rounded border border-warning/30 px-2 py-1 hover:bg-warning/10 disabled:opacity-50"
+                >
+                  {profileBusy && <Loader2 size={9} className="animate-spin" />}
+                  Enable exact cloud profile
+                </button>
+              ) : (
+                <p className="mt-1">
+                  Add the matching credential under Settings → Models, then return here to enable
+                  it with one click.
+                </p>
+              )}
+            </>
+          ) : (
+            <p>
+              This collection needs its exact {bucket.profile?.label ?? "advanced embedding"}
+              profile. Configure and verify that model under Advanced before attaching it.
+            </p>
+          )}
+        </div>
+      )}
+
+      <RemoteDocumentsPanel
+        bucket={bucket}
+        jobs={jobs}
+        onRefreshJobs={onRefreshJobs}
+        onChanged={onChanged}
+      />
 
       <QdrantImportWizard bucket={bucket} onChanged={onChanged} />
 

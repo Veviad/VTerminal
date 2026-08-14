@@ -670,7 +670,7 @@ async fn discover_remote_bucket(
         .collection_info(&collection)
         .await
         .map_err(|error| (bucket.clone(), error.to_string()))?;
-    let imported = if info.metadata.is_none() && docs.exists() {
+    let imported = if info.metadata.is_absent() && docs.exists() {
         docs.with(|connection| {
             crate::docs::semantic::get_qdrant_binding(connection, &connection_id, &collection)
         })
@@ -743,10 +743,10 @@ async fn discover_remote_bucket(
     }
 
     let payload_index_drift = super::contract::required_payload_index_drift(&info);
-    let metadata = info.metadata.ok_or_else(|| {
+    let metadata = info.metadata.into_valid().ok_or_else(|| {
         (
             bucket.clone(),
-            "this unmarked collection must be bound through Import existing collection before it can be searched"
+            "this collection has no valid shared VTerminal contract and is hidden from Knowledge"
                 .into(),
         )
     })?;

@@ -19,15 +19,18 @@ use crate::knowledge::contract::{classify_collection, CompatibilityContext};
 use crate::knowledge::embedding::{
     self, EmbeddingInput, EmbeddingProfile, EmbeddingProviderDialect, EmbeddingPurpose,
 };
-use crate::knowledge::qdrant::{QdrantClient, QdrantEndpoint};
+use crate::knowledge::qdrant::{QdrantClient, QdrantEndpoint, QdrantError};
 use crate::knowledge::store::{self, QdrantConnectionInput, QdrantConnectionRecord};
 use crate::knowledge::types::{
     CollectionAccess, CollectionCompatibility, DocumentMetadataUpdate, DocumentPage,
-    ImportedCollectionBinding, KnowledgeBucketRef, PayloadSample, PointId, QdrantCollectionInfo,
-    QuantizationStatus, TurboQuantConfig, VectorDescriptor,
+    KnowledgeBucketRef, PointId, QdrantCollectionInfo, QuantizationStatus, TurboQuantConfig,
 };
 
 const DISCOVERY_CONCURRENCY: usize = 6;
+
+fn discovery_result_is_stale(last_checked_at: Option<i64>, started_at: i64) -> bool {
+    last_checked_at.is_some_and(|last_checked| last_checked >= started_at)
+}
 
 pub(crate) fn gate(app: &tauri::AppHandle<Wry>) -> Result<(), String> {
     if crate::commands::settings::read_bool(app, "docs_enabled", false) {
@@ -112,46 +115,6 @@ fn profile_view(id: impl Into<String>, profile: &EmbeddingProfile) -> EmbeddingP
 struct AvailableProfile {
     id: String,
     profile: EmbeddingProfile,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct QdrantImportBindingView {
-    pub profile_id: String,
-    pub vector_name: String,
-    pub text_field: String,
-    pub document_id_field: String,
-    pub title_field: Option<String>,
-    pub source_uri_field: Option<String>,
-    pub page_field: Option<String>,
-    pub heading_field: Option<String>,
-    pub model_attested: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct QdrantImportInspection {
-    pub vectors: Vec<VectorDescriptor>,
-    pub samples: Vec<PayloadSample>,
-    pub profiles: Vec<EmbeddingProfileView>,
-    pub binding: Option<QdrantImportBindingView>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct QdrantImportInput {
-    pub profile_id: String,
-    /// Empty selects Qdrant's unnamed/default dense vector.
-    #[serde(default)]
-    pub vector_name: String,
-    pub text_field: String,
-    pub document_id_field: String,
-    #[serde(default)]
-    pub title_field: Option<String>,
-    #[serde(default)]
-    pub source_uri_field: Option<String>,
-    #[serde(default)]
-    pub page_field: Option<String>,
-    #[serde(default)]
-    pub heading_field: Option<String>,
-    pub model_attested: bool,
 }
 
 fn stored_profiles(docs: &crate::docs::db::DocsDb) -> Result<Vec<AvailableProfile>, String> {
@@ -281,13 +244,25 @@ pub struct KnowledgeBucketView {
     /// conflating ordinary read-only managed collections with imported ones.
     #[serde(default)]
     pub imported: bool,
+    /// Remediation hints for valid managed collections whose immutable profile
+    /// is not currently runnable on this client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_builtin_model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_version: Option<String>,
+    #[serde(default)]
+    pub turbo_quant_supported: bool,
 }
 
 fn compatibility_name(value: CollectionCompatibility) -> &'static str {
     match value {
         CollectionCompatibility::ManagedCompatible => "managed_compatible",
         CollectionCompatibility::AttachOnly => "attach_only",
-        CollectionCompatibility::NeedsGuidedImport => "needs_import",
+        CollectionCompatibility::RequiresProfile => "requires_profile",
+        CollectionCompatibility::Unmanaged => "unmanaged",
+        CollectionCompatibility::LegacyImport => "legacy_import",
         CollectionCompatibility::UpgradeRequired => "upgrade_required",
         CollectionCompatibility::Incompatible => "incompatible",
         CollectionCompatibility::Unreadable => "unreadable",
@@ -306,22 +281,86 @@ fn unknown_write_capability() -> String {
     "unknown".into()
 }
 
+/// Cache only what an explicit collection-management operation proved. A 403
+/// rules out manage access but says nothing about point writes, so downgrade to
+/// `unknown` rather than incorrectly labelling the key read-only.
+fn remember_manage_denied(
+    app: &tauri::AppHandle<Wry>,
+    connection_id: &str,
+    collection: &str,
+) -> Result<(), String> {
+    let connections = store::read_connections(app);
+    let snapshot = store::find_connection(&connections, connection_id)?.clone();
+    store::update_connection_if_current(app, &snapshot, |connection| {
+        let mut found = false;
+        for value in &mut connection.collections {
+            let Ok(mut bucket) = serde_json::from_value::<KnowledgeBucketView>(value.clone())
+            else {
+                continue;
+            };
+            if matches!(
+                &bucket.bucket_ref,
+                KnowledgeBucketRef::Qdrant { collection: name, .. } if name == collection
+            ) {
+                found = true;
+                bucket.access = Some(CollectionAccess::Unknown);
+                bucket.manageable = false;
+                bucket.writable = false;
+                bucket.write_capability = "unknown".into();
+                *value = serde_json::to_value(bucket).map_err(|error| error.to_string())?;
+            }
+        }
+        if found {
+            connection.last_checked_at = Some(
+                connection
+                    .last_checked_at
+                    .unwrap_or(i64::MIN)
+                    .max(semantic::now_ms()),
+            );
+            connection.status = "connected".into();
+            connection.error = None;
+        }
+        Ok(())
+    })
+    .map(|_| ())
+}
+
 fn remote_bucket_view(
     raw: crate::knowledge::types::KnowledgeBucketDescriptor,
     connection_label: &str,
     profiles: &[AvailableProfile],
     stale: bool,
     error: Option<String>,
+    server_version: Option<&Version>,
 ) -> KnowledgeBucketView {
-    let imported = raw.compatibility_reason.starts_with("Imported collection;");
+    let imported = raw.compatibility == CollectionCompatibility::LegacyImport;
     let profile = raw.embedding_profile.as_ref().map(|profile| {
-        let id = profiles
+        let ready = profiles
             .iter()
-            .find(|stored| stored.profile.fingerprint() == profile.fingerprint())
+            .find(|stored| stored.profile.fingerprint() == profile.fingerprint());
+        let id = ready
             .map(|stored| stored.id.clone())
             .unwrap_or_else(|| profile.fingerprint().into());
-        profile_view(id, profile)
+        let mut view = profile_view(id, profile);
+        view.available = ready.is_some();
+        view
     });
+    let required_builtin_model_id = (raw.compatibility == CollectionCompatibility::RequiresProfile)
+        .then(|| {
+            raw.embedding_profile
+                .as_ref()
+                .and_then(required_builtin_profile_id)
+        })
+        .flatten();
+    let required_provider = (raw.compatibility == CollectionCompatibility::RequiresProfile)
+        .then(|| {
+            raw.embedding_profile
+                .as_ref()
+                .map(|profile| provider_name(profile.semantic().provider).to_string())
+        })
+        .flatten();
+    let turbo_min = Version::parse(crate::knowledge::types::QDRANT_TURBO_QUANT_MIN_VERSION)
+        .expect("TurboQuant minimum is valid semver");
     KnowledgeBucketView {
         bucket_ref: raw.bucket,
         label: raw.name,
@@ -333,16 +372,43 @@ fn remote_bucket_view(
         writable: raw.access.can_write_points(),
         write_capability: write_capability(raw.access).into(),
         manageable: raw.access.can_manage(),
-        file_count: 0,
-        chunk_count: raw.indexed_vectors_count,
-        pending_count: raw.points_count.saturating_sub(raw.indexed_vectors_count),
+        file_count: raw.active_document_count,
+        chunk_count: raw.active_chunk_count,
+        pending_count: raw.pending_count,
         stale,
         error,
         access: Some(raw.access),
         vector_name: raw.vector_name,
         quantization: Some(raw.quantization),
         imported,
+        required_builtin_model_id,
+        required_provider,
+        server_version: server_version.map(ToString::to_string),
+        turbo_quant_supported: server_version.is_some_and(|version| version >= &turbo_min),
     }
+}
+
+fn required_builtin_profile_id(profile: &EmbeddingProfile) -> Option<String> {
+    let semantic = profile.semantic();
+    if semantic.provider != EmbeddingProviderDialect::LocalLlamaCpp {
+        return None;
+    }
+    embedding::BUILTIN_EMBEDDING_MODELS
+        .iter()
+        .find(|model| {
+            if model.upstream_model_id != semantic.model_id {
+                return false;
+            }
+            let (Some(revision), Some(digest)) = (
+                semantic.revision.as_deref(),
+                semantic.artifact_sha256.as_deref(),
+            ) else {
+                return false;
+            };
+            embedding::builtin_profile(model.id, semantic.dimensions, revision, digest)
+                .is_ok_and(|expected| expected == *profile)
+        })
+        .map(|model| model.id.to_string())
 }
 
 fn unreadable_bucket(
@@ -373,6 +439,10 @@ fn unreadable_bucket(
         vector_name: None,
         quantization: None,
         imported: false,
+        required_builtin_model_id: None,
+        required_provider: None,
+        server_version: connection.server_version.clone(),
+        turbo_quant_supported: false,
     }
 }
 
@@ -403,12 +473,18 @@ pub struct QdrantConnectionView {
     pub last_checked_at: Option<i64>,
     pub error: Option<String>,
     pub collections: Vec<KnowledgeBucketView>,
+    pub hidden_unmanaged_count: usize,
 }
 
 fn connection_view(
     app: &tauri::AppHandle<Wry>,
     connection: &QdrantConnectionRecord,
 ) -> Result<QdrantConnectionView, String> {
+    let cached = cached_bucket_views(connection);
+    let hidden_unmanaged_count = cached
+        .iter()
+        .filter(|bucket| bucket.compatibility == "unmanaged")
+        .count();
     Ok(QdrantConnectionView {
         id: connection.id.clone(),
         label: connection.label.clone(),
@@ -419,7 +495,11 @@ fn connection_view(
         server_version: connection.server_version.clone(),
         last_checked_at: connection.last_checked_at,
         error: connection.error.clone(),
-        collections: cached_bucket_views(connection),
+        collections: cached
+            .into_iter()
+            .filter(|bucket| bucket.compatibility != "unmanaged")
+            .collect(),
+        hidden_unmanaged_count,
     })
 }
 
@@ -489,106 +569,6 @@ fn imported_bindings(
                 .map(|stored| (stored.binding.collection.clone(), stored))
                 .collect()
         })
-}
-
-fn import_field(
-    value: Option<String>,
-    label: &str,
-    required: bool,
-) -> Result<Option<String>, String> {
-    let value = value.map(|field| field.trim().to_string());
-    let value = value.filter(|field| !field.is_empty());
-    if required && value.is_none() {
-        return Err(format!("choose a {label} payload field"));
-    }
-    if let Some(field) = &value {
-        if field.len() > 256
-            || field.chars().any(char::is_control)
-            || field.split('.').any(str::is_empty)
-        {
-            return Err(format!("{label} payload field is invalid"));
-        }
-    }
-    Ok(value)
-}
-
-/// Resolve an exact top-level key first (Qdrant payload keys may contain dots),
-/// then fall back to dot-separated nested object traversal for common metadata
-/// shapes such as `metadata.document_id`.
-fn payload_field<'a>(payload: &'a Value, field: &str) -> Option<&'a Value> {
-    payload
-        .as_object()
-        .and_then(|object| object.get(field))
-        .or_else(|| {
-            let mut value = payload;
-            for segment in field.split('.') {
-                value = value.as_object()?.get(segment)?;
-            }
-            Some(value)
-        })
-}
-
-fn sampled_field_is(
-    samples: &[PayloadSample],
-    field: &str,
-    predicate: impl Fn(&Value) -> bool,
-) -> bool {
-    samples
-        .iter()
-        .filter_map(|sample| payload_field(&sample.payload, field))
-        .any(predicate)
-}
-
-fn validate_import_samples(
-    samples: &[PayloadSample],
-    binding: &ImportedCollectionBinding,
-) -> Result<(), String> {
-    if samples.is_empty() {
-        return Err("the collection has no payload-bearing points to validate; add data before importing it".into());
-    }
-    if !sampled_field_is(samples, &binding.text_field, |value| {
-        value.as_str().is_some_and(|text| !text.trim().is_empty())
-    }) {
-        return Err(format!(
-            "sampled payloads do not contain non-empty text at {:?}",
-            binding.text_field
-        ));
-    }
-    if !sampled_field_is(samples, &binding.document_id_field, |value| {
-        value.as_str().is_some_and(|id| !id.trim().is_empty()) || value.as_u64().is_some()
-    }) {
-        return Err(format!(
-            "sampled payloads do not contain a string or integer document id at {:?}",
-            binding.document_id_field
-        ));
-    }
-    for (label, field) in [
-        ("title", binding.title_field.as_deref()),
-        ("source URI", binding.source_uri_field.as_deref()),
-        ("heading", binding.heading_field.as_deref()),
-    ] {
-        if let Some(field) = field {
-            if !sampled_field_is(samples, field, Value::is_string) {
-                return Err(format!(
-                    "sampled payloads do not contain a string {label} at {field:?}"
-                ));
-            }
-        }
-    }
-    if let Some(field) = binding.page_field.as_deref() {
-        if !sampled_field_is(samples, field, |value| {
-            value.as_u64().is_some()
-                || value
-                    .as_str()
-                    .and_then(|page| page.parse::<u32>().ok())
-                    .is_some()
-        }) {
-            return Err(format!(
-                "sampled payloads do not contain a non-negative page number at {field:?}"
-            ));
-        }
-    }
-    Ok(())
 }
 
 #[tauri::command]
@@ -764,7 +744,15 @@ pub async fn knowledge_connections_refresh(
         let inspected = stream::iter(names.into_iter().map(|name| {
             let client = &client;
             async move {
-                let result = client.collection_info(&name).await;
+                let result: Result<QdrantCollectionInfo, crate::knowledge::qdrant::QdrantError> =
+                    async {
+                        let mut collection = client.collection_info(&name).await?;
+                        client
+                            .populate_contract_counts(&name, &mut collection)
+                            .await?;
+                        Ok(collection)
+                    }
+                    .await;
                 (name, result)
             }
         }))
@@ -796,6 +784,7 @@ pub async fn knowledge_connections_refresh(
                         &profiles,
                         false,
                         None,
+                        Some(&version),
                     ));
                 }
                 Err(error) => buckets.push(unreadable_bucket(&snapshot, name, error.to_string())),
@@ -814,11 +803,17 @@ pub async fn knowledge_connections_refresh(
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|error| error.to_string())?;
             store::update_connection_if_current(&app, &snapshot, move |current| {
+                if discovery_result_is_stale(current.last_checked_at, checked_at) {
+                    return Ok(());
+                }
                 store::set_discovery(current, version, values, checked_at);
                 Ok(())
             })?
         }
         Err(error) => store::update_connection_if_current(&app, &snapshot, move |current| {
+            if discovery_result_is_stale(current.last_checked_at, checked_at) {
+                return Ok(());
+            }
             store::set_discovery_error(current, error, checked_at);
             Ok(())
         })?,
@@ -865,6 +860,10 @@ pub fn knowledge_buckets_list(
                     vector_name: bucket.embedding_profile_id.map(|_| "embedding".into()),
                     quantization: None,
                     imported: false,
+                    required_builtin_model_id: None,
+                    required_provider: None,
+                    server_version: None,
+                    turbo_quant_supported: false,
                 }
             })
             .collect()
@@ -872,7 +871,11 @@ pub fn knowledge_buckets_list(
         Vec::new()
     };
     for connection in store::read_connections(&app) {
-        buckets.extend(cached_bucket_views(&connection));
+        buckets.extend(
+            cached_bucket_views(&connection)
+                .into_iter()
+                .filter(|bucket| bucket.compatibility != "unmanaged"),
+        );
     }
     Ok(buckets)
 }
@@ -980,8 +983,12 @@ pub async fn knowledge_buckets_create(
         .create_collection(&version, &name, &selected.profile)
         .await
         .map_err(|error| error.to_string())?;
-    let info = client
+    let mut info = client
         .collection_info(&name)
+        .await
+        .map_err(|error| error.to_string())?;
+    client
+        .populate_contract_counts(&name, &mut info)
         .await
         .map_err(|error| error.to_string())?;
     let raw = classify_collection(
@@ -1000,6 +1007,7 @@ pub async fn knowledge_buckets_create(
         std::slice::from_ref(&selected),
         false,
         None,
+        Some(&version),
     );
     let return_view = view.clone();
     store::update_connection_if_current(&app, &snapshot, move |current| {
@@ -1039,10 +1047,18 @@ pub async fn knowledge_buckets_delete(
             }
             let (client, _, _) =
                 resolve_managed_collection(&app, &docs, &connection_id, &collection).await?;
-            client
-                .delete_collection(&collection)
-                .await
-                .map_err(|error| error.to_string())?;
+            match client.delete_collection(&collection).await {
+                Ok(()) => {}
+                Err(error @ QdrantError::Permission { .. }) => {
+                    if let Err(cache_error) =
+                        remember_manage_denied(&app, &connection_id, &collection)
+                    {
+                        log::warn!("remember Qdrant manage denial failed: {cache_error}");
+                    }
+                    return Err(error.to_string());
+                }
+                Err(error) => return Err(error.to_string()),
+            }
             if docs.exists() {
                 docs.with(|database| {
                     crate::knowledge::ingest::forget_deleted_remote_collection(
@@ -1287,219 +1303,6 @@ pub async fn knowledge_embedding_profile_create_cloud(
     Ok(id)
 }
 
-/// Read-only guided-import inspection. It intentionally fetches only collection
-/// configuration and a bounded payload sample; no write probe, metadata stamp, or
-/// payload index creation is performed.
-#[tauri::command(rename_all = "snake_case")]
-pub async fn knowledge_qdrant_import_inspect(
-    app: tauri::AppHandle<Wry>,
-    docs: State<'_, crate::docs::db::DocsDb>,
-    bucket: KnowledgeBucketRef,
-    limit: Option<usize>,
-) -> Result<QdrantImportInspection, String> {
-    gate(&app)?;
-    let KnowledgeBucketRef::Qdrant {
-        connection_id,
-        collection,
-    } = bucket
-    else {
-        return Err("guided import applies only to an existing Qdrant collection".into());
-    };
-    let connections = store::read_connections(&app);
-    let connection = store::find_connection(&connections, &connection_id)?;
-    let client = qdrant_client(&app, connection)?;
-    let (info, samples) = tokio::try_join!(
-        async {
-            client
-                .collection_info(&collection)
-                .await
-                .map_err(|error| error.to_string())
-        },
-        async {
-            client
-                .sample_payloads(&collection, limit.unwrap_or(8).clamp(1, 20))
-                .await
-                .map_err(|error| error.to_string())
-        }
-    )?;
-    let profiles = available_profiles(&app, &docs)?;
-    let binding = if docs.exists() {
-        docs.with(|database| semantic::get_qdrant_binding(database, &connection_id, &collection))?
-            .map(|stored| QdrantImportBindingView {
-                profile_id: stored.profile_id,
-                vector_name: stored.binding.vector_name,
-                text_field: stored.binding.text_field,
-                document_id_field: stored.binding.document_id_field,
-                title_field: stored.binding.title_field,
-                source_uri_field: stored.binding.source_uri_field,
-                page_field: stored.binding.page_field,
-                heading_field: stored.binding.heading_field,
-                model_attested: stored.binding.model_attested,
-            })
-    } else {
-        None
-    };
-    Ok(QdrantImportInspection {
-        vectors: info.vectors,
-        samples,
-        profiles: profiles
-            .iter()
-            .map(|stored| profile_view(stored.id.clone(), &stored.profile))
-            .collect(),
-        binding,
-    })
-}
-
-/// Save an explicit local binding after validating the chosen vector against the
-/// exact runnable profile and checking obvious payload-field mismatches in a
-/// bounded sample. This never mutates the remote collection.
-#[tauri::command(rename_all = "snake_case")]
-pub async fn knowledge_qdrant_import_save(
-    app: tauri::AppHandle<Wry>,
-    docs: State<'_, crate::docs::db::DocsDb>,
-    bucket: KnowledgeBucketRef,
-    input: QdrantImportInput,
-) -> Result<(), String> {
-    gate(&app)?;
-    let _process_lock = knowledge_writer_lock(&app).await?;
-    let KnowledgeBucketRef::Qdrant {
-        connection_id,
-        collection,
-    } = bucket
-    else {
-        return Err("guided import applies only to an existing Qdrant collection".into());
-    };
-    if !input.model_attested {
-        return Err(
-            "confirm that the selected profile is the exact original model, revision, pooling, and transforms"
-                .into(),
-        );
-    }
-    let profile = find_profile(&app, &docs, input.profile_id.trim())?;
-    let text_field =
-        import_field(Some(input.text_field), "text", true)?.expect("required field was checked");
-    let document_id_field = import_field(Some(input.document_id_field), "document id", true)?
-        .expect("required field was checked");
-    let binding = ImportedCollectionBinding {
-        connection_id: connection_id.clone(),
-        collection: collection.clone(),
-        vector_name: input.vector_name.trim().to_string(),
-        embedding_profile_fingerprint: profile.profile.fingerprint().into(),
-        text_field,
-        document_id_field,
-        title_field: import_field(input.title_field, "title", false)?,
-        source_uri_field: import_field(input.source_uri_field, "source URI", false)?,
-        page_field: import_field(input.page_field, "page", false)?,
-        heading_field: import_field(input.heading_field, "heading", false)?,
-        model_attested: true,
-    };
-
-    let connections = store::read_connections(&app);
-    let connection = store::find_connection(&connections, &connection_id)?.clone();
-    let client = qdrant_client(&app, &connection)?;
-    let info = client
-        .collection_info(&collection)
-        .await
-        .map_err(|error| error.to_string())?;
-    if info.metadata.is_some() {
-        return Err("this collection already has managed VTerminal metadata and does not need guided import".into());
-    }
-    let vector = info
-        .vectors
-        .iter()
-        .find(|vector| vector.name == binding.vector_name)
-        .ok_or_else(|| {
-            if binding.vector_name.is_empty() {
-                "the collection no longer has an unnamed/default dense vector".to_string()
-            } else {
-                format!(
-                    "the selected vector {:?} no longer exists",
-                    binding.vector_name
-                )
-            }
-        })?;
-    if vector.size != profile.profile.semantic().dimensions {
-        return Err(format!(
-            "vector {:?} has {} dimensions, but profile {:?} produces {}",
-            if vector.name.is_empty() {
-                "(default)"
-            } else {
-                &vector.name
-            },
-            vector.size,
-            profile.id,
-            profile.profile.semantic().dimensions
-        ));
-    }
-    if !vector.distance.eq_ignore_ascii_case("cosine") {
-        return Err(format!(
-            "vector {:?} uses {}; guided import requires cosine distance",
-            if vector.name.is_empty() {
-                "(default)"
-            } else {
-                &vector.name
-            },
-            vector.distance
-        ));
-    }
-    if vector
-        .data_type
-        .as_deref()
-        .is_some_and(|kind| !kind.eq_ignore_ascii_case("float32"))
-    {
-        return Err("guided import v1 requires original float32 dense vectors".into());
-    }
-    let samples = client
-        .sample_payloads(&collection, 12)
-        .await
-        .map_err(|error| error.to_string())?;
-    validate_import_samples(&samples, &binding)?;
-    docs.with(|database| semantic::put_qdrant_binding(database, &profile.id, &binding))?;
-
-    // Keep the compatibility picker current without requiring another network
-    // refresh: `info` is the read-only snapshot validated immediately above.
-    let profiles = available_profiles(&app, &docs)?;
-    let runnable: Vec<_> = profiles
-        .iter()
-        .map(|stored| stored.profile.clone())
-        .collect();
-    let previous = cached_bucket_views(&connection)
-        .into_iter()
-        .find(|bucket| bucket.label == collection);
-    let access = previous
-        .as_ref()
-        .and_then(|bucket| bucket.access)
-        .unwrap_or(CollectionAccess::Unknown);
-    let server_version = connection
-        .server_version
-        .as_deref()
-        .and_then(|version| Version::parse(version).ok());
-    let raw = classify_collection(
-        &info,
-        CompatibilityContext {
-            connection_id: &connection_id,
-            server_version: server_version.as_ref(),
-            runnable_profiles: &runnable,
-            access,
-            imported_binding: Some(&binding),
-        },
-    );
-    let imported_view = remote_bucket_view(raw, &connection.label, &profiles, false, None);
-    store::update_connection_if_current(&app, &connection, move |current| {
-        let mut cached = cached_bucket_views(current);
-        cached.retain(|bucket| bucket.label != collection);
-        cached.push(imported_view);
-        cached.sort_by_key(|bucket| bucket.label.to_lowercase());
-        current.collections = cached
-            .into_iter()
-            .map(serde_json::to_value)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())?;
-        Ok(())
-    })
-    .map(|_| ())
-}
-
 /// Forget only VTerminal's local interpretation. The remote collection and every
 /// point in it remain untouched.
 #[tauri::command(rename_all = "snake_case")]
@@ -1538,14 +1341,16 @@ pub async fn knowledge_qdrant_import_remove(
                     continue;
                 }
                 bucket.profile = None;
-                bucket.compatibility = "needs_import".into();
+                bucket.compatibility = "unmanaged".into();
                 bucket.compatibility_reason = Some(
-                    "This collection has no VTerminal embedding metadata. Map its vector and payload fields in the import wizard."
+                    "This is not a VTerminal-managed collection and is hidden from Knowledge buckets."
                         .into(),
                 );
                 bucket.attachable = false;
                 bucket.vector_name = None;
                 bucket.imported = false;
+                bucket.required_builtin_model_id = None;
+                bucket.required_provider = None;
                 *value = serde_json::to_value(bucket).map_err(|error| error.to_string())?;
             }
             Ok(())
@@ -1602,10 +1407,21 @@ pub async fn knowledge_document_delete(
     )?;
     let (client, _, _) =
         resolve_managed_collection(&app, &docs, &connection_id, &collection).await?;
-    client
-        .delete_document(&collection, &document_id)
-        .await
-        .map_err(|error| error.to_string())?;
+    match client.delete_document(&collection, &document_id).await {
+        Ok(_) => {}
+        Err(error @ QdrantError::Permission { .. }) => {
+            if let Err(cache_error) = crate::knowledge::ingest::remember_point_access(
+                &app,
+                &connection_id,
+                &collection,
+                false,
+            ) {
+                log::warn!("remember Qdrant read-only access failed: {cache_error}");
+            }
+            return Err(error.to_string());
+        }
+        Err(error) => return Err(error.to_string()),
+    }
     Ok(())
 }
 
@@ -1634,10 +1450,24 @@ pub async fn knowledge_document_update(
     )?;
     let (client, _, _) =
         resolve_managed_collection(&app, &docs, &connection_id, &collection).await?;
-    client
+    match client
         .update_document_metadata(&collection, &document_id, &update)
         .await
-        .map_err(|error| error.to_string())?;
+    {
+        Ok(_) => {}
+        Err(error @ QdrantError::Permission { .. }) => {
+            if let Err(cache_error) = crate::knowledge::ingest::remember_point_access(
+                &app,
+                &connection_id,
+                &collection,
+                false,
+            ) {
+                log::warn!("remember Qdrant read-only access failed: {cache_error}");
+            }
+            return Err(error.to_string());
+        }
+        Err(error) => return Err(error.to_string()),
+    }
     Ok(())
 }
 
@@ -1647,7 +1477,7 @@ pub async fn knowledge_qdrant_turbo_quant_set(
     docs: State<'_, crate::docs::db::DocsDb>,
     bucket: KnowledgeBucketRef,
     config: Option<TurboQuantConfig>,
-) -> Result<(), String> {
+) -> Result<KnowledgeBucketView, String> {
     gate(&app)?;
     let _process_lock = knowledge_writer_lock(&app).await?;
     let KnowledgeBucketRef::Qdrant {
@@ -1657,29 +1487,134 @@ pub async fn knowledge_qdrant_turbo_quant_set(
     else {
         return Err("TurboQuant applies only to Qdrant collections".into());
     };
+    let connections = store::read_connections(&app);
+    let snapshot = store::find_connection(&connections, &connection_id)?.clone();
     let (client, current, version) =
         resolve_managed_collection(&app, &docs, &connection_id, &collection).await?;
-    if let Some(config) = config {
+    let expected = config.map_or(QuantizationStatus::Off, |config| {
+        QuantizationStatus::Turbo {
+            bits: config.bits,
+            always_ram: config.always_ram,
+        }
+    });
+    let changed = current.quantization != expected;
+    if changed {
         if let QuantizationStatus::Other { kind } = &current.quantization {
             return Err(format!(
                 "this collection uses {kind} quantization; VTerminal will not replace a non-TurboQuant configuration"
             ));
         }
-        client
-            .set_turbo_quant(&version, &collection, config)
-            .await
-            .map_err(|error| error.to_string())
-    } else {
-        match current.quantization {
-            QuantizationStatus::Off => Ok(()),
-            QuantizationStatus::Turbo { .. } => client
-                .disable_quantization(&collection)
-                .await
-                .map_err(|error| error.to_string()),
-            QuantizationStatus::Other { kind } => Err(format!(
-                "refusing to disable the collection's non-TurboQuant {kind} quantization"
-            )),
+        if let Some(config) = config {
+            if let Err(error) = client.set_turbo_quant(&version, &collection, config).await {
+                if matches!(&error, QdrantError::Permission { .. }) {
+                    if let Err(cache_error) =
+                        remember_manage_denied(&app, &connection_id, &collection)
+                    {
+                        log::warn!("remember Qdrant manage denial failed: {cache_error}");
+                    }
+                }
+                return Err(error.to_string());
+            }
+        } else {
+            if let Err(error) = client.disable_quantization(&collection).await {
+                if matches!(&error, QdrantError::Permission { .. }) {
+                    if let Err(cache_error) =
+                        remember_manage_denied(&app, &connection_id, &collection)
+                    {
+                        log::warn!("remember Qdrant manage denial failed: {cache_error}");
+                    }
+                }
+                return Err(error.to_string());
+            }
         }
+    } else if matches!(current.quantization, QuantizationStatus::Other { .. }) {
+        return Err("VTerminal cannot manage this collection's non-TurboQuant quantization".into());
+    }
+
+    let mut confirmed = client.collection_info(&collection).await.map_err(|error| {
+        turbo_confirm_error(changed, format!("read the updated collection: {error}"))
+    })?;
+    client
+        .populate_contract_counts(&collection, &mut confirmed)
+        .await
+        .map_err(|error| turbo_confirm_error(changed, format!("refresh exact counts: {error}")))?;
+    if confirmed.quantization != expected {
+        return Err(turbo_confirm_error(
+            changed,
+            format!(
+                "Qdrant reports {:?}, expected {:?}",
+                confirmed.quantization, expected
+            ),
+        ));
+    }
+
+    let profiles = available_profiles(&app, &docs)?;
+    let runnable = profiles
+        .iter()
+        .map(|stored| stored.profile.clone())
+        .collect::<Vec<_>>();
+    let access = cached_bucket_views(&snapshot)
+        .into_iter()
+        .find(|bucket| bucket.label == collection)
+        .and_then(|bucket| bucket.access)
+        .unwrap_or(CollectionAccess::Manage);
+    let descriptor = classify_collection(
+        &confirmed,
+        CompatibilityContext {
+            connection_id: &connection_id,
+            server_version: Some(&version),
+            runnable_profiles: &runnable,
+            access,
+            imported_binding: None,
+        },
+    );
+    let view = remote_bucket_view(
+        descriptor,
+        &snapshot.label,
+        &profiles,
+        false,
+        None,
+        Some(&version),
+    );
+    let cached_value = serde_json::to_value(&view).map_err(|error| error.to_string())?;
+    store::update_connection_if_current(&app, &snapshot, |connection| {
+        let entry = connection
+            .collections
+            .iter_mut()
+            .find(|value| {
+                serde_json::from_value::<KnowledgeBucketView>((*value).clone())
+                    .ok()
+                    .is_some_and(|bucket| bucket.bucket_ref == view.bucket_ref)
+            })
+            .ok_or_else(|| {
+                "the collection is not in the current discovery cache; refresh the connection"
+                    .to_string()
+            })?;
+        *entry = cached_value;
+        connection.status = "connected".into();
+        connection.error = None;
+        connection.last_checked_at = Some(semantic::now_ms());
+        Ok(())
+    })
+    .map_err(|error| {
+        if changed {
+            format!(
+                "TurboQuant was saved and confirmed in Qdrant, but VTerminal could not update its local cache: {error}. Refresh the connection."
+            )
+        } else {
+            error
+        }
+    })?;
+    Ok(view)
+}
+
+fn turbo_confirm_error(changed: bool, detail: String) -> String {
+    if changed {
+        format!(
+            "Qdrant accepted the TurboQuant update, but VTerminal could not confirm the resulting configuration ({detail}). Refresh the connection before retrying."
+        )
+    } else {
+        detail
     }
 }
 
@@ -1694,21 +1629,12 @@ pub async fn knowledge_document_ingest(
     pages: Vec<crate::knowledge::ingest::IngestPage>,
 ) -> Result<crate::knowledge::ingest::JobView, String> {
     gate(&app)?;
-    let process_lock = knowledge_writer_lock(&app).await?;
     crate::knowledge::ingest::validate_document(&mut document, &pages)?;
     let job = crate::knowledge::ingest::new_ingest_job(&bucket, document, pages)?;
     docs.with(|connection| semantic::put_job(connection, &job))?;
-    let view = job.clone().into();
-    let run_app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let run_docs = run_app.state::<crate::docs::db::DocsDb>();
-        if let Err(error) =
-            crate::knowledge::ingest::run_job_with_lock(&run_app, &run_docs, job, process_lock)
-                .await
-        {
-            log::warn!("knowledge ingestion failed: {error}");
-        }
-    });
+    let view = crate::knowledge::ingest::job_view(&docs, &job.id)?;
+    crate::knowledge::ingest::notify_job_changed(&app, &docs, &job.id);
+    crate::knowledge::ingest::wake_job_runner(&app)?;
     Ok(view)
 }
 
@@ -1721,7 +1647,6 @@ pub async fn knowledge_bucket_embed(
     bucket_id: String,
 ) -> Result<crate::knowledge::ingest::JobView, String> {
     gate(&app)?;
-    let process_lock = knowledge_writer_lock(&app).await?;
     // Fail before queuing if the bucket/profile is not usable.
     docs.with(|connection| {
         let count: i64 = connection
@@ -1740,17 +1665,9 @@ pub async fn knowledge_bucket_embed(
     })?;
     let job = crate::knowledge::ingest::new_local_backfill_job(bucket_id)?;
     docs.with(|connection| semantic::put_job(connection, &job))?;
-    let view = job.clone().into();
-    let run_app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let run_docs = run_app.state::<crate::docs::db::DocsDb>();
-        if let Err(error) =
-            crate::knowledge::ingest::run_job_with_lock(&run_app, &run_docs, job, process_lock)
-                .await
-        {
-            log::warn!("local bucket embedding failed: {error}");
-        }
-    });
+    let view = crate::knowledge::ingest::job_view(&docs, &job.id)?;
+    crate::knowledge::ingest::notify_job_changed(&app, &docs, &job.id);
+    crate::knowledge::ingest::wake_job_runner(&app)?;
     Ok(view)
 }
 
@@ -1764,7 +1681,6 @@ pub async fn knowledge_bucket_semantic_enable(
     profile_id: String,
 ) -> Result<crate::knowledge::ingest::JobView, String> {
     gate(&app)?;
-    let process_lock = knowledge_writer_lock(&app).await?;
     let selected = find_profile(&app, &docs, &profile_id)?;
     let profile = selected.profile.semantic();
     docs.with(|connection| {
@@ -1779,17 +1695,9 @@ pub async fn knowledge_bucket_semantic_enable(
     })?;
     let job = crate::knowledge::ingest::new_local_backfill_job(bucket_id)?;
     docs.with(|connection| semantic::put_job(connection, &job))?;
-    let view = job.clone().into();
-    let run_app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let run_docs = run_app.state::<crate::docs::db::DocsDb>();
-        if let Err(error) =
-            crate::knowledge::ingest::run_job_with_lock(&run_app, &run_docs, job, process_lock)
-                .await
-        {
-            log::warn!("semantic bucket upgrade failed: {error}");
-        }
-    });
+    let view = crate::knowledge::ingest::job_view(&docs, &job.id)?;
+    crate::knowledge::ingest::notify_job_changed(&app, &docs, &job.id);
+    crate::knowledge::ingest::wake_job_runner(&app)?;
     Ok(view)
 }
 
@@ -1803,7 +1711,7 @@ pub fn knowledge_jobs_list(
         return Ok(Vec::new());
     }
     docs.with(|conn| semantic::list_jobs(conn))
-        .map(|jobs| jobs.into_iter().map(Into::into).collect())
+        .map(crate::knowledge::ingest::job_views)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -1813,7 +1721,9 @@ pub fn knowledge_jobs_cancel(
     id: String,
 ) -> Result<crate::knowledge::ingest::JobView, String> {
     gate(&app)?;
-    crate::knowledge::ingest::cancel_job(&docs, &id).map(Into::into)
+    let job = crate::knowledge::ingest::cancel_job(&docs, &id)?;
+    crate::knowledge::ingest::notify_job_changed(&app, &docs, &id);
+    Ok(job.into())
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -1823,19 +1733,10 @@ pub async fn knowledge_jobs_retry(
     id: String,
 ) -> Result<crate::knowledge::ingest::JobView, String> {
     gate(&app)?;
-    let process_lock = knowledge_writer_lock(&app).await?;
     let job = crate::knowledge::ingest::prepare_retry(&docs, &id)?;
-    let view = job.clone().into();
-    let run_app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let run_docs = run_app.state::<crate::docs::db::DocsDb>();
-        if let Err(error) =
-            crate::knowledge::ingest::run_job_with_lock(&run_app, &run_docs, job, process_lock)
-                .await
-        {
-            log::warn!("retried knowledge job failed: {error}");
-        }
-    });
+    let view = crate::knowledge::ingest::job_view(&docs, &job.id)?;
+    crate::knowledge::ingest::notify_job_changed(&app, &docs, &job.id);
+    crate::knowledge::ingest::wake_job_runner(&app)?;
     Ok(view)
 }
 
@@ -1846,13 +1747,29 @@ mod tests {
     #[test]
     fn compatibility_wire_names_match_the_frontend() {
         assert_eq!(
-            compatibility_name(CollectionCompatibility::NeedsGuidedImport),
-            "needs_import"
-        );
-        assert_eq!(
             compatibility_name(CollectionCompatibility::ManagedCompatible),
             "managed_compatible"
         );
+        assert_eq!(
+            compatibility_name(CollectionCompatibility::RequiresProfile),
+            "requires_profile"
+        );
+        assert_eq!(
+            compatibility_name(CollectionCompatibility::Unmanaged),
+            "unmanaged"
+        );
+        assert_eq!(
+            compatibility_name(CollectionCompatibility::LegacyImport),
+            "legacy_import"
+        );
+    }
+
+    #[test]
+    fn older_discovery_results_cannot_overwrite_a_confirmed_target_update() {
+        assert!(!discovery_result_is_stale(None, 10));
+        assert!(!discovery_result_is_stale(Some(9), 10));
+        assert!(discovery_result_is_stale(Some(10), 10));
+        assert!(discovery_result_is_stale(Some(11), 10));
     }
 
     #[test]
@@ -1866,37 +1783,5 @@ mod tests {
                 .count(),
             4
         );
-    }
-
-    #[test]
-    fn guided_import_sample_validation_accepts_nested_fields_and_rejects_guessing() {
-        let binding = ImportedCollectionBinding {
-            connection_id: "c".into(),
-            collection: "legacy".into(),
-            vector_name: "dense".into(),
-            embedding_profile_fingerprint: "exact".into(),
-            text_field: "content.text".into(),
-            document_id_field: "document.id".into(),
-            title_field: Some("document.title".into()),
-            source_uri_field: None,
-            page_field: Some("page".into()),
-            heading_field: None,
-            model_attested: true,
-        };
-        let samples = vec![PayloadSample {
-            point_id: PointId::Number(1),
-            payload: serde_json::json!({
-                "content": {"text": "A useful passage"},
-                "document": {"id": "doc-1", "title": "Guide"},
-                "page": 2
-            }),
-        }];
-        validate_import_samples(&samples, &binding).unwrap();
-
-        let mut wrong = binding;
-        wrong.text_field = "content.missing".into();
-        assert!(validate_import_samples(&samples, &wrong)
-            .unwrap_err()
-            .contains("non-empty text"));
     }
 }

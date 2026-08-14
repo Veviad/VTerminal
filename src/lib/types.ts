@@ -900,7 +900,9 @@ export type KnowledgeBucketRef =
 export type KnowledgeCompatibility =
   | "managed_compatible"
   | "attach_only"
-  | "needs_import"
+  | "requires_profile"
+  | "unmanaged"
+  | "legacy_import"
   | "upgrade_required"
   | "incompatible"
   | "unreadable";
@@ -993,6 +995,9 @@ export interface QdrantConnection {
   server_version: string | null;
   last_checked_at: number | null;
   error: string | null;
+  /** Accessible collections without a valid VTerminal collection contract are
+   * deliberately hidden from the normal Knowledge UI. */
+  hidden_unmanaged_count?: number;
   collections?: KnowledgeBucketDescriptor[];
 }
 
@@ -1036,6 +1041,13 @@ export interface KnowledgeBucketDescriptor {
     | { state: "other"; kind: string };
   /** True when compatibility comes from an explicit local guided-import binding. */
   imported?: boolean;
+  /** Remediation hints for a valid managed collection whose immutable profile
+   * is not currently runnable on this client. */
+  required_builtin_model_id?: string | null;
+  required_provider?: EmbeddingProvider | null;
+  /** Backend-derived capability; the command still enforces the version gate. */
+  turbo_quant_supported?: boolean;
+  server_version?: string | null;
 }
 
 /** Unified search hits remain structurally compatible with `DocSearchPreview`, so the
@@ -1125,6 +1137,9 @@ export interface KnowledgeJob {
   completed_items: number;
   total_items: number | null;
   error: string | null;
+  display_name?: string;
+  queue_position?: number | null;
+  waiting_reason?: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -1134,38 +1149,6 @@ export type TurboQuantBits = "bits4" | "bits2" | "bits1_5" | "bits1";
 export interface TurboQuantConfig {
   bits: TurboQuantBits;
   always_ram: boolean;
-}
-
-export interface QdrantVectorDescriptor {
-  /** Empty means Qdrant's unnamed/default dense vector. */
-  name: string;
-  size: number;
-  distance: string;
-  data_type: string | null;
-}
-
-export interface QdrantPayloadSample {
-  point_id: KnowledgePointId;
-  payload: Record<string, unknown>;
-}
-
-export interface QdrantImportInspection {
-  vectors: QdrantVectorDescriptor[];
-  samples: QdrantPayloadSample[];
-  profiles: EmbeddingProfile[];
-  binding: ({ profile_id: string } & QdrantImportInput) | null;
-}
-
-export interface QdrantImportInput {
-  profile_id: string;
-  vector_name: string;
-  text_field: string;
-  document_id_field: string;
-  title_field?: string | null;
-  source_uri_field?: string | null;
-  page_field?: string | null;
-  heading_field?: string | null;
-  model_attested: boolean;
 }
 
 /** One page of extracted text on its way to Rust. `page` is null for formats with

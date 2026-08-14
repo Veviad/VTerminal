@@ -3,17 +3,19 @@ import { Cloud, FileText, HardDrive, Loader2, Plus, Upload, X } from "lucide-rea
 
 import { formatAttachmentBytes } from "../../lib/attachments";
 import { estimateKnowledgeFiles, ingestKnowledgeFiles } from "../../lib/knowledgeIngest";
-import type { KnowledgeBucketDescriptor } from "../../lib/types";
+import type { KnowledgeBucketDescriptor, KnowledgeJob } from "../../lib/types";
 
 const ACCEPT = ".pdf,.md,.markdown,.txt,.html,.htm,.csv,.json,.yaml,.yml,.png,.jpg,.jpeg,.webp";
 
 export function AddKnowledgeWizard({
   buckets,
+  jobs,
   onCreateBucket,
   onOpenBucket,
   onChanged,
 }: {
   buckets: KnowledgeBucketDescriptor[];
+  jobs: KnowledgeJob[];
   onCreateBucket: () => void;
   onOpenBucket: (bucket: KnowledgeBucketDescriptor) => void;
   onChanged: () => Promise<void>;
@@ -25,6 +27,7 @@ export function AddKnowledgeWizard({
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [queuedJobIds, setQueuedJobIds] = useState<string[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const choices = useMemo(
@@ -35,7 +38,8 @@ export function AddKnowledgeWizard({
           (source === "local" ||
             (!bucket.imported &&
               (bucket.compatibility === "managed_compatible" ||
-                bucket.compatibility === "attach_only"))),
+                (bucket.compatibility === "attach_only" &&
+                  bucket.write_capability === "unknown")))),
       ),
     [buckets, source],
   );
@@ -51,6 +55,7 @@ export function AddKnowledgeWizard({
     setFiles([]);
     setStatus(null);
     setError(null);
+    setQueuedJobIds([]);
   };
 
   const start = async () => {
@@ -70,10 +75,20 @@ export function AddKnowledgeWizard({
       });
       const failed = outcomes.filter((outcome) => outcome.error);
       const queued = outcomes.length - failed.length;
-      setStatus(`${queued} queued${failed.length ? ` · ${failed.length} failed` : ""}`);
+      setQueuedJobIds(
+        outcomes.flatMap((outcome) => (outcome.job ? [outcome.job.id] : [])),
+      );
+      setStatus(
+        `${queued} queued for automatic processing${failed.length ? ` · ${failed.length} failed` : ""}`,
+      );
       if (failed.length) setError(failed.map((outcome) => `${outcome.file}: ${outcome.error}`).join("\n"));
+      if (queued > 0) {
+        // Keep the durable job status visible, but consume the file selection so
+        // a second click cannot enqueue the same successful uploads again.
+        setFiles([]);
+        if (fileRef.current) fileRef.current.value = "";
+      }
       await onChanged();
-      if (failed.length === 0) reset();
     } finally {
       setBusy(false);
     }
@@ -119,7 +134,7 @@ export function AddKnowledgeWizard({
 
       {choices.length === 0 ? (
         <div className="rounded border border-dashed border-border-subtle p-2 text-[10px] text-text-muted">
-          No {source === "local" ? "local" : "managed Qdrant"} bucket is ready.
+          No {source === "local" ? "local" : "writable managed Qdrant"} bucket is ready.
           <button type="button" onClick={onCreateBucket} className="ml-1 text-accent hover:underline">Create one below</button>.
         </div>
       ) : (
@@ -178,6 +193,20 @@ export function AddKnowledgeWizard({
       ) : null}
 
       {status && <p className="text-[9px] text-text-muted">{status}</p>}
+      {queuedJobIds.length > 0 && (
+        <div className="space-y-1 rounded border border-border-subtle bg-bg-card p-2">
+          {queuedJobIds.map((id) => {
+            const job = jobs.find((candidate) => candidate.id === id);
+            return (
+              <p key={id} className={job?.status === "failed" ? "text-[9px] text-error" : "text-[9px] text-text-muted"}>
+                {job?.display_name ?? "Document"} — {job ? `${job.stage.replaceAll("_", " ")} · ${job.status}` : "queued"}
+                {job?.queue_position ? ` · queue ${job.queue_position}` : ""}
+                {job?.error ? ` · ${job.error}` : ""}
+              </p>
+            );
+          })}
+        </div>
+      )}
       {error && <pre className="whitespace-pre-wrap text-[9px] text-error">{error}</pre>}
       <div className="flex justify-end">
         <button

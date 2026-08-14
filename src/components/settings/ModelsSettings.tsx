@@ -1,11 +1,10 @@
 import { useEffect } from "react";
-import { X } from "lucide-react";
 import { useAppStore } from "../../stores/appStore";
 import { useSettings } from "../../hooks/useSettings";
 import * as api from "../../lib/tauri";
 import type { BuiltInProviderId, CatalogEntry, SettingsPatch } from "../../lib/types";
 import { refreshModels as refresh } from "../../lib/selectModel";
-import { formatBytes, ModelRow } from "./ModelRow";
+import { ModelRow } from "./ModelRow";
 import { RemoteServersSection } from "./RemoteServersSection";
 import { VisionSection } from "./VisionSection";
 import { S } from "../../lib/strings";
@@ -43,7 +42,6 @@ export function ModelsSettings() {
     <div className="space-y-8">
       <CredentialStoreBanner />
       <LoadErrorBanner />
-      <ActiveDownloads />
       {PROVIDER_ORDER.map((provider) => {
         const entries = catalog.filter((m) => m.provider === provider);
         if (entries.length === 0) return null;
@@ -188,58 +186,6 @@ function ApiKeyField({ provider }: { provider: BuiltInProviderId }) {
           Clear
         </button>
       )}
-    </div>
-  );
-}
-
-function ActiveDownloads() {
-  const downloads = useAppStore((s) => s.downloads);
-  const entries = Object.entries(downloads);
-  if (entries.length === 0) return null;
-  return (
-    <div className="space-y-1.5">
-      {entries.map(([id, d]) => (
-        <DownloadRow key={id} id={id} progress={d} />
-      ))}
-    </div>
-  );
-}
-
-function DownloadRow({
-  id,
-  progress,
-}: {
-  id: string;
-  progress: { filename: string; downloaded: number; total: number | null; bps: number };
-}) {
-  const pct = progress.total ? (progress.downloaded / progress.total) * 100 : 0;
-  const eta =
-    progress.total && progress.bps > 0
-      ? `${Math.ceil((progress.total - progress.downloaded) / progress.bps / 60)}m left`
-      : null;
-  return (
-    <div className="rounded-lg border border-border-subtle bg-bg-card px-3 py-2">
-      <div className="flex items-center justify-between gap-2">
-        <span className="truncate font-mono text-[11px] text-text-secondary">
-          {progress.filename}
-        </span>
-        <button
-          onClick={() => void api.modelsCancelDownload(id).catch(() => {})}
-          className="rounded p-0.5 text-text-muted hover:text-error"
-          title={S.settings.models.cancel}
-        >
-          <X size={12} />
-        </button>
-      </div>
-      <div className="mt-1.5 h-px w-full bg-bg-elevated">
-        <div className="h-px bg-accent" style={{ width: `${pct}%` }} />
-      </div>
-      <p className="mt-1 text-[10px] text-text-muted">
-        {formatBytes(progress.downloaded)}
-        {progress.total ? ` / ${formatBytes(progress.total)}` : ""}
-        {progress.bps > 0 ? ` · ${formatBytes(progress.bps)}/s` : ""}
-        {eta ? ` · ${eta}` : ""}
-      </p>
     </div>
   );
 }

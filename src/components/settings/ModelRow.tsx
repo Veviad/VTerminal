@@ -12,14 +12,14 @@ import type { CatalogEntry, DownloadEvent, Effort } from "../../lib/types";
 import { EffortPicker } from "../ui/EffortPicker";
 import { isUsable, loadModel, refreshModels as refresh, selectModel } from "../../lib/selectModel";
 import { S } from "../../lib/strings";
+import {
+  formatBytes,
+  InlineModelDownloadProgress,
+} from "./InlineModelDownloadProgress";
+
+export { formatBytes } from "./InlineModelDownloadProgress";
 
 let downloadCounter = 1;
-
-export function formatBytes(n: number): string {
-  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)} GB`;
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(0)} MB`;
-  return `${(n / 1000).toFixed(0)} KB`;
-}
 
 export function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(0)}M`;
@@ -37,10 +37,16 @@ export function formatTokens(n: number): string {
  */
 export function startDownloadWith(
   invoke: (downloadId: string, onEvent: (e: DownloadEvent) => void) => Promise<void>,
-  meta: { repoId: string; filename: string },
-): void {
+  meta: {
+    kind: "chat" | "vision";
+    modelId: string;
+    repoId: string;
+    filename: string;
+  },
+): string {
   const downloadId = `dl-${Date.now()}-${downloadCounter++}`;
   const store = useAppStore.getState();
+  store.setDownloadError(meta.kind, meta.modelId, null);
   store.updateDownload(downloadId, { ...meta, downloaded: 0, total: null, bps: 0 });
   void invoke(downloadId, (e: DownloadEvent) => {
     const s = useAppStore.getState();
@@ -61,13 +67,18 @@ export function startDownloadWith(
     } else if (e.type === "Completed" || e.type === "Cancelled" || e.type === "Error") {
       s.clearDownload(downloadId);
       void refresh();
-      if (e.type === "Error") s.setModelLoadError(e.message);
+      if (e.type === "Error") {
+        s.setDownloadError(meta.kind, meta.modelId, e.message);
+      } else if (e.type === "Completed") {
+        s.setDownloadError(meta.kind, meta.modelId, null);
+      }
     }
   }).catch((err) => {
     const s = useAppStore.getState();
     s.clearDownload(downloadId);
-    s.setModelLoadError(String(err));
+    s.setDownloadError(meta.kind, meta.modelId, String(err));
   });
+  return downloadId;
 }
 
 export function startDownload(entry: CatalogEntry): void {
@@ -75,7 +86,12 @@ export function startDownload(entry: CatalogEntry): void {
   if (!spec) return;
   startDownloadWith(
     (id, onEvent) => api.modelsDownload(id, entry.id, onEvent),
-    { repoId: spec.repo_id, filename: spec.filename },
+    {
+      kind: "chat",
+      modelId: entry.id,
+      repoId: spec.repo_id,
+      filename: spec.filename,
+    },
   );
 }
 
@@ -84,11 +100,14 @@ export function ModelRow({ entry }: { entry: CatalogEntry }) {
   const loadedModelId = useAppStore((s) => s.loadedModelId);
   const modelState = useAppStore((s) => s.modelState);
   const storedEffort = useAppStore((s) => s.modelEffort[entry.id]);
-  const downloading = useAppStore((s) =>
-    Object.values(s.downloads).some(
-      (d) => entry.local && d.repoId === entry.local.repo_id && d.filename === entry.local.filename,
-    ),
+  const downloadId = useAppStore(
+    (s) =>
+      Object.keys(s.downloads).find(
+        (id) => s.downloads[id].kind === "chat" && s.downloads[id].modelId === entry.id,
+      ) ?? null,
   );
+  const download = useAppStore((s) => (downloadId ? (s.downloads[downloadId] ?? null) : null));
+  const downloadError = useAppStore((s) => s.downloadErrors[`chat:${entry.id}`] ?? null);
 
   const engineMissing = useAppStore((s) => s.localEngineMissing());
 
@@ -163,12 +182,12 @@ export function ModelRow({ entry }: { entry: CatalogEntry }) {
           <div className="flex items-center gap-1">
             {entry.local && !entry.downloaded && (
               <button
-                disabled={downloading || !entry.fits || noEngine}
+                disabled={!!download || !entry.fits || noEngine}
                 onClick={() => startDownload(entry)}
                 className="flex items-center gap-1 rounded-md border border-border-subtle px-2 py-1 text-[10px] text-text-secondary hover:bg-bg-hover disabled:opacity-60"
               >
-                {downloading ? <Loader2 size={11} className="animate-spin" /> : <Download size={11} />}
-                {S.settings.models.download}
+                {download ? <Loader2 size={11} className="animate-spin" /> : <Download size={11} />}
+                {download ? "Downloading…" : downloadError ? "Retry" : S.settings.models.download}
               </button>
             )}
             {entry.local && entry.downloaded && (
@@ -212,6 +231,20 @@ export function ModelRow({ entry }: { entry: CatalogEntry }) {
           </div>
         </div>
       </div>
+      {downloadError && !download && (
+        <p className="mt-2 border-t border-border-subtle pt-2 text-[9px] leading-relaxed text-error">
+          {downloadError}
+        </p>
+      )}
+      {downloadId && download && (
+        <InlineModelDownloadProgress
+          label={entry.label}
+          downloaded={download.downloaded}
+          total={download.total}
+          bytesPerSecond={download.bps}
+          onCancel={() => void api.modelsCancelDownload(downloadId).catch(() => {})}
+        />
+      )}
     </div>
   );
 }
