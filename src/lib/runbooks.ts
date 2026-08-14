@@ -193,14 +193,48 @@ export interface AnsibleAction {
 
 export type RunbookAction = ShellAction | AgentAction | ManualAction | AnsibleAction;
 
+/** What a step must achieve, and the conditions the ENGINE runs to decide it
+ * did. A model's own summary is narration; these exit codes are the verdict. */
+export interface RunbookGoal {
+  intent: string;
+  checks: { command: string; env?: Record<string, string>; expect: number[] }[];
+}
+
+/** Per-step bounds on an agent phase. Every field narrows; nothing here can
+ * widen what the operator already allows. Best-effort in the same way the agent
+ * panel's command checks are — not a sandbox. */
+export interface RunbookConstraints {
+  maxCommands?: number | null;
+  maxSeconds?: number | null;
+  maxRounds?: number | null;
+  network?: boolean | null;
+  privilege?: "none" | "root" | null;
+}
+
+/** What a step's agent phase is allowed to know. Nothing is implicit. */
+export interface RunbookStepContext {
+  inputs?: string[];
+  priorSteps?: boolean;
+}
+
+export interface RunbookDiscoveryProbe {
+  name: string;
+  command: string;
+  env?: Record<string, string>;
+}
+
 export interface RunbookStepDefinition {
   id: string;
   title: string;
   description?: string | null;
   required: boolean;
-  check: RunbookAction;
+  /** Absent when `goal.checks` supplies the check phase instead. */
+  check?: RunbookAction | null;
   apply?: RunbookAction | null;
   verify?: RunbookAction | null;
+  goal?: RunbookGoal | null;
+  constraints?: RunbookConstraints | null;
+  context?: RunbookStepContext | null;
   onFailure?: OnFailure;
   on_failure?: OnFailure;
 }
@@ -219,6 +253,9 @@ export interface RunbookDefinition {
     /** What the package asks the operator to keep. A request, not a grant:
      * Settings → Runbooks supplies the floor and can only raise this. */
     audit?: { recordOutput?: EvidenceMode | null } | null;
+    /** Target facts gathered once, before the first step, and shown to every
+     * agent phase in the run. */
+    context?: { discover?: RunbookDiscoveryProbe[] } | null;
     steps: RunbookStepDefinition[];
   };
   source_id?: string;

@@ -2405,16 +2405,18 @@ impl<'a> EngineRunner<'a> {
         } else {
             "This is an on-device, opaque action"
         };
+        let constraints = self.effective_constraints(step);
         let request = ApprovalRequest {
             approval_id: uuid::Uuid::new_v4().to_string(),
             run_id: self.spec.run_id.clone(),
             step_id: step.id.clone(),
             phase,
             command: invocation,
-            explanation: format!(
-                "Allow the configured model to process this step's bounded instructions and run context for the {} phase. {provider_scope}; any terminal command the model proposes will require a separate approval.",
-                phase.as_str(),
-            ),
+            // The one place an operator sees what the model is about to be
+            // asked for, before it is asked. The goal and the enforced bounds
+            // ride on the explanation rather than new wire fields: this string
+            // already exists to say what is being approved.
+            explanation: model_invocation_explanation(phase, provider_scope, step, &constraints),
             read_only: false,
             network: self.context.config.model_networked,
             privileged: false,
@@ -2428,7 +2430,6 @@ impl<'a> EngineRunner<'a> {
             ApprovalGate::Declined(reason) => return Ok(PhaseRun::Paused(reason)),
             ApprovalGate::Cancelled => return Ok(PhaseRun::Cancelled),
         }
-        let constraints = self.effective_constraints(step);
         let config = AgentPhaseConfig {
             run_id: self.spec.run_id.clone(),
             step_id: step.id.clone(),
@@ -3541,6 +3542,46 @@ pub(crate) fn constraint_refusal(constraints: &Constraints, command: &str) -> Op
         );
     }
     None
+}
+
+/// What the operator is consenting to when they let the model act.
+///
+/// A model phase is opaque by nature, so this is the only moment the operator
+/// can see the objective and the bounds before the model has them. Written as
+/// short lines rather than one paragraph: the card renders newlines, and a
+/// four-clause sentence about goals, scope and refusals is not read.
+fn model_invocation_explanation(
+    phase: RunbookPhase,
+    provider_scope: &str,
+    step: &Step,
+    constraints: &Constraints,
+) -> String {
+    let mut out = format!(
+        "Allow the configured model to process this step's bounded instructions and run context for the {} phase. {provider_scope}; any terminal command the model proposes will require a separate approval.",
+        phase.as_str(),
+    );
+    if let Some(goal) = &step.goal {
+        // First line only: the card is compact, and the full intent is on the
+        // step in Review runbook.
+        let intent = goal.intent.trim().lines().next().unwrap_or_default();
+        if !intent.is_empty() {
+            let _ = write!(out, "\n\nGoal: {intent}");
+        }
+        let _ = write!(
+            out,
+            "\nThe engine decides whether this goal was met by running {} condition{} itself.",
+            goal.checks.len(),
+            if goal.checks.len() == 1 { "" } else { "s" }
+        );
+    }
+    let rules = describe_constraints(constraints);
+    if !rules.is_empty() {
+        out.push_str("\n\nEnforced bounds for this step:");
+        for rule in rules {
+            let _ = write!(out, "\n· {rule}");
+        }
+    }
+    out
 }
 
 /// The step's bounds, in the words the model is given.
