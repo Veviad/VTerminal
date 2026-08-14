@@ -626,6 +626,44 @@ describe("useRunbooks recovery and deletion", () => {
     expect(useRunbookStore.getState().definition?.metadata.id).toBe("builtin-security");
   });
 
+  it("ignores an older library response after a newer refresh completes", async () => {
+    let resolveFirst!: (value: RunbookSource[]) => void;
+    let resolveSecond!: (value: RunbookSource[]) => void;
+    const firstLibrary = new Promise<RunbookSource[]>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const secondLibrary = new Promise<RunbookSource[]>((resolve) => {
+      resolveSecond = resolve;
+    });
+    mocks.list
+      .mockImplementationOnce(() => firstLibrary)
+      .mockImplementationOnce(() => secondLibrary);
+    const { result } = renderHook(() => useRunbooks());
+
+    let firstRequest!: Promise<void>;
+    let secondRequest!: Promise<void>;
+    act(() => {
+      firstRequest = result.current.loadLibrary();
+      secondRequest = result.current.loadLibrary();
+    });
+    await act(async () => {
+      resolveSecond([source("newer")]);
+      await secondRequest;
+    });
+    expect(useRunbookStore.getState().sources.map((item) => item.source_id)).toEqual(["newer"]);
+    expect(useRunbookStore.getState().selectedSourceId).toBe("newer");
+    expect(useRunbookStore.getState().loadingLibrary).toBe(false);
+
+    await act(async () => {
+      resolveFirst([source("older")]);
+      await firstRequest;
+    });
+    expect(useRunbookStore.getState().sources.map((item) => item.source_id)).toEqual(["newer"]);
+    expect(useRunbookStore.getState().selectedSourceId).toBe("newer");
+    expect(useRunbookStore.getState().definition?.metadata.id).toBe("newer");
+    expect(useRunbookStore.getState().loadingLibrary).toBe(false);
+  });
+
   it("ignores an older definition response after a newer source is selected", async () => {
     let resolveFirst!: (value: RunbookDefinition) => void;
     let resolveSecond!: (value: RunbookDefinition) => void;

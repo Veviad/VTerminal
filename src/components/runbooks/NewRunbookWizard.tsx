@@ -109,7 +109,9 @@ export function NewRunbookWizard({
     const timeout = window.setTimeout(() => {
       void enqueueSave(document, draft.id).catch(() => undefined);
     }, 650);
-    return () => window.clearTimeout(timeout);
+    return () => {
+      window.clearTimeout(timeout);
+    };
   }, [document, draft, enqueueSave]);
 
   const flushSave = async () => {
@@ -133,7 +135,9 @@ export function NewRunbookWizard({
       if (event.key === "Escape") close();
     };
     window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
   }, [close, open]);
 
   const create = async () => {
@@ -228,14 +232,18 @@ export function NewRunbookWizard({
       target = "wizard-title";
     }
     setStage(nextStage);
-    window.requestAnimationFrame(() => window.document.getElementById(target)?.focus());
+    window.requestAnimationFrame(() => {
+      window.document.getElementById(target)?.focus();
+    });
   };
 
   if (!open) {
     return (
       <button
         type="button"
-        onClick={() => setOpen(true)}
+        onClick={() => {
+          setOpen(true);
+        }}
         className={`${secondaryButton} min-w-0 flex-1`}
       >
         <FilePlus2 size={12} /> New
@@ -281,7 +289,10 @@ export function NewRunbookWizard({
                 <button
                   key={label}
                   type="button"
-                  onClick={() => (index === 3 ? void review() : setStage(index))}
+                  onClick={() => {
+                    if (index === 3) void review();
+                    else setStage(index);
+                  }}
                   className={`px-2 py-2 text-[10px] ${index === stage ? "bg-accent/10 text-accent" : "text-text-muted hover:bg-bg-hover"}`}
                 >
                   <span className="me-1 font-mono text-[8px]">{index + 1}</span>{label}
@@ -304,12 +315,16 @@ export function NewRunbookWizard({
               </div>
               <div className="flex gap-1.5">
                 {stage > 0 && (
-                  <button type="button" onClick={() => setStage(stage - 1)} className={secondaryButton}>
+                  <button type="button" onClick={() => {
+                    setStage(stage - 1);
+                  }} className={secondaryButton}>
                     <ArrowLeft size={11} /> Back
                   </button>
                 )}
                 {stage < 2 && (
-                  <button type="button" onClick={() => setStage(stage + 1)} className="flex items-center gap-1 rounded-md bg-accent px-3 py-1.5 text-[10px] text-white">
+                  <button type="button" onClick={() => {
+                    setStage(stage + 1);
+                  }} className="flex items-center gap-1 rounded-md bg-accent px-3 py-1.5 text-[10px] text-white">
                     Next <ArrowRight size={11} />
                   </button>
                 )}
@@ -355,8 +370,12 @@ function DraftChooser({ summaries, busy, error, onCreate, onResume, onDiscard }:
               <p className="mt-1 text-[8px] text-text-muted">{summary.publishedSourceId ? (summary.dirty ? "Unpublished changes" : "Published") : "Draft"}</p>
             </div>
             <div className="flex gap-1">
-              <button type="button" onClick={() => onResume(summary.id)} className={secondaryButton}>Resume</button>
-              <button type="button" onClick={() => onDiscard(summary)} aria-label={`Discard ${summary.title || "draft"}`} className="rounded p-1.5 text-text-muted hover:bg-error/10 hover:text-error"><Trash2 size={12} /></button>
+              <button type="button" onClick={() => {
+                onResume(summary.id);
+              }} className={secondaryButton}>Resume</button>
+              <button type="button" onClick={() => {
+                onDiscard(summary);
+              }} aria-label={`Discard ${summary.title || "draft"}`} className="rounded p-1.5 text-text-muted hover:bg-error/10 hover:text-error"><Trash2 size={12} /></button>
             </div>
           </article>
         ))}
@@ -370,22 +389,40 @@ function Basics({ document, onChange }: EditorProps) {
   return (
     <div className="mx-auto max-w-2xl space-y-4">
       <div className="grid grid-cols-2 gap-3">
-        <TextField inputId="wizard-definition-id" label="Runbook ID" value={document.definitionId} placeholder="workstation-health" onChange={(definitionId) => onChange({ ...document, definitionId })} />
-        <TextField inputId="wizard-version" label="Semantic version" value={document.version} placeholder="1.0.0" onChange={(version) => onChange({ ...document, version })} />
+        <TextField inputId="wizard-definition-id" label="Runbook ID" value={document.definitionId} placeholder="workstation-health" onChange={(definitionId) => {
+          onChange({ ...document, definitionId });
+        }} />
+        <TextField inputId="wizard-version" label="Semantic version" value={document.version} placeholder="1.0.0" onChange={(version) => {
+          onChange({ ...document, version });
+        }} />
       </div>
-      <TextField inputId="wizard-title" label="Title" value={document.title} placeholder="Workstation Health Assessment" onChange={(title) => onChange({ ...document, title })} />
-      <label className={labelClass}>Description<textarea className={`${fieldClass} min-h-24 resize-y`} value={document.description} onChange={(event) => onChange({ ...document, description: event.target.value })} /></label>
-      <TextField label="Tags (comma separated)" value={document.tags.join(", ")} placeholder="macos, security, assessment" onChange={(value) => onChange({ ...document, tags: value.split(",").map((tag) => tag.trim()).filter(Boolean) })} />
+      <TextField inputId="wizard-title" label="Title" value={document.title} placeholder="Workstation Health Assessment" onChange={(title) => {
+        onChange({ ...document, title });
+      }} />
+      <label className={labelClass}>Description<textarea className={`${fieldClass} min-h-24 resize-y`} value={document.description} onChange={(event) => {
+        onChange({ ...document, description: event.target.value });
+      }} /></label>
+      <TextField label="Tags (comma separated)" value={document.tags.join(", ")} placeholder="macos, security, assessment" onChange={(value) => {
+        onChange({ ...document, tags: value.split(",").map((tag) => tag.trim()).filter(Boolean) });
+      }} />
       <div className="grid grid-cols-2 gap-3">
-        <label className={labelClass}>Target platform<select className={fieldClass} value={document.platform} onChange={(event) => onChange({ ...document, platform: event.target.value as RunbookDraftDocument["platform"] })}><option value="macos13">macOS 13+</option><option value="linux">Linux</option><option value="any">Any active terminal</option></select></label>
-        <label className={labelClass}>Default on failure<select className={fieldClass} value={document.defaultOnFailure} onChange={(event) => onChange({ ...document, defaultOnFailure: event.target.value as OnFailure })}><option value="continue">Continue collecting</option><option value="pause">Pause for operator</option><option value="stop">Stop run</option></select></label>
+        <label className={labelClass}>Target platform<select className={fieldClass} value={document.platform} onChange={(event) => {
+          onChange({ ...document, platform: event.target.value as RunbookDraftDocument["platform"] });
+        }}><option value="macos13">macOS 13+</option><option value="linux">Linux</option><option value="any">Any active terminal</option></select></label>
+        <label className={labelClass}>Default on failure<select className={fieldClass} value={document.defaultOnFailure} onChange={(event) => {
+          onChange({ ...document, defaultOnFailure: event.target.value as OnFailure });
+        }}><option value="continue">Continue collecting</option><option value="pause">Pause for operator</option><option value="stop">Stop run</option></select></label>
       </div>
       {document.platform === "any" && <p className="rounded border border-warning/30 bg-warning/10 p-2 text-[9px] text-warning">No operating-system guard will be generated. Every command must be portable or handle platform differences itself.</p>}
       <fieldset className="rounded-lg border border-border-subtle p-3">
         <legend className="px-1 text-[9px] text-text-muted">Declared assessment capabilities</legend>
         <div className="flex flex-wrap gap-4 text-[10px] text-text-secondary">
-          <label className="flex items-center gap-1.5"><input type="checkbox" checked={document.network} onChange={(event) => onChange({ ...document, network: event.target.checked })} /> Uses network</label>
-          <label className="flex items-center gap-1.5"><input type="checkbox" checked={document.privilege === "root"} onChange={(event) => onChange({ ...document, privilege: event.target.checked ? "root" : "none" })} /> Requires root privilege</label>
+          <label className="flex items-center gap-1.5"><input type="checkbox" checked={document.network} onChange={(event) => {
+            onChange({ ...document, network: event.target.checked });
+          }} /> Uses network</label>
+          <label className="flex items-center gap-1.5"><input type="checkbox" checked={document.privilege === "root"} onChange={(event) => {
+            onChange({ ...document, privilege: event.target.checked ? "root" : "none" });
+          }} /> Requires root privilege</label>
         </div>
         <p className="mt-2 text-[8px] text-text-muted">Writes are always empty. This wizard creates check-only assessments.</p>
       </fieldset>
@@ -394,8 +431,12 @@ function Basics({ document, onChange }: EditorProps) {
 }
 
 function Inputs({ document, onChange }: EditorProps) {
-  const add = () => onChange({ ...document, inputs: [...document.inputs, { id: "", type: "string", description: "", required: false, default: null, values: [] }] });
-  const update = (index: number, input: RunbookDraftInput) => onChange({ ...document, inputs: document.inputs.map((item, itemIndex) => itemIndex === index ? input : item) });
+  const add = () => {
+    onChange({ ...document, inputs: [...document.inputs, { id: "", type: "string", description: "", required: false, default: null, values: [] }] });
+  };
+  const update = (index: number, input: RunbookDraftInput) => {
+    onChange({ ...document, inputs: document.inputs.map((item, itemIndex) => itemIndex === index ? input : item) });
+  };
   return (
     <div className="mx-auto max-w-3xl space-y-3">
       <div className="flex items-center justify-between"><div><h3 className="text-[12px] text-text-primary">Runtime inputs</h3><p className="text-[9px] text-text-muted">Shell commands receive inputs only through explicit VRUN_* mappings.</p></div><button type="button" onClick={add} className={secondaryButton}><Plus size={11} /> Add input</button></div>
@@ -403,16 +444,32 @@ function Inputs({ document, onChange }: EditorProps) {
       {document.inputs.map((input, index) => (
         <article key={index} className="rounded-lg border border-border-subtle bg-bg-card p-3">
           <div className="grid grid-cols-[1fr_10rem_auto] gap-2">
-            <TextField inputId={`wizard-input-id-${index}`} label="Input ID" value={input.id} onChange={(id) => update(index, { ...input, id })} />
-            <label className={labelClass}>Type<select className={fieldClass} value={input.type} onChange={(event) => update(index, { ...input, type: event.target.value as RunbookInputType, default: null, values: [] })}>{["string", "integer", "boolean", "path", "enum"].map((type) => <option key={type}>{type}</option>)}</select></label>
-            <button type="button" aria-label="Remove input" onClick={() => onChange({ ...document, inputs: document.inputs.filter((_, itemIndex) => itemIndex !== index) })} className="mt-4 rounded p-1.5 text-text-muted hover:text-error"><Trash2 size={12} /></button>
+            <TextField inputId={`wizard-input-id-${index}`} label="Input ID" value={input.id} onChange={(id) => {
+              update(index, { ...input, id });
+            }} />
+            <label className={labelClass}>Type<select className={fieldClass} value={input.type} onChange={(event) => {
+              update(index, { ...input, type: event.target.value as RunbookInputType, default: null, values: [] });
+            }}>{["string", "integer", "boolean", "path", "enum"].map((type) => <option key={type}>{type}</option>)}</select></label>
+            <button type="button" aria-label="Remove input" onClick={() => {
+              onChange({ ...document, inputs: document.inputs.filter((_, itemIndex) => itemIndex !== index) });
+            }} className="mt-4 rounded p-1.5 text-text-muted hover:text-error"><Trash2 size={12} /></button>
           </div>
           <div className="mt-2 grid grid-cols-2 gap-2">
-            <TextField label="Description" value={input.description} onChange={(description) => update(index, { ...input, description })} />
-            {input.type === "enum" ? <TextField label="Allowed values (comma separated)" value={input.values.join(", ")} onChange={(value) => update(index, { ...input, values: value.split(",").map((item) => item.trim()).filter(Boolean) })} /> : <DefaultField input={input} onChange={(value) => update(index, { ...input, default: value })} />}
+            <TextField label="Description" value={input.description} onChange={(description) => {
+              update(index, { ...input, description });
+            }} />
+            {input.type === "enum" ? <TextField label="Allowed values (comma separated)" value={input.values.join(", ")} onChange={(value) => {
+              update(index, { ...input, values: value.split(",").map((item) => item.trim()).filter(Boolean) });
+            }} /> : <DefaultField input={input} onChange={(value) => {
+              update(index, { ...input, default: value });
+            }} />}
           </div>
-          {input.type === "enum" && <label className={`${labelClass} mt-2`}>Default<select className={fieldClass} value={typeof input.default === "string" ? input.default : ""} onChange={(event) => update(index, { ...input, default: event.target.value || null })}><option value="">No default</option>{input.values.map((value) => <option key={value}>{value}</option>)}</select></label>}
-          <label className="mt-2 flex items-center gap-1.5 text-[9px] text-text-muted"><input type="checkbox" checked={input.required} onChange={(event) => update(index, { ...input, required: event.target.checked })} /> Required when no default is present</label>
+          {input.type === "enum" && <label className={`${labelClass} mt-2`}>Default<select className={fieldClass} value={typeof input.default === "string" ? input.default : ""} onChange={(event) => {
+            update(index, { ...input, default: event.target.value || null });
+          }}><option value="">No default</option>{input.values.map((value) => <option key={value}>{value}</option>)}</select></label>}
+          <label className="mt-2 flex items-center gap-1.5 text-[9px] text-text-muted"><input type="checkbox" checked={input.required} onChange={(event) => {
+            update(index, { ...input, required: event.target.checked });
+          }} /> Required when no default is present</label>
         </article>
       ))}
     </div>
@@ -420,8 +477,12 @@ function Inputs({ document, onChange }: EditorProps) {
 }
 
 function Checks({ document, onChange }: EditorProps) {
-  const add = () => onChange({ ...document, steps: [...document.steps, { id: "", title: "", required: true, onFailure: null, check: { kind: "shell", command: "", env: {}, compliantExitCodes: [0], noncompliantExitCodes: [1] } }] });
-  const update = (index: number, step: RunbookDraftStep) => onChange({ ...document, steps: document.steps.map((item, itemIndex) => itemIndex === index ? step : item) });
+  const add = () => {
+    onChange({ ...document, steps: [...document.steps, { id: "", title: "", required: true, onFailure: null, check: { kind: "shell", command: "", env: {}, compliantExitCodes: [0], noncompliantExitCodes: [1] } }] });
+  };
+  const update = (index: number, step: RunbookDraftStep) => {
+    onChange({ ...document, steps: document.steps.map((item, itemIndex) => itemIndex === index ? step : item) });
+  };
   const move = (index: number, delta: number) => { const steps = [...document.steps]; const [step] = steps.splice(index, 1); steps.splice(index + delta, 0, step); onChange({ ...document, steps }); };
   return (
     <div className="mx-auto max-w-3xl space-y-3">
@@ -429,14 +490,34 @@ function Checks({ document, onChange }: EditorProps) {
       {document.steps.length === 0 && <Empty>Add at least one shell or manual check.</Empty>}
       {document.steps.map((step, index) => (
         <article key={index} className="rounded-lg border border-border-subtle bg-bg-card p-3">
-          <div className="mb-2 flex items-center justify-between"><span className="font-mono text-[9px] text-text-muted">Check {index + 1}</span><div className="flex"><IconButton label="Move up" disabled={index === 0} onClick={() => move(index, -1)}><ArrowUp size={11} /></IconButton><IconButton label="Move down" disabled={index === document.steps.length - 1} onClick={() => move(index, 1)}><ArrowDown size={11} /></IconButton><IconButton label="Remove check" onClick={() => onChange({ ...document, steps: document.steps.filter((_, itemIndex) => itemIndex !== index) })}><Trash2 size={11} /></IconButton></div></div>
-          <div className="grid grid-cols-2 gap-2"><TextField inputId={`wizard-step-id-${index}`} label="Stable step ID" value={step.id} onChange={(id) => update(index, { ...step, id })} /><TextField label="Title" value={step.title} onChange={(title) => update(index, { ...step, title })} /></div>
+          <div className="mb-2 flex items-center justify-between"><span className="font-mono text-[9px] text-text-muted">Check {index + 1}</span><div className="flex"><IconButton label="Move up" disabled={index === 0} onClick={() => {
+            move(index, -1);
+          }}><ArrowUp size={11} /></IconButton><IconButton label="Move down" disabled={index === document.steps.length - 1} onClick={() => {
+            move(index, 1);
+          }}><ArrowDown size={11} /></IconButton><IconButton label="Remove check" onClick={() => {
+            onChange({ ...document, steps: document.steps.filter((_, itemIndex) => itemIndex !== index) });
+          }}><Trash2 size={11} /></IconButton></div></div>
+          <div className="grid grid-cols-2 gap-2"><TextField inputId={`wizard-step-id-${index}`} label="Stable step ID" value={step.id} onChange={(id) => {
+            update(index, { ...step, id });
+          }} /><TextField label="Title" value={step.title} onChange={(title) => {
+            update(index, { ...step, title });
+          }} /></div>
           <div className="mt-2 grid grid-cols-3 gap-2">
-            <label className={labelClass}>Check type<select className={fieldClass} value={step.check.kind} onChange={(event) => update(index, { ...step, check: event.target.value === "manual" ? { kind: "manual", instructions: "" } : { kind: "shell", command: "", env: {}, compliantExitCodes: [0], noncompliantExitCodes: [1] } })}><option value="shell">Shell</option><option value="manual">Manual</option></select></label>
-            <label className={labelClass}>On failure<select className={fieldClass} value={step.onFailure ?? ""} onChange={(event) => update(index, { ...step, onFailure: (event.target.value || null) as OnFailure | null })}><option value="">Use runbook default</option><option value="continue">Continue</option><option value="pause">Pause</option><option value="stop">Stop</option></select></label>
-            <label className="mt-5 flex items-center gap-1.5 text-[9px] text-text-muted"><input type="checkbox" checked={step.required} onChange={(event) => update(index, { ...step, required: event.target.checked })} /> Required control</label>
+            <label className={labelClass}>Check type<select className={fieldClass} value={step.check.kind} onChange={(event) => {
+              update(index, { ...step, check: event.target.value === "manual" ? { kind: "manual", instructions: "" } : { kind: "shell", command: "", env: {}, compliantExitCodes: [0], noncompliantExitCodes: [1] } });
+            }}><option value="shell">Shell</option><option value="manual">Manual</option></select></label>
+            <label className={labelClass}>On failure<select className={fieldClass} value={step.onFailure ?? ""} onChange={(event) => {
+              update(index, { ...step, onFailure: (event.target.value || null) as OnFailure | null });
+            }}><option value="">Use runbook default</option><option value="continue">Continue</option><option value="pause">Pause</option><option value="stop">Stop</option></select></label>
+            <label className="mt-5 flex items-center gap-1.5 text-[9px] text-text-muted"><input type="checkbox" checked={step.required} onChange={(event) => {
+              update(index, { ...step, required: event.target.checked });
+            }} /> Required control</label>
           </div>
-          {step.check.kind === "shell" ? <ShellCheck check={step.check} onChange={(check) => update(index, { ...step, check })} /> : <label className={`${labelClass} mt-2`}>Operator instructions<textarea className={`${fieldClass} min-h-24`} value={step.check.instructions} onChange={(event) => update(index, { ...step, check: { kind: "manual", instructions: event.target.value } })} /></label>}
+          {step.check.kind === "shell" ? <ShellCheck check={step.check} onChange={(check) => {
+            update(index, { ...step, check });
+          }} /> : <label className={`${labelClass} mt-2`}>Operator instructions<textarea className={`${fieldClass} min-h-24`} value={step.check.instructions} onChange={(event) => {
+            update(index, { ...step, check: { kind: "manual", instructions: event.target.value } });
+          }} /></label>}
         </article>
       ))}
     </div>
@@ -444,17 +525,33 @@ function Checks({ document, onChange }: EditorProps) {
 }
 
 function ShellCheck({ check, onChange }: { check: Extract<RunbookDraftStep["check"], { kind: "shell" }>; onChange: (check: Extract<RunbookDraftStep["check"], { kind: "shell" }>) => void }) {
-  return <div className="mt-2 space-y-2"><label className={labelClass}>Single-line command<textarea className={`${fieldClass} min-h-16 font-mono`} value={check.command} onChange={(event) => onChange({ ...check, command: event.target.value })} /></label><label className={labelClass}>Input mappings (one <code>VRUN_NAME=inputId</code> per line)<textarea className={`${fieldClass} min-h-14 font-mono`} value={Object.entries(check.env).map(([name, id]) => `${name}=${id}`).join("\n")} onChange={(event) => onChange({ ...check, env: parseMappings(event.target.value) })} /></label><details><summary className="cursor-pointer text-[9px] text-text-muted">Advanced exit codes</summary><div className="mt-2 grid grid-cols-2 gap-2"><TextField label="Compliant codes" value={check.compliantExitCodes.join(", ")} onChange={(value) => onChange({ ...check, compliantExitCodes: parseCodes(value) })} /><TextField label="Non-compliant codes" value={check.noncompliantExitCodes.join(", ")} onChange={(value) => onChange({ ...check, noncompliantExitCodes: parseCodes(value) })} /></div></details></div>;
+  return <div className="mt-2 space-y-2"><label className={labelClass}>Single-line command<textarea className={`${fieldClass} min-h-16 font-mono`} value={check.command} onChange={(event) => {
+    onChange({ ...check, command: event.target.value });
+  }} /></label><label className={labelClass}>Input mappings (one <code>VRUN_NAME=inputId</code> per line)<textarea className={`${fieldClass} min-h-14 font-mono`} value={Object.entries(check.env).map(([name, id]) => `${name}=${id}`).join("\n")} onChange={(event) => {
+    onChange({ ...check, env: parseMappings(event.target.value) });
+  }} /></label><details><summary className="cursor-pointer text-[9px] text-text-muted">Advanced exit codes</summary><div className="mt-2 grid grid-cols-2 gap-2"><TextField label="Compliant codes" value={check.compliantExitCodes.join(", ")} onChange={(value) => {
+    onChange({ ...check, compliantExitCodes: parseCodes(value) });
+  }} /><TextField label="Non-compliant codes" value={check.noncompliantExitCodes.join(", ")} onChange={(value) => {
+    onChange({ ...check, noncompliantExitCodes: parseCodes(value) });
+  }} /></div></details></div>;
 }
 
 function Review({ preview, document, onIssue }: { preview: RunbookDraftPreview | null; document: RunbookDraftDocument; onIssue: (path: string) => void }) {
   if (!preview) return <p className="py-10 text-center text-[10px] text-text-muted">Saving and validating preview…</p>;
-  return <div className="mx-auto max-w-3xl space-y-3"><div className={`rounded-lg border p-3 ${preview.issues.length ? "border-error/30 bg-error/10" : "border-success/30 bg-success/10"}`}><p className="text-[11px] font-medium text-text-primary">{preview.issues.length ? `${preview.issues.length} issue${preview.issues.length === 1 ? "" : "s"} must be fixed` : "Ready to publish"}</p>{preview.issues.map((issue, index) => <button type="button" key={`${issue.path}:${index}`} onClick={() => onIssue(issue.path)} className="mt-1 block text-start text-[9px] text-error hover:underline"><code>{issue.path}</code>: {issue.message}</button>)}</div><div className="grid grid-cols-3 gap-2 text-[9px]"><Summary label="Platform" value={document.platform === "macos13" ? "macOS 13+" : document.platform === "linux" ? "Linux" : "Any"} /><Summary label="Inputs" value={String(document.inputs.length)} /><Summary label="Checks" value={String(document.steps.length + (document.platform === "any" ? 0 : 1))} /></div>{preview.sourceYaml && <details open><summary className="cursor-pointer text-[10px] text-text-secondary">Generated runbook.vrun.yaml</summary><pre className="mt-2 max-h-80 overflow-auto rounded-lg border border-border-subtle bg-bg-primary p-3 text-[9px] text-text-muted">{preview.sourceYaml}</pre></details>}</div>;
+  return <div className="mx-auto max-w-3xl space-y-3"><div className={`rounded-lg border p-3 ${preview.issues.length ? "border-error/30 bg-error/10" : "border-success/30 bg-success/10"}`}><p className="text-[11px] font-medium text-text-primary">{preview.issues.length ? `${preview.issues.length} issue${preview.issues.length === 1 ? "" : "s"} must be fixed` : "Ready to publish"}</p>{preview.issues.map((issue, index) => <button type="button" key={`${issue.path}:${index}`} onClick={() => {
+    onIssue(issue.path);
+  }} className="mt-1 block text-start text-[9px] text-error hover:underline"><code>{issue.path}</code>: {issue.message}</button>)}</div><div className="grid grid-cols-3 gap-2 text-[9px]"><Summary label="Platform" value={document.platform === "macos13" ? "macOS 13+" : document.platform === "linux" ? "Linux" : "Any"} /><Summary label="Inputs" value={String(document.inputs.length)} /><Summary label="Checks" value={String(document.steps.length + (document.platform === "any" ? 0 : 1))} /></div>{preview.sourceYaml && <details open><summary className="cursor-pointer text-[10px] text-text-secondary">Generated runbook.vrun.yaml</summary><pre className="mt-2 max-h-80 overflow-auto rounded-lg border border-border-subtle bg-bg-primary p-3 text-[9px] text-text-muted">{preview.sourceYaml}</pre></details>}</div>;
 }
 
 type EditorProps = { document: RunbookDraftDocument; onChange: (document: RunbookDraftDocument) => void };
-function TextField({ inputId, label, value, placeholder, onChange }: { inputId?: string; label: string; value: string; placeholder?: string; onChange: (value: string) => void }) { return <label className={labelClass}>{label}<input id={inputId} className={fieldClass} value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} /></label>; }
-function DefaultField({ input, onChange }: { input: RunbookDraftInput; onChange: (value: string | number | boolean | null) => void }) { if (input.type === "boolean") return <label className={labelClass}>Default<select className={fieldClass} value={input.default == null ? "" : String(input.default)} onChange={(event) => onChange(event.target.value === "" ? null : event.target.value === "true")}><option value="">No default</option><option value="false">false</option><option value="true">true</option></select></label>; return <TextField label="Default (optional)" value={input.default == null ? "" : String(input.default)} onChange={(value) => onChange(value === "" ? null : input.type === "integer" ? Number(value) : value)} />; }
+function TextField({ inputId, label, value, placeholder, onChange }: { inputId?: string; label: string; value: string; placeholder?: string; onChange: (value: string) => void }) { return <label className={labelClass}>{label}<input id={inputId} className={fieldClass} value={value} placeholder={placeholder} onChange={(event) => {
+  onChange(event.target.value);
+}} /></label>; }
+function DefaultField({ input, onChange }: { input: RunbookDraftInput; onChange: (value: string | number | boolean | null) => void }) { if (input.type === "boolean") return <label className={labelClass}>Default<select className={fieldClass} value={input.default == null ? "" : String(input.default)} onChange={(event) => {
+  onChange(event.target.value === "" ? null : event.target.value === "true");
+}}><option value="">No default</option><option value="false">false</option><option value="true">true</option></select></label>; return <TextField label="Default (optional)" value={input.default == null ? "" : String(input.default)} onChange={(value) => {
+  onChange(value === "" ? null : input.type === "integer" ? Number(value) : value);
+}} />; }
 function IconButton({ label, disabled, onClick, children }: { label: string; disabled?: boolean; onClick: () => void; children: ReactNode }) { return <button type="button" aria-label={label} disabled={disabled} onClick={onClick} className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text-primary disabled:opacity-30">{children}</button>; }
 function Empty({ children }: { children: ReactNode }) { return <p className="rounded-lg border border-dashed border-border-subtle p-5 text-center text-[10px] text-text-muted">{children}</p>; }
 function Summary({ label, value }: { label: string; value: string }) { return <div className="rounded border border-border-subtle bg-bg-card p-2"><p className="text-text-muted">{label}</p><p className="mt-1 text-text-primary">{value}</p></div>; }

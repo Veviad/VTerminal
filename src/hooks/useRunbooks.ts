@@ -69,6 +69,7 @@ function sameTarget(left: RunbookTargetContext, right: RunbookTargetContext): bo
 }
 
 let definitionRequestSequence = 0;
+let libraryRequestSequence = 0;
 let sourceSelectionSequence = 0;
 
 function cancelDefinitionRequest(): void {
@@ -410,16 +411,23 @@ export function useRunbooks() {
   );
 
   const loadLibrary = useCallback(async () => {
+    const requestSequence = ++libraryRequestSequence;
     const store = useRunbookStore.getState();
     store.setLoading("library", true);
     store.setError(null);
     try {
       const sources = await api.runbooksList();
-      await installLibrarySources(sources);
+      if (requestSequence === libraryRequestSequence) {
+        await installLibrarySources(sources);
+      }
     } catch (error) {
-      store.setError(String(error));
+      if (requestSequence === libraryRequestSequence) {
+        useRunbookStore.getState().setError(String(error));
+      }
     } finally {
-      store.setLoading("library", false);
+      if (requestSequence === libraryRequestSequence) {
+        useRunbookStore.getState().setLoading("library", false);
+      }
     }
   }, []);
 
