@@ -208,10 +208,13 @@ the same terminal concurrently.
   dispatch. A compromised interactive shell remains outside v1's trust model.
 - Networked, privileged, or opaque checks and verifies require approval and are
   reported as phase deviations.
-- Runbooks never honor the ordinary agent panel's `Auto all` setting.
-- Model phases are always treated as opaque and require their own approval.
-  On-device models are reported as local; cloud and user-configured remote
-  providers are additionally reported as networked.
+- Runbook approvals are single-click by default. In live mode, you can also use
+  **Acknowledge and approve all remaining steps** to continue through later
+  approvals automatically. The flow stops at the first non-approval pause,
+  terminal-status change, repeated approval-id, or command validation issue.
+- Model phases are opaque and still require their own approval action; this is
+  separate from shell approvals and still reports any model/provider network use.
+- Runbooks do not mirror the agent panel’s `Auto all` behavior for any phase.
 - The proposed and executed commands are both retained when an operator edits a
   command.
 - Visible-terminal shell checks and verification are reported as
@@ -225,6 +228,8 @@ the same terminal concurrently.
   for that terminal's lifetime. Semantic shell/cwd markers are quarantined
   while each attempt is observed; delayed descendant output after completion
   remains part of the explicitly trusted target session.
+- You can revisit the definition while a run is active by opening **Review
+  runbook** from the live checklist header.
 
 A timeout means the outcome is unknown; it does not kill or retry the command.
 Cancelling an active run sends SIGINT to the owned foreground job and stops

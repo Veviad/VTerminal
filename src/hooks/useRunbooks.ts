@@ -23,16 +23,20 @@ import type {
   EvidenceMode,
   RunbookEvent,
   RunbookOperatorDecision,
+  RunbookRun,
   RunbookSource,
   RunbookStartRequest,
   RunbookTargetContext,
 } from "../lib/runbooks";
 
-export function buildRunbookTargetContext(sessionId: string): RunbookTargetContext {
+export function buildRunbookTargetContext(
+  sessionId: string,
+): RunbookTargetContext {
   const app = useAppStore.getState();
   const session = app.sessions.find((item) => item.id === sessionId);
   const ui = app.sessionUi[sessionId];
-  if (!session || session.exited) throw new Error("The selected terminal is no longer available.");
+  if (!session || session.exited)
+    throw new Error("The selected terminal is no longer available.");
 
   return {
     kind: "active-terminal",
@@ -48,7 +52,9 @@ export function buildRunbookTargetContext(sessionId: string): RunbookTargetConte
   };
 }
 
-export function describeRunbookTarget(context: RunbookTargetContext | null): string {
+export function describeRunbookTarget(
+  context: RunbookTargetContext | null,
+): string {
   if (!context) return "No terminal bound";
   if (context.remote_kind) {
     return context.remote_target
@@ -58,7 +64,10 @@ export function describeRunbookTarget(context: RunbookTargetContext | null): str
   return context.cwd ?? context.context_marker ?? "Local terminal";
 }
 
-function sameTarget(left: RunbookTargetContext, right: RunbookTargetContext): boolean {
+function sameTarget(
+  left: RunbookTargetContext,
+  right: RunbookTargetContext,
+): boolean {
   return (
     left.session_id === right.session_id &&
     (left.remote_kind !== null || left.cwd === right.cwd) &&
@@ -71,6 +80,26 @@ function sameTarget(left: RunbookTargetContext, right: RunbookTargetContext): bo
 let definitionRequestSequence = 0;
 let libraryRequestSequence = 0;
 let sourceSelectionSequence = 0;
+let approvalFlowSequence = 0;
+const approvalAllFlows = new Map<string, number>();
+
+function stopApproveAllFlow(runId: string): void {
+  const current = approvalAllFlows.get(runId) ?? 0;
+  approvalAllFlows.set(runId, current + 1);
+}
+
+function isApproveAllFlowActive(runId: string, token: number): boolean {
+  const active = approvalAllFlows.get(runId);
+  return Object.is(active, token);
+}
+
+function getRunById(runId: string): RunbookRun | null {
+  return (
+    Object.values(useRunbookStore.getState().runsById).find((run) =>
+      Object.is(run.run_id, runId),
+    ) ?? null
+  );
+}
 
 function cancelDefinitionRequest(): void {
   definitionRequestSequence += 1;
@@ -112,9 +141,11 @@ async function installLibrarySources(sources: RunbookSource[]): Promise<void> {
   const store = useRunbookStore.getState();
   const previousSourceId = store.selectedSourceId;
   const current = sources.find(
-    (source) => source.source_id === previousSourceId && source.state === "valid",
+    (source) =>
+      source.source_id === previousSourceId && source.state === "valid",
   );
-  const selected = current ?? sources.find((source) => source.state === "valid") ?? null;
+  const selected =
+    current ?? sources.find((source) => source.state === "valid") ?? null;
   store.setSources(sources);
 
   if (!selected) {
@@ -203,160 +234,191 @@ export function useRunbooks() {
     [loadReport],
   );
 
-  const executeTerminalEventBody = useCallback(async (event: Extract<RunbookEvent, { type: "RunInTerminal" }>) => {
-    protectRunbookTerminal(event.session_id);
-    // Schedule an immediate blank scrollback snapshot. The sticky protection
-    // below also covers later metadata, quit and archive flushes, but this
-    // proactively removes an older stored raw blob before Runbook output can
-    // arrive.
-    markScrollbackDirty(event.session_id);
-    const app = useAppStore.getState();
-    let targetError: string | null = null;
-    let currentTarget: RunbookTargetContext | null = null;
-    const approvalPromptBinding = event.approval_id
-      ? (approvalPromptBindings.get(event.approval_id) ?? null)
-      : null;
-    if (event.approval_id) approvalPromptBindings.delete(event.approval_id);
-    if (!app.runbooksEnabled) {
-      targetError = "Runbooks were disabled before dispatch; execution was not started.";
-    }
-    try {
-      currentTarget = buildRunbookTargetContext(event.session_id);
-    } catch (error) {
-      targetError = String(error);
-    }
-
-    const run = useRunbookStore.getState().runsById[event.run_id] ?? null;
-    const expectedTarget = run?.target ?? null;
-    if (app.activeSessionId !== event.session_id) {
-      targetError = "The bound terminal is no longer visible; execution was not started.";
-    } else if (!expectedTarget) {
-      targetError = "The durable run target is unavailable; execution was not started.";
-    } else if (!event.approval_id || !approvalPromptBinding) {
-      targetError = "The shell dispatch is not bound to a fresh operator prompt attestation.";
-    } else if (currentTarget && !sameTarget(expectedTarget, currentTarget)) {
-      targetError = "The terminal target changed since preflight; execution was not started.";
-    }
-
-    if (targetError || !expectedTarget) {
-      if (approvalPromptBinding) releaseApprovalPromptBinding(approvalPromptBinding);
-      try {
-        // Settle a rejected preflight under the same one-shot ownership rule;
-        // a duplicate event can never become executable later.
-        if (!(await api.runbooksClaimTerminalDispatch(event.run_id, event.attempt_id))) return;
-        await api.runbooksSubmitTerminalResult(event.run_id, event.attempt_id, {
-          exit_code: null,
-          output_tail: "",
-          output_truncated: false,
-          output_observed_bytes: 0,
-          output_captured_bytes: 0,
-          duration_ms: 0,
-          error: targetError ?? "The durable run target is unavailable; execution was not started.",
-          execution_mode: null,
-          target_context: currentTarget,
-        });
-      } catch (error) {
-        useRunbookStore.getState().setError(String(error));
+  const executeTerminalEventBody = useCallback(
+    async (event: Extract<RunbookEvent, { type: "RunInTerminal" }>) => {
+      protectRunbookTerminal(event.session_id);
+      // Schedule an immediate blank scrollback snapshot. The sticky protection
+      // below also covers later metadata, quit and archive flushes, but this
+      // proactively removes an older stored raw blob before Runbook output can
+      // arrive.
+      markScrollbackDirty(event.session_id);
+      const app = useAppStore.getState();
+      let targetError: string | null = null;
+      let currentTarget: RunbookTargetContext | null = null;
+      const approvalPromptBinding = event.approval_id
+        ? (approvalPromptBindings.get(event.approval_id) ?? null)
+        : null;
+      if (event.approval_id) approvalPromptBindings.delete(event.approval_id);
+      if (!app.runbooksEnabled) {
+        targetError =
+          "Runbooks were disabled before dispatch; execution was not started.";
       }
-      return;
-    }
+      try {
+        currentTarget = buildRunbookTargetContext(event.session_id);
+      } catch (error) {
+        targetError = String(error);
+      }
 
-    let dispatchClaimed = false;
-    let claimAttempted = false;
-    try {
-      const outcome = await runInTerminal(event.session_id, event.attempt_id, event.command, {
-        timeoutMs: event.timeout_ms,
-        tailLimit: run?.evidence_mode === "full" ? 1_048_576 : 8_192,
-        environment: event.environment,
-        // Rust emits the exact pager/stdin/input wrapper persisted in the
-        // canonical attempt record. Do not transform it a second time here.
-        harden: false,
-        // Integrated/hook OSC markers can be replayed by hostile command
-        // output. Runbooks require a fresh per-attempt nonce in every shell.
-        nonceCompletion: true,
-        approvalPromptBinding: approvalPromptBinding ?? undefined,
-        // Prompt/mode detection can wait for seconds. Acquire the Rust lease
-        // only after that work, at the final async boundary before ptyWrite, so
-        // cancellation and dispatch are linearized rather than racing a stale
-        // early claim.
-        beforeWrite: async () => {
-          if (isRunbookRunRevoked(event.run_id)) return false;
-          claimAttempted = true;
-          const claimed = await api.runbooksClaimTerminalDispatch(
+      const run = getRunById(event.run_id);
+      const expectedTarget = run?.target ?? null;
+      if (app.activeSessionId !== event.session_id) {
+        targetError =
+          "The bound terminal is no longer visible; execution was not started.";
+      } else if (!expectedTarget) {
+        targetError =
+          "The durable run target is unavailable; execution was not started.";
+      } else if (!event.approval_id || !approvalPromptBinding) {
+        targetError =
+          "The shell dispatch is not bound to a fresh operator prompt attestation.";
+      } else if (currentTarget && !sameTarget(expectedTarget, currentTarget)) {
+        targetError =
+          "The terminal target changed since preflight; execution was not started.";
+      }
+
+      if (targetError || !expectedTarget) {
+        if (approvalPromptBinding)
+          releaseApprovalPromptBinding(approvalPromptBinding);
+        try {
+          // Settle a rejected preflight under the same one-shot ownership rule;
+          // a duplicate event can never become executable later.
+          if (
+            !(await api.runbooksClaimTerminalDispatch(
+              event.run_id,
+              event.attempt_id,
+            ))
+          )
+            return;
+          await api.runbooksSubmitTerminalResult(
+            event.run_id,
+            event.attempt_id,
+            {
+              exit_code: null,
+              output_tail: "",
+              output_truncated: false,
+              output_observed_bytes: 0,
+              output_captured_bytes: 0,
+              duration_ms: 0,
+              error:
+                targetError ??
+                "The durable run target is unavailable; execution was not started.",
+              execution_mode: null,
+              target_context: currentTarget,
+            },
+          );
+        } catch (error) {
+          useRunbookStore.getState().setError(String(error));
+        }
+        return;
+      }
+
+      let dispatchClaimed = false;
+      let claimAttempted = false;
+      try {
+        const outcome = await runInTerminal(
+          event.session_id,
+          event.attempt_id,
+          event.command,
+          {
+            timeoutMs: event.timeout_ms,
+            tailLimit: run?.evidence_mode === "full" ? 1_048_576 : 8_192,
+            environment: event.environment,
+            // Rust emits the exact pager/stdin/input wrapper persisted in the
+            // canonical attempt record. Do not transform it a second time here.
+            harden: false,
+            // Integrated/hook OSC markers can be replayed by hostile command
+            // output. Runbooks require a fresh per-attempt nonce in every shell.
+            nonceCompletion: true,
+            approvalPromptBinding: approvalPromptBinding ?? undefined,
+            // Prompt/mode detection can wait for seconds. Acquire the Rust lease
+            // only after that work, at the final async boundary before ptyWrite, so
+            // cancellation and dispatch are linearized rather than racing a stale
+            // early claim.
+            beforeWrite: async () => {
+              if (isRunbookRunRevoked(event.run_id)) return false;
+              claimAttempted = true;
+              const claimed = await api.runbooksClaimTerminalDispatch(
+                event.run_id,
+                event.attempt_id,
+              );
+              dispatchClaimed = claimed && !isRunbookRunRevoked(event.run_id);
+              return dispatchClaimed;
+            },
+            canWrite: () => {
+              const latest = useAppStore.getState();
+              const latestRun = getRunById(event.run_id);
+              if (
+                isRunbookRunRevoked(event.run_id) ||
+                !latest.runbooksEnabled ||
+                latest.activeSessionId !== event.session_id ||
+                !latestRun ||
+                api.isTerminalRunState(latestRun.status) ||
+                latestRun.status === "interrupted"
+              )
+                return false;
+              try {
+                const observed = buildRunbookTargetContext(event.session_id);
+                return sameTarget(expectedTarget, observed);
+              } catch {
+                return false;
+              }
+            },
+          },
+        );
+        if (!dispatchClaimed) {
+          // Prompt rejection can happen before the normal beforeWrite lease
+          // boundary (for example an expired approval-click binding). Claim only
+          // to settle that attempt Unknown; never type it.
+          if (claimAttempted || isRunbookRunRevoked(event.run_id)) return;
+          dispatchClaimed = await api.runbooksClaimTerminalDispatch(
             event.run_id,
             event.attempt_id,
           );
-          dispatchClaimed = claimed && !isRunbookRunRevoked(event.run_id);
-          return dispatchClaimed;
-        },
-        canWrite: () => {
-          const latest = useAppStore.getState();
-          const latestRun = useRunbookStore.getState().runsById[event.run_id];
-          if (
-            isRunbookRunRevoked(event.run_id)
-            || !latest.runbooksEnabled
-            || latest.activeSessionId !== event.session_id
-            || !latestRun
-            || api.isTerminalRunState(latestRun.status)
-            || latestRun.status === "interrupted"
-          ) return false;
-          try {
-            const observed = buildRunbookTargetContext(event.session_id);
-            return sameTarget(expectedTarget, observed);
-          } catch {
-            return false;
-          }
-        },
-      });
-      if (!dispatchClaimed) {
-        // Prompt rejection can happen before the normal beforeWrite lease
-        // boundary (for example an expired approval-click binding). Claim only
-        // to settle that attempt Unknown; never type it.
-        if (claimAttempted || isRunbookRunRevoked(event.run_id)) return;
-        dispatchClaimed = await api.runbooksClaimTerminalDispatch(
-          event.run_id,
-          event.attempt_id,
-        );
+          if (!dispatchClaimed) return;
+        }
+        let resultTarget: RunbookTargetContext | null = null;
+        try {
+          resultTarget = buildRunbookTargetContext(event.session_id);
+        } catch {
+          // A closed or replaced terminal is intentionally reported as an unknown
+          // observation so Rust will not accept the exit code as authoritative.
+        }
+        await api.runbooksSubmitTerminalResult(event.run_id, event.attempt_id, {
+          exit_code: outcome.exitCode,
+          output_tail: outcome.output,
+          output_truncated: outcome.outputTruncated ?? false,
+          output_observed_bytes:
+            outcome.outputObservedBytes ??
+            new TextEncoder().encode(outcome.output).length,
+          output_captured_bytes:
+            outcome.outputCapturedBytes ??
+            new TextEncoder().encode(outcome.output).length,
+          duration_ms: outcome.durationMs,
+          error: outcome.error ?? null,
+          execution_mode: outcome.mode,
+          target_context: resultTarget,
+        });
+      } catch (error) {
+        useRunbookStore.getState().setError(String(error));
+        // A result must never be submitted for a dispatch the backend did not
+        // lease to this webview. The engine owns timeout/cancellation settlement.
         if (!dispatchClaimed) return;
+        await api
+          .runbooksSubmitTerminalResult(event.run_id, event.attempt_id, {
+            exit_code: null,
+            output_tail: "",
+            output_truncated: false,
+            output_observed_bytes: 0,
+            output_captured_bytes: 0,
+            duration_ms: 0,
+            error: String(error),
+            execution_mode: null,
+            target_context: currentTarget,
+          })
+          .catch(() => {});
       }
-      let resultTarget: RunbookTargetContext | null = null;
-      try {
-        resultTarget = buildRunbookTargetContext(event.session_id);
-      } catch {
-        // A closed or replaced terminal is intentionally reported as an unknown
-        // observation so Rust will not accept the exit code as authoritative.
-      }
-      await api.runbooksSubmitTerminalResult(event.run_id, event.attempt_id, {
-        exit_code: outcome.exitCode,
-        output_tail: outcome.output,
-        output_truncated: outcome.outputTruncated ?? false,
-        output_observed_bytes: outcome.outputObservedBytes ?? new TextEncoder().encode(outcome.output).length,
-        output_captured_bytes: outcome.outputCapturedBytes ?? new TextEncoder().encode(outcome.output).length,
-        duration_ms: outcome.durationMs,
-        error: outcome.error ?? null,
-        execution_mode: outcome.mode,
-        target_context: resultTarget,
-      });
-    } catch (error) {
-      useRunbookStore.getState().setError(String(error));
-      // A result must never be submitted for a dispatch the backend did not
-      // lease to this webview. The engine owns timeout/cancellation settlement.
-      if (!dispatchClaimed) return;
-      await api
-        .runbooksSubmitTerminalResult(event.run_id, event.attempt_id, {
-          exit_code: null,
-          output_tail: "",
-          output_truncated: false,
-          output_observed_bytes: 0,
-          output_captured_bytes: 0,
-          duration_ms: 0,
-          error: String(error),
-          execution_mode: null,
-          target_context: currentTarget,
-        })
-        .catch(() => {});
-    }
-  }, []);
+    },
+    [],
+  );
 
   const executeTerminalEvent = useCallback(
     async (event: Extract<RunbookEvent, { type: "RunInTerminal" }>) => {
@@ -437,15 +499,21 @@ export function useRunbooks() {
     // Hydrate every nonterminal run, not only the selected one. Different PTY
     // sessions may execute concurrently and each event needs its immutable
     // target/evidence metadata even while another run is open in the workspace.
-    const recoverable = history.filter((run) => !api.isTerminalRunState(run.state));
+    const recoverable = history.filter(
+      (run) => !api.isTerminalRunState(run.state),
+    );
     if (recoverable.length === 0) return;
     try {
-      const runs = await Promise.all(recoverable.map((entry) => api.runbooksGet(entry.run_id)));
+      const runs = await Promise.all(
+        recoverable.map((entry) => api.runbooksGet(entry.run_id)),
+      );
       for (const run of runs) {
         if (!api.isTerminalRunState(run.status)) store.upsertRun(run);
       }
       if (!store.activeRun || api.isTerminalRunState(store.activeRun.status)) {
-        const selected = runs.find((run) => !api.isTerminalRunState(run.status));
+        const selected = runs.find(
+          (run) => !api.isTerminalRunState(run.status),
+        );
         if (selected) {
           store.selectHistoryRun(selected.run_id);
           store.setActiveRun(selected);
@@ -476,7 +544,9 @@ export function useRunbooks() {
       if (selectionSequence === sourceSelectionSequence) {
         useRunbookStore
           .getState()
-          .setNotice(source.state === "valid" ? "Runbook imported and validated." : null);
+          .setNotice(
+            source.state === "valid" ? "Runbook imported and validated." : null,
+          );
       }
       return source;
     } catch (error) {
@@ -526,14 +596,17 @@ export function useRunbooks() {
 
   const removeSource = useCallback(async (sourceId: string) => {
     const store = useRunbookStore.getState();
-    const source = store.sources.find((item) => item.source_id === sourceId) ?? null;
+    const source =
+      store.sources.find((item) => item.source_id === sourceId) ?? null;
     store.setBusyAction(`remove:${sourceId}`);
     store.setError(null);
     store.setNotice(null);
     try {
       await api.runbooksRemove(sourceId);
       await installLibrarySources(
-        useRunbookStore.getState().sources.filter((item) => item.source_id !== sourceId),
+        useRunbookStore
+          .getState()
+          .sources.filter((item) => item.source_id !== sourceId),
       );
       store.setNotice(
         source?.source_kind === "builtin"
@@ -547,22 +620,25 @@ export function useRunbooks() {
     }
   }, []);
 
-  const exportPackage = useCallback(async (sourceId: string, destination: string) => {
-    const store = useRunbookStore.getState();
-    store.setBusyAction(`export-package:${sourceId}`);
-    store.setError(null);
-    store.setNotice(null);
-    try {
-      const result = await api.runbooksExportPackage(sourceId, destination);
-      store.setNotice(`Runbook package exported to ${result.destination}.`);
-      return result;
-    } catch (error) {
-      store.setError(String(error));
-      return null;
-    } finally {
-      store.setBusyAction(null);
-    }
-  }, []);
+  const exportPackage = useCallback(
+    async (sourceId: string, destination: string) => {
+      const store = useRunbookStore.getState();
+      store.setBusyAction(`export-package:${sourceId}`);
+      store.setError(null);
+      store.setNotice(null);
+      try {
+        const result = await api.runbooksExportPackage(sourceId, destination);
+        store.setNotice(`Runbook package exported to ${result.destination}.`);
+        return result;
+      } catch (error) {
+        store.setError(String(error));
+        return null;
+      } finally {
+        store.setBusyAction(null);
+      }
+    },
+    [],
+  );
 
   const restoreBuiltins = useCallback(async () => {
     const store = useRunbookStore.getState();
@@ -595,7 +671,9 @@ export function useRunbooks() {
       const eventBuffer = api.createRunbookEventBuffer(handleEvent);
       try {
         if (useAppStore.getState().activeSessionId !== sessionId) {
-          throw new Error("Select the target terminal before starting this runbook.");
+          throw new Error(
+            "Select the target terminal before starting this runbook.",
+          );
         }
         const request: RunbookStartRequest = {
           source_id: sourceId,
@@ -615,7 +693,9 @@ export function useRunbooks() {
           inputs,
           evidence_mode: evidenceMode,
           steps: run.steps.map((step, index) => {
-            const defined = definition?.spec.steps.find((item) => item.id === step.id);
+            const defined = definition?.spec.steps.find(
+              (item) => item.id === step.id,
+            );
             return {
               ...step,
               title: defined?.title ?? step.id,
@@ -649,7 +729,9 @@ export function useRunbooks() {
       const eventBuffer = api.createRunbookEventBuffer(handleEvent);
       try {
         if (useAppStore.getState().activeSessionId !== sessionId) {
-          throw new Error("Select the terminal you want to rebind before resuming.");
+          throw new Error(
+            "Select the terminal you want to rebind before resuming.",
+          );
         }
         const run = await api.runbooksResume(
           runId,
@@ -657,7 +739,7 @@ export function useRunbooks() {
           buildRunbookTargetContext(sessionId),
           eventBuffer.handle,
         );
-        const previous = store.runsById[runId] ?? null;
+        const previous = getRunById(runId);
         store.setActiveRun({
           ...run,
           evidence_mode: run.evidence_mode ?? previous?.evidence_mode,
@@ -677,66 +759,108 @@ export function useRunbooks() {
     [handleEvent],
   );
 
-  const cancel = useCallback(async (runId: string) => {
-    const store = useRunbookStore.getState();
-    // Revoke synchronously before any await. This closes claim(true) -> cancel
-    // -> PTY-write even when the claim response was already travelling back to
-    // the webview when the operator pressed Cancel.
-    const attempts = revokeRunbookRun(runId);
-    for (const attempt of attempts) {
-      // Cancel is an operator gesture, so hand an owned in-flight foreground
-      // command SIGINT before releasing observation. The durable outcome still
-      // stays Unknown: SIGINT cannot prove what a mutation already changed or
-      // whether it spawned work outside the foreground process group.
-      interruptJob(attempt.sessionId, attempt.attemptId);
-      abortSession(attempt.sessionId, "cancelled", attempt.attemptId);
-    }
-    store.setBusyAction("cancel");
-    try {
-      await api.runbooksCancel(runId);
-      const terminal = await api.runbooksWaitForTerminal(runId, {
-        onObservation: (run) => useRunbookStore.getState().setActiveRun(run),
-      });
-      store.setActiveRun(terminal);
-      await loadHistory();
-      if (terminal.report_ready) await loadReport(runId);
-    } catch (error) {
-      store.setError(String(error));
-    } finally {
-      store.setBusyAction(null);
-    }
-  }, [loadHistory, loadReport]);
+  const cancel = useCallback(
+    async (runId: string) => {
+      const store = useRunbookStore.getState();
+      // Revoke synchronously before any await. This closes claim(true) -> cancel
+      // -> PTY-write even when the claim response was already travelling back to
+      // the webview when the operator pressed Cancel.
+      const attempts = revokeRunbookRun(runId);
+      for (const attempt of attempts) {
+        // Cancel is an operator gesture, so hand an owned in-flight foreground
+        // command SIGINT before releasing observation. The durable outcome still
+        // stays Unknown: SIGINT cannot prove what a mutation already changed or
+        // whether it spawned work outside the foreground process group.
+        interruptJob(attempt.sessionId, attempt.attemptId);
+        abortSession(attempt.sessionId, "cancelled", attempt.attemptId);
+      }
+      store.setBusyAction("cancel");
+      try {
+        await api.runbooksCancel(runId);
+        const terminal = await api.runbooksWaitForTerminal(runId, {
+          onObservation: (run) => useRunbookStore.getState().setActiveRun(run),
+        });
+        store.setActiveRun(terminal);
+        await loadHistory();
+        if (terminal.report_ready) await loadReport(runId);
+      } catch (error) {
+        store.setError(String(error));
+      } finally {
+        store.setBusyAction(null);
+      }
+    },
+    [loadHistory, loadReport],
+  );
 
-  const respondApproval = useCallback(
+  const respondApprovalInternal = useCallback(
     async (
       runId: string,
       approvalId: string,
       approved: boolean,
       command: string | null,
       shellAttested: boolean,
+      busyAction: string,
+      clearBusy = true,
     ) => {
       const store = useRunbookStore.getState();
-      const approval = store.runsById[runId]?.pending_approval;
-      const modelInvocation = approval?.command.startsWith("model://configured-agent/") ?? false;
+      const run = getRunById(runId);
+      const approval = run?.pending_approval;
+      if (!approval) {
+        store.setError("No pending approval was found for this run.");
+        if (clearBusy && useRunbookStore.getState().busyAction === busyAction) {
+          store.setBusyAction(null);
+        }
+        return;
+      }
+      if (approval.approval_id !== approvalId) {
+        store.setError(
+          "This approval request changed before it was submitted.",
+        );
+        if (clearBusy && useRunbookStore.getState().busyAction === busyAction) {
+          store.setBusyAction(null);
+        }
+        return;
+      }
+      if (approval.command.trim().length === 0) {
+        store.setError("Approval command content is empty.");
+        if (clearBusy && useRunbookStore.getState().busyAction === busyAction) {
+          store.setBusyAction(null);
+        }
+        return;
+      }
+
+      const modelInvocation = approval.command.startsWith(
+        "model://configured-agent/",
+      );
       let promptBinding: string | null = null;
       if (approved && !modelInvocation) {
         if (!shellAttested) {
-          store.setError("Confirm the visible POSIX shell prompt before approving this action.");
+          store.setError(
+            "Confirm the visible POSIX shell prompt before approving this action.",
+          );
           return;
         }
-        const sessionId = store.runsById[runId]?.target.session_id;
-        if (!sessionId || useAppStore.getState().activeSessionId !== sessionId) {
-          store.setError("Select the bound terminal before approving this action.");
+        const sessionId = run.target.session_id;
+        if (
+          !sessionId ||
+          useAppStore.getState().activeSessionId !== sessionId
+        ) {
+          store.setError(
+            "Select the bound terminal before approving this action.",
+          );
           return;
         }
         promptBinding = captureApprovalPromptBinding(sessionId);
         if (!promptBinding) {
-          store.setError("The visible terminal is not in a stable normal-buffer prompt state.");
+          store.setError(
+            "The visible terminal is not in a stable normal-buffer prompt state.",
+          );
           return;
         }
         approvalPromptBindings.set(approvalId, promptBinding);
       }
-      store.setBusyAction(`approval:${approvalId}`);
+
+      store.setBusyAction(busyAction);
       try {
         await api.runbooksRespondApproval(
           runId,
@@ -751,11 +875,125 @@ export function useRunbooks() {
         approvalPromptBindings.delete(approvalId);
         store.setError(String(error));
       } finally {
-        store.setBusyAction(null);
+        if (clearBusy && useRunbookStore.getState().busyAction === busyAction) {
+          store.setBusyAction(null);
+        }
       }
     },
     [refreshRun],
   );
+
+  const respondApproval = useCallback(
+    async (
+      runId: string,
+      approvalId: string,
+      approved: boolean,
+      command: string | null,
+      shellAttested: boolean,
+    ) => {
+      stopApproveAllFlow(runId);
+      await respondApprovalInternal(
+        runId,
+        approvalId,
+        approved,
+        command,
+        shellAttested,
+        `approval:${approvalId}`,
+      );
+    },
+    [respondApprovalInternal],
+  );
+
+  const approveAllPendingSteps = useCallback(
+    async (runId: string) => {
+      const run = getRunById(runId);
+      if (!run || run.status !== "waiting_approval") {
+        return;
+      }
+
+      const autoApproveToken = ++approvalFlowSequence;
+      approvalAllFlows.set(runId, autoApproveToken);
+      const observedApprovals = new Set<string>();
+      const store = useRunbookStore.getState();
+      store.setBusyAction(`approve-all:${runId}`);
+      store.setError(null);
+      try {
+        while (isApproveAllFlowActive(runId, autoApproveToken)) {
+          const currentRun = getRunById(runId);
+          if (!currentRun) {
+            store.setError("The active run is no longer available.");
+            break;
+          }
+          if (
+            currentRun.status !== "waiting_approval" ||
+            currentRun.pending_operator ||
+            currentRun.pending_manual
+          ) {
+            break;
+          }
+          const approval = currentRun.pending_approval;
+          if (!approval) {
+            store.setError("Runbook approval state is missing.");
+            break;
+          }
+          if (observedApprovals.has(approval.approval_id)) {
+            store.setError(
+              "Automatic approval stopped because the approval state did not advance.",
+            );
+            break;
+          }
+          observedApprovals.add(approval.approval_id);
+          const modelInvocation = approval.command.startsWith(
+            "model://configured-agent/",
+          );
+          if (
+            !modelInvocation &&
+            (!approval.command.trim() ||
+              approval.command.length > 4_096 ||
+              /[\r\n\0]/.test(approval.command))
+          ) {
+            store.setError(
+              "Automatic approval stopped because an approval command is invalid.",
+            );
+            break;
+          }
+
+          await respondApprovalInternal(
+            runId,
+            approval.approval_id,
+            true,
+            modelInvocation ? null : approval.command,
+            modelInvocation ? false : true,
+            `approve-all:${runId}`,
+            false,
+          );
+
+          const refreshedRun = getRunById(runId);
+          if (!isApproveAllFlowActive(runId, autoApproveToken)) break;
+          if (!refreshedRun || refreshedRun.status !== "waiting_approval")
+            break;
+        }
+      } catch (error) {
+        store.setError(String(error));
+      } finally {
+        if (isApproveAllFlowActive(runId, autoApproveToken)) {
+          approvalAllFlows.delete(runId);
+        }
+        if (useRunbookStore.getState().busyAction === `approve-all:${runId}`) {
+          store.setBusyAction(null);
+        }
+      }
+    },
+    [respondApprovalInternal],
+  );
+
+  const cancelApproveAll = useCallback((runId: string) => {
+    stopApproveAllFlow(runId);
+    const store = useRunbookStore.getState();
+    if (store.busyAction === `approve-all:${runId}`) {
+      store.setBusyAction(null);
+    }
+  }, []);
 
   const decide = useCallback(
     async (runId: string, decision: RunbookOperatorDecision) => {
@@ -784,13 +1022,22 @@ export function useRunbooks() {
       const store = useRunbookStore.getState();
       store.setBusyAction(`manual:${stepId}`);
       try {
-        const run = useRunbookStore.getState().runsById[runId];
+        const run = getRunById(runId);
         if (!run) throw new Error("The durable run target is unavailable.");
         const target = buildRunbookTargetContext(run.target.session_id);
         if (!sameTarget(run.target, target)) {
-          throw new Error("The terminal target changed; the manual outcome was not submitted.");
+          throw new Error(
+            "The terminal target changed; the manual outcome was not submitted.",
+          );
         }
-        await api.runbooksSubmitManual(runId, stepId, outcome, comment, evidence, target);
+        await api.runbooksSubmitManual(
+          runId,
+          stepId,
+          outcome,
+          comment,
+          evidence,
+          target,
+        );
         await refreshRun(runId);
       } catch (error) {
         store.setError(String(error));
@@ -801,20 +1048,23 @@ export function useRunbooks() {
     [refreshRun],
   );
 
-  const exportReport = useCallback(async (runId: string, destination: string) => {
-    const store = useRunbookStore.getState();
-    store.setBusyAction("export");
-    try {
-      const result = await api.runbooksExport(runId, destination);
-      store.setNotice(`Report exported to ${result.destination}.`);
-      return result;
-    } catch (error) {
-      store.setError(String(error));
-      return null;
-    } finally {
-      store.setBusyAction(null);
-    }
-  }, []);
+  const exportReport = useCallback(
+    async (runId: string, destination: string) => {
+      const store = useRunbookStore.getState();
+      store.setBusyAction("export");
+      try {
+        const result = await api.runbooksExport(runId, destination);
+        store.setNotice(`Report exported to ${result.destination}.`);
+        return result;
+      } catch (error) {
+        store.setError(String(error));
+        return null;
+      } finally {
+        store.setBusyAction(null);
+      }
+    },
+    [],
+  );
 
   const deleteRun = useCallback(
     async (runId: string) => {
@@ -835,9 +1085,10 @@ export function useRunbooks() {
         store.deleteHistoryRun(runId);
         const cleanup = result.evidence_cleanup;
         if (cleanup.complete) {
-          const detail = cleanup.expected > 0
-            ? ` ${cleanup.deleted} evidence artifact${cleanup.deleted === 1 ? "" : "s"} removed${cleanup.missing > 0 ? `; ${cleanup.missing} already missing` : ""}.`
-            : " No captured evidence artifacts were registered.";
+          const detail =
+            cleanup.expected > 0
+              ? ` ${cleanup.deleted} evidence artifact${cleanup.deleted === 1 ? "" : "s"} removed${cleanup.missing > 0 ? `; ${cleanup.missing} already missing` : ""}.`
+              : " No captured evidence artifacts were registered.";
           store.setNotice(`Run history deleted.${detail}`);
         }
         await loadHistory();
@@ -865,6 +1116,8 @@ export function useRunbooks() {
     resume,
     cancel,
     respondApproval,
+    approveAllPendingSteps,
+    cancelApproveAll,
     decide,
     submitManual,
     loadHistory,

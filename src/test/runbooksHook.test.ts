@@ -75,7 +75,11 @@ import type {
   RunbookRunState,
 } from "../lib/runbooks";
 
-function historyEntry(runId: string, state: RunbookRunState, startedAt: string): RunbookHistoryEntry {
+function historyEntry(
+  runId: string,
+  state: RunbookRunState,
+  startedAt: string,
+): RunbookHistoryEntry {
   return {
     run_id: runId,
     source_id: "source-1",
@@ -118,7 +122,14 @@ function definition(id: string): RunbookDefinition {
     metadata: { id, version: "1.0.0", title: id },
     spec: {
       target: { kind: "active-terminal" },
-      steps: [{ id: "one", title: "One", required: true, check: { uses: "manual", instructions: "Check" } }],
+      steps: [
+        {
+          id: "one",
+          title: "One",
+          required: true,
+          check: { uses: "manual", instructions: "Check" },
+        },
+      ],
     },
   };
 }
@@ -136,11 +147,46 @@ function run(runId: string, status: RunbookRunState): RunbookRun {
     active_phase: "check",
     pending_approval_id: null,
     pause_reason: status === "interrupted" ? "Application restarted" : null,
-    steps: [{ id: "one", status: status === "interrupted" ? "unknown" : "checking" }],
+    steps: [
+      { id: "one", status: status === "interrupted" ? "unknown" : "checking" },
+    ],
   };
 }
 
-function approvalEvent(runId: string, approvalId: string, command: string): RunbookEvent {
+function waitingApprovalRun(
+  runId: string,
+  approvalId: string,
+  command: string,
+  overrides: Partial<RunbookRun> = {},
+): RunbookRun {
+  return {
+    ...run(runId, "waiting_approval"),
+    active_step_id: "one",
+    active_phase: "check",
+    pending_approval_id: approvalId,
+    pending_approval: {
+      approval_id: approvalId,
+      run_id: runId,
+      step_id: "one",
+      phase: "check",
+      command,
+      explanation: "Runbook approval",
+      classification: {
+        read_only: false,
+        network: false,
+        privileged: false,
+        opaque: true,
+      },
+    },
+    ...overrides,
+  };
+}
+
+function approvalEvent(
+  runId: string,
+  approvalId: string,
+  command: string,
+): RunbookEvent {
   return {
     type: "ApprovalRequested",
     run_id: runId,
@@ -199,7 +245,9 @@ beforeEach(() => {
   mocks.cancel.mockReset();
   mocks.waitForTerminal.mockReset();
   mocks.list.mockResolvedValue([]);
-  mocks.getDefinition.mockImplementation(async (sourceId: string) => definition(sourceId));
+  mocks.getDefinition.mockImplementation(async (sourceId: string) =>
+    definition(sourceId),
+  );
   mocks.removeSource.mockResolvedValue(undefined);
   mocks.exportPackage.mockResolvedValue({
     destination: "/exports/runbook-example-v1.0.0",
@@ -207,21 +255,25 @@ beforeEach(() => {
   });
   mocks.restoreBuiltins.mockResolvedValue([]);
   mocks.history.mockResolvedValue([]);
-  mocks.runInTerminal.mockImplementation(async (_sessionId, _attemptId, _command, options) => {
-    const authorized = await options.beforeWrite?.();
-    return {
-      exitCode: authorized === false ? null : 0,
-      output: authorized === false ? "" : "full captured output",
-      durationMs: 12,
-      error: authorized === false ? "cancelled" : null,
-      mode: "sentinel",
-    };
-  });
+  mocks.runInTerminal.mockImplementation(
+    async (_sessionId, _attemptId, _command, options) => {
+      const authorized = await options.beforeWrite?.();
+      return {
+        exitCode: authorized === false ? null : 0,
+        output: authorized === false ? "" : "full captured output",
+        durationMs: 12,
+        error: authorized === false ? "cancelled" : null,
+        mode: "sentinel",
+      };
+    },
+  );
   mocks.claimTerminal.mockResolvedValue(true);
   mocks.respondApproval.mockResolvedValue(undefined);
   mocks.capturePrompt.mockReturnValue("prompt-binding");
   mocks.cancel.mockResolvedValue(undefined);
-  mocks.waitForTerminal.mockImplementation(async (runId: string) => run(runId, "cancelled"));
+  mocks.waitForTerminal.mockImplementation(async (runId: string) =>
+    run(runId, "cancelled"),
+  );
   useRunbookStore.getState().reset();
   useAppStore.setState({
     runbooksEnabled: true,
@@ -254,7 +306,14 @@ beforeEach(() => {
     metadata: { id: "baseline", version: "1.0.0", title: "Baseline" },
     spec: {
       target: { kind: "active-terminal" },
-      steps: [{ id: "one", title: "One", required: true, check: { uses: "manual", instructions: "Check" } }],
+      steps: [
+        {
+          id: "one",
+          title: "One",
+          required: true,
+          check: { uses: "manual", instructions: "Check" },
+        },
+      ],
     },
   });
 });
@@ -263,7 +322,10 @@ describe("useRunbooks channel activation", () => {
   it("installs full evidence mode before flushing an early terminal event", async () => {
     let onEvent!: (event: RunbookEvent) => void;
     mocks.start.mockImplementation(
-      async (request: RunbookStartRequest, handler: (event: RunbookEvent) => void) => {
+      async (
+        request: RunbookStartRequest,
+        handler: (event: RunbookEvent) => void,
+      ) => {
         onEvent = handler;
         const run: RunbookRun = {
           run_id: "run-early",
@@ -293,7 +355,16 @@ describe("useRunbooks channel activation", () => {
         true,
       );
     });
-    act(() => onEvent(terminalEvent("run-early", "attempt-early", "approval-early", "sshd -T")));
+    act(() =>
+      onEvent(
+        terminalEvent(
+          "run-early",
+          "attempt-early",
+          "approval-early",
+          "sshd -T",
+        ),
+      ),
+    );
 
     await waitFor(() => expect(mocks.runInTerminal).toHaveBeenCalledTimes(1));
     expect(isRunbookTerminalProtected("session-1")).toBe(true);
@@ -311,7 +382,10 @@ describe("useRunbooks channel activation", () => {
     let onEvent!: (event: RunbookEvent) => void;
     mocks.claimTerminal.mockResolvedValue(false);
     mocks.start.mockImplementation(
-      async (request: RunbookStartRequest, handler: (event: RunbookEvent) => void) => {
+      async (
+        request: RunbookStartRequest,
+        handler: (event: RunbookEvent) => void,
+      ) => {
         onEvent = handler;
         const started = run("run-replayed", "running");
         started.target = request.target_context;
@@ -323,7 +397,15 @@ describe("useRunbooks channel activation", () => {
     await act(async () => {
       await result.current.start("source-1", "session-1", {}, "tail");
     });
-    act(() => onEvent(approvalEvent("run-replayed", "approval-replayed", "touch /tmp/must-not-repeat")));
+    act(() =>
+      onEvent(
+        approvalEvent(
+          "run-replayed",
+          "approval-replayed",
+          "touch /tmp/must-not-repeat",
+        ),
+      ),
+    );
     await act(async () => {
       await result.current.respondApproval(
         "run-replayed",
@@ -333,12 +415,16 @@ describe("useRunbooks channel activation", () => {
         true,
       );
     });
-    act(() => onEvent(terminalEvent(
-      "run-replayed",
-      "attempt-already-claimed",
-      "approval-replayed",
-      "touch /tmp/must-not-repeat",
-    )));
+    act(() =>
+      onEvent(
+        terminalEvent(
+          "run-replayed",
+          "attempt-already-claimed",
+          "approval-replayed",
+          "touch /tmp/must-not-repeat",
+        ),
+      ),
+    );
 
     await waitFor(() => expect(mocks.claimTerminal).toHaveBeenCalledTimes(1));
     expect(mocks.runInTerminal).toHaveBeenCalledTimes(1);
@@ -347,34 +433,39 @@ describe("useRunbooks channel activation", () => {
 
   it("keeps the immutable target guard when live run state disappears before typing", async () => {
     let onEvent!: (event: RunbookEvent) => void;
-    mocks.runInTerminal.mockImplementation(async (_sessionId, _attemptId, _command, options) => {
-      expect(await options.beforeWrite()).toBe(true);
-      // Model the webview/store recovery window after the event was accepted but
-      // before ptyWrite. The target has also changed in place to a remote shell.
-      useRunbookStore.getState().setActiveRun(null);
-      useAppStore.setState((state) => ({
-        sessionUi: {
-          ...state.sessionUi,
-          "session-1": {
-            ...state.sessionUi["session-1"],
-            remote: { kind: "ssh", target: "other.example" },
+    mocks.runInTerminal.mockImplementation(
+      async (_sessionId, _attemptId, _command, options) => {
+        expect(await options.beforeWrite()).toBe(true);
+        // Model the webview/store recovery window after the event was accepted but
+        // before ptyWrite. The target has also changed in place to a remote shell.
+        useRunbookStore.getState().setActiveRun(null);
+        useAppStore.setState((state) => ({
+          sessionUi: {
+            ...state.sessionUi,
+            "session-1": {
+              ...state.sessionUi["session-1"],
+              remote: { kind: "ssh", target: "other.example" },
+            },
           },
-        },
-      }));
-      expect(options.canWrite()).toBe(false);
-      return {
-        exitCode: null,
-        output: "",
-        outputTruncated: false,
-        outputObservedBytes: 0,
-        outputCapturedBytes: 0,
-        durationMs: 1,
-        error: "target_changed",
-        mode: "sentinel",
-      };
-    });
+        }));
+        expect(options.canWrite()).toBe(false);
+        return {
+          exitCode: null,
+          output: "",
+          outputTruncated: false,
+          outputObservedBytes: 0,
+          outputCapturedBytes: 0,
+          durationMs: 1,
+          error: "target_changed",
+          mode: "sentinel",
+        };
+      },
+    );
     mocks.start.mockImplementation(
-      async (request: RunbookStartRequest, handler: (event: RunbookEvent) => void) => {
+      async (
+        request: RunbookStartRequest,
+        handler: (event: RunbookEvent) => void,
+      ) => {
         onEvent = handler;
         const started = run("run-target-guard", "running");
         started.target = request.target_context;
@@ -386,7 +477,11 @@ describe("useRunbooks channel activation", () => {
     await act(async () => {
       await result.current.start("source-1", "session-1", {}, "tail");
     });
-    act(() => onEvent(approvalEvent("run-target-guard", "approval-target", "printf ok")));
+    act(() =>
+      onEvent(
+        approvalEvent("run-target-guard", "approval-target", "printf ok"),
+      ),
+    );
     await act(async () => {
       await result.current.respondApproval(
         "run-target-guard",
@@ -396,12 +491,16 @@ describe("useRunbooks channel activation", () => {
         true,
       );
     });
-    act(() => onEvent(terminalEvent(
-      "run-target-guard",
-      "attempt-target-guard",
-      "approval-target",
-      "printf ok",
-    )));
+    act(() =>
+      onEvent(
+        terminalEvent(
+          "run-target-guard",
+          "attempt-target-guard",
+          "approval-target",
+          "printf ok",
+        ),
+      ),
+    );
 
     await waitFor(() => expect(mocks.runInTerminal).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(mocks.submitTerminal).toHaveBeenCalledTimes(1));
@@ -416,30 +515,38 @@ describe("useRunbooks channel activation", () => {
     let onEvent!: (event: RunbookEvent) => void;
     let resolveClaim!: (claimed: boolean) => void;
     let markClaimStarted!: () => void;
-    const claimStarted = new Promise<void>((resolve) => (markClaimStarted = resolve));
+    const claimStarted = new Promise<void>(
+      (resolve) => (markClaimStarted = resolve),
+    );
     mocks.claimTerminal.mockImplementation(
-      () => new Promise<boolean>((resolve) => {
-        resolveClaim = resolve;
-        markClaimStarted();
-      }),
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveClaim = resolve;
+          markClaimStarted();
+        }),
     );
     let simulatedWrites = 0;
-    mocks.runInTerminal.mockImplementation(async (_sessionId, _attemptId, _command, options) => {
-      const authorized = await options.beforeWrite();
-      if (authorized && options.canWrite()) simulatedWrites += 1;
-      return {
-        exitCode: null,
-        output: "",
-        outputTruncated: false,
-        outputObservedBytes: 0,
-        outputCapturedBytes: 0,
-        durationMs: 1,
-        error: authorized ? "target_changed" : "cancelled",
-        mode: "sentinel",
-      };
-    });
+    mocks.runInTerminal.mockImplementation(
+      async (_sessionId, _attemptId, _command, options) => {
+        const authorized = await options.beforeWrite();
+        if (authorized && options.canWrite()) simulatedWrites += 1;
+        return {
+          exitCode: null,
+          output: "",
+          outputTruncated: false,
+          outputObservedBytes: 0,
+          outputCapturedBytes: 0,
+          durationMs: 1,
+          error: authorized ? "target_changed" : "cancelled",
+          mode: "sentinel",
+        };
+      },
+    );
     mocks.start.mockImplementation(
-      async (request: RunbookStartRequest, handler: (event: RunbookEvent) => void) => {
+      async (
+        request: RunbookStartRequest,
+        handler: (event: RunbookEvent) => void,
+      ) => {
         onEvent = handler;
         const started = run("run-cancel-race", "running");
         started.target = request.target_context;
@@ -451,11 +558,15 @@ describe("useRunbooks channel activation", () => {
     await act(async () => {
       await result.current.start("source-1", "session-1", {}, "tail");
     });
-    act(() => onEvent(approvalEvent(
-      "run-cancel-race",
-      "approval-cancel-race",
-      "touch /tmp/must-not-run-after-cancel",
-    )));
+    act(() =>
+      onEvent(
+        approvalEvent(
+          "run-cancel-race",
+          "approval-cancel-race",
+          "touch /tmp/must-not-run-after-cancel",
+        ),
+      ),
+    );
     await act(async () => {
       await result.current.respondApproval(
         "run-cancel-race",
@@ -465,12 +576,16 @@ describe("useRunbooks channel activation", () => {
         true,
       );
     });
-    act(() => onEvent(terminalEvent(
-      "run-cancel-race",
-      "attempt-cancel-race",
-      "approval-cancel-race",
-      "touch /tmp/must-not-run-after-cancel",
-    )));
+    act(() =>
+      onEvent(
+        terminalEvent(
+          "run-cancel-race",
+          "attempt-cancel-race",
+          "approval-cancel-race",
+          "touch /tmp/must-not-run-after-cancel",
+        ),
+      ),
+    );
     await claimStarted;
 
     let cancellation!: Promise<void>;
@@ -480,7 +595,9 @@ describe("useRunbooks channel activation", () => {
     resolveClaim(true);
     await act(async () => cancellation);
 
-    await waitFor(() => expect(mocks.cancel).toHaveBeenCalledWith("run-cancel-race"));
+    await waitFor(() =>
+      expect(mocks.cancel).toHaveBeenCalledWith("run-cancel-race"),
+    );
     expect(simulatedWrites).toBe(0);
     expect(mocks.submitTerminal).not.toHaveBeenCalled();
   });
@@ -498,7 +615,10 @@ describe("useRunbooks channel activation", () => {
       () => new Promise((resolve) => (settleTerminal = resolve)),
     );
     mocks.start.mockImplementation(
-      async (request: RunbookStartRequest, handler: (event: RunbookEvent) => void) => {
+      async (
+        request: RunbookStartRequest,
+        handler: (event: RunbookEvent) => void,
+      ) => {
         onEvent = handler;
         const started = run("run-evicted", "running");
         started.target = request.target_context;
@@ -510,11 +630,11 @@ describe("useRunbooks channel activation", () => {
     await act(async () => {
       await result.current.start("source-1", "session-1", {}, "tail");
     });
-    act(() => onEvent(approvalEvent(
-      "run-evicted",
-      "approval-evicted",
-      "printf still-owned",
-    )));
+    act(() =>
+      onEvent(
+        approvalEvent("run-evicted", "approval-evicted", "printf still-owned"),
+      ),
+    );
     await act(async () => {
       await result.current.respondApproval(
         "run-evicted",
@@ -524,12 +644,16 @@ describe("useRunbooks channel activation", () => {
         true,
       );
     });
-    act(() => onEvent(terminalEvent(
-      "run-evicted",
-      "attempt-evicted",
-      "approval-evicted",
-      "printf still-owned",
-    )));
+    act(() =>
+      onEvent(
+        terminalEvent(
+          "run-evicted",
+          "attempt-evicted",
+          "approval-evicted",
+          "printf still-owned",
+        ),
+      ),
+    );
 
     await waitFor(() => expect(mocks.runInTerminal).toHaveBeenCalledTimes(1));
     act(() => {
@@ -542,19 +666,29 @@ describe("useRunbooks channel activation", () => {
       }
     });
     expect(useRunbookStore.getState().events).toHaveLength(200);
-    expect(useRunbookStore.getState().events.some(
-      (event) => event.type === "RunInTerminal" && event.run_id === "run-evicted",
-    )).toBe(false);
-    expect(listLiveRunbookPtyJobs("run-evicted")).toEqual([{
-      runId: "run-evicted",
-      attemptId: "attempt-evicted",
-      sessionId: "session-1",
-    }]);
+    expect(
+      useRunbookStore
+        .getState()
+        .events.some(
+          (event) =>
+            event.type === "RunInTerminal" && event.run_id === "run-evicted",
+        ),
+    ).toBe(false);
+    expect(listLiveRunbookPtyJobs("run-evicted")).toEqual([
+      {
+        runId: "run-evicted",
+        attemptId: "attempt-evicted",
+        sessionId: "session-1",
+      },
+    ]);
 
     await act(async () => {
       await result.current.cancel("run-evicted");
     });
-    expect(mocks.interruptJob).toHaveBeenCalledWith("session-1", "attempt-evicted");
+    expect(mocks.interruptJob).toHaveBeenCalledWith(
+      "session-1",
+      "attempt-evicted",
+    );
     expect(mocks.abortSession).toHaveBeenCalledWith(
       "session-1",
       "cancelled",
@@ -571,7 +705,9 @@ describe("useRunbooks channel activation", () => {
       });
       await Promise.resolve();
     });
-    await waitFor(() => expect(listLiveRunbookPtyJobs("run-evicted")).toEqual([]));
+    await waitFor(() =>
+      expect(listLiveRunbookPtyJobs("run-evicted")).toEqual([]),
+    );
     expect(mocks.submitTerminal).not.toHaveBeenCalled();
   });
 });
@@ -621,9 +757,13 @@ describe("useRunbooks recovery and deletion", () => {
       await result.current.loadLibrary();
     });
 
-    expect(useRunbookStore.getState().selectedSourceId).toBe("builtin-security");
+    expect(useRunbookStore.getState().selectedSourceId).toBe(
+      "builtin-security",
+    );
     expect(mocks.getDefinition).toHaveBeenCalledWith("builtin-security");
-    expect(useRunbookStore.getState().definition?.metadata.id).toBe("builtin-security");
+    expect(useRunbookStore.getState().definition?.metadata.id).toBe(
+      "builtin-security",
+    );
   });
 
   it("ignores an older library response after a newer refresh completes", async () => {
@@ -650,7 +790,9 @@ describe("useRunbooks recovery and deletion", () => {
       resolveSecond([source("newer")]);
       await secondRequest;
     });
-    expect(useRunbookStore.getState().sources.map((item) => item.source_id)).toEqual(["newer"]);
+    expect(
+      useRunbookStore.getState().sources.map((item) => item.source_id),
+    ).toEqual(["newer"]);
     expect(useRunbookStore.getState().selectedSourceId).toBe("newer");
     expect(useRunbookStore.getState().loadingLibrary).toBe(false);
 
@@ -658,7 +800,9 @@ describe("useRunbooks recovery and deletion", () => {
       resolveFirst([source("older")]);
       await firstRequest;
     });
-    expect(useRunbookStore.getState().sources.map((item) => item.source_id)).toEqual(["newer"]);
+    expect(
+      useRunbookStore.getState().sources.map((item) => item.source_id),
+    ).toEqual(["newer"]);
     expect(useRunbookStore.getState().selectedSourceId).toBe("newer");
     expect(useRunbookStore.getState().definition?.metadata.id).toBe("newer");
     expect(useRunbookStore.getState().loadingLibrary).toBe(false);
@@ -704,11 +848,15 @@ describe("useRunbooks recovery and deletion", () => {
 
   it("ignores an older definition error after a newer source has loaded", async () => {
     let rejectFirst!: (reason: Error) => void;
-    const firstDefinition = new Promise<RunbookDefinition>((_resolve, reject) => {
-      rejectFirst = reject;
-    });
+    const firstDefinition = new Promise<RunbookDefinition>(
+      (_resolve, reject) => {
+        rejectFirst = reject;
+      },
+    );
     mocks.getDefinition.mockImplementation((sourceId: string) =>
-      sourceId === "first" ? firstDefinition : Promise.resolve(definition("second")),
+      sourceId === "first"
+        ? firstDefinition
+        : Promise.resolve(definition("second")),
     );
     useRunbookStore.getState().setSources([source("first"), source("second")]);
     const { result } = renderHook(() => useRunbooks());
@@ -730,7 +878,10 @@ describe("useRunbooks recovery and deletion", () => {
   });
 
   it("restores examples, preserves backend ordering, and selects the first valid source", async () => {
-    const restored = [source("builtin-security", "builtin"), source("user-baseline")];
+    const restored = [
+      source("builtin-security", "builtin"),
+      source("user-baseline"),
+    ];
     mocks.restoreBuiltins.mockResolvedValue(restored);
     const { result } = renderHook(() => useRunbooks());
 
@@ -740,15 +891,21 @@ describe("useRunbooks recovery and deletion", () => {
 
     expect(mocks.restoreBuiltins).toHaveBeenCalledTimes(1);
     expect(useRunbookStore.getState().sources).toEqual(restored);
-    expect(useRunbookStore.getState().selectedSourceId).toBe("builtin-security");
-    expect(useRunbookStore.getState().notice).toBe("Included runbook examples restored.");
+    expect(useRunbookStore.getState().selectedSourceId).toBe(
+      "builtin-security",
+    );
+    expect(useRunbookStore.getState().notice).toBe(
+      "Included runbook examples restored.",
+    );
   });
 
   it("hides an included source, retains the explanatory notice, and selects a fallback", async () => {
-    useRunbookStore.getState().setSources([
-      source("builtin-security", "builtin"),
-      source("builtin-developer", "builtin"),
-    ]);
+    useRunbookStore
+      .getState()
+      .setSources([
+        source("builtin-security", "builtin"),
+        source("builtin-developer", "builtin"),
+      ]);
     useRunbookStore.getState().selectSource("builtin-security");
     const { result } = renderHook(() => useRunbooks());
 
@@ -757,11 +914,15 @@ describe("useRunbooks recovery and deletion", () => {
     });
 
     expect(mocks.removeSource).toHaveBeenCalledWith("builtin-security");
-    expect(useRunbookStore.getState().sources.map((item) => item.source_id)).toEqual([
+    expect(
+      useRunbookStore.getState().sources.map((item) => item.source_id),
+    ).toEqual(["builtin-developer"]);
+    expect(useRunbookStore.getState().selectedSourceId).toBe(
       "builtin-developer",
-    ]);
-    expect(useRunbookStore.getState().selectedSourceId).toBe("builtin-developer");
-    expect(useRunbookStore.getState().notice).toContain("Included runbook hidden");
+    );
+    expect(useRunbookStore.getState().notice).toContain(
+      "Included runbook hidden",
+    );
   });
 
   it("exports a reusable package with source and destination feedback", async () => {
@@ -771,10 +932,107 @@ describe("useRunbooks recovery and deletion", () => {
       await result.current.exportPackage("builtin-security", "/exports");
     });
 
-    expect(mocks.exportPackage).toHaveBeenCalledWith("builtin-security", "/exports");
+    expect(mocks.exportPackage).toHaveBeenCalledWith(
+      "builtin-security",
+      "/exports",
+    );
     expect(useRunbookStore.getState().notice).toContain(
       "/exports/runbook-example-v1.0.0",
     );
+    expect(useRunbookStore.getState().busyAction).toBeNull();
+  });
+
+  it("approveAllPendingSteps can drain multiple waiting approvals", async () => {
+    const first = waitingApprovalRun(
+      "run-approve-all",
+      "approval-1",
+      "printf one",
+    );
+    const second = waitingApprovalRun(
+      "run-approve-all",
+      "approval-2",
+      "printf two",
+      {
+        active_phase: "apply",
+      },
+    );
+    const terminal = {
+      ...first,
+      status: "running" as const,
+      active_phase: null,
+      pending_approval_id: null,
+      pending_approval: null,
+    };
+
+    useRunbookStore.getState().setActiveRun(first);
+    mocks.get.mockResolvedValueOnce(second).mockResolvedValueOnce(terminal);
+
+    const { result } = renderHook(() => useRunbooks());
+
+    await act(async () => {
+      await result.current.approveAllPendingSteps("run-approve-all");
+    });
+
+    expect(mocks.respondApproval).toHaveBeenCalledTimes(2);
+    expect(mocks.respondApproval).toHaveBeenNthCalledWith(
+      1,
+      "run-approve-all",
+      "approval-1",
+      true,
+      "printf one",
+      true,
+    );
+    expect(mocks.respondApproval).toHaveBeenNthCalledWith(
+      2,
+      "run-approve-all",
+      "approval-2",
+      true,
+      "printf two",
+      true,
+    );
+    expect(useRunbookStore.getState().error).toBeNull();
+    expect(useRunbookStore.getState().busyAction).toBeNull();
+  });
+
+  it("approveAllPendingSteps stops when a run enters a manual or operator pause", async () => {
+    const first = waitingApprovalRun("run-paused", "approval-1", "printf one");
+    const paused = {
+      ...first,
+      status: "waiting_operator" as const,
+      pending_approval_id: null,
+      pending_approval: null,
+      pending_operator: {
+        run_id: "run-paused",
+        step_id: "one",
+        reason: "human decision required",
+        choices: ["retry", "skip", "waive", "stop"],
+      },
+    };
+    useRunbookStore.getState().setActiveRun(first);
+    mocks.get.mockResolvedValueOnce(paused);
+
+    const { result } = renderHook(() => useRunbooks());
+    await act(async () => {
+      await result.current.approveAllPendingSteps("run-paused");
+    });
+
+    expect(mocks.respondApproval).toHaveBeenCalledTimes(1);
+    expect(useRunbookStore.getState().error).toBeNull();
+    expect(useRunbookStore.getState().busyAction).toBeNull();
+  });
+
+  it("approveAllPendingSteps surfaces response errors and exits", async () => {
+    const first = waitingApprovalRun("run-fail", "approval-1", "printf one");
+    useRunbookStore.getState().setActiveRun(first);
+    mocks.respondApproval.mockRejectedValueOnce(new Error("approval denied"));
+
+    const { result } = renderHook(() => useRunbooks());
+    await act(async () => {
+      await result.current.approveAllPendingSteps("run-fail");
+    });
+
+    expect(mocks.respondApproval).toHaveBeenCalledTimes(1);
+    expect(useRunbookStore.getState().error).toContain("approval");
     expect(useRunbookStore.getState().busyAction).toBeNull();
   });
 
@@ -793,15 +1051,21 @@ describe("useRunbooks recovery and deletion", () => {
 
     expect(mocks.get).toHaveBeenCalledWith("run-interrupted");
     expect(mocks.report).not.toHaveBeenCalled();
-    expect(useRunbookStore.getState().activeRun?.run_id).toBe("run-interrupted");
-    expect(useRunbookStore.getState().selectedHistoryRunId).toBe("run-interrupted");
+    expect(useRunbookStore.getState().activeRun?.run_id).toBe(
+      "run-interrupted",
+    );
+    expect(useRunbookStore.getState().selectedHistoryRunId).toBe(
+      "run-interrupted",
+    );
     expect(useRunbookStore.getState().view).toBe("run");
   });
 
   it("opens an interrupted history entry in the live recovery view", async () => {
-    useRunbookStore.getState().setHistory([
-      historyEntry("run-interrupted", "interrupted", "2026-08-13T12:02:00Z"),
-    ]);
+    useRunbookStore
+      .getState()
+      .setHistory([
+        historyEntry("run-interrupted", "interrupted", "2026-08-13T12:02:00Z"),
+      ]);
     mocks.get.mockResolvedValue(run("run-interrupted", "interrupted"));
 
     const { result } = renderHook(() => useRunbooks());
@@ -844,7 +1108,9 @@ describe("useRunbooks recovery and deletion", () => {
     expect(useRunbookStore.getState().history).toEqual([entry]);
     expect(useRunbookStore.getState().activeRun?.run_id).toBe(entry.run_id);
     expect(useRunbookStore.getState().selectedHistoryRunId).toBe(entry.run_id);
-    expect(useRunbookStore.getState().error).toContain("Evidence cleanup was incomplete");
+    expect(useRunbookStore.getState().error).toContain(
+      "Evidence cleanup was incomplete",
+    );
     expect(useRunbookStore.getState().error).toContain("1/3 removed");
   });
 });
