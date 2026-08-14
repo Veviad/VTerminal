@@ -200,8 +200,8 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
             <div className="flex shrink-0 gap-1.5">
               {terminal && (
                 <button
-                  onClick={async () => {
-                    await openReport();
+                  onClick={() => {
+                    openReport();
                   }}
                   className={primaryButton}
                 >
@@ -209,8 +209,8 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
                 </button>
               )}
               <button
-                onClick={async () => {
-                  await openRunbookReview();
+                onClick={() => {
+                  openRunbookReview();
                 }}
                 disabled={definitionReviewLoading}
                 className={secondaryButton}
@@ -219,8 +219,8 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
               </button>
               {run.status === "interrupted" && sessionId && (
                 <button
-                  onClick={async () => {
-                    await resume(run.run_id, sessionId);
+                  onClick={() => {
+                    resume(run.run_id, sessionId);
                   }}
                   disabled={busyAction === "resume"}
                   className={primaryButton}
@@ -231,10 +231,10 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
               {!terminal && run.status !== "interrupted" && (
                 <div className="flex flex-col items-end gap-1">
                   <button
-                    onClick={async () => {
+                    onClick={() => {
                       if (confirmCancel) {
                         setConfirmCancel(false);
-                        await cancel(run.run_id);
+                        cancel(run.run_id);
                       } else {
                         setConfirmCancel(true);
                       }
@@ -298,14 +298,14 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
               targetLabel={describeRunbookTarget(run.target)}
               busy={busyAction !== null}
               autoApproving={autoApproving}
-              onApproveAll={async () => {
-                await approveAllPendingSteps(run.run_id);
+              onApproveAll={() => {
+                approveAllPendingSteps(run.run_id);
               }}
-              onCancelApproveAll={async () => {
-                await cancelApproveAll(run.run_id);
+              onCancelApproveAll={() => {
+                cancelApproveAll(run.run_id);
               }}
-              onRespond={async (approved, command, shellAttested) => {
-                await respondApproval(
+              onRespond={(approved, command, shellAttested) => {
+                respondApproval(
                   run.run_id,
                   pendingApproval.approval_id,
                   approved,
@@ -321,8 +321,8 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
           <RunbookManualCard
             request={pendingManual}
             busy={busyAction === `manual:${pendingManual.step_id}`}
-            onSubmit={async (outcome, comment, evidence) => {
-              await submitManual(
+            onSubmit={(outcome, comment, evidence) => {
+              submitManual(
                 run.run_id,
                 pendingManual.step_id,
                 outcome,
@@ -337,8 +337,8 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
           <RunbookPauseCard
             request={pendingOperator}
             busy={busyAction?.startsWith("decision:") ?? false}
-            onDecide={async (kind, reason) => {
-              await decide(run.run_id, {
+            onDecide={(kind, reason) => {
+              decide(run.run_id, {
                 kind,
                 step_id: pendingOperator.step_id,
                 actor: "operator",
