@@ -14,7 +14,7 @@ on:
   release:
     types: [published]
   schedule:
-    - cron: '17 3 * * *'
+    - cron: "17 3 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -28,10 +28,32 @@ permissions:
   contents: read
 
 jobs:
+  # GitHub Pages currently accepts a deployment from a `release` event and
+  # reports success, but can keep serving the previous artifact when that
+  # release points at a commit that Pages already deployed. Re-dispatching the
+  # workflow avoids that release-event-only path. See:
+  # https://github.com/actions/deploy-pages/issues/383
+  refresh-release:
+    name: Refresh published release
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Re-dispatch Pages deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: gh workflow run pages.yml --repo "$GITHUB_REPOSITORY" --ref "$DEFAULT_BRANCH"
+
   build:
     name: Build
+    if: github.event_name != 'release'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      release_version: ${{ steps.release.outputs.version }}
     steps:
       # Always deploy current main. A release event otherwise checks out its tag,
       # and workflow_dispatch can target another ref; neither should be allowed
@@ -46,9 +68,13 @@ jobs:
           node-version-file: .nvmrc
 
       - name: Render live release data
+        id: release
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: node scripts/site-release/render.mjs --source docs --output "$RUNNER_TEMP/vterminal-pages"
+        run: |
+          node scripts/site-release/render.mjs --source docs --output "$RUNNER_TEMP/vterminal-pages"
+          version=$(jq -er '.release.version' "$RUNNER_TEMP/vterminal-pages/release.json")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       # Every asset is referenced relatively ("assets/…" at the root, "../assets/…"
       # from docs/legal/), so the site works at the custom domain, at the
@@ -99,3 +125,29 @@ jobs:
       # v5's changelog is that bump and nothing else.
       - id: deployment
         uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5
+
+      # A successful deploy-pages result is not enough: release-event
+      # deployments can be marked successful while the old artifact remains
+      # live. Verify the public release feed with cache-busting retries so this
+      # workflow cannot silently leave the download page stale again.
+      - name: Verify live release version
+        env:
+          EXPECTED_VERSION: ${{ needs.build.outputs.release_version }}
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          set -euo pipefail
+          live_url="${PAGE_URL%/}/release.json"
+          observed=''
+          for attempt in {1..12}; do
+            observed=$(curl --fail --silent --show-error \
+              --header 'Cache-Control: no-cache' \
+              "${live_url}?pages_run=${GITHUB_RUN_ID}&attempt=${attempt}" \
+              | jq -r '.release.version // empty') || true
+            if [ "$observed" = "$EXPECTED_VERSION" ]; then
+              echo "Verified VTerminal $EXPECTED_VERSION at $live_url."
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Pages serves VTerminal ${observed:-unknown}; expected $EXPECTED_VERSION."
+          exit 1
