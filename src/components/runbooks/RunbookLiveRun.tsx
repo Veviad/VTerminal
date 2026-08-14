@@ -79,7 +79,9 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
     return (
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
         <button
-          onClick={() => setShowReport(false)}
+          onClick={() => {
+            setShowReport(false);
+          }}
           className={`${secondaryButton} mb-4`}
         >
           ← Checklist
@@ -96,6 +98,9 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
   const active =
     run.steps.find((step) => step.id === run.active_step_id) ?? null;
   const autoApproving = busyAction === `approve-all:${run.run_id}`;
+  const pendingApproval = run.pending_approval;
+  const pendingManual = run.pending_manual;
+  const pendingOperator = run.pending_operator;
 
   useEffect(() => {
     setShowDefinitionReview(false);
@@ -195,8 +200,8 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
             <div className="flex shrink-0 gap-1.5">
               {terminal && (
                 <button
-                  onClick={() => {
-                    void openReport();
+                  onClick={async () => {
+                    await openReport();
                   }}
                   className={primaryButton}
                 >
@@ -204,8 +209,8 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
                 </button>
               )}
               <button
-                onClick={() => {
-                  void openRunbookReview();
+                onClick={async () => {
+                  await openRunbookReview();
                 }}
                 disabled={definitionReviewLoading}
                 className={secondaryButton}
@@ -214,8 +219,8 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
               </button>
               {run.status === "interrupted" && sessionId && (
                 <button
-                  onClick={() => {
-                    void resume(run.run_id, sessionId);
+                  onClick={async () => {
+                    await resume(run.run_id, sessionId);
                   }}
                   disabled={busyAction === "resume"}
                   className={primaryButton}
@@ -226,10 +231,10 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
               {!terminal && run.status !== "interrupted" && (
                 <div className="flex flex-col items-end gap-1">
                   <button
-                    onClick={() => {
+                    onClick={async () => {
                       if (confirmCancel) {
                         setConfirmCancel(false);
-                        void cancel(run.run_id);
+                        await cancel(run.run_id);
                       } else {
                         setConfirmCancel(true);
                       }
@@ -280,7 +285,7 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
           )}
         </section>
 
-        {run.pending_approval && (
+        {pendingApproval && (
           <section className="space-y-2">
             {autoApproving && (
               <p className="rounded-md border border-accent/30 bg-accent/5 px-2 py-1.5 text-[10px] text-accent">
@@ -289,20 +294,20 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
               </p>
             )}
             <RunbookApprovalCard
-              approval={run.pending_approval}
+              approval={pendingApproval}
               targetLabel={describeRunbookTarget(run.target)}
               busy={busyAction !== null}
               autoApproving={autoApproving}
-              onApproveAll={() => {
-                void approveAllPendingSteps(run.run_id);
+              onApproveAll={async () => {
+                await approveAllPendingSteps(run.run_id);
               }}
-              onCancelApproveAll={() => {
-                void cancelApproveAll(run.run_id);
+              onCancelApproveAll={async () => {
+                await cancelApproveAll(run.run_id);
               }}
-              onRespond={(approved, command, shellAttested) => {
-                void respondApproval(
+              onRespond={async (approved, command, shellAttested) => {
+                await respondApproval(
                   run.run_id,
-                  run.pending_approval!.approval_id,
+                  pendingApproval.approval_id,
                   approved,
                   command,
                   shellAttested,
@@ -312,34 +317,34 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
           </section>
         )}
 
-        {run.pending_manual && (
+        {pendingManual && (
           <RunbookManualCard
-            request={run.pending_manual}
-            busy={busyAction === `manual:${run.pending_manual.step_id}`}
-            onSubmit={(outcome, comment, evidence) =>
-              void submitManual(
+            request={pendingManual}
+            busy={busyAction === `manual:${pendingManual.step_id}`}
+            onSubmit={async (outcome, comment, evidence) => {
+              await submitManual(
                 run.run_id,
-                run.pending_manual!.step_id,
+                pendingManual.step_id,
                 outcome,
                 comment,
                 evidence,
-              )
-            }
+              );
+            }}
           />
         )}
 
-        {run.pending_operator && !run.pending_manual && (
+        {pendingOperator && !pendingManual && (
           <RunbookPauseCard
-            request={run.pending_operator}
+            request={pendingOperator}
             busy={busyAction?.startsWith("decision:") ?? false}
-            onDecide={(kind, reason) =>
-              void decide(run.run_id, {
+            onDecide={async (kind, reason) => {
+              await decide(run.run_id, {
                 kind,
-                step_id: run.pending_operator?.step_id,
+                step_id: pendingOperator.step_id,
                 actor: "operator",
                 reason,
-              })
-            }
+              });
+            }}
           />
         )}
 

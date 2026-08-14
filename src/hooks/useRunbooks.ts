@@ -90,7 +90,7 @@ function stopApproveAllFlow(runId: string): void {
 
 function isApproveAllFlowActive(runId: string, token: number): boolean {
   const active = approvalAllFlows.get(runId);
-  return active === token;
+  return Object.is(active, token);
 }
 
 function getRunById(runId: string): RunbookRun | null {
@@ -259,7 +259,7 @@ export function useRunbooks() {
         targetError = String(error);
       }
 
-      const run = useRunbookStore.getState().runsById[event.run_id] ?? null;
+      const run = getRunById(event.run_id);
       const expectedTarget = run?.target ?? null;
       if (app.activeSessionId !== event.session_id) {
         targetError =
@@ -345,8 +345,7 @@ export function useRunbooks() {
             },
             canWrite: () => {
               const latest = useAppStore.getState();
-              const latestRun =
-                useRunbookStore.getState().runsById[event.run_id];
+              const latestRun = getRunById(event.run_id);
               if (
                 isRunbookRunRevoked(event.run_id) ||
                 !latest.runbooksEnabled ||
@@ -740,7 +739,7 @@ export function useRunbooks() {
           buildRunbookTargetContext(sessionId),
           eventBuffer.handle,
         );
-        const previous = store.runsById[runId] ?? null;
+        const previous = getRunById(runId);
         store.setActiveRun({
           ...run,
           evidence_mode: run.evidence_mode ?? previous?.evidence_mode,
@@ -1023,7 +1022,7 @@ export function useRunbooks() {
       const store = useRunbookStore.getState();
       store.setBusyAction(`manual:${stepId}`);
       try {
-        const run = useRunbookStore.getState().runsById[runId];
+        const run = getRunById(runId);
         if (!run) throw new Error("The durable run target is unavailable.");
         const target = buildRunbookTargetContext(run.target.session_id);
         if (!sameTarget(run.target, target)) {
