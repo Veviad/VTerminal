@@ -2190,7 +2190,11 @@ impl<'a> EngineRunner<'a> {
             return Ok(());
         };
         let mut connection = database.0.lock().map_err(|_| "runbook database poisoned")?;
-        super::db::request_approval(
+        // One transaction. The engine holds its own connection, so a
+        // `runbooks_get` on the command side can land between two commits and
+        // read a run that is `running` with a pending approval already
+        // recorded — a pair the panel reads as "nothing to approve".
+        super::db::request_approval_awaiting(
             &mut connection,
             &super::db::ApprovalIntent {
                 id: request.approval_id.clone(),
@@ -2205,13 +2209,6 @@ impl<'a> EngineRunner<'a> {
                 opaque: request.opaque,
             },
         )?;
-        super::db::transition_run(
-            &mut connection,
-            &self.spec.run_id,
-            RunStatus::Running,
-            RunStatus::WaitingApproval,
-            None,
-        )?;
         Ok(())
     }
 
@@ -2224,25 +2221,30 @@ impl<'a> EngineRunner<'a> {
             return Ok(());
         };
         let mut connection = database.0.lock().map_err(|_| "runbook database poisoned")?;
-        super::db::decide_approval(
-            &mut connection,
-            &resolved.approval_id,
-            resolved.decision,
-            &resolved.actor,
-            resolved.reason.as_deref(),
-            resolved.executed_command.as_deref(),
-        )?;
         match resolved.decision {
             ApprovalDecision::Approve => {
-                super::db::transition_run(
+                // Decision and resumption in one transaction, for the same
+                // reason as the request above: the half-committed pair here is
+                // `waiting_approval` with the approval already decided, which
+                // reads as "waiting for a click" with nothing left to click.
+                super::db::approve_and_resume(
                     &mut connection,
                     &self.spec.run_id,
-                    RunStatus::WaitingApproval,
-                    RunStatus::Running,
-                    None,
+                    &resolved.approval_id,
+                    &resolved.actor,
+                    resolved.reason.as_deref(),
+                    resolved.executed_command.as_deref(),
                 )?;
             }
             ApprovalDecision::Decline => {
+                super::db::decide_approval(
+                    &mut connection,
+                    &resolved.approval_id,
+                    resolved.decision,
+                    &resolved.actor,
+                    resolved.reason.as_deref(),
+                    resolved.executed_command.as_deref(),
+                )?;
                 let index = self
                     .checklist
                     .iter()

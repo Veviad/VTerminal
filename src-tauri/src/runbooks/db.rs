@@ -1323,10 +1323,28 @@ pub fn transition_run(
     next: RunStatus,
     pause_reason: Option<&str>,
 ) -> Result<RunRecord, String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    transition_run_tx(&tx, run_id, expected, next, pause_reason)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    get_run(conn, run_id)?.ok_or_else(|| "transitioned run disappeared".into())
+}
+
+/// The run-status half of a transition, inside a caller-owned transaction.
+///
+/// Split out so a status change can be committed together with the approval row
+/// that causes it. A reader on another connection must never observe
+/// `waiting_approval` with no pending approval, or `running` with one: the
+/// runbook panel drives its whole approval UI off exactly that pair.
+fn transition_run_tx(
+    tx: &Transaction<'_>,
+    run_id: &str,
+    expected: RunStatus,
+    next: RunStatus,
+    pause_reason: Option<&str>,
+) -> Result<(), String> {
     if !expected.can_transition_to(next) {
         return Err(format!("invalid run transition: {expected} -> {next}"));
     }
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
     let actual: String = tx
         .query_row(
             "SELECT status FROM runbook_runs WHERE id = ?1",
@@ -1358,7 +1376,7 @@ pub fn transition_run(
     )
     .map_err(|e| format!("transition run: {e}"))?;
     append_event_tx(
-        &tx,
+        tx,
         run_id,
         "run_status_changed",
         None,
@@ -1366,8 +1384,7 @@ pub fn transition_run(
         &serde_json::json!({"from":expected,"to":next,"reason":pause_reason}),
         &timestamp,
     )?;
-    tx.commit().map_err(|e| e.to_string())?;
-    get_run(conn, run_id)?.ok_or_else(|| "transitioned run disappeared".into())
+    Ok(())
 }
 
 pub fn list_steps(conn: &Connection, run_id: &str) -> Result<Vec<StepRecord>, String> {
@@ -2195,10 +2212,40 @@ pub fn request_approval(
     conn: &mut Connection,
     input: &ApprovalIntent,
 ) -> Result<ApprovalRecord, String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    request_approval_tx(&tx, input)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    get_approval(conn, &input.id)?.ok_or_else(|| "approval disappeared".into())
+}
+
+/// Record a pending approval and move the run to `waiting_approval` in ONE
+/// transaction.
+///
+/// Two commits let a reader on the command-side connection observe the run as
+/// `running` while a pending approval already exists — the runbook panel reads
+/// that pair as "no approval to show" and sits on a spinner while the engine
+/// waits for a click that has nowhere to be made.
+pub fn request_approval_awaiting(
+    conn: &mut Connection,
+    input: &ApprovalIntent,
+) -> Result<ApprovalRecord, String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    request_approval_tx(&tx, input)?;
+    transition_run_tx(
+        &tx,
+        &input.run_id,
+        RunStatus::Running,
+        RunStatus::WaitingApproval,
+        None,
+    )?;
+    tx.commit().map_err(|e| e.to_string())?;
+    get_approval(conn, &input.id)?.ok_or_else(|| "approval disappeared".into())
+}
+
+fn request_approval_tx(tx: &Transaction<'_>, input: &ApprovalIntent) -> Result<(), String> {
     // Native v1 never auto-dispatches into an existing interactive shell. Even
     // a textually read-only check needs the operator's prompt/session trust
     // attestation, so every phase legitimately reaches this durable gate.
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
     let timestamp = now();
     let count = tx
         .execute(
@@ -2236,7 +2283,7 @@ pub fn request_approval(
     )
     .map_err(|e| format!("record runbook approval: {e}"))?;
     append_event_tx(
-        &tx,
+        tx,
         &input.run_id,
         "approval_requested",
         Some(&input.step_id),
@@ -2244,8 +2291,7 @@ pub fn request_approval(
         &serde_json::json!({"approval_id":input.id,"phase":input.phase}),
         &timestamp,
     )?;
-    tx.commit().map_err(|e| e.to_string())?;
-    get_approval(conn, &input.id)?.ok_or_else(|| "approval disappeared".into())
+    Ok(())
 }
 
 pub fn decide_approval(
@@ -2256,10 +2302,57 @@ pub fn decide_approval(
     reason: Option<&str>,
     executed_command: Option<&str>,
 ) -> Result<ApprovalRecord, String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    decide_approval_tx(&tx, approval_id, decision, actor, reason, executed_command)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    get_approval(conn, approval_id)?.ok_or_else(|| "approval disappeared".into())
+}
+
+/// Approve an approval and resume the run in ONE transaction.
+///
+/// The mirror of `request_approval_awaiting`. Two commits let a reader see the
+/// run still `waiting_approval` with the approval already decided, i.e. a state
+/// that says "waiting for a click" with nothing to click — which is what the
+/// panel used to report as "Runbook approval state is missing."
+pub fn approve_and_resume(
+    conn: &mut Connection,
+    run_id: &str,
+    approval_id: &str,
+    actor: &str,
+    reason: Option<&str>,
+    executed_command: Option<&str>,
+) -> Result<ApprovalRecord, String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    decide_approval_tx(
+        &tx,
+        approval_id,
+        ApprovalDecision::Approve,
+        actor,
+        reason,
+        executed_command,
+    )?;
+    transition_run_tx(
+        &tx,
+        run_id,
+        RunStatus::WaitingApproval,
+        RunStatus::Running,
+        None,
+    )?;
+    tx.commit().map_err(|e| e.to_string())?;
+    get_approval(conn, approval_id)?.ok_or_else(|| "approval disappeared".into())
+}
+
+fn decide_approval_tx(
+    tx: &Transaction<'_>,
+    approval_id: &str,
+    decision: ApprovalDecision,
+    actor: &str,
+    reason: Option<&str>,
+    executed_command: Option<&str>,
+) -> Result<(), String> {
     if actor.trim().is_empty() {
         return Err("approval actor is required".into());
     }
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
     let (attempt_id, run_id, step_id, proposed): (String, String, String, Option<String>) = tx
         .query_row(
             "SELECT attempt_id,run_id,step_id,proposed_command FROM runbook_approvals
@@ -2317,7 +2410,7 @@ pub fn decide_approval(
     )
     .map_err(|e| e.to_string())?;
     append_event_tx(
-        &tx,
+        tx,
         &run_id,
         "approval_decided",
         Some(&step_id),
@@ -2325,8 +2418,7 @@ pub fn decide_approval(
         &serde_json::json!({"approval_id":approval_id,"decision":decision,"edited":edited}),
         &timestamp,
     )?;
-    tx.commit().map_err(|e| e.to_string())?;
-    get_approval(conn, approval_id)?.ok_or_else(|| "approval disappeared".into())
+    Ok(())
 }
 
 /// Settle every pending gate before a run is cancelled. In-flight commands are
@@ -5778,6 +5870,123 @@ mod tests {
                 created_at: now(),
             },
         )
+    }
+
+    /// Set a run up to the point where a check phase is about to ask for
+    /// approval: running, step one checking, one intent attempt.
+    fn run_awaiting_first_approval(conn: &mut Connection, session: &str) -> (RunRecord, String) {
+        let run = create_run(conn, &creation(session)).unwrap();
+        transition_run(conn, &run.id, RunStatus::Created, RunStatus::Ready, None).unwrap();
+        transition_run(conn, &run.id, RunStatus::Ready, RunStatus::Running, None).unwrap();
+        transition_step(
+            conn,
+            &run.id,
+            "one",
+            StepStatus::Pending,
+            StepStatus::Checking,
+            StepUpdate::default(),
+        )
+        .unwrap();
+        let attempt = create_attempt_intent(
+            conn,
+            &AttemptIntent {
+                run_id: run.id.clone(),
+                step_id: "one".into(),
+                phase: RunbookPhase::Check,
+                executor: "shell".into(),
+                proposed_command: Some("check".into()),
+            },
+        )
+        .unwrap();
+        (run, attempt.id)
+    }
+
+    fn approval_intent(run_id: &str, attempt_id: &str, id: &str) -> ApprovalIntent {
+        ApprovalIntent {
+            id: id.into(),
+            attempt_id: attempt_id.into(),
+            run_id: run_id.into(),
+            step_id: "one".into(),
+            phase: RunbookPhase::Check,
+            proposed_command: Some("check".into()),
+            read_only: false,
+            network: false,
+            privileged: false,
+            opaque: true,
+        }
+    }
+
+    /// A reader must never see a run that is waiting on an approval that does
+    /// not exist, or running with one that does.
+    ///
+    /// The engine holds its own connection, so anything it commits in two steps
+    /// is observable in between by `runbooks_get`. Rollback is the property
+    /// that proves these are one transaction: make the second half fail and the
+    /// first half must be gone too.
+    #[test]
+    fn an_approval_and_its_run_status_move_together() {
+        let mut conn = db();
+        let (run, attempt_id) = run_awaiting_first_approval(&mut conn, "approval-atomicity");
+
+        request_approval_awaiting(&mut conn, &approval_intent(&run.id, &attempt_id, "a-1"))
+            .unwrap();
+        assert_eq!(
+            get_run(&conn, &run.id).unwrap().unwrap().status,
+            RunStatus::WaitingApproval
+        );
+        assert_eq!(
+            get_approval(&conn, "a-1").unwrap().unwrap().status,
+            ApprovalStatus::Pending
+        );
+
+        approve_and_resume(&mut conn, &run.id, "a-1", "operator", None, None).unwrap();
+        assert_eq!(
+            get_run(&conn, &run.id).unwrap().unwrap().status,
+            RunStatus::Running
+        );
+        assert_eq!(
+            get_approval(&conn, "a-1").unwrap().unwrap().status,
+            ApprovalStatus::Approved
+        );
+    }
+
+    #[test]
+    fn a_failed_run_transition_takes_the_approval_row_with_it() {
+        let mut conn = db();
+        let (run, attempt_id) = run_awaiting_first_approval(&mut conn, "approval-rollback");
+
+        // Both attempts while the run is still `running` — `create_attempt_intent`
+        // requires that. `agent` executor for the second because the
+        // one-in-flight unique index excludes it.
+        let second = create_attempt_intent(
+            &mut conn,
+            &AttemptIntent {
+                run_id: run.id.clone(),
+                step_id: "one".into(),
+                phase: RunbookPhase::Check,
+                executor: "agent".into(),
+                proposed_command: Some("check again".into()),
+            },
+        )
+        .expect("an agent attempt may coexist with the in-flight shell attempt");
+
+        request_approval_awaiting(&mut conn, &approval_intent(&run.id, &attempt_id, "a-1"))
+            .unwrap();
+
+        // The approval half SUCCEEDS (that attempt is still `intent`) and only
+        // the status half fails, because the run is now `waiting_approval`.
+        let error =
+            request_approval_awaiting(&mut conn, &approval_intent(&run.id, &second.id, "a-2"))
+                .expect_err("the run is not running, so the status half must fail");
+        assert!(error.contains("expected running"), "{error}");
+        assert!(
+            get_approval(&conn, "a-2").unwrap().is_none(),
+            "the approval row must not survive a failed run transition",
+        );
+        assert_eq!(
+            get_run(&conn, &run.id).unwrap().unwrap().status,
+            RunStatus::WaitingApproval
+        );
     }
 
     #[test]
