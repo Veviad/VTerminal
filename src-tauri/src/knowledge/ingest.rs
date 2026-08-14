@@ -26,6 +26,59 @@ const MAX_PAGES: usize = 20_000;
 const MAX_EXTRACTED_BYTES: usize = 128 * 1024 * 1024;
 const JOB_UPDATED_EVENT: &str = "knowledge-job-updated";
 
+struct ResolvedHttpEmbedding {
+    endpoint: EmbeddingEndpoint,
+    client: reqwest::Client,
+}
+
+/// A credential-bearing HTTP endpoint belongs to one ingestion execution. It
+/// is resolved lazily on the first batch, then both success and failure are
+/// retained for the remaining batches and dropped when the job returns.
+#[derive(Default)]
+struct EmbeddingJobContext {
+    profile_fingerprint: Option<String>,
+    resolved_http: Option<Result<ResolvedHttpEmbedding, String>>,
+}
+
+impl EmbeddingJobContext {
+    fn resolve_http_with(
+        &mut self,
+        profile: &EmbeddingProfile,
+        resolve: impl FnOnce() -> Result<(String, Option<crate::credentials::Secret>), String>,
+    ) -> Result<&ResolvedHttpEmbedding, String> {
+        if self
+            .profile_fingerprint
+            .as_deref()
+            .is_some_and(|fingerprint| fingerprint != profile.fingerprint())
+        {
+            return Err(
+                "an ingestion embedding context cannot be reused for another profile".into(),
+            );
+        }
+        if self.resolved_http.is_none() {
+            self.profile_fingerprint = Some(profile.fingerprint().to_string());
+            self.resolved_http = Some(resolve().and_then(|(base_url, api_key)| {
+                let endpoint =
+                    EmbeddingEndpoint::new(base_url, api_key).map_err(|error| error.to_string())?;
+                let client = reqwest::Client::builder()
+                    .connect_timeout(std::time::Duration::from_secs(8))
+                    .timeout(std::time::Duration::from_secs(120))
+                    .build()
+                    .map_err(|error| format!("create embedding HTTP client: {error}"))?;
+                Ok(ResolvedHttpEmbedding { endpoint, client })
+            }));
+        }
+        match self
+            .resolved_http
+            .as_ref()
+            .expect("embedding context was initialized")
+        {
+            Ok(resolved) => Ok(resolved),
+            Err(error) => Err(error.clone()),
+        }
+    }
+}
+
 /// Per-application runner coordination. The operating-system writer lock still
 /// serializes each desktop app with the standalone CLI, while this state prevents
 /// a burst of file selections from spawning one waiter per file. Keeping it in
@@ -931,6 +984,7 @@ async fn embed_pending_local(
     bucket_id: &str,
 ) -> Result<(), String> {
     let profile = local_bucket_profile(docs, bucket_id)?;
+    let mut embedding = EmbeddingJobContext::default();
     let total = docs.with(|connection| {
         connection
             .query_row(
@@ -958,7 +1012,9 @@ async fn embed_pending_local(
             .iter()
             .map(|chunk| EmbeddingInput::document(&chunk.text, Some(chunk.title.clone())))
             .collect::<Vec<_>>();
-        let vectors = embed_documents(app, &profile, &inputs).await?.vectors;
+        let vectors = embed_documents(app, &mut embedding, &profile, &inputs)
+            .await?
+            .vectors;
         let rows = pending
             .iter()
             .zip(vectors)
@@ -988,6 +1044,7 @@ async fn ingest_qdrant(
     mut payload: IngestJobPayload,
 ) -> Result<(), String> {
     let (client, profile) = managed_qdrant_target(app, connection_id, collection).await?;
+    let mut embedding = EmbeddingJobContext::default();
     persist_progress_and_notify(app, docs, job, "chunk", 0, None)?;
     let spec = ChunkSpec::default();
     let source_pages = source_pages(&payload.pages);
@@ -1017,7 +1074,9 @@ async fn ingest_qdrant(
                 EmbeddingInput::document(&chunk.text, Some(payload.document.title.clone()))
             })
             .collect::<Vec<_>>();
-        let vectors = embed_documents(app, &profile, &inputs).await?.vectors;
+        let vectors = embed_documents(app, &mut embedding, &profile, &inputs)
+            .await?
+            .vectors;
         for (chunk, vector) in batch.iter().zip(vectors) {
             embedded_chunks.push(DocumentChunk {
                 document_id: document_id.clone(),
@@ -1399,6 +1458,7 @@ async fn retire_revision_if_superseded(
 
 async fn embed_documents(
     app: &tauri::AppHandle<Wry>,
+    context: &mut EmbeddingJobContext,
     profile: &EmbeddingProfile,
     inputs: &[EmbeddingInput],
 ) -> Result<EmbeddedBatch, String> {
@@ -1407,17 +1467,11 @@ async fn embed_documents(
             embed_local_documents(app, profile, inputs).await
         }
         provider => {
-            let (base_url, api_key) = embedding_endpoint(app, profile, provider)?;
-            let endpoint =
-                EmbeddingEndpoint::new(base_url, api_key).map_err(|error| error.to_string())?;
-            let client = reqwest::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(8))
-                .timeout(std::time::Duration::from_secs(120))
-                .build()
-                .map_err(|error| format!("create embedding HTTP client: {error}"))?;
+            let resolved = context
+                .resolve_http_with(profile, || embedding_endpoint(app, profile, provider))?;
             embed_http_batch(
-                &client,
-                &endpoint,
+                &resolved.client,
+                &resolved.endpoint,
                 profile,
                 EmbeddingPurpose::Document,
                 inputs,
@@ -1494,13 +1548,33 @@ fn required_credential(
     id: crate::credentials::CredentialId,
     provider: &str,
 ) -> Result<crate::credentials::Secret, String> {
-    crate::commands::settings::read_credential(app, id)?
-        .ok_or_else(|| format!("{provider} API key is missing; add it in Settings first"))
+    required_credential_with(id, provider, |id| crate::credentials::state(app).get(id))
+}
+
+fn required_credential_with(
+    id: crate::credentials::CredentialId,
+    provider: &str,
+    read: impl FnOnce(
+        &crate::credentials::CredentialId,
+    ) -> Result<Option<crate::credentials::Secret>, String>,
+) -> Result<crate::credentials::Secret, String> {
+    read(&id)?.ok_or_else(|| format!("{provider} API key is missing; add it in Settings first"))
 }
 
 fn advanced_embedding_endpoint(
     app: &tauri::AppHandle<Wry>,
     profile: &EmbeddingProfile,
+) -> Result<(String, Option<crate::credentials::Secret>), String> {
+    let servers = crate::models::remote::read_servers(app);
+    advanced_embedding_endpoint_with(profile, &servers, |server_id| {
+        crate::models::remote::read_token(app, server_id)
+    })
+}
+
+fn advanced_embedding_endpoint_with(
+    profile: &EmbeddingProfile,
+    servers: &[crate::models::remote::RemoteServer],
+    read_token: impl FnOnce(&str) -> Result<Option<crate::credentials::Secret>, String>,
 ) -> Result<(String, Option<crate::credentials::Secret>), String> {
     use crate::models::remote::ServerKind;
     let kind = match profile.semantic().provider {
@@ -1508,8 +1582,8 @@ fn advanced_embedding_endpoint(
         EmbeddingProviderDialect::LmStudio => ServerKind::LmStudio,
         _ => return Err("not an advanced embedding provider".into()),
     };
-    let matches = crate::models::remote::read_servers(app)
-        .into_iter()
+    let matches = servers
+        .iter()
         .filter(|server| {
             server.kind == kind
                 && server
@@ -1533,10 +1607,7 @@ fn advanced_embedding_endpoint(
             ))
         }
     };
-    Ok((
-        server.base_url.clone(),
-        crate::models::remote::read_token(app, &server.id)?,
-    ))
+    Ok((server.base_url.clone(), read_token(&server.id)?))
 }
 
 /// Run one ingestion to completion without a Tauri application. This is the
@@ -1757,6 +1828,7 @@ async fn embed_pending_local_headless(
     bucket_id: &str,
 ) -> Result<(), String> {
     let profile = local_bucket_profile(docs, bucket_id)?;
+    let mut embedding = EmbeddingJobContext::default();
     let total = docs.with(|connection| {
         connection
             .query_row(
@@ -1780,9 +1852,10 @@ async fn embed_pending_local_headless(
             .iter()
             .map(|chunk| EmbeddingInput::document(&chunk.text, Some(chunk.title.clone())))
             .collect::<Vec<_>>();
-        let vectors = embed_documents_headless(app_data, settings, &profile, &inputs)
-            .await?
-            .vectors;
+        let vectors =
+            embed_documents_headless(app_data, settings, &mut embedding, &profile, &inputs)
+                .await?
+                .vectors;
         let rows = pending
             .iter()
             .zip(vectors)
@@ -1821,6 +1894,7 @@ async fn ingest_qdrant_headless(
         "upload requires a managed VTerminal collection with exact embedding metadata".to_string()
     })?;
     let profile = metadata.embedding_profile;
+    let mut embedding = EmbeddingJobContext::default();
     if metadata.embedding_profile_fingerprint != profile.fingerprint() {
         return Err("collection metadata has a mismatched embedding fingerprint".into());
     }
@@ -1846,9 +1920,10 @@ async fn ingest_qdrant_headless(
                 EmbeddingInput::document(&chunk.text, Some(payload.document.title.clone()))
             })
             .collect::<Vec<_>>();
-        let vectors = embed_documents_headless(app_data, settings, &profile, &inputs)
-            .await?
-            .vectors;
+        let vectors =
+            embed_documents_headless(app_data, settings, &mut embedding, &profile, &inputs)
+                .await?
+                .vectors;
         for (chunk, vector) in batch.iter().zip(vectors) {
             document_chunks.push(DocumentChunk {
                 document_id: document_id.clone(),
@@ -1940,9 +2015,43 @@ fn qdrant_headless(
     QdrantClient::new(endpoint, key).map_err(|error| error.to_string())
 }
 
+fn headless_embedding_endpoint(
+    profile: &EmbeddingProfile,
+) -> Result<(String, Option<crate::credentials::Secret>), String> {
+    headless_embedding_endpoint_with(profile, crate::credentials::headless_get)
+}
+
+fn headless_embedding_endpoint_with(
+    profile: &EmbeddingProfile,
+    read: impl FnOnce(
+        &crate::credentials::CredentialId,
+    ) -> Result<Option<crate::credentials::Secret>, String>,
+) -> Result<(String, Option<crate::credentials::Secret>), String> {
+    let (base_url, credential_id) = match profile.semantic().provider {
+        EmbeddingProviderDialect::OpenAi => (
+            "https://api.openai.com",
+            crate::credentials::CredentialId::OpenAi,
+        ),
+        EmbeddingProviderDialect::Mistral => (
+            "https://api.mistral.ai",
+            crate::credentials::CredentialId::Mistral,
+        ),
+        _ => {
+            return Err(
+                "headless ingestion supports built-in local, OpenAI, and Mistral profiles".into(),
+            )
+        }
+    };
+    let key = read(&credential_id)?
+        .filter(|secret| !secret.expose().trim().is_empty())
+        .ok_or_else(|| "the embedding provider API key is missing".to_string())?;
+    Ok((base_url.into(), Some(key)))
+}
+
 async fn embed_documents_headless(
     app_data: &std::path::Path,
     settings: &HeadlessSettings,
+    context: &mut EmbeddingJobContext,
     profile: &EmbeddingProfile,
     inputs: &[EmbeddingInput],
 ) -> Result<EmbeddedBatch, String> {
@@ -1967,31 +2076,10 @@ async fn embed_documents_headless(
             .await
             .map_err(|error| error.to_string());
     }
-    let (base_url, key) = match profile.semantic().provider {
-        EmbeddingProviderDialect::OpenAi => (
-            "https://api.openai.com",
-            crate::credentials::headless_get(&crate::credentials::CredentialId::OpenAi)?
-                .map(|secret| secret.expose().to_owned()),
-        ),
-        EmbeddingProviderDialect::Mistral => (
-            "https://api.mistral.ai",
-            crate::credentials::headless_get(&crate::credentials::CredentialId::Mistral)?
-                .map(|secret| secret.expose().to_owned()),
-        ),
-        _ => {
-            return Err(
-                "headless ingestion supports built-in local, OpenAI, and Mistral profiles".into(),
-            )
-        }
-    };
-    let key = key
-        .filter(|key| !key.trim().is_empty())
-        .ok_or_else(|| "the embedding provider API key is missing".to_string())?;
-    let endpoint =
-        EmbeddingEndpoint::new(base_url, Some(key.into())).map_err(|error| error.to_string())?;
+    let resolved = context.resolve_http_with(profile, || headless_embedding_endpoint(profile))?;
     embed_http_batch(
-        &reqwest::Client::new(),
-        &endpoint,
+        &resolved.client,
+        &resolved.endpoint,
         profile,
         EmbeddingPurpose::Document,
         inputs,
@@ -2572,5 +2660,120 @@ mod tests {
         let allocated = allocate_remote_revision(Some(10)).unwrap();
         assert!(allocated > 10);
         assert!(allocated < (1_u64 << 53));
+    }
+
+    #[test]
+    fn app_ingestion_reads_a_provider_credential_once_across_batches() {
+        let profile =
+            super::super::embedding::openai_profile("text-embedding-3-small", 1_536).unwrap();
+        let reads = std::cell::Cell::new(0);
+        let mut context = EmbeddingJobContext::default();
+
+        for _ in 0..3 {
+            let resolved = context
+                .resolve_http_with(&profile, || {
+                    let key = required_credential_with(
+                        crate::credentials::CredentialId::OpenAi,
+                        "OpenAI",
+                        |id| {
+                            reads.set(reads.get() + 1);
+                            assert_eq!(id, &crate::credentials::CredentialId::OpenAi);
+                            Ok(Some(crate::credentials::Secret::from("app-secret")))
+                        },
+                    )?;
+                    Ok(("https://api.openai.com".into(), Some(key)))
+                })
+                .unwrap();
+            assert_eq!(resolved.endpoint.base_url(), "https://api.openai.com");
+            assert!(resolved.endpoint.has_api_key());
+        }
+
+        assert_eq!(reads.get(), 1);
+    }
+
+    #[test]
+    fn app_ingestion_reads_an_advanced_server_token_once_across_batches() {
+        let mut semantic = super::super::embedding::openai_profile("fixture", 768)
+            .unwrap()
+            .semantic()
+            .clone();
+        semantic.provider = EmbeddingProviderDialect::LmStudio;
+        semantic.model_id = "local-embedding".into();
+        let profile = EmbeddingProfile::new(semantic).unwrap();
+        let servers = vec![crate::models::remote::RemoteServer {
+            id: "server-one".into(),
+            kind: crate::models::remote::ServerKind::LmStudio,
+            label: "Local embeddings".into(),
+            base_url: "http://127.0.0.1:1234".into(),
+            models: vec![crate::models::remote::RemoteModel {
+                wire_model: "local-embedding".into(),
+                label: "Local embedding".into(),
+                context_tokens: 4_096,
+                supports_vision: false,
+                supports_tools: false,
+            }],
+        }];
+        let reads = std::cell::Cell::new(0);
+        let mut context = EmbeddingJobContext::default();
+
+        for _ in 0..3 {
+            let resolved = context
+                .resolve_http_with(&profile, || {
+                    advanced_embedding_endpoint_with(&profile, &servers, |server_id| {
+                        reads.set(reads.get() + 1);
+                        assert_eq!(server_id, "server-one");
+                        Ok(Some(crate::credentials::Secret::from("remote-token")))
+                    })
+                })
+                .unwrap();
+            assert_eq!(resolved.endpoint.base_url(), "http://127.0.0.1:1234");
+            assert!(resolved.endpoint.has_api_key());
+        }
+
+        assert_eq!(reads.get(), 1);
+    }
+
+    #[test]
+    fn headless_ingestion_reads_a_provider_credential_once_across_batches() {
+        let profile = super::super::embedding::mistral_profile("mistral-embed", 1_024).unwrap();
+        let reads = std::cell::Cell::new(0);
+        let mut context = EmbeddingJobContext::default();
+
+        for _ in 0..3 {
+            let resolved = context
+                .resolve_http_with(&profile, || {
+                    headless_embedding_endpoint_with(&profile, |id| {
+                        reads.set(reads.get() + 1);
+                        assert_eq!(id, &crate::credentials::CredentialId::Mistral);
+                        Ok(Some(crate::credentials::Secret::from("headless-secret")))
+                    })
+                })
+                .unwrap();
+            assert_eq!(resolved.endpoint.base_url(), "https://api.mistral.ai");
+            assert!(resolved.endpoint.has_api_key());
+        }
+
+        assert_eq!(reads.get(), 1);
+    }
+
+    #[test]
+    fn ingestion_caches_credential_errors_for_the_rest_of_the_job() {
+        let profile =
+            super::super::embedding::openai_profile("text-embedding-3-small", 1_536).unwrap();
+        let reads = std::cell::Cell::new(0);
+        let mut context = EmbeddingJobContext::default();
+
+        for _ in 0..3 {
+            let result = context.resolve_http_with(&profile, || {
+                reads.set(reads.get() + 1);
+                Err("credential access denied".into())
+            });
+            match result {
+                Err(error) => assert_eq!(error, "credential access denied"),
+                Ok(_) => panic!("a denied credential must not resolve"),
+            }
+        }
+
+        assert_eq!(reads.get(), 1);
     }
 }

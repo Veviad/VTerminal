@@ -55,6 +55,7 @@ import type {
   WorkspaceSnapshotInput,
 } from "./types";
 import { localBucketDescriptor, normalizeKnowledgeBucketRef } from "./knowledge";
+import { trackArchiveWrite, trackExitArchiveWrite } from "./archiveWriteTracker";
 
 // RETAINED-CHANNEL GOTCHA (same as Cowork's realtimeChannels map):
 // a Channel must stay referenced for as long as Rust will send on it, or GC
@@ -462,6 +463,12 @@ export const workspaceScrollback = (sessionId: string) =>
 /** Resets the crash-loop counter once a run has survived a few seconds. */
 export const workspaceMarkHealthy = () => invoke<void>("workspace_mark_healthy");
 
+/** Set only after the final workspace and archive writes are durable. */
+export const workspaceMarkCleanExit = () => invoke<void>("workspace_mark_clean_exit");
+
+/** Re-arm crash reporting when a prepared exit is abandoned. */
+export const workspaceMarkRunning = () => invoke<void>("workspace_mark_running");
+
 export const workspaceClear = () => invoke<void>("workspace_clear");
 
 // ---------- Session archive ----------
@@ -484,21 +491,25 @@ export const archiveTranscript = (sessionId: string) =>
   invoke<ChatMessage[]>("archive_transcript", { sessionId });
 
 export const archivePut = (session: ArchiveSessionInput) =>
-  invoke<void>("archive_put", { session });
+  trackArchiveWrite(() => invoke<void>("archive_put", { session }));
 
 /** One transaction. Used by the quit path, which archives every tab at once
  *  inside a hard time budget. */
 export const archivePutMany = (sessions: ArchiveSessionInput[]) =>
-  invoke<void>("archive_put_many", { sessions });
+  trackArchiveWrite(() => invoke<void>("archive_put_many", { sessions }));
+
+/** Exit-barrier-only variant; ordinary archive mutations are frozen by then. */
+export const archivePutManyForExit = (sessions: ArchiveSessionInput[]) =>
+  trackExitArchiveWrite(() => invoke<void>("archive_put_many", { sessions }));
 
 export const archiveDelete = (sessionId: string) =>
-  invoke<void>("archive_delete", { sessionId });
+  trackArchiveWrite(() => invoke<void>("archive_delete", { sessionId }));
 
-export const archiveClear = () => invoke<void>("archive_clear");
+export const archiveClear = () => trackArchiveWrite(() => invoke<void>("archive_clear"));
 
 /** Returns how many rows went. Called after a retention limit is lowered, so the
  *  change takes effect immediately rather than at the next archive write. */
-export const archivePrune = () => invoke<number>("archive_prune");
+export const archivePrune = () => trackArchiveWrite(() => invoke<number>("archive_prune"));
 
 // ---------- Attachments ----------
 
@@ -540,20 +551,37 @@ export const getSystemInfo = () =>
 
 export const updateCheck = () => invoke<UpdateMetadata | null>("update_check");
 
-export async function updateInstall(
+export async function updateDownload(
   onEvent: (event: UpdateDownloadEvent) => void,
-): Promise<void> {
+): Promise<string> {
   const channel = new Channel<UpdateDownloadEvent>();
   channel.onmessage = onEvent;
   updateChannels.add(channel);
   try {
-    await invoke<void>("update_install", { onEvent: channel });
+    return await invoke<string>("update_download", { onEvent: channel });
   } finally {
     updateChannels.delete(channel);
   }
 }
 
+export const updateCancel = () => invoke<void>("update_cancel");
+
+export const updateApply = (downloadId: string) =>
+  invoke<void>("update_apply", { downloadId });
+
 export const appRestart = () => invoke<void>("app_restart");
+
+export type AppQuitOrigin = "menu" | "windowClose" | "exitRequested";
+export type AppQuitTicket = { token: number; origin: AppQuitOrigin };
+
+export const appQuitBegin = (origin: AppQuitOrigin) =>
+  invoke<AppQuitTicket>("app_quit_begin", { origin });
+
+export const appQuitCommit = (token: number) =>
+  invoke<void>("app_quit_commit", { token });
+
+export const appQuitForce = (token: number, reason?: string) =>
+  invoke<void>("app_quit_force", { token, reason });
 
 // ---------- On-device vision sidecar ----------
 

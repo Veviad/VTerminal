@@ -172,7 +172,9 @@ export function useAiStream() {
         (e) => dispatchPanelEvent(sessionId, requestId, e),
       );
     } catch (err) {
-      useAppStore.getState().finishAiStream(sessionId, String(err));
+      if (ownsActiveRequest(sessionId, requestId)) {
+        useAppStore.getState().finishAiStream(sessionId, String(err), undefined, requestId);
+      }
     }
   }, []);
 
@@ -182,6 +184,10 @@ export function useAiStream() {
     if (isSessionBusy(sessionId)) return;
     const requestId = newRequestId();
     const stream = store.aiStreams[sessionId];
+    // Claim the generation before the first await. Attachment persistence and
+    // knowledge retrieval are preflight work, but an exit/new-chat fence still
+    // has to see and retire them before it snapshots the transcript.
+    store.initAiStream(sessionId, "ask", requestId);
     // Resolve attached blocks into the context
     const context = buildTerminalContext(sessionId);
     if (stream?.attachedBlockIds.length) {
@@ -217,7 +223,16 @@ export function useAiStream() {
       };
     });
 
-    const staged = await persistAttachments(sessionId, stream?.pendingAttachments ?? []);
+    let staged: Awaited<ReturnType<typeof persistAttachments>>;
+    try {
+      staged = await persistAttachments(sessionId, stream?.pendingAttachments ?? []);
+    } catch (err) {
+      if (ownsActiveRequest(sessionId, requestId)) {
+        useAppStore.getState().finishAiStream(sessionId, String(err), undefined, requestId);
+      }
+      return;
+    }
+    if (!ownsActiveRequest(sessionId, requestId)) return;
     let outgoing = buildOutgoing(prompt, staged);
 
     // The chat model cannot see, but a sidecar is loaded: transcribe on-device and
@@ -225,18 +240,25 @@ export function useAiStream() {
     // with images and no vision means one is ready.
     const canSee = store.catalog.find((m) => m.id === store.activeModelId)?.supports_vision;
     if (outgoing.images.length > 0 && !canSee) {
-      if (!ocrAvailable()) return;
+      if (!ocrAvailable()) {
+        useAppStore
+          .getState()
+          .finishAiStream(sessionId, S.vision.readFailed, undefined, requestId);
+        return;
+      }
       // Stream FIRST, transcription second. On-device OCR is seconds on a large
       // screenshot, and without this the panel sits inert with no Stop button —
       // indistinguishable from a hang. `vision_describe` registers on the same
       // cancel registry as a chat turn, so Stop really reaches it.
-      store.initAiStream(sessionId, "ask", requestId);
       const folded = await transcribeImages(requestId, outgoing.prompt, staged);
+      if (!ownsActiveRequest(sessionId, requestId)) return;
       if (folded === null) {
         // Deliberately NOT sent, and the stream is closed again: an answer about
         // an image the model never received is indistinguishable from one about an
         // image it did. The files stay staged so the user can retry.
-        useAppStore.getState().finishAiStream(sessionId, S.vision.readFailed);
+        useAppStore
+          .getState()
+          .finishAiStream(sessionId, S.vision.readFailed, undefined, requestId);
         return;
       }
       outgoing = { prompt: folded, images: [] };
@@ -263,6 +285,7 @@ export function useAiStream() {
           prompt,
           DOC_INJECT_LIMIT,
         );
+        if (!ownsActiveRequest(sessionId, requestId)) return;
         const folded = foldRetrievedPassages(outgoing.prompt, response.hits);
         outgoing = { ...outgoing, prompt: folded.prompt };
         docsUsed = folded.count;
@@ -276,6 +299,7 @@ export function useAiStream() {
           );
         }
       } catch {
+        if (!ownsActiveRequest(sessionId, requestId)) return;
         store.setKnowledgeWarning(
           sessionId,
           "Attached knowledge could not be searched for this turn. The answer may be ungrounded.",
@@ -292,8 +316,6 @@ export function useAiStream() {
       attachments: staged.length > 0 ? staged : undefined,
       createdAt: new Date().toISOString(),
     });
-    // Idempotent when the OCR branch above already ran; required otherwise.
-    store.initAiStream(sessionId, "ask", requestId);
     // Only now, once the files are on the outgoing message: clearing any earlier
     // would let a send that never starts eat them.
     if (staged.length > 0) store.clearPendingAttachments(sessionId);
@@ -308,7 +330,9 @@ export function useAiStream() {
         (e) => dispatchPanelEvent(sessionId, requestId, e),
       );
     } catch (err) {
-      useAppStore.getState().finishAiStream(sessionId, String(err));
+      if (ownsActiveRequest(sessionId, requestId)) {
+        useAppStore.getState().finishAiStream(sessionId, String(err), undefined, requestId);
+      }
     }
   }, []);
 
@@ -318,10 +342,22 @@ export function useAiStream() {
     const store = useAppStore.getState();
     if (isSessionBusy(sessionId)) return;
     const requestId = newRequestId();
-    const staged = await persistAttachments(
-      sessionId,
-      store.aiStreams[sessionId]?.pendingAttachments ?? [],
-    );
+    // Like ask mode, own the session before attachment persistence yields. This
+    // makes a shutdown fence authoritative even while no backend request exists.
+    store.initAiStream(sessionId, "agent", requestId);
+    let staged: Awaited<ReturnType<typeof persistAttachments>>;
+    try {
+      staged = await persistAttachments(
+        sessionId,
+        store.aiStreams[sessionId]?.pendingAttachments ?? [],
+      );
+    } catch (err) {
+      if (ownsActiveRequest(sessionId, requestId)) {
+        useAppStore.getState().finishAiStream(sessionId, String(err), undefined, requestId);
+      }
+      return;
+    }
+    if (!ownsActiveRequest(sessionId, requestId)) return;
     const outgoing = buildOutgoing(goal, staged);
     store.pushAiMessage(sessionId, {
       id: `msg-${Date.now()}`,
@@ -330,7 +366,6 @@ export function useAiStream() {
       attachments: staged.length > 0 ? staged : undefined,
       createdAt: new Date().toISOString(),
     });
-    store.initAiStream(sessionId, "agent", requestId);
     if (staged.length > 0) store.clearPendingAttachments(sessionId);
     // Read at dispatch time, not captured earlier: a reopened session's archived
     // transcript is written into the store asynchronously, and this is what turns
@@ -353,9 +388,16 @@ export function useAiStream() {
         docBuckets,
         (e) => dispatchPanelEvent(sessionId, requestId, e),
       );
-      useAppStore.getState().setModelTranscript(sessionId, transcript);
+      // Done/Paused clears requestId before agentStart resolves. generationId
+      // intentionally survives that event, but is replaced by a new run and
+      // cleared by exit/cancel fences.
+      useAppStore
+        .getState()
+        .setModelTranscriptForGeneration(sessionId, requestId, transcript);
     } catch (err) {
-      useAppStore.getState().finishAiStream(sessionId, String(err));
+      if (ownsActiveRequest(sessionId, requestId)) {
+        useAppStore.getState().finishAiStream(sessionId, String(err), undefined, requestId);
+      }
     }
   }, []);
 
@@ -403,6 +445,7 @@ export function useAiStream() {
         return;
       }
       const steerId = newSteerId();
+      const generationId = stream.generationId;
       useAppStore.getState().queueSteer(sessionId, steerId, body);
       try {
         await api.agentSteer(stream.requestId, steerId, body);
@@ -410,7 +453,9 @@ export function useAiStream() {
         // The run ended between the check and the call, or the backend refused
         // it (too long, too many queued). The message stays in the transcript
         // flagged undelivered with its own Send button, rather than vanishing.
-        useAppStore.getState().markSteerUndelivered(sessionId, steerId);
+        if (generationId && ownsGeneration(sessionId, generationId)) {
+          useAppStore.getState().markSteerUndelivered(sessionId, steerId);
+        }
       }
     },
     [startAgent],
@@ -438,7 +483,14 @@ export function useAiStream() {
     // in front of them, and killing it is their decision.
     abortSession(sessionId, "cancelled");
     if (stream?.requestId) {
-      await api.aiCancel(stream.requestId).catch(() => {});
+      const requestId = stream.requestId;
+      // Retire ownership synchronously. aiCancel can be delayed, and during
+      // preflight there may not even be a registered backend operation yet.
+      // Waiting for a Cancelled event would let that old continuation resume or
+      // overwrite a new run started in the meantime.
+      useAppStore.getState().finishAiStream(sessionId);
+      markTranscriptDirty(sessionId);
+      await api.aiCancel(requestId).catch(() => {});
     }
   }, []);
 
@@ -457,6 +509,15 @@ export function useAiStream() {
 function isSessionBusy(sessionId: string): boolean {
   const status = useAppStore.getState().aiStreams[sessionId]?.status;
   return status === "streaming" || status === "awaiting_approval" || status === "executing";
+}
+
+function ownsGeneration(sessionId: string, generationId: string): boolean {
+  return useAppStore.getState().aiStreams[sessionId]?.generationId === generationId;
+}
+
+function ownsActiveRequest(sessionId: string, requestId: string): boolean {
+  const stream = useAppStore.getState().aiStreams[sessionId];
+  return stream?.generationId === requestId && stream.requestId === requestId;
 }
 
 function dispatchPanelEvent(sessionId: string, requestId: string, e: StreamEvent): void {
@@ -555,7 +616,7 @@ function dispatchPanelEvent(sessionId: string, requestId: string, e: StreamEvent
       store.finishAiStream(sessionId, undefined, {
         prompt: e.prompt_tokens,
         completion: e.completion_tokens,
-      });
+      }, requestId);
       // A completed exchange is the first moment there is anything worth naming
       // a tab after. Debounced and heavily gated (see lib/sessionNaming.ts) —
       // and deliberately after finishAiStream, so the session reads as idle and
@@ -570,6 +631,7 @@ function dispatchPanelEvent(sessionId: string, requestId: string, e: StreamEvent
         sessionId,
         { reason: e.reason, steps: e.steps, limit: e.limit },
         { prompt: e.prompt_tokens, completion: e.completion_tokens },
+        requestId,
       );
       // Named and archived like a completed exchange, because that is what it is
       // from the outside: real work happened in the terminal, and the user may
@@ -579,11 +641,11 @@ function dispatchPanelEvent(sessionId: string, requestId: string, e: StreamEvent
       markTranscriptDirty(sessionId);
       break;
     case "Cancelled":
-      store.finishAiStream(sessionId);
+      store.finishAiStream(sessionId, undefined, undefined, requestId);
       markTranscriptDirty(sessionId);
       break;
     case "Error":
-      store.finishAiStream(sessionId, e.message);
+      store.finishAiStream(sessionId, e.message, undefined, requestId);
       // Archived on failure too: a run that errored halfway still did real work
       // in the terminal, and that is exactly the transcript worth reopening.
       markTranscriptDirty(sessionId);

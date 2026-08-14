@@ -5,7 +5,8 @@
 //! with deterministic Reciprocal Rank Fusion. A broken provider is recorded as a
 //! warning while healthy buckets still return results.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 use futures::stream::{self, StreamExt};
 use serde::Serialize;
@@ -78,7 +79,41 @@ struct RemoteBucketPlan {
     vector_name: String,
     profile: EmbeddingProfile,
     imported_binding: Option<ImportedCollectionBinding>,
-    client: QdrantClient,
+    client: Arc<QdrantClient>,
+}
+
+#[derive(Clone)]
+struct RemoteConnectionContext {
+    label: String,
+    client: Arc<QdrantClient>,
+}
+
+/// Secrets are cached only for the duration of one search. Both successful
+/// reads and item-scoped failures are retained so a search spanning several
+/// profiles or collections never asks Keychain repeatedly.
+#[derive(Default)]
+struct SearchCredentialCache {
+    values: BTreeMap<
+        crate::credentials::CredentialId,
+        Result<Option<crate::credentials::Secret>, String>,
+    >,
+}
+
+impl SearchCredentialCache {
+    fn read_with(
+        &mut self,
+        id: crate::credentials::CredentialId,
+        read: impl FnOnce(
+            &crate::credentials::CredentialId,
+        ) -> Result<Option<crate::credentials::Secret>, String>,
+    ) -> Result<Option<crate::credentials::Secret>, String> {
+        if let Some(value) = self.values.get(&id) {
+            return value.clone();
+        }
+        let value = read(&id);
+        self.values.insert(id, value.clone());
+        value
+    }
 }
 
 type LocalSources = (
@@ -103,6 +138,7 @@ pub async fn search_knowledge(
     let limit = limit.clamp(1, crate::docs::search::MAX_LIMIT);
     let fetch_limit = (limit * 3).clamp(limit, 36);
     let buckets = deduplicate_refs(buckets);
+    let mut credential_cache = SearchCredentialCache::default();
 
     let mut warnings = Vec::new();
     let local_ids: Vec<String> = buckets
@@ -150,9 +186,21 @@ pub async fn search_knowledge(
         }
     };
 
+    let remote_connections = resolve_remote_connections(app, &remote_refs, &mut credential_cache);
     let remote_discovery = stream::iter(remote_refs.into_iter().map(|bucket| {
-        let app = app.clone();
-        async move { discover_remote_bucket(&app, docs, bucket).await }
+        let context = match &bucket {
+            KnowledgeBucketRef::Qdrant { connection_id, .. } => {
+                remote_connections.get(connection_id).cloned()
+            }
+            KnowledgeBucketRef::Local { .. } => None,
+        };
+        async move {
+            match context {
+                Some(Ok(context)) => discover_remote_bucket(docs, bucket, context).await,
+                Some(Err(error)) => Err((bucket, error)),
+                None => Err((bucket, "the Qdrant connection no longer exists".into())),
+            }
+        }
     }))
     .buffer_unordered(REMOTE_DISCOVERY_CONCURRENCY)
     .collect::<Vec<_>>()
@@ -184,7 +232,7 @@ pub async fn search_knowledge(
 
     let mut query_vectors: HashMap<String, Result<Vec<f32>, String>> = HashMap::new();
     for (fingerprint, profile) in profiles {
-        let result = embed_query(app, &profile, query).await;
+        let result = embed_query(app, &mut credential_cache, &profile, query).await;
         query_vectors.insert(fingerprint, result);
     }
 
@@ -639,10 +687,62 @@ fn local_semantic_hit(
     })
 }
 
-async fn discover_remote_bucket(
+fn unique_remote_connection_ids(buckets: &[KnowledgeBucketRef]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    buckets
+        .iter()
+        .filter_map(|bucket| match bucket {
+            KnowledgeBucketRef::Qdrant { connection_id, .. }
+                if seen.insert(connection_id.clone()) =>
+            {
+                Some(connection_id.clone())
+            }
+            KnowledgeBucketRef::Qdrant { .. } | KnowledgeBucketRef::Local { .. } => None,
+        })
+        .collect()
+}
+
+fn resolve_remote_connections(
     app: &tauri::AppHandle<Wry>,
+    buckets: &[KnowledgeBucketRef],
+    credentials: &mut SearchCredentialCache,
+) -> HashMap<String, Result<RemoteConnectionContext, String>> {
+    let records: HashMap<_, _> = store::read_connections(app)
+        .into_iter()
+        .map(|record| (record.id.clone(), record))
+        .collect();
+    unique_remote_connection_ids(buckets)
+        .into_iter()
+        .map(|connection_id| {
+            let result = (|| {
+                let record = records
+                    .get(&connection_id)
+                    .ok_or_else(|| "the Qdrant connection no longer exists".to_string())?;
+                let credential_id = crate::credentials::qdrant_id(&record.id, &record.url)?;
+                let api_key = credentials.read_with(credential_id, |_| {
+                    // This reader also verifies that the endpoint has not
+                    // changed since the metadata snapshot above.
+                    store::read_api_key(app, record)
+                })?;
+                let endpoint =
+                    QdrantEndpoint::parse(&record.url, api_key.is_some(), record.allow_insecure)
+                        .map_err(|error| error.to_string())?;
+                let client =
+                    QdrantClient::new(endpoint, api_key).map_err(|error| error.to_string())?;
+                Ok(RemoteConnectionContext {
+                    label: record.label.clone(),
+                    client: Arc::new(client),
+                })
+            })();
+            (connection_id, result)
+        })
+        .collect()
+}
+
+async fn discover_remote_bucket(
     docs: &DocsDb,
     bucket: KnowledgeBucketRef,
+    context: RemoteConnectionContext,
 ) -> Result<RemoteBucketPlan, (KnowledgeBucketRef, String)> {
     let (connection_id, collection) = match &bucket {
         KnowledgeBucketRef::Qdrant {
@@ -653,20 +753,8 @@ async fn discover_remote_bucket(
             return Err((bucket, "internal error: expected a Qdrant bucket".into()))
         }
     };
-    let connections = store::read_connections(app);
-    let record = match connections
-        .into_iter()
-        .find(|connection| connection.id == connection_id)
-    {
-        Some(record) => record,
-        None => return Err((bucket, "the Qdrant connection no longer exists".into())),
-    };
-    let api_key = store::read_api_key(app, &record).map_err(|error| (bucket.clone(), error))?;
-    let endpoint = QdrantEndpoint::parse(&record.url, api_key.is_some(), record.allow_insecure)
-        .map_err(|error| (bucket.clone(), error.to_string()))?;
-    let client = QdrantClient::new(endpoint, api_key)
-        .map_err(|error| (bucket.clone(), error.to_string()))?;
-    let info = client
+    let info = context
+        .client
         .collection_info(&collection)
         .await
         .map_err(|error| (bucket.clone(), error.to_string()))?;
@@ -733,12 +821,12 @@ async fn discover_remote_bucket(
         return Ok(RemoteBucketPlan {
             bucket,
             bucket_label: collection.clone(),
-            connection_label: record.label,
+            connection_label: context.label,
             collection,
             vector_name: binding.vector_name.clone(),
             profile,
             imported_binding: Some(binding),
-            client,
+            client: context.client,
         });
     }
 
@@ -790,17 +878,18 @@ async fn discover_remote_bucket(
     Ok(RemoteBucketPlan {
         bucket,
         bucket_label: collection.clone(),
-        connection_label: record.label,
+        connection_label: context.label,
         collection,
         vector_name,
         profile: metadata.embedding_profile,
         imported_binding: None,
-        client,
+        client: context.client,
     })
 }
 
 async fn embed_query(
     app: &tauri::AppHandle<Wry>,
+    credential_cache: &mut SearchCredentialCache,
     profile: &EmbeddingProfile,
     query: &str,
 ) -> Result<Vec<f32>, String> {
@@ -812,24 +901,26 @@ async fn embed_query(
     let (base_url, api_key) = match provider {
         EmbeddingProviderDialect::OpenAi => (
             "https://api.openai.com".to_string(),
-            crate::commands::settings::read_credential(
-                app,
-                crate::credentials::CredentialId::OpenAi,
-            )?
-            .ok_or_else(|| "OpenAI API key is missing; add it in Settings → Models".to_string())
-            .map(Some)?,
+            credential_cache
+                .read_with(crate::credentials::CredentialId::OpenAi, |id| {
+                    crate::credentials::state(app).get(id)
+                })?
+                .ok_or_else(|| "OpenAI API key is missing; add it in Settings → Models".to_string())
+                .map(Some)?,
         ),
         EmbeddingProviderDialect::Mistral => (
             "https://api.mistral.ai".to_string(),
-            crate::commands::settings::read_credential(
-                app,
-                crate::credentials::CredentialId::Mistral,
-            )?
-            .ok_or_else(|| "Mistral API key is missing; add it in Settings → Models".to_string())
-            .map(Some)?,
+            credential_cache
+                .read_with(crate::credentials::CredentialId::Mistral, |id| {
+                    crate::credentials::state(app).get(id)
+                })?
+                .ok_or_else(|| {
+                    "Mistral API key is missing; add it in Settings → Models".to_string()
+                })
+                .map(Some)?,
         ),
         EmbeddingProviderDialect::Ollama | EmbeddingProviderDialect::LmStudio => {
-            advanced_embedding_endpoint(app, profile)?
+            advanced_embedding_endpoint(app, credential_cache, profile)?
         }
         EmbeddingProviderDialect::LocalLlamaCpp => unreachable!(),
     };
@@ -857,6 +948,7 @@ async fn embed_query(
 
 fn advanced_embedding_endpoint(
     app: &tauri::AppHandle<Wry>,
+    credential_cache: &mut SearchCredentialCache,
     profile: &EmbeddingProfile,
 ) -> Result<(String, Option<crate::credentials::Secret>), String> {
     use crate::models::remote::ServerKind;
@@ -895,7 +987,10 @@ fn advanced_embedding_endpoint(
     };
     Ok((
         server.base_url.clone(),
-        crate::models::remote::read_token(app, &server.id)?,
+        credential_cache.read_with(
+            crate::credentials::CredentialId::RemoteServer(server.id.clone()),
+            |id| crate::credentials::state(app).get(id),
+        )?,
     ))
 }
 
@@ -1147,5 +1242,75 @@ mod tests {
             },
         ];
         assert_eq!(deduplicate_refs(&refs).len(), 2);
+    }
+
+    #[test]
+    fn search_credential_cache_reads_each_secret_once_and_reuses_success() {
+        let mut cache = SearchCredentialCache::default();
+        let mut reads = 0;
+        let mut reader = |id: &crate::credentials::CredentialId| {
+            reads += 1;
+            assert_eq!(id, &crate::credentials::CredentialId::OpenAi);
+            Ok(Some(crate::credentials::Secret::from("search-secret")))
+        };
+
+        let first = cache
+            .read_with(crate::credentials::CredentialId::OpenAi, &mut reader)
+            .unwrap()
+            .unwrap();
+        let second = cache
+            .read_with(crate::credentials::CredentialId::OpenAi, &mut reader)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(reads, 1);
+        assert_eq!(first.expose(), "search-secret");
+        assert_eq!(second.expose(), "search-secret");
+    }
+
+    #[test]
+    fn search_credential_cache_reuses_item_error_without_reprompting() {
+        let mut cache = SearchCredentialCache::default();
+        let mut reads = 0;
+        let mut reader = |_id: &crate::credentials::CredentialId| {
+            reads += 1;
+            Err("item denied".to_string())
+        };
+
+        for _ in 0..2 {
+            assert_eq!(
+                cache
+                    .read_with(
+                        crate::credentials::CredentialId::RemoteServer("shared".into()),
+                        &mut reader,
+                    )
+                    .unwrap_err(),
+                "item denied"
+            );
+        }
+        assert_eq!(reads, 1);
+    }
+
+    #[test]
+    fn qdrant_connection_contexts_are_unique_across_attached_collections() {
+        let buckets = vec![
+            KnowledgeBucketRef::Qdrant {
+                connection_id: "shared".into(),
+                collection: "manuals".into(),
+            },
+            KnowledgeBucketRef::Qdrant {
+                connection_id: "shared".into(),
+                collection: "runbooks".into(),
+            },
+            KnowledgeBucketRef::Qdrant {
+                connection_id: "other".into(),
+                collection: "notes".into(),
+            },
+        ];
+
+        assert_eq!(
+            unique_remote_connection_ids(&buckets),
+            vec!["shared".to_string(), "other".to_string()]
+        );
     }
 }

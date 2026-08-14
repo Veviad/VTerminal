@@ -71,6 +71,10 @@ export interface AiStreamState {
   mode: AiMode;
   status: "idle" | "streaming" | "awaiting_approval" | "executing" | "error" | "paused";
   requestId: string | null;
+  /** Stable owner for every asynchronous continuation belonging to a run.
+   * It survives Done until the agent promise resolves, but fences/new runs
+   * clear or replace it so late callbacks cannot mutate finalized state. */
+  generationId: string | null;
   messages: AiMessage[];
   streamingContent: string;
   /** Live reasoning stream (thinking mode); folded into the message on finish. */
@@ -206,6 +210,7 @@ export function emptyAiStream(): AiStreamState {
     mode: "ask",
     status: "idle",
     requestId: null,
+    generationId: null,
     messages: [],
     streamingContent: "",
     thinkingContent: "",
@@ -303,19 +308,29 @@ export interface AppState {
     sessionId: string,
     error?: string,
     usage?: { prompt: number; completion: number },
+    generationId?: string,
   ): void;
+  /** Retire every continuation for the current run. */
+  fenceAiGeneration(sessionId: string): void;
   /** Settle a run that stopped at a guard rail rather than finishing. Leaves
    *  `lastError` null and the transcript resumable — see `AiStreamState.pause`. */
   pauseAiStream(
     sessionId: string,
     pause: NonNullable<AiStreamState["pause"]>,
     usage?: { prompt: number; completion: number },
+    generationId?: string,
   ): void;
   /** Record which model is serving the in-flight request. */
   setAiStreamModel(sessionId: string, model: string): void;
   /** Store the transcript an agent turn produced, to hand back on the next one.
    *  Replaces wholesale: the returned array already contains the prior turns. */
   setModelTranscript(sessionId: string, transcript: ChatMessage[]): void;
+  /** Accept the agent promise result only while this generation still owns the session. */
+  setModelTranscriptForGeneration(
+    sessionId: string,
+    generationId: string,
+    transcript: ChatMessage[],
+  ): void;
   /** Hydrate a reopened session's panel from the archive.
    *
    *  ONE action rather than N pushAiMessage calls: fifty messages would be fifty
@@ -688,6 +703,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         mode,
         status: "streaming",
         requestId,
+        generationId: requestId,
         streamingContent: "",
         thinkingContent: "",
         // Cleared per request: Started will name the model actually serving it.
@@ -710,6 +726,13 @@ export const useAppStore = create<AppState>((set, get) => ({
   setModelTranscript: (sessionId, transcript) =>
     set((state) => withAiStream(state, sessionId, (s) => ({ ...s, modelTranscript: transcript }))),
 
+  setModelTranscriptForGeneration: (sessionId, generationId, transcript) =>
+    set((state) =>
+      withAiStream(state, sessionId, (s) =>
+        s.generationId === generationId ? { ...s, modelTranscript: transcript } : s,
+      ),
+    ),
+
   restoreAiTranscript: (sessionId, messages, modelTranscript, capturedAt) =>
     set((state) =>
       withAiStream(state, sessionId, (s) => ({
@@ -719,6 +742,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         mode: "ask",
         status: "idle",
         requestId: null,
+        generationId: null,
         messages,
         modelTranscript,
         streamingContent: "",
@@ -953,14 +977,16 @@ export const useAppStore = create<AppState>((set, get) => ({
       })),
     ),
 
-  finishAiStream: (sessionId, error, usage) =>
+  finishAiStream: (sessionId, error, usage, generationId) =>
     set((state) =>
       withAiStream(state, sessionId, (s) => {
+        if (generationId !== undefined && s.generationId !== generationId) return s;
         const flushed = flushStreaming(s, usage);
         return {
           ...flushed,
           status: error ? "error" : "idle",
           requestId: null,
+          generationId: generationId === undefined ? null : s.generationId,
           pendingProposal: null,
           lastError: error ?? null,
           attachedBlockIds: [],
@@ -980,11 +1006,21 @@ export const useAppStore = create<AppState>((set, get) => ({
       }),
     ),
 
+  fenceAiGeneration: (sessionId) =>
+    set((state) =>
+      withAiStream(state, sessionId, (s) => ({
+        ...s,
+        requestId: null,
+        generationId: null,
+      })),
+    ),
+
   /** The run stopped at a guard rail. A near-copy of `finishAiStream` on purpose:
    *  everything about settling a run is identical, and only the outcome differs. */
-  pauseAiStream: (sessionId, pause, usage) =>
+  pauseAiStream: (sessionId, pause, usage, generationId) =>
     set((state) =>
       withAiStream(state, sessionId, (s) => {
+        if (generationId !== undefined && s.generationId !== generationId) return s;
         // Same flush as the finish path, or the model's last text never lands in
         // the panel.
         const flushed = flushStreaming(s, usage);
@@ -992,6 +1028,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           ...flushed,
           status: "paused",
           requestId: null,
+          generationId: generationId === undefined ? null : s.generationId,
           pendingProposal: null,
           // Stays null — this is the whole point. The red banner keys off it.
           lastError: null,

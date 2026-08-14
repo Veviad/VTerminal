@@ -246,6 +246,12 @@ export function buildReleaseData({
       bytes: assets.dmg.size,
       formatted_size: dmgSize,
     },
+    // The desktop updater downloads the signed app archive rather than the
+    // public DMG. Its exact size makes progress authoritative even when a CDN
+    // response does not expose Content-Length.
+    updater_bytes: {
+      "darwin-aarch64": assets.updater.size,
+    },
     checksum_url: checksumUrl,
     repository: {
       url: repositoryView.url,

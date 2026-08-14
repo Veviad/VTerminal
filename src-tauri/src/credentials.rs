@@ -19,6 +19,10 @@ use crate::commands::settings::STORE_NAME;
 pub const SERVICE: &str = "com.veviad.terminal";
 pub const GENERIC_ERROR: &str =
     "macOS Keychain is unavailable. Credentials are blocked until Keychain access is restored.";
+const CANCELLED_ERROR: &str = "Keychain access was cancelled. Retry the action to ask macOS again.";
+const DENIED_ERROR: &str = "Keychain access was not allowed for this item. Retry the action or review the item's access in Keychain Access.";
+const ITEM_ERROR: &str =
+    "The requested Keychain item could not be accessed. Retry the action or replace it in Settings.";
 
 const LEGACY_PROVIDER_KEYS: [(&str, CredentialId); 4] = [
     ("anthropic_api_key", CredentialId::Anthropic),
@@ -119,12 +123,29 @@ impl From<&str> for Secret {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-struct VaultError;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VaultError {
+    Unavailable,
+    Cancelled,
+    Denied,
+    Item,
+}
+
+impl VaultError {
+    fn message(self) -> &'static str {
+        match self {
+            Self::Unavailable => GENERIC_ERROR,
+            Self::Cancelled => CANCELLED_ERROR,
+            Self::Denied => DENIED_ERROR,
+            Self::Item => ITEM_ERROR,
+        }
+    }
+}
 
 trait CredentialStore: Send + Sync {
     fn available(&self) -> Result<(), VaultError>;
     fn get(&self, id: &CredentialId) -> Result<Option<Secret>, VaultError>;
+    fn has(&self, id: &CredentialId) -> Result<bool, VaultError>;
     fn set(&self, id: &CredentialId, value: &Secret) -> Result<(), VaultError>;
     fn delete(&self, id: &CredentialId) -> Result<(), VaultError>;
 }
@@ -136,7 +157,78 @@ struct SystemStore;
 #[cfg(target_os = "macos")]
 impl SystemStore {
     fn entry(id: &CredentialId) -> Result<keyring::v1::Entry, VaultError> {
-        keyring::v1::Entry::new(SERVICE, &id.account()).map_err(|_| VaultError)
+        keyring::v1::Entry::new(SERVICE, &id.account()).map_err(classify_keyring_error)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn classify_macos_status(code: i32) -> VaultError {
+    match code {
+        // errSecUserCanceled
+        -128 => VaultError::Cancelled,
+        // errSecAuthFailed, errSecInteractionNotAllowed, errSecInteractionRequired
+        -25293 | -25308 | -25315 => VaultError::Denied,
+        // errSecNotAvailable, errSecNoSuchKeychain, errSecInvalidKeychain
+        -25291 | -25294 | -25295 => VaultError::Unavailable,
+        // A read-only Keychain and item-specific ACL/write failures do not mean
+        // that every other credential is unavailable.
+        -61 | -25244 | -25292 | -25309 => VaultError::Denied,
+        _ => VaultError::Item,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn classify_platform_error(error: &(dyn std::error::Error + Send + Sync + 'static)) -> VaultError {
+    error
+        .downcast_ref::<security_framework::base::Error>()
+        .map_or(VaultError::Item, |error| {
+            classify_macos_status(error.code())
+        })
+}
+
+#[cfg(target_os = "macos")]
+fn classify_keyring_error(error: keyring::v1::Error) -> VaultError {
+    classify_keyring_error_ref(&error)
+}
+
+#[cfg(target_os = "macos")]
+fn classify_keyring_error_ref(error: &keyring::v1::Error) -> VaultError {
+    match error {
+        keyring::v1::Error::NoDefaultStore | keyring::v1::Error::BadStoreFormat(_) => {
+            VaultError::Unavailable
+        }
+        keyring::v1::Error::PlatformFailure(error) | keyring::v1::Error::NoStorageAccess(error) => {
+            classify_platform_error(error.as_ref())
+        }
+        _ => VaultError::Item,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_has(id: &CredentialId) -> Result<bool, VaultError> {
+    use security_framework::item::{ItemClass, ItemSearchOptions};
+    use security_framework::os::macos::keychain::{SecKeychain, SecPreferencesDomain};
+
+    let keychain = SecKeychain::default_for_domain(SecPreferencesDomain::User)
+        .map_err(|error| classify_macos_status(error.code()))?;
+    let keychains = [keychain];
+    let mut query = ItemSearchOptions::new();
+    query
+        .keychains(&keychains)
+        .class(ItemClass::generic_password())
+        .service(SERVICE)
+        .account(&id.account())
+        // Return attributes so SecItemCopyMatching produces a result while
+        // deliberately never requesting kSecReturnData (the secret itself).
+        .load_attributes(true)
+        .limit(1)
+        // Presence checks must never display an authentication dialog.
+        .skip_authenticated_items(true);
+
+    match query.search() {
+        Ok(matches) => Ok(!matches.is_empty()),
+        Err(error) if error.code() == -25300 => Ok(false), // errSecItemNotFound
+        Err(error) => Err(classify_macos_status(error.code())),
     }
 }
 
@@ -146,27 +238,31 @@ impl CredentialStore for SystemStore {
         keyring::v1::Entry::store_status()
             .as_ref()
             .map(|_| ())
-            .map_err(|_| VaultError)
+            .map_err(classify_keyring_error_ref)
     }
 
     fn get(&self, id: &CredentialId) -> Result<Option<Secret>, VaultError> {
         match Self::entry(id)?.get_password() {
             Ok(value) => Ok(Some(Secret::new(value))),
             Err(keyring::v1::Error::NoEntry) => Ok(None),
-            Err(_) => Err(VaultError),
+            Err(error) => Err(classify_keyring_error(error)),
         }
+    }
+
+    fn has(&self, id: &CredentialId) -> Result<bool, VaultError> {
+        macos_has(id)
     }
 
     fn set(&self, id: &CredentialId, value: &Secret) -> Result<(), VaultError> {
         Self::entry(id)?
             .set_password(value.expose())
-            .map_err(|_| VaultError)
+            .map_err(classify_keyring_error)
     }
 
     fn delete(&self, id: &CredentialId) -> Result<(), VaultError> {
         match Self::entry(id)?.delete_credential() {
             Ok(()) | Err(keyring::v1::Error::NoEntry) => Ok(()),
-            Err(_) => Err(VaultError),
+            Err(error) => Err(classify_keyring_error(error)),
         }
     }
 }
@@ -178,16 +274,19 @@ struct SystemStore;
 #[cfg(not(target_os = "macos"))]
 impl CredentialStore for SystemStore {
     fn available(&self) -> Result<(), VaultError> {
-        Err(VaultError)
+        Err(VaultError::Unavailable)
     }
     fn get(&self, _id: &CredentialId) -> Result<Option<Secret>, VaultError> {
-        Err(VaultError)
+        Err(VaultError::Unavailable)
+    }
+    fn has(&self, _id: &CredentialId) -> Result<bool, VaultError> {
+        Err(VaultError::Unavailable)
     }
     fn set(&self, _id: &CredentialId, _value: &Secret) -> Result<(), VaultError> {
-        Err(VaultError)
+        Err(VaultError::Unavailable)
     }
     fn delete(&self, _id: &CredentialId) -> Result<(), VaultError> {
-        Err(VaultError)
+        Err(VaultError::Unavailable)
     }
 }
 
@@ -216,9 +315,11 @@ impl CredentialStoreState {
         self.blocked.load(Ordering::SeqCst)
     }
 
-    fn block(&self) -> String {
-        self.blocked.store(true, Ordering::SeqCst);
-        GENERIC_ERROR.into()
+    fn operation_error(&self, error: VaultError) -> String {
+        if error == VaultError::Unavailable {
+            self.blocked.store(true, Ordering::SeqCst);
+        }
+        error.message().into()
     }
 
     fn ready(&self) -> Result<(), String> {
@@ -231,11 +332,16 @@ impl CredentialStoreState {
 
     pub fn get(&self, id: &CredentialId) -> Result<Option<Secret>, String> {
         self.ready()?;
-        self.store.get(id).map_err(|_| self.block())
+        self.store
+            .get(id)
+            .map_err(|error| self.operation_error(error))
     }
 
     pub fn has(&self, id: &CredentialId) -> Result<bool, String> {
-        Ok(self.get(id)?.is_some_and(|s| !s.expose().trim().is_empty()))
+        self.ready()?;
+        self.store
+            .has(id)
+            .map_err(|error| self.operation_error(error))
     }
 
     pub fn set_or_clear(&self, id: &CredentialId, value: String) -> Result<(), String> {
@@ -245,12 +351,14 @@ impl CredentialStoreState {
         } else {
             self.store.set(id, &Secret::new(value))
         };
-        result.map_err(|_| self.block())
+        result.map_err(|error| self.operation_error(error))
     }
 
     pub fn delete(&self, id: &CredentialId) -> Result<(), String> {
         self.ready()?;
-        self.store.delete(id).map_err(|_| self.block())
+        self.store
+            .delete(id)
+            .map_err(|error| self.operation_error(error))
     }
 }
 
@@ -263,12 +371,28 @@ pub fn state(app: &tauri::AppHandle<Wry>) -> tauri::State<'_, CredentialStoreSta
 /// without ever parsing or recreating plaintext settings fields.
 pub fn headless_get(id: &CredentialId) -> Result<Option<Secret>, String> {
     let store = SystemStore;
-    store.available().map_err(|_| GENERIC_ERROR.to_string())?;
-    store.get(id).map_err(|_| GENERIC_ERROR.to_string())
+    store
+        .available()
+        .map_err(|error| error.message().to_string())?;
+    store.get(id).map_err(|error| error.message().to_string())
+}
+
+/// Check Keychain metadata without reading the secret. On macOS this uses an
+/// attribute-only query with authentication UI explicitly suppressed.
+pub fn headless_has(id: &CredentialId) -> Result<bool, String> {
+    let store = SystemStore;
+    store
+        .available()
+        .map_err(|error| error.message().to_string())?;
+    store.has(id).map_err(|error| error.message().to_string())
 }
 
 pub fn headless_qdrant_get(connection_id: &str, endpoint: &str) -> Result<Option<Secret>, String> {
     headless_get(&qdrant_id(connection_id, endpoint)?)
+}
+
+pub fn headless_qdrant_has(connection_id: &str, endpoint: &str) -> Result<bool, String> {
+    headless_has(&qdrant_id(connection_id, endpoint)?)
 }
 
 #[derive(Default)]
@@ -336,9 +460,9 @@ fn write_and_verify_all(
 ) -> Result<(), VaultError> {
     for (id, secret) in &legacy.values {
         backend.set(id, secret)?;
-        let verified = backend.get(id)?.ok_or(VaultError)?;
+        let verified = backend.get(id)?.ok_or(VaultError::Item)?;
         if verified != *secret {
-            return Err(VaultError);
+            return Err(VaultError::Item);
         }
     }
     Ok(())
@@ -349,7 +473,7 @@ fn secure_permissions(path: &std::path::Path) -> Result<(), VaultError> {
     use std::os::unix::fs::PermissionsExt;
     if path.exists() {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|_| VaultError)?;
+            .map_err(|_| VaultError::Item)?;
     }
     Ok(())
 }
@@ -360,19 +484,20 @@ fn secure_permissions(_path: &std::path::Path) -> Result<(), VaultError> {
 }
 
 /// Initialize Keychain and atomically retire legacy plaintext settings. Errors
-/// never abort startup: the app remains usable, but all credential operations
-/// are blocked and the UI receives only [`GENERIC_ERROR`].
+/// never abort startup. Only a vault-wide availability failure blocks all later
+/// operations; cancellation, access denial, and item/migration failures remain
+/// retryable without affecting unrelated credentials.
 pub fn initialize(app: &tauri::AppHandle<Wry>, state: &CredentialStoreState) {
     let result = (|| -> Result<(), VaultError> {
         state.store.available()?;
-        let store = app.store(STORE_NAME).map_err(|_| VaultError)?;
+        let store = app.store(STORE_NAME).map_err(|_| VaultError::Item)?;
         let legacy = collect_legacy(&store);
         write_and_verify_all(state.store.as_ref(), &legacy)?;
 
         let path = app
             .path()
             .app_data_dir()
-            .map_err(|_| VaultError)?
+            .map_err(|_| VaultError::Item)?
             .join(STORE_NAME);
         secure_permissions(&path)?;
         if !legacy.values.is_empty()
@@ -389,13 +514,19 @@ pub fn initialize(app: &tauri::AppHandle<Wry>, state: &CredentialStoreState) {
         // Create the sanitized store even on a fresh install, so the first
         // non-secret writer cannot create it with the process umask's broader
         // default. Existing files keep the mode secured above during rewrite.
-        store.save().map_err(|_| VaultError)?;
+        store.save().map_err(|_| VaultError::Item)?;
         secure_permissions(&path)?;
         Ok(())
     })();
-    if result.is_err() {
-        state.blocked.store(true, Ordering::SeqCst);
-        log::error!("credential store initialization failed; credential access is blocked");
+    if let Err(error) = result {
+        if error == VaultError::Unavailable {
+            state.blocked.store(true, Ordering::SeqCst);
+            log::error!("Keychain initialization failed; credential access is blocked");
+        } else {
+            log::warn!(
+                "credential migration or settings sanitization did not complete; it will be retried"
+            );
+        }
     }
 }
 
@@ -450,6 +581,8 @@ mod tests {
         values: Mutex<BTreeMap<CredentialId, String>>,
         fail_after: Mutex<Option<usize>>,
         writes: Mutex<usize>,
+        reads: Mutex<usize>,
+        presence_checks: Mutex<usize>,
     }
 
     impl MemoryStore {
@@ -466,6 +599,7 @@ mod tests {
             Ok(())
         }
         fn get(&self, id: &CredentialId) -> Result<Option<Secret>, VaultError> {
+            *self.reads.lock().unwrap() += 1;
             Ok(self
                 .values
                 .lock()
@@ -473,6 +607,10 @@ mod tests {
                 .get(id)
                 .cloned()
                 .map(Secret::new))
+        }
+        fn has(&self, id: &CredentialId) -> Result<bool, VaultError> {
+            *self.presence_checks.lock().unwrap() += 1;
+            Ok(self.values.lock().unwrap().contains_key(id))
         }
         fn set(&self, id: &CredentialId, value: &Secret) -> Result<(), VaultError> {
             let mut writes = self.writes.lock().unwrap();
@@ -482,7 +620,7 @@ mod tests {
                 .unwrap()
                 .is_some_and(|n| *writes >= n)
             {
-                return Err(VaultError);
+                return Err(VaultError::Item);
             }
             *writes += 1;
             self.values
@@ -497,12 +635,39 @@ mod tests {
         }
     }
 
+    struct AlwaysErrorStore(VaultError);
+
+    impl CredentialStore for AlwaysErrorStore {
+        fn available(&self) -> Result<(), VaultError> {
+            Ok(())
+        }
+        fn get(&self, _id: &CredentialId) -> Result<Option<Secret>, VaultError> {
+            Err(self.0)
+        }
+        fn has(&self, _id: &CredentialId) -> Result<bool, VaultError> {
+            Err(self.0)
+        }
+        fn set(&self, _id: &CredentialId, _value: &Secret) -> Result<(), VaultError> {
+            Err(self.0)
+        }
+        fn delete(&self, _id: &CredentialId) -> Result<(), VaultError> {
+            Err(self.0)
+        }
+    }
+
     #[test]
     fn memory_vault_set_get_presence_delete_and_debug_are_safe() {
-        let state = CredentialStoreState::with_store(Arc::new(MemoryStore::default()));
+        let backend = Arc::new(MemoryStore::default());
+        let state = CredentialStoreState::with_store(backend.clone());
         let id = CredentialId::OpenAi;
         state.set_or_clear(&id, "sentinel-secret".into()).unwrap();
         assert!(state.has(&id).unwrap());
+        assert_eq!(*backend.presence_checks.lock().unwrap(), 1);
+        assert_eq!(
+            *backend.reads.lock().unwrap(),
+            0,
+            "presence checks must not retrieve the secret"
+        );
         let secret = state.get(&id).unwrap().unwrap();
         assert_eq!(secret.expose(), "sentinel-secret");
         assert_eq!(format!("{secret:?}"), "Secret([REDACTED])");
@@ -548,7 +713,7 @@ mod tests {
     }
 
     #[test]
-    fn total_migration_failure_blocks_use_with_only_the_generic_error() {
+    fn item_failure_is_retryable_and_does_not_block_other_credentials() {
         let source = legacy();
         assert!(write_and_verify_all(&MemoryStore::failing_after(0), &source).is_err());
         assert_eq!(source.values.len(), 3);
@@ -558,13 +723,44 @@ mod tests {
         let error = state
             .set_or_clear(&CredentialId::Mistral, "sentinel-secret".into())
             .unwrap_err();
-        assert_eq!(error, GENERIC_ERROR);
-        assert!(state.is_blocked());
+        assert_eq!(error, ITEM_ERROR);
+        assert!(!state.is_blocked());
         assert!(!error.contains("sentinel-secret"));
+        assert!(!state.has(&CredentialId::Mistral).unwrap());
+    }
+
+    #[test]
+    fn only_unavailable_errors_globally_block_credentials() {
+        for error in [VaultError::Cancelled, VaultError::Denied, VaultError::Item] {
+            let state = CredentialStoreState::with_store(Arc::new(AlwaysErrorStore(error)));
+            assert_eq!(
+                state.has(&CredentialId::OpenAi).unwrap_err(),
+                error.message()
+            );
+            assert!(!state.is_blocked());
+        }
+
+        let state =
+            CredentialStoreState::with_store(Arc::new(AlwaysErrorStore(VaultError::Unavailable)));
+        assert_eq!(state.has(&CredentialId::OpenAi).unwrap_err(), GENERIC_ERROR);
+        assert!(state.is_blocked());
         assert_eq!(
-            state.get(&CredentialId::Mistral).unwrap_err(),
+            state.has(&CredentialId::Mistral).unwrap_err(),
             GENERIC_ERROR
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_statuses_keep_item_denials_distinct_from_vault_unavailability() {
+        assert_eq!(classify_macos_status(-128), VaultError::Cancelled);
+        assert_eq!(classify_macos_status(-25293), VaultError::Denied);
+        assert_eq!(classify_macos_status(-25308), VaultError::Denied);
+        assert_eq!(classify_macos_status(-25315), VaultError::Denied);
+        assert_eq!(classify_macos_status(-25291), VaultError::Unavailable);
+        assert_eq!(classify_macos_status(-25294), VaultError::Unavailable);
+        assert_eq!(classify_macos_status(-25295), VaultError::Unavailable);
+        assert_eq!(classify_macos_status(-50), VaultError::Item);
     }
 
     #[test]

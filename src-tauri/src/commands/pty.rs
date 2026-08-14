@@ -20,13 +20,6 @@ pub fn pty_spawn(
     on_data: Channel<InvokeResponseBody>,
     on_event: Channel<PtyEvent>,
 ) -> Result<u32, String> {
-    {
-        let sessions = state.sessions.lock().map_err(|_| "pty state poisoned")?;
-        if sessions.contains_key(&session_id) {
-            return Err(format!("session {session_id} already exists"));
-        }
-    }
-
     let shell_path = shell
         .filter(|s| !s.trim().is_empty())
         .or_else(|| settings::read_string(&app, "shell_path"));
@@ -37,6 +30,9 @@ pub fn pty_spawn(
         None
     };
 
+    // Hold an admission permit across OS process creation. Verified shutdown
+    // closes this gate and waits for every racing spawn before killing PTYs.
+    let permit = state.begin_spawn(session_id.clone())?;
     let spawned = session::spawn(
         session::SpawnParams {
             session_id: session_id.clone(),
@@ -50,13 +46,8 @@ pub fn pty_spawn(
         on_event.clone(),
     )?;
 
-    let pid = spawned.pid;
+    let pid = permit.insert(spawned)?;
     let _ = on_event.send(PtyEvent::Spawned { pid });
-
-    // The wait thread reports Exit to the frontend; the map entry is cleaned up
-    // when the frontend calls pty_kill (or on app exit).
-    let mut sessions = state.sessions.lock().map_err(|_| "pty state poisoned")?;
-    sessions.insert(session_id, spawned);
     Ok(pid)
 }
 
@@ -98,11 +89,7 @@ pub fn pty_ack(state: State<'_, PtyManager>, session_id: String, bytes: u64) -> 
 
 #[tauri::command]
 pub fn pty_kill(state: State<'_, PtyManager>, session_id: String) -> Result<(), String> {
-    let session = state
-        .remove(&session_id)
-        .ok_or_else(|| format!("no session {session_id}"))?;
-    session.kill();
-    Ok(())
+    state.kill_session_verified(&session_id)
 }
 
 #[tauri::command]

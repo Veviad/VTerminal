@@ -1,4 +1,10 @@
-import { checkForUpdates, dismissUpdatePrompt, installPendingUpdate } from "../../lib/appUpdates";
+import { Loader2 } from "lucide-react";
+import {
+  cancelPendingUpdate,
+  checkForUpdates,
+  dismissUpdatePrompt,
+  installPendingUpdate,
+} from "../../lib/appUpdates";
 import { S } from "../../lib/strings";
 import { useSettings } from "../../hooks/useSettings";
 import { useAppStore } from "../../stores/appStore";
@@ -19,12 +25,29 @@ const statusLabel = (status: UpdateStatus) => {
       return u.statusAvailable;
     case "downloading":
       return u.statusDownloading;
+    case "verifying":
+      return u.statusVerifying;
+    case "cancelling":
+      return u.statusCancelling;
+    case "saving":
+      return u.statusSaving;
     case "installing":
       return u.statusInstalling;
+    case "restarting":
+      return u.statusRestarting;
     case "error":
       return u.statusError;
   }
 };
+
+export const isUpdateProcessing = (status: UpdateStatus): boolean =>
+  ["downloading", "verifying", "cancelling", "saving", "installing", "restarting"].includes(status);
+
+export const isUpdateCancellable = (status: UpdateStatus): boolean =>
+  ["downloading", "verifying", "cancelling"].includes(status);
+
+export const updateActionLabel = (status: UpdateStatus): string =>
+  isUpdateProcessing(status) ? statusLabel(status) : S.settings.updates.install;
 
 export function formatUpdateBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -34,13 +57,18 @@ export function formatUpdateBytes(bytes: number): string {
 
 export function UpdatesSection() {
   const enabled = useAppStore((state) => state.autoUpdateEnabled);
-  const update = useUpdateStore();
+  const status = useUpdateStore((state) => state.status);
+  const metadata = useUpdateStore((state) => state.metadata);
+  const lastCheckedAt = useUpdateStore((state) => state.lastCheckedAt);
+  const error = useUpdateStore((state) => state.error);
+  const workspaceReady = useUpdateStore((state) => state.workspaceReady);
   const { save } = useSettings();
-  const busy = ["checking", "downloading", "installing"].includes(update.status);
-  const installDisabled = busy || !update.workspaceReady;
-  const installing = update.status === "downloading" || update.status === "installing";
-  const checked = update.lastCheckedAt
-    ? new Date(update.lastCheckedAt).toLocaleString()
+  const processing = isUpdateProcessing(status);
+  const cancellable = isUpdateCancellable(status);
+  const busy = status === "checking" || processing;
+  const installDisabled = busy || !workspaceReady;
+  const checked = lastCheckedAt
+    ? new Date(lastCheckedAt).toLocaleString()
     : S.settings.updates.never;
 
   return (
@@ -62,7 +90,7 @@ export function UpdatesSection() {
           label={S.settings.updates.automatic}
           hint={S.settings.updates.automaticHint}
           checked={enabled}
-          disabled={installing}
+          disabled={processing}
           onChange={(value) => {
             if (!value) dismissUpdatePrompt();
             void save({ auto_update_enabled: value });
@@ -79,13 +107,13 @@ export function UpdatesSection() {
             </span>
           </Row>
           <Row label={S.settings.updates.status} hint={`${S.settings.updates.lastChecked}: ${checked}`}>
-            <span className="text-[12px] text-text-primary">{statusLabel(update.status)}</span>
+            <span className="text-[12px] text-text-primary">{statusLabel(status)}</span>
           </Row>
         </div>
 
-        {update.error && (
+        {error && (
           <p className="rounded-md border border-error/30 bg-error/10 px-2 py-1.5 text-[11px] leading-relaxed text-error">
-            {update.error}
+            {error}
           </p>
         )}
 
@@ -94,63 +122,126 @@ export function UpdatesSection() {
           disabled={busy}
           className="rounded-md border border-border-subtle px-2.5 py-1.5 text-[11px] text-text-secondary hover:bg-bg-hover hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {update.status === "error" ? S.settings.updates.checkAgain : S.settings.updates.checkNow}
+          {status === "error" ? S.settings.updates.checkAgain : S.settings.updates.checkNow}
         </button>
       </section>
 
-      {update.metadata && (
+      {metadata && (
         <section className="space-y-3 rounded-lg border border-accent/30 bg-accent/5 p-3">
           <div className="flex items-center gap-2">
             <p className="text-[13px] font-medium text-text-primary">
-              {S.settings.updates.available(update.metadata.version)}
+              {S.settings.updates.available(metadata.version)}
             </p>
-            {update.metadata.prerelease && (
+            {metadata.prerelease && (
               <span className="rounded bg-warning/15 px-1.5 py-0.5 text-[9px] text-warning">
                 {S.settings.updates.prerelease}
               </span>
             )}
           </div>
-          {update.metadata.published_at && (
+          {metadata.published_at && (
             <p className="text-[10px] text-text-muted">
-              {S.settings.updates.published}: {new Date(update.metadata.published_at).toLocaleString()}
+              {S.settings.updates.published}: {new Date(metadata.published_at).toLocaleString()}
             </p>
           )}
           <p className="text-[10px] font-medium uppercase tracking-wide text-text-muted">
             {S.settings.updates.releaseNotes}
           </p>
           <div className="max-h-40 overflow-y-auto">
-            <ReleaseNotes notes={update.metadata.notes} />
+            <ReleaseNotes notes={metadata.notes} />
           </div>
-          {installing && (
-            <UpdateProgress downloaded={update.downloadedBytes} total={update.totalBytes} />
-          )}
-          <button
-            onClick={() => void installPendingUpdate()}
-            disabled={installDisabled}
-            className="rounded-md bg-accent px-2.5 py-1.5 text-[11px] font-medium text-bg-primary hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {S.settings.updates.install}
-          </button>
+          {processing && <LiveUpdateProgress status={status} />}
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={() => void installPendingUpdate()}
+              disabled={installDisabled}
+              className="rounded-md bg-accent px-2.5 py-1.5 text-[11px] font-medium text-bg-primary hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {updateActionLabel(status)}
+            </button>
+            {cancellable && (
+              <button
+                onClick={() => void cancelPendingUpdate()}
+                disabled={status === "cancelling"}
+                className="rounded-md border border-border-subtle px-2.5 py-1.5 text-[11px] text-text-secondary hover:bg-bg-hover hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {S.settings.updates.cancelDownload}
+              </button>
+            )}
+          </div>
         </section>
       )}
     </div>
   );
 }
 
-export function UpdateProgress({ downloaded, total }: { downloaded: number; total: number | null }) {
-  const percent = total && total > 0 ? Math.min(100, (downloaded / total) * 100) : null;
+export function LiveUpdateProgress({ status }: { status: UpdateStatus }) {
+  const downloaded = useUpdateStore((state) => state.downloadedBytes);
+  const total = useUpdateStore((state) => state.totalBytes);
+  return <UpdateProgress status={status} downloaded={downloaded} total={total} />;
+}
+
+export function UpdateProgress({
+  status,
+  downloaded,
+  total,
+}: {
+  status: UpdateStatus;
+  downloaded: number;
+  total: number | null;
+}) {
+  if (status !== "downloading") {
+    return (
+      <div
+        role="status"
+        aria-live="polite"
+        className="flex items-center gap-1.5 text-[10px] text-text-muted"
+      >
+        <Loader2 size={11} aria-hidden="true" className="animate-spin text-accent" />
+        <span>{statusLabel(status)}</span>
+      </div>
+    );
+  }
+
+  const safeDownloaded = Number.isFinite(downloaded) ? Math.max(0, downloaded) : 0;
+  const hasTotal =
+    total !== null && Number.isFinite(total) && total > 0 && safeDownloaded <= total;
+  const percent = hasTotal ? Math.min(100, (safeDownloaded / total) * 100) : null;
+  const roundedPercent =
+    percent === null
+      ? null
+      : safeDownloaded === total
+        ? 100
+        : Math.min(99, Math.floor(percent));
+  const progressText = hasTotal
+    ? S.settings.updates.progress(
+        formatUpdateBytes(safeDownloaded),
+        formatUpdateBytes(total),
+        roundedPercent ?? 0,
+      )
+    : S.settings.updates.progressUnknown(formatUpdateBytes(safeDownloaded));
+
   return (
-    <div className="space-y-1" aria-label={S.settings.updates.statusDownloading}>
-      <div className="h-1.5 overflow-hidden rounded-full bg-bg-elevated">
-        <div
-          className={`h-full rounded-full bg-accent transition-[width] ${percent === null ? "w-1/3 animate-pulse" : ""}`}
-          style={percent === null ? undefined : { width: `${percent}%` }}
-        />
+    <div className="space-y-1">
+      <div
+        role="progressbar"
+        aria-label={S.settings.updates.statusDownloading}
+        aria-valuemin={percent === null ? undefined : 0}
+        aria-valuemax={percent === null ? undefined : 100}
+        aria-valuenow={roundedPercent ?? undefined}
+        aria-valuetext={progressText}
+        className="h-1.5 overflow-hidden rounded-full bg-bg-elevated"
+      >
+        {percent === null ? (
+          <div className="update-progress-indeterminate h-full rounded-full bg-accent" />
+        ) : (
+          <div
+            className="h-full rounded-full bg-accent transition-[width] duration-150"
+            style={{ width: `${percent}%` }}
+          />
+        )}
       </div>
       <p className="font-mono text-[9px] text-text-muted">
-        {total
-          ? S.settings.updates.progress(formatUpdateBytes(downloaded), formatUpdateBytes(total))
-          : formatUpdateBytes(downloaded)}
+        {progressText}
       </p>
     </div>
   );

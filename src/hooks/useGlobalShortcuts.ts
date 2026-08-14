@@ -6,6 +6,7 @@ import { useSettings } from "./useSettings";
 import { getTerm } from "../lib/termRegistry";
 import { aiCancel } from "../lib/tauri";
 import { toggleAiPanel } from "../lib/aiPanel";
+import { isUpdateExitBarrier, useUpdateStore } from "../stores/updateStore";
 
 /** Close the composer, cancelling any in-flight generation — otherwise the
  *  abandoned stream later resurrects a stale proposal into the closed UI. */
@@ -39,7 +40,7 @@ export function useGlobalShortcuts(): void {
       };
       switch (action) {
         case "new-tab":
-          void createSession();
+          void createSession().catch(() => {});
           break;
         case "close-tab":
           if (s.activeSessionId) void closeSession(s.activeSessionId);
@@ -110,6 +111,10 @@ export function useGlobalShortcuts(): void {
       if (binding) {
         e.preventDefault();
         e.stopPropagation();
+        // updateApply quiesces all PTYs before the installer is launched. Keep
+        // consuming reserved shortcuts, but do not let any of them mutate app or
+        // terminal state after the durable-exit barrier has begun.
+        if (isUpdateExitBarrier(useUpdateStore.getState().status)) return;
         dispatch(binding.id);
         return;
       }

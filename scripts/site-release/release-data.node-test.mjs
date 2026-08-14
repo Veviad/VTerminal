@@ -144,6 +144,9 @@ test("aggregates every published non-draft DMG and updater archive", async () =>
   assert.equal(selected.release.label, "Pre-release");
   assert.equal(selected.release.published_date, "10 Aug 2026");
   assert.equal(selected.dmg.formatted_size, "12.8 MB");
+  assert.deepEqual(selected.updater_bytes, {
+    "darwin-aarch64": 10_000_000,
+  });
   assert.equal(formatInteger(1_234_567), "1,234,567");
   assert.equal(formatBytes(10_000_000), "10 MB");
 });
@@ -202,6 +205,9 @@ test("renders the checked-in Pages source and writes sanitized release.json", as
   assert.match(html, /"fileSize": "12\.8 MB"/);
   assert.equal(manifest.release.tag, "v0.3.0-beta.2");
   assert.equal(manifest.dmg.bytes, 12_750_000);
+  assert.deepEqual(manifest.updater_bytes, {
+    "darwin-aarch64": 10_000_000,
+  });
   assert.equal(manifest.total_downloads, 1027);
   assert.deepEqual(Object.keys(manifest).sort(), [
     "checksum_url",
@@ -211,6 +217,7 @@ test("renders the checked-in Pages source and writes sanitized release.json", as
     "repository",
     "schema_version",
     "total_downloads",
+    "updater_bytes",
   ]);
 });
 

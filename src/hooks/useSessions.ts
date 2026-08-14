@@ -16,10 +16,12 @@ import { clearPendingConnect, takePendingConnect } from "../lib/sshConnect";
 import { replayScrollback, subscribeTerm } from "../lib/termRegistry";
 import { trackSession } from "../lib/sessionPersistence";
 import { archiveOnClose } from "../lib/sessionArchive";
+import { trackArchiveMutation } from "../lib/archiveWriteTracker";
 import { forgetRunbookTerminal } from "../lib/runbookTerminalPrivacy";
 import { replayBanner } from "../lib/replayBanner";
 import { nextOrdinal, shortenCommand } from "../lib/sessionTitle";
 import { cancelNaming } from "../lib/sessionNaming";
+import { isUpdateExitBarrier, useUpdateStore } from "../stores/updateStore";
 import type {
   Block,
   LaunchSpec,
@@ -78,6 +80,9 @@ function waitForFirstPrompt(sessionId: string, timeoutMs: number): Promise<void>
 // channel with ack-based flow control, keystroke forwarding.
 export function useSessions() {
   const createSession = useCallback(async (spec: LaunchSpec = {}): Promise<string> => {
+    if (isUpdateExitBarrier(useUpdateStore.getState().status)) {
+      throw new Error("A new terminal cannot be opened while VTerminal is applying an update.");
+    }
     const store = useAppStore.getState();
     const sessionId = `sess-${Date.now()}-${sessionCounter++}`;
     const shell = spec.shell?.trim() || store.shellPath || "/bin/zsh";
@@ -450,48 +455,52 @@ export function useSessions() {
     return created.length;
   }, [createSession]);
 
-  const closeSession = useCallback(async (sessionId: string) => {
-    // Cancel any in-flight AI work scoped to this session — otherwise the
-    // stream callbacks resurrect store entries for the dead session and the
-    // local model keeps generating for nobody.
-    const state = useAppStore.getState();
-    const streamReq = state.aiStreams[sessionId]?.requestId;
-    if (streamReq) void api.aiCancel(streamReq).catch(() => {});
-    const composerReq = state.sessionUi[sessionId]?.composerRequestId;
-    if (composerReq) void api.aiCancel(composerReq).catch(() => {});
-    // A command the agent typed into this terminal is still being awaited —
-    // release it now, or its poll keeps running against a disposed xterm.
-    abortSession(sessionId, "closed");
-    // Only cleared on nested-block end otherwise, so a tab closed while inside
-    // ssh leaks its negotiated exec mode for the life of the app.
-    resetSessionMode(sessionId);
-    clearPendingConnect(sessionId);
-    clearLongRunningTimer(sessionId);
-    cancelNaming(sessionId);
+  const closeSession = useCallback(
+    (sessionId: string) =>
+      trackArchiveMutation(async () => {
+        // Cancel any in-flight AI work scoped to this session — otherwise the
+        // stream callbacks resurrect store entries for the dead session and the
+        // local model keeps generating for nobody.
+        const state = useAppStore.getState();
+        const streamReq = state.aiStreams[sessionId]?.requestId;
+        if (streamReq) void api.aiCancel(streamReq).catch(() => {});
+        const composerReq = state.sessionUi[sessionId]?.composerRequestId;
+        if (composerReq) void api.aiCancel(composerReq).catch(() => {});
+        // A command the agent typed into this terminal is still being awaited —
+        // release it now, or its poll keeps running against a disposed xterm.
+        abortSession(sessionId, "closed");
+        // Only cleared on nested-block end otherwise, so a tab closed while inside
+        // ssh leaks its negotiated exec mode for the life of the app.
+        resetSessionMode(sessionId);
+        clearPendingConnect(sessionId);
+        clearLongRunningTimer(sessionId);
+        cancelNaming(sessionId);
 
-    const entry = getTerm(sessionId);
-    if (entry) releaseWebgl(entry);
-    try {
-      await api.ptyKill(sessionId);
-    } catch {
-      // Session may already be gone (shell exited) — still clean up the UI.
-    }
-    // Ordering here is load-bearing and easy to break:
-    //   after ptyKill  — so the shell's final bytes are in the buffer
-    //   before disposeTerm — which destroys the buffer we serialize
-    //   before removeSession — which drops aiStreams[id] UNREAD, and the AI
-    //                          transcript exists nowhere else in the app
-    await archiveOnClose(sessionId);
-    forgetRunbookTerminal(sessionId);
-    disposeTerm(sessionId);
-    useAppStore.getState().removeSession(sessionId);
-    // Re-acquire WebGL on the newly active tab
-    const nextActive = useAppStore.getState().activeSessionId;
-    if (nextActive) {
-      const nextEntry = getTerm(nextActive);
-      if (nextEntry) acquireWebgl(nextEntry);
-    }
-  }, []);
+        const entry = getTerm(sessionId);
+        if (entry) releaseWebgl(entry);
+        try {
+          await api.ptyKill(sessionId);
+        } catch {
+          // Session may already be gone (shell exited) — still clean up the UI.
+        }
+        // Ordering here is load-bearing and easy to break:
+        //   after ptyKill  — so the shell's final bytes are in the buffer
+        //   before disposeTerm — which destroys the buffer we serialize
+        //   before removeSession — which drops aiStreams[id] UNREAD, and the AI
+        //                          transcript exists nowhere else in the app
+        await archiveOnClose(sessionId);
+        forgetRunbookTerminal(sessionId);
+        disposeTerm(sessionId);
+        useAppStore.getState().removeSession(sessionId);
+        // Re-acquire WebGL on the newly active tab
+        const nextActive = useAppStore.getState().activeSessionId;
+        if (nextActive) {
+          const nextEntry = getTerm(nextActive);
+          if (nextEntry) acquireWebgl(nextEntry);
+        }
+      }, undefined),
+    [],
+  );
 
   return { createSession, closeSession, restoreSessions };
 }

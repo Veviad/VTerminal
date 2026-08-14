@@ -73,6 +73,33 @@ pub fn workspace_mark_healthy(db: State<'_, DbState>) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn workspace_mark_clean_exit(
+    app: tauri::AppHandle<Wry>,
+    db: State<'_, DbState>,
+) -> Result<(), String> {
+    commit_clean_exit(&app, &db)
+}
+
+/// Shared irreversible boundary for ordinary quits and updater exits. The
+/// returned success means archive finalization, retention, and the workspace
+/// clean marker committed together; attachment removal is best-effort after
+/// that transaction.
+pub(crate) fn commit_clean_exit(app: &tauri::AppHandle<Wry>, db: &DbState) -> Result<(), String> {
+    let removed = {
+        let mut conn = db.0.lock().map_err(|_| "db poisoned")?;
+        workspace::commit_clean_exit(&mut conn, super::archive::retention(app))?
+    };
+    super::archive::remove_archived_attachments(app, removed);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn workspace_mark_running(db: State<'_, DbState>) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|_| "db poisoned")?;
+    workspace::mark_running(&conn)
+}
+
+#[tauri::command]
 pub fn workspace_clear(db: State<'_, DbState>) -> Result<(), String> {
     let conn = db.0.lock().map_err(|_| "db poisoned")?;
     workspace::clear(&conn)

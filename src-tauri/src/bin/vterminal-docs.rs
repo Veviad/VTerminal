@@ -214,10 +214,86 @@ fn connection<'a>(context: &'a Context, id: &str) -> Result<&'a QdrantConnection
 
 fn qdrant(context: &Context, id: &str) -> Result<QdrantClient, String> {
     let record = connection(context, id)?;
-    let key = vterminal_lib::credentials::headless_qdrant_get(id, &record.url)?;
+    qdrant_with_reader(record, vterminal_lib::credentials::headless_qdrant_get)
+}
+
+fn qdrant_with_reader(
+    record: &QdrantConnectionRecord,
+    mut read: impl FnMut(&str, &str) -> Result<Option<vterminal_lib::credentials::Secret>, String>,
+) -> Result<QdrantClient, String> {
+    let key = read(&record.id, &record.url)?;
     let endpoint = QdrantEndpoint::parse(&record.url, key.is_some(), record.allow_insecure)
         .map_err(|error| error.to_string())?;
     QdrantClient::new(endpoint, key).map_err(|error| error.to_string())
+}
+
+fn connection_status_rows(
+    connections: &[QdrantConnectionRecord],
+    mut has: impl FnMut(&str, &str) -> Result<bool, String>,
+) -> Result<Vec<serde_json::Value>, String> {
+    connections
+        .iter()
+        .map(|record| {
+            Ok(json!({
+                "id": record.id,
+                "label": record.label,
+                "url": record.url,
+                "has_api_key": has(&record.id, &record.url)?,
+                "status": record.status,
+                "server_version": record.server_version
+            }))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod credential_access_tests {
+    use super::*;
+
+    fn record(id: &str) -> QdrantConnectionRecord {
+        QdrantConnectionRecord {
+            id: id.into(),
+            label: format!("Qdrant {id}"),
+            url: "http://localhost:6333".into(),
+            allow_insecure: false,
+            status: "unchecked".into(),
+            server_version: None,
+            last_checked_at: None,
+            error: None,
+            collections: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn cli_status_uses_presence_and_test_setup_reads_one_secret() {
+        let connections = [record("one"), record("two")];
+        let mut presence_calls = Vec::new();
+        let rows = connection_status_rows(&connections, |id, endpoint| {
+            presence_calls.push((id.to_owned(), endpoint.to_owned()));
+            Ok(id == "one")
+        })
+        .unwrap();
+        assert_eq!(presence_calls.len(), 2);
+        assert_eq!(rows[0]["has_api_key"], true);
+        assert_eq!(rows[1]["has_api_key"], false);
+
+        let error = connection_status_rows(&connections, |_, _| Err("presence unavailable".into()))
+            .unwrap_err();
+        assert_eq!(error, "presence unavailable");
+
+        let mut reads = 0;
+        let client = qdrant_with_reader(&connections[0], |id, endpoint| {
+            reads += 1;
+            assert_eq!(id, "one");
+            assert_eq!(endpoint, "http://localhost:6333");
+            Ok(Some(vterminal_lib::credentials::Secret::from(
+                "qdrant-secret",
+            )))
+        })
+        .unwrap();
+        assert_eq!(reads, 1);
+        assert!(client.has_api_key());
+    }
 }
 
 async fn profile_command(context: &Context, args: &[String]) -> Result<(), String> {
@@ -239,26 +315,10 @@ async fn profile_command(context: &Context, args: &[String]) -> Result<(), Strin
 async fn connection_command(context: &Context, args: &[String]) -> Result<(), String> {
     match args.first().map(String::as_str) {
         Some("list") => {
-            let safe: Vec<_> = context
-                .settings
-                .knowledge_qdrant_connections
-                .iter()
-                .map(|record| {
-                    json!({
-                        "id": record.id,
-                        "label": record.label,
-                        "url": record.url,
-                        "has_api_key": vterminal_lib::credentials::headless_qdrant_get(
-                            &record.id,
-                            &record.url,
-                        )
-                        .map(|key| key.is_some())
-                        .unwrap_or(false),
-                        "status": record.status,
-                        "server_version": record.server_version
-                    })
-                })
-                .collect();
+            let safe = connection_status_rows(
+                &context.settings.knowledge_qdrant_connections,
+                vterminal_lib::credentials::headless_qdrant_has,
+            )?;
             output(context, &safe)
         }
         Some("test") => {

@@ -7,8 +7,17 @@ export type UpdateStatus =
   | "up_to_date"
   | "available"
   | "downloading"
+  | "verifying"
+  | "cancelling"
+  | "saving"
   | "installing"
+  | "restarting"
   | "error";
+
+/** Once durable exit preparation starts, frontend actions must not create or
+ * mutate terminal state until restart succeeds or persistence is resumed. */
+export const isUpdateExitBarrier = (status: UpdateStatus): boolean =>
+  ["saving", "installing", "restarting"].includes(status);
 
 export interface UpdateUiState {
   status: UpdateStatus;

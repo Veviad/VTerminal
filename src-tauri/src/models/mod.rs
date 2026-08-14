@@ -87,3 +87,20 @@ pub struct DownloadState {
     /// the same .part would interleave appends and corrupt it.
     pub in_flight: Mutex<std::collections::HashSet<String>>,
 }
+
+impl DownloadState {
+    pub fn cancel_all(&self) {
+        if let Ok(mut pending) = self.cancel.lock() {
+            for (_, sender) in pending.drain() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    pub fn is_idle(&self) -> bool {
+        self.in_flight
+            .lock()
+            .map(|in_flight| in_flight.is_empty())
+            .unwrap_or(false)
+    }
+}

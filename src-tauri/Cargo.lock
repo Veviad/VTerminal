@@ -5780,7 +5780,7 @@ dependencies = [
 
 [[package]]
 name = "vterminal"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -5796,17 +5796,19 @@ dependencies = [
  "minijinja",
  "minijinja-contrib",
  "pdf-extract",
+ "plist",
  "portable-pty",
  "reqwest 0.12.28",
  "rusqlite",
  "schemars 1.0.4",
+ "security-framework",
  "semver",
  "serde",
  "serde-saphyr",
  "serde_json",
  "sha2 0.11.0",
- "sqlite-vec",
  "shlex 1.3.0",
+ "sqlite-vec",
  "sysinfo",
  "tauri",
  "tauri-build",

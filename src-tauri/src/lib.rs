@@ -1,4 +1,5 @@
 pub mod agent;
+mod app_exit;
 mod commands;
 pub mod credentials;
 mod database;
@@ -7,6 +8,8 @@ pub mod knowledge;
 pub mod models;
 pub mod provider;
 mod pty;
+#[cfg(target_os = "macos")]
+mod restart;
 pub mod runbooks;
 mod ssh_config;
 
@@ -25,12 +28,14 @@ fn parse_log_level(level: &str) -> log::LevelFilter {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Normal quits deliberately use `_exit` below to skip llama.cpp's unsafe
-    // static destructors. An updater restart is different: Tauri must get past
-    // the callback so it can spawn the newly installed binary. Remember the
-    // restart exit code without widening the lifetime of any application state.
+    // static destructors. Remember an updater restart request so the final Exit
+    // event can spawn the executable from the newly installed bundle first.
     let restarting = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let restart_event = std::sync::Arc::clone(&restarting);
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(app_exit::macos_menu);
+    builder
         // Must be registered FIRST. Two instances would each hold their own
         // SQLite connection and race last-write-wins on the session snapshot,
         // so the second launch focuses the existing window instead.
@@ -76,6 +81,7 @@ pub fn run() {
             app.manage(credential_store);
             let conn = database::init(&app_data).map_err(std::io::Error::other)?;
             app.manage(database::DbState(std::sync::Mutex::new(conn)));
+            app.manage(app_exit::AppExitCoordinator::default());
             // Document buckets live in their OWN database file, opened lazily — the
             // handle is registered here but nothing touches the disk until a
             // `docs_*` command runs, so the default (flag-off) install has no
@@ -123,9 +129,25 @@ pub fn run() {
             }
             Ok(())
         })
+        .on_menu_event(|app, event| {
+            if event.id() == app_exit::QUIT_MENU_ID {
+                if let Err(error) = app_exit::request_quit(app, app_exit::QuitOrigin::Menu) {
+                    log::error!("could not coordinate menu quit: {error}");
+                }
+            }
+        })
         .on_window_event(|window, event| {
-            // Kill all shells on app exit — no orphan zsh processes.
-            if let tauri::WindowEvent::Destroyed = event {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Keep the webview alive while it serializes terminal buffers.
+                // The backend clean-commit command owns the eventual app exit.
+                api.prevent_close();
+                if let Err(error) =
+                    app_exit::request_quit(window.app_handle(), app_exit::QuitOrigin::WindowClose)
+                {
+                    log::error!("could not coordinate window close: {error}");
+                }
+            } else if let tauri::WindowEvent::Destroyed = event {
+                // Last-resort teardown for a non-preventable platform exit.
                 let manager = window.state::<pty::PtyManager>();
                 let drained: Vec<pty::session::PtySession> = manager
                     .sessions
@@ -146,8 +168,13 @@ pub fn run() {
             commands::settings::get_system_info,
             // application updates
             commands::updates::update_check,
-            commands::updates::update_install,
+            commands::updates::update_download,
+            commands::updates::update_cancel,
+            commands::updates::update_apply,
             commands::updates::app_restart,
+            app_exit::app_quit_begin,
+            app_exit::app_quit_commit,
+            app_exit::app_quit_force,
             // pty
             commands::pty::pty_spawn,
             commands::pty::pty_write,
@@ -176,6 +203,8 @@ pub fn run() {
             commands::workspace::workspace_snapshot,
             commands::workspace::workspace_scrollback,
             commands::workspace::workspace_mark_healthy,
+            commands::workspace::workspace_mark_clean_exit,
+            commands::workspace::workspace_mark_running,
             commands::workspace::workspace_clear,
             // session archive
             commands::archive::archive_list,
@@ -293,7 +322,7 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(move |_app, event| {
+        .run(move |app, event| {
             // Leave the process BEFORE libc runs C++ static destructors.
             //
             // llama.cpp's Metal backend keeps its devices in a static
@@ -320,13 +349,41 @@ pub fn run() {
             // AppKit's `-[NSApplication terminate:]`, which reaches it through
             // `applicationWillTerminate` before calling `exit()` itself.
             match event {
-                tauri::RunEvent::ExitRequested { code, .. }
-                    if code == Some(tauri::RESTART_EXIT_CODE) =>
-                {
-                    restart_event.store(true, std::sync::atomic::Ordering::Release);
+                tauri::RunEvent::ExitRequested { code, api, .. } => {
+                    if code == Some(tauri::RESTART_EXIT_CODE) {
+                        restart_event.store(true, std::sync::atomic::Ordering::Release);
+                    } else if !app
+                        .state::<app_exit::AppExitCoordinator>()
+                        .allows_requested_exit()
+                    {
+                        // tauri-runtime checks this synchronously after callback.
+                        api.prevent_exit();
+                        if let Err(error) =
+                            app_exit::request_quit(app, app_exit::QuitOrigin::ExitRequested)
+                        {
+                            log::error!("could not coordinate requested exit: {error}");
+                        }
+                    }
                 }
-                tauri::RunEvent::Exit if !restarting.load(std::sync::atomic::Ordering::Acquire) => {
-                    unsafe { libc::_exit(0) };
+                #[cfg(target_os = "macos")]
+                tauri::RunEvent::Exit => {
+                    if restarting.load(std::sync::atomic::Ordering::Acquire) {
+                        match restart::relaunch_updated_app() {
+                            Ok(()) => unsafe { libc::_exit(0) },
+                            Err(error) => {
+                                // Let Tauri's built-in restart path recover.
+                                log::error!("could not relaunch the updated app: {error}");
+                            }
+                        }
+                    } else {
+                        // Dock Quit/OS termination can bypass preventable exit.
+                        if let Err(error) = app.state::<pty::PtyManager>().kill_all_verified() {
+                            log::error!(
+                                "best-effort terminal cleanup on direct exit failed: {error}"
+                            );
+                        }
+                        unsafe { libc::_exit(0) };
+                    }
                 }
                 _ => {}
             }

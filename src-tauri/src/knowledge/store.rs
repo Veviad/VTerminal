@@ -342,7 +342,16 @@ pub fn has_api_key(app: &tauri::AppHandle<Wry>, id: &str) -> Result<bool, String
         .into_iter()
         .find(|connection| connection.id == id)
         .ok_or_else(|| "the Qdrant connection no longer exists".to_string())?;
-    let credential = crate::credentials::qdrant_id(id, &connection.url)?;
+    has_api_key_for(app, &connection)
+}
+
+/// Presence check for a connection record already read by the caller. This
+/// avoids re-reading the whole settings collection for every row in list views.
+pub fn has_api_key_for(
+    app: &tauri::AppHandle<Wry>,
+    connection: &QdrantConnectionRecord,
+) -> Result<bool, String> {
+    let credential = crate::credentials::qdrant_id(&connection.id, &connection.url)?;
     crate::credentials::state(app).has(&credential)
 }
 

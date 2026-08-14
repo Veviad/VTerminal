@@ -11,6 +11,7 @@
 //! budget on the tab-close path, contending with the snapshot tick, and a few MB of
 //! base64 per image would blow it.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
@@ -125,14 +126,56 @@ pub async fn attachment_read(
     Ok(tauri::ipc::Response::new(bytes))
 }
 
-/// Drop a session's attachment directory.
-///
-/// The DB rows go with the session through `ON DELETE CASCADE`; files do not, so
-/// this is called from the same places that delete or prune an archived session.
-/// Best-effort: a session whose files are already gone is not an error, and a
-/// failure here must never fail the delete the user asked for.
-pub fn remove_session_attachments(app: &AppHandle<Wry>, session_id: &str) {
-    if let Ok(dir) = session_dir(app, session_id) {
+/// Drop both the archive row's own directory and any older directories still
+/// referenced by a transcript carried through one or more reopens.
+pub fn remove_archive_attachments(
+    app: &AppHandle<Wry>,
+    session_id: &str,
+    remove_session_dir: bool,
+    stored_paths: &[String],
+) {
+    let Ok(root) = attachments_root(app) else {
+        return;
+    };
+    remove_archive_attachments_at(&root, session_id, remove_session_dir, stored_paths);
+}
+
+pub(crate) fn remove_archive_attachments_at(
+    root: &Path,
+    session_id: &str,
+    remove_session_dir: bool,
+    stored_paths: &[String],
+) {
+    if remove_session_dir {
+        if let Ok(session) = safe_component(session_id, "session id") {
+            let _ = std::fs::remove_dir_all(root.join(session));
+        }
+    }
+    remove_stored_attachment_paths_at(root, stored_paths);
+}
+
+/// Remove the direct child directories that own paths retained by a deleted
+/// archive row. Reopened transcripts keep their original absolute attachment
+/// paths, so the owner directory can be an earlier, superseded session id.
+fn remove_stored_attachment_paths_at(root: &Path, paths: &[String]) {
+    let Ok(canonical_root) = std::fs::canonicalize(root) else {
+        return;
+    };
+    let mut dirs = HashSet::new();
+    for stored in paths {
+        let Some(parent) = Path::new(stored).parent() else {
+            continue;
+        };
+        let Ok(canonical_parent) = std::fs::canonicalize(parent) else {
+            continue;
+        };
+        // attachment_put writes exactly root/session/file. Refuse nested paths,
+        // siblings, and symlinks that resolve outside the real app-data root.
+        if canonical_parent.parent() == Some(canonical_root.as_path()) {
+            dirs.insert(canonical_parent);
+        }
+    }
+    for dir in dirs {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
@@ -168,5 +211,34 @@ mod tests {
     fn an_over_long_component_is_rejected() {
         assert!(safe_component(&"a".repeat(128), "id").is_ok());
         assert!(safe_component(&"a".repeat(129), "id").is_err());
+    }
+
+    #[test]
+    fn stored_paths_remove_only_their_confined_direct_owner_directory() {
+        let base = std::env::temp_dir().join(format!(
+            "vterminal-attachment-cleanup-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let root = base.join("attachments");
+        let source = root.join("source");
+        let nested = root.join("nested").join("not-a-session");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        let image = source.join("image.png");
+        let refused = nested.join("image.png");
+        std::fs::write(&image, b"image").unwrap();
+        std::fs::write(&refused, b"keep").unwrap();
+
+        remove_stored_attachment_paths_at(
+            &root,
+            &[
+                image.to_string_lossy().into_owned(),
+                refused.to_string_lossy().into_owned(),
+            ],
+        );
+        assert!(!source.exists());
+        assert!(refused.exists());
+
+        let _ = std::fs::remove_dir_all(base);
     }
 }

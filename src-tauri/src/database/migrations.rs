@@ -34,6 +34,9 @@ pub fn run(conn: &Connection) -> Result<(), String> {
     if version < 6 {
         crate::runbooks::db::migrate_v6(conn)?;
     }
+    if version < 7 {
+        migrate_v7(conn)?;
+    }
     crate::runbooks::db::ensure_v6_runtime_indexes(conn)?;
 
     Ok(())
@@ -315,7 +318,7 @@ fn migrate_v5(conn: &Connection) -> Result<(), String> {
         -- `archive_put` runs inside a ~500ms budget on the tab-close path, and a
         -- few MB of base64 per image would blow it. The bytes live under
         -- <app_data>/attachments/<session_id>/ and are removed alongside the
-        -- session by `commands::attachments::remove_session_attachments` —
+        -- session by `commands::attachments::remove_archive_attachments` —
         -- CASCADE takes care of these rows but cannot touch the filesystem.
         --
         -- A text attachment's CONTENT is deliberately absent: it was folded into
@@ -351,6 +354,27 @@ fn migrate_v5(conn: &Connection) -> Result<(), String> {
     .map_err(|e| format!("migration v5 failed: {e}"))
 }
 
+fn migrate_v7(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        BEGIN;
+        -- A reopened archive is collapsed only after the whole app-exit
+        -- barrier succeeds. The open archive row is otherwise crash-recoverable,
+        -- so deleting its source during preparation would be data loss when an
+        -- update or quit is abandoned.
+        CREATE TABLE archive_pending_supersedes (
+            session_id            TEXT PRIMARY KEY
+                                  REFERENCES archived_sessions(session_id)
+                                  ON DELETE CASCADE,
+            supersedes_session_id TEXT NOT NULL
+        );
+        INSERT INTO schema_version (version) VALUES (7);
+        COMMIT;
+        "#,
+    )
+    .map_err(|e| format!("migration v7 failed: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;
@@ -377,7 +401,7 @@ mod tests {
         let first = version(&conn);
         super::run(&conn).unwrap();
         assert_eq!(version(&conn), first);
-        assert_eq!(first, 6);
+        assert_eq!(first, 7);
     }
 
     /// The migration chain is append-only, so this asserts the shape a v4
@@ -465,7 +489,7 @@ mod tests {
         )
         .unwrap();
         super::run(&conn).unwrap();
-        assert_eq!(version(&conn), 6);
+        assert_eq!(version(&conn), 7);
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM command_history", [], |r| r.get(0))
             .unwrap();
@@ -494,7 +518,7 @@ mod tests {
         super::run(&conn).unwrap();
 
         // Upgrades run the whole chain, so this lands on the current head.
-        assert_eq!(version(&conn), 6);
+        assert_eq!(version(&conn), 7);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()
@@ -540,7 +564,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 6);
+        assert_eq!(version(&conn), 7);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()

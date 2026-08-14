@@ -58,7 +58,7 @@ pub fn init(app_data_dir: &Path) -> Result<Connection, String> {
     // Sessions still flagged open belong to a run that died without closing them.
     // Deliberately non-fatal: `init`'s error becomes an io::Error in `setup` and
     // would brick startup, and a missed reap costs one mislabelled archive row.
-    if let Err(e) = archive::reap_open_sessions(&conn) {
+    if let Err(e) = archive::reap_open_sessions(&mut conn) {
         log::warn!("could not reap open archived sessions: {e}");
     }
     Ok(conn)
