@@ -312,14 +312,15 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
                 cancelApproveAll(run.run_id);
               }}
               onRespond={(approved, command, shellAttested) => {
-                const result = respondApproval(
-                  run.run_id,
-                  pendingApproval.approval_id,
-                  approved,
-                  command,
-                  shellAttested,
+                ignoreAsync(
+                  respondApproval(
+                    run.run_id,
+                    pendingApproval.approval_id,
+                    approved,
+                    command,
+                    shellAttested,
+                  ),
                 );
-                if (result) ignoreAsync(result);
               }}
             />
           </section>
@@ -330,14 +331,15 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
             request={pendingManual}
             busy={busyAction === `manual:${pendingManual.step_id}`}
             onSubmit={(outcome, comment, evidence) => {
-              const result = submitManual(
-                run.run_id,
-                pendingManual.step_id,
-                outcome,
-                comment,
-                evidence,
+              ignoreAsync(
+                submitManual(
+                  run.run_id,
+                  pendingManual.step_id,
+                  outcome,
+                  comment,
+                  evidence,
+                ),
               );
-              if (result) ignoreAsync(result);
             }}
           />
         )}
@@ -347,13 +349,14 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
             request={pendingOperator}
             busy={busyAction?.startsWith("decision:") ?? false}
             onDecide={(kind, reason) => {
-              const result = decide(run.run_id, {
-                kind,
-                step_id: pendingOperator.step_id,
-                actor: "operator",
-                reason,
-              });
-              if (result) ignoreAsync(result);
+              ignoreAsync(
+                decide(run.run_id, {
+                  kind,
+                  step_id: pendingOperator.step_id,
+                  actor: "operator",
+                  reason,
+                }),
+              );
             }}
           />
         )}
