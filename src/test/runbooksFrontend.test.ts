@@ -466,7 +466,7 @@ describe("durable refresh versus live events", () => {
     const store = useRunbookStore.getState();
     store.setActiveRun(run());
     const issuedAtRevision =
-      useRunbookStore.getState().runRevisions["run-1"] ?? 0;
+      useRunbookStore.getState().runRevisions.get("run-1") ?? 0;
 
     // The approval arrives while the snapshot above is still in flight.
     store.dispatchEvent({
@@ -517,7 +517,7 @@ describe("durable refresh versus live events", () => {
     const store = useRunbookStore.getState();
     store.setActiveRun(run());
     const issuedAtRevision =
-      useRunbookStore.getState().runRevisions["run-1"] ?? 0;
+      useRunbookStore.getState().runRevisions.get("run-1") ?? 0;
 
     store.upsertRun({ ...run(), status: "succeeded" }, issuedAtRevision);
 

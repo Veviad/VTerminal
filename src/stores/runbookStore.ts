@@ -29,8 +29,12 @@ export interface RunbookStoreState {
    * before an approval existed lands after `ApprovalRequested` and erases it —
    * the run then sits on a spinner while the engine waits for a click the
    * operator can no longer make. Callers capture this before the request and
-   * hand it back, and a snapshot older than the newest event is dropped. */
-  runRevisions: Record<string, number>;
+   * hand it back, and a snapshot older than the newest event is dropped.
+   *
+   * A `Map` rather than a record: the key is a run id from the backend, and a
+   * plain object indexed by it is both a lint sink and reachable by
+   * `__proto__`. */
+  runRevisions: ReadonlyMap<string, number>;
   history: RunbookHistoryEntry[];
   selectedHistoryRunId: string | null;
   report: RunbookReport | null;
@@ -79,7 +83,7 @@ interface RunbookStoreData {
   definition: RunbookDefinition | null;
   runsById: Record<string, RunbookRun>;
   activeRun: RunbookRun | null;
-  runRevisions: Record<string, number>;
+  runRevisions: ReadonlyMap<string, number>;
   history: RunbookHistoryEntry[];
   selectedHistoryRunId: string | null;
   report: RunbookReport | null;
@@ -101,7 +105,7 @@ const emptyState = (): RunbookStoreData => ({
   definition: null,
   runsById: {},
   activeRun: null,
-  runRevisions: {},
+  runRevisions: new Map<string, number>(),
   history: [],
   selectedHistoryRunId: null,
   report: null,
@@ -162,7 +166,7 @@ export const useRunbookStore = create<RunbookStoreState>((set) => ({
     set((state) => {
       if (
         issuedAtRevision !== undefined &&
-        (state.runRevisions[run.run_id] ?? 0) !== issuedAtRevision
+        (state.runRevisions.get(run.run_id) ?? 0) !== issuedAtRevision
       ) {
         // An event landed while this snapshot was in flight, so it describes a
         // moment that has already been overtaken. Applying it would undo the
@@ -223,10 +227,10 @@ export const useRunbookStore = create<RunbookStoreState>((set) => ({
       // change nothing here. A durable snapshot issued before this point is
       // stale whatever the event said, because the row it read has moved on.
       const runRevisions = eventRunId
-        ? {
-            ...state.runRevisions,
-            [eventRunId]: (state.runRevisions[eventRunId] ?? 0) + 1,
-          }
+        ? new Map(state.runRevisions).set(
+            eventRunId,
+            (state.runRevisions.get(eventRunId) ?? 0) + 1,
+          )
         : state.runRevisions;
 
       const withRun = (next: RunbookRun) => ({

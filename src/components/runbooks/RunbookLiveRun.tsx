@@ -84,8 +84,10 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
   const abortRun = async (runId: string) => {
     await cancel(runId);
     const store = useRunbookStore.getState();
-    const stopped = store.runsById[runId] ?? store.activeRun;
-    if (stopped && isTerminalRunState(stopped.status)) {
+    // `cancel` installs the settled run as the active one, so that is the
+    // authoritative outcome to read here.
+    const stopped = store.activeRun;
+    if (stopped?.run_id === runId && isTerminalRunState(stopped.status)) {
       store.setView("library");
     }
   };

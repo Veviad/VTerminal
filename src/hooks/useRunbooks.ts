@@ -149,7 +149,9 @@ function waitForNextApproval(
       unsubscribe();
       resolve(outcome);
     };
-    const timer = setTimeout(() => settle({ kind: "timeout" }), timeoutMs);
+    const timer = setTimeout(() => {
+      settle({ kind: "timeout" });
+    }, timeoutMs);
     const unsubscribe = useRunbookStore.subscribe(() => {
       const outcome = evaluate();
       if (outcome) settle(outcome);
@@ -246,7 +248,7 @@ export function useRunbooks() {
     // revision back lets the store drop a snapshot that events have overtaken
     // instead of rewinding to it.
     const issuedAtRevision =
-      useRunbookStore.getState().runRevisions[runId] ?? 0;
+      useRunbookStore.getState().runRevisions.get(runId) ?? 0;
     try {
       const run = await api.runbooksGet(runId);
       useRunbookStore.getState().upsertRun(run, issuedAtRevision);
