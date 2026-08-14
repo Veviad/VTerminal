@@ -15,6 +15,7 @@ import {
 import * as api from "../../lib/tauri";
 import { sameKnowledgeBucket } from "../../lib/knowledge";
 import { ingestKnowledgeFiles } from "../../lib/knowledgeIngest";
+import { useAppStore } from "../../stores/appStore";
 import type {
   KnowledgeBucketDescriptor,
   KnowledgeDocumentManifest,
@@ -72,6 +73,28 @@ export function RemoteDocumentsPanel({
         setDocuments((current) => (reset ? page.documents : mergeDocuments(current, page.documents)));
         setCursor(page.next_cursor);
         setLoaded(true);
+        const fileCount = page.file_count;
+        const chunkCount = page.chunk_count;
+        if (reset && typeof fileCount === "number" && typeof chunkCount === "number") {
+          const state = useAppStore.getState();
+          state.setKnowledgeBuckets(
+            state.knowledgeBuckets.map((candidate) =>
+              sameKnowledgeBucket(candidate.ref, bucket.ref)
+                ? {
+                    ...candidate,
+                    file_count: fileCount,
+                    chunk_count: chunkCount,
+                    attachable:
+                      !candidate.imported &&
+                      (candidate.compatibility === "managed_compatible" ||
+                        candidate.compatibility === "attach_only")
+                        ? chunkCount > 0
+                        : candidate.attachable,
+                  }
+                : candidate,
+            ),
+          );
+        }
       } catch (reason) {
         setError(String(reason));
       } finally {

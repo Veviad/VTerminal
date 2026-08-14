@@ -142,6 +142,45 @@ pub fn collection_metadata(profile: &EmbeddingProfile) -> VterminalCollectionMet
     }
 }
 
+/// Validate only the immutable ownership markers needed to offer destructive
+/// collection deletion. A runnable local embedding profile and intact payload
+/// indexes are deliberately not required: neither is needed by Qdrant to
+/// delete, and partially-created VTerminal collections must remain removable.
+/// Unmarked imports, malformed metadata, foreign owners, and vector drift fail
+/// closed.
+pub(crate) fn validate_vterminal_collection_deletable(
+    collection: &QdrantCollectionInfo,
+) -> Result<(), String> {
+    let metadata = collection
+        .metadata
+        .valid()
+        .ok_or_else(|| "the collection has no valid VTerminal ownership metadata".to_string())?;
+    if metadata.owner != "vterminal" {
+        return Err("the collection metadata is owned by another application".into());
+    }
+    if metadata.contract_version != VTERMINAL_CONTRACT_VERSION
+        || metadata.payload_schema_version != VTERMINAL_PAYLOAD_SCHEMA_VERSION
+        || metadata.chunk_pipeline_version != VTERMINAL_CHUNK_PIPELINE_VERSION
+    {
+        return Err("the collection does not carry the current VTerminal contract markers".into());
+    }
+    if metadata.embedding_profile_fingerprint != metadata.embedding_profile.fingerprint() {
+        return Err("the collection embedding profile fingerprint is not self-consistent".into());
+    }
+    if metadata.vector_name != VTERMINAL_VECTOR_NAME {
+        return Err("the collection does not use VTerminal's managed vector name".into());
+    }
+    let vector = collection
+        .vectors
+        .iter()
+        .find(|vector| vector.name == metadata.vector_name)
+        .ok_or_else(|| "the collection's managed VTerminal vector is missing".to_string())?;
+    if !vector_matches_profile(vector, &metadata.embedding_profile) {
+        return Err("the collection vector does not match its embedded VTerminal profile".into());
+    }
+    Ok(())
+}
+
 pub(crate) fn metadata_value(profile: &EmbeddingProfile) -> Value {
     json!({ "vterminal": collection_metadata(profile) })
 }
@@ -550,6 +589,7 @@ pub fn classify_collection(
         vector_size: decision.vector.map(|vector| vector.size),
         quantization: collection.quantization.clone(),
         attachable,
+        deletable: validate_vterminal_collection_deletable(collection).is_ok(),
     }
 }
 
@@ -931,6 +971,51 @@ mod tests {
             CollectionCompatibility::RequiresProfile
         );
         assert!(!missing.attachable);
+    }
+
+    #[test]
+    fn deletion_ownership_does_not_require_a_runtime_profile_or_payload_indexes() {
+        let profile = profile();
+        let mut partial = collection(&profile);
+        partial.payload_indexes.clear();
+        partial.payload_index_types.clear();
+
+        validate_vterminal_collection_deletable(&partial).unwrap();
+        assert!(classify(&partial, &[], CollectionAccess::Unknown).deletable);
+    }
+
+    #[test]
+    fn deletion_ownership_rejects_unmarked_and_foreign_collections() {
+        let profile = profile();
+        let mut unmarked = collection(&profile);
+        unmarked.metadata = CollectionMetadataState::Absent;
+        assert!(validate_vterminal_collection_deletable(&unmarked).is_err());
+        assert!(!classify(&unmarked, &[], CollectionAccess::Unknown).deletable);
+
+        let mut foreign = collection(&profile);
+        let CollectionMetadataState::Valid { metadata } = &mut foreign.metadata else {
+            unreachable!();
+        };
+        metadata.owner = "another-app".into();
+        assert!(validate_vterminal_collection_deletable(&foreign)
+            .unwrap_err()
+            .contains("another application"));
+        assert!(!classify(&foreign, &[], CollectionAccess::Unknown).deletable);
+    }
+
+    #[test]
+    fn deletion_ownership_fails_closed_on_contract_or_vector_tampering() {
+        let profile = profile();
+        let mut wrong_contract = collection(&profile);
+        let CollectionMetadataState::Valid { metadata } = &mut wrong_contract.metadata else {
+            unreachable!();
+        };
+        metadata.contract_version += 1;
+        assert!(validate_vterminal_collection_deletable(&wrong_contract).is_err());
+
+        let mut wrong_vector = collection(&profile);
+        wrong_vector.vectors[0].size += 1;
+        assert!(validate_vterminal_collection_deletable(&wrong_vector).is_err());
     }
 
     #[test]
