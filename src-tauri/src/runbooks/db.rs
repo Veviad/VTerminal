@@ -3025,6 +3025,87 @@ fn evidence_artifact_matches(path: &Path, evidence: &EvidenceRecord) -> Result<b
     Ok(bytes.len() as u64 == evidence.bytes && sha256_hex(&bytes) == evidence.sha256)
 }
 
+/// Read one complete evidence artifact back for in-app review.
+///
+/// The digest is re-verified on every read rather than trusted from the row.
+/// The whole point of this artifact is to be shown as proof of what a step did,
+/// so returning bytes that no longer match what was recorded would be worse
+/// than returning nothing: the operator cannot tell the difference by looking.
+/// `Ok(None)` means there is nothing trustworthy to show — absent, resized,
+/// symlinked, or altered — and is deliberately not distinguished further, since
+/// each case is reported to the operator the same way.
+///
+/// Confinement is `confined_pending_evidence_paths`, the same helper recovery
+/// uses, so a traversal or symlinked path is rejected identically on both.
+pub fn read_complete_evidence_artifact(
+    evidence_root: &Path,
+    evidence: &EvidenceRecord,
+) -> Result<Option<Vec<u8>>, String> {
+    if evidence.availability != EvidenceAvailability::Complete {
+        return Ok(None);
+    }
+    let Some((_parent, final_path, _staging)) =
+        confined_pending_evidence_paths(evidence_root, evidence)?
+    else {
+        return Ok(None);
+    };
+    let metadata = match fs::symlink_metadata(&final_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("inspect evidence artifact: {error}")),
+    };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() != evidence.bytes
+        || evidence.bytes > FULL_EVIDENCE_BYTES as u64
+    {
+        return Ok(None);
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = match options.open(&final_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("open evidence artifact: {error}")),
+    };
+    let opened_metadata = file
+        .metadata()
+        .map_err(|error| format!("inspect opened evidence artifact: {error}"))?;
+    if !opened_metadata.is_file() || opened_metadata.len() != evidence.bytes {
+        return Ok(None);
+    }
+    // Read one byte past the recorded size so a file that GREW between the
+    // metadata check and the read is caught by the length comparison below
+    // rather than silently truncated into a plausible-looking artifact.
+    let read_limit = evidence
+        .bytes
+        .checked_add(1)
+        .ok_or("evidence byte count is too large")?;
+    let mut bytes = Vec::with_capacity(evidence.bytes as usize);
+    file.take(read_limit)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("read evidence artifact: {error}"))?;
+    if bytes.len() as u64 != evidence.bytes || sha256_hex(&bytes) != evidence.sha256 {
+        return Ok(None);
+    }
+    Ok(Some(bytes))
+}
+
+pub fn find_evidence(
+    conn: &Connection,
+    run_id: &str,
+    evidence_id: &str,
+) -> Result<Option<EvidenceRecord>, String> {
+    Ok(list_evidence(conn, run_id)?
+        .into_iter()
+        .find(|item| item.id == evidence_id))
+}
+
 fn sync_directory(path: &Path) -> Result<(), String> {
     File::open(path)
         .and_then(|directory| directory.sync_all())
@@ -5644,6 +5725,89 @@ mod tests {
         assert_eq!(list_evidence(&conn, &run.id).unwrap().len(), 1);
         remove_evidence_reservation(&conn, &reservation.id, &run.id, &attempt.id).unwrap();
         assert!(list_evidence(&conn, &run.id).unwrap().is_empty());
+    }
+
+    /// A root holding one complete artifact at the canonical relative path.
+    fn evidence_fixture(label: &str, contents: &[u8]) -> (PathBuf, EvidenceRecord) {
+        let root = std::env::temp_dir().join(format!("runbook-evidence-{label}-{}", uuid::Uuid::new_v4()));
+        let directory = root.join("runbooks").join("run-1");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("attempt-1.log"), contents).unwrap();
+        (
+            root,
+            EvidenceRecord {
+                id: "evidence-1".into(),
+                attempt_id: "attempt-1".into(),
+                run_id: "run-1".into(),
+                mode: EvidenceCaptureMode::Full,
+                availability: EvidenceAvailability::Complete,
+                relative_path: Some("runbooks/run-1/attempt-1.log".into()),
+                bytes: contents.len() as u64,
+                sha256: sha256_hex(contents),
+                redacted: false,
+                truncated: false,
+                created_at: now(),
+            },
+        )
+    }
+
+    #[test]
+    fn a_recorded_artifact_reads_back_only_while_it_still_matches() {
+        let (root, evidence) = evidence_fixture("readback", b"permitrootlogin no\n");
+        assert_eq!(
+            read_complete_evidence_artifact(&root, &evidence).unwrap(),
+            Some(b"permitrootlogin no\n".to_vec()),
+        );
+
+        // Altered on disk. The row still says complete, so trusting it would
+        // present someone else's bytes as this step's proof.
+        fs::write(root.join("runbooks/run-1/attempt-1.log"), b"permitrootlogin yes").unwrap();
+        assert_eq!(read_complete_evidence_artifact(&root, &evidence).unwrap(), None);
+
+        // Truncated to a prefix: same leading bytes, wrong length and digest.
+        fs::write(root.join("runbooks/run-1/attempt-1.log"), b"permitrootlogin no").unwrap();
+        assert_eq!(read_complete_evidence_artifact(&root, &evidence).unwrap(), None);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_unavailable_or_missing_artifact_reads_as_nothing_rather_than_erroring() {
+        let (root, complete) = evidence_fixture("unavailable", b"output");
+
+        let mut pending = complete.clone();
+        pending.availability = EvidenceAvailability::Pending;
+        assert_eq!(read_complete_evidence_artifact(&root, &pending).unwrap(), None);
+        let mut missing = complete.clone();
+        missing.availability = EvidenceAvailability::Missing;
+        assert_eq!(read_complete_evidence_artifact(&root, &missing).unwrap(), None);
+
+        fs::remove_file(root.join("runbooks/run-1/attempt-1.log")).unwrap();
+        assert_eq!(read_complete_evidence_artifact(&root, &complete).unwrap(), None);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_or_escaping_artifact_is_never_read() {
+        let (root, evidence) = evidence_fixture("confinement", b"output");
+        let secret = root.join("private-key");
+        fs::write(&secret, b"-----BEGIN PRIVATE KEY-----").unwrap();
+
+        // Swapped for a symlink pointing at a file outside the run directory.
+        let artifact = root.join("runbooks/run-1/attempt-1.log");
+        fs::remove_file(&artifact).unwrap();
+        std::os::unix::fs::symlink(&secret, &artifact).unwrap();
+        assert_eq!(read_complete_evidence_artifact(&root, &evidence).unwrap(), None);
+
+        // A traversal in the stored path is refused by the shared confinement
+        // helper before any file is opened.
+        let mut escaping = evidence.clone();
+        escaping.relative_path = Some("runbooks/run-1/../../private-key".into());
+        assert!(read_complete_evidence_artifact(&root, &escaping).is_err());
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

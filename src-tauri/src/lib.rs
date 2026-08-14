@@ -303,6 +303,7 @@ pub fn run() {
             commands::runbooks::runbooks_history,
             commands::runbooks::runbooks_delete,
             commands::runbooks::runbooks_report,
+            commands::runbooks::runbooks_evidence_read,
             commands::runbooks::runbooks_export,
             commands::runbooks::runbooks_export_package,
             // vision sidecar

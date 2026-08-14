@@ -704,6 +704,22 @@ pub struct RunbookExportResult {
     pub files: Vec<String>,
 }
 
+/// One recorded artifact, read back for review.
+///
+/// `available: false` is a normal answer, not an error: an artifact can be
+/// deleted, resized or altered on disk after the run, and the report already
+/// carries an availability of its own. `bytes` is what the run RECORDED, so the
+/// UI can say how much is missing rather than silently showing nothing.
+#[derive(Debug, Clone, Serialize)]
+pub struct RunbookEvidenceContent {
+    pub evidence_id: String,
+    pub available: bool,
+    pub text: String,
+    pub bytes: u64,
+    pub redacted: bool,
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RunbookEvidenceCleanup {
     pub expected: u32,
@@ -1789,6 +1805,56 @@ pub fn runbooks_report(
     let connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
     db::load_report(&connection, &run_id)?
         .ok_or_else(|| format!("report for run {run_id} is not ready"))
+}
+
+/// Read one recorded artifact back so the operator can review it in the app.
+///
+/// Until this existed a `full` run wrote redacted artifacts that nothing could
+/// open: the report showed `mode · bytes · available` and `runbooks_export`
+/// only copied files to a folder. Evidence that cannot be read is not proof.
+///
+/// The stored bytes are already redacted and capped, so this neither redacts
+/// nor truncates again — it re-verifies the recorded digest and hands back what
+/// was persisted, or reports that nothing trustworthy remains.
+#[tauri::command(rename_all = "snake_case")]
+pub fn runbooks_evidence_read(
+    app: tauri::AppHandle<Wry>,
+    db_state: State<'_, DbState>,
+    command_state: State<'_, Arc<RunbookCommandState>>,
+    run_id: String,
+    evidence_id: String,
+) -> Result<RunbookEvidenceContent, String> {
+    gate(&app)?;
+    validate_identifier(&run_id, "run id")?;
+    validate_identifier(&evidence_id, "evidence id")?;
+    let evidence = {
+        let connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
+        db::find_evidence(&connection, &run_id, &evidence_id)?
+            .ok_or_else(|| format!("evidence {evidence_id} does not belong to run {run_id}"))?
+    };
+    let Some(bytes) =
+        db::read_complete_evidence_artifact(&command_state.app_data_dir, &evidence)?
+    else {
+        return Ok(RunbookEvidenceContent {
+            evidence_id,
+            available: false,
+            text: String::new(),
+            bytes: evidence.bytes,
+            redacted: evidence.redacted,
+            truncated: evidence.truncated,
+        });
+    };
+    Ok(RunbookEvidenceContent {
+        evidence_id,
+        available: true,
+        // Terminal output is not guaranteed valid UTF-8 and the artifact is
+        // stored verbatim, so a lossy decode is the honest read: refusing the
+        // whole artifact over one stray byte would hide the rest of the proof.
+        text: String::from_utf8_lossy(&bytes).into_owned(),
+        bytes: evidence.bytes,
+        redacted: evidence.redacted,
+        truncated: evidence.truncated,
+    })
 }
 
 #[tauri::command(rename_all = "snake_case")]

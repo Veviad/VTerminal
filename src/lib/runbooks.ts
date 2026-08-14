@@ -436,6 +436,18 @@ export interface RunbookReportEvidence {
   truncated: boolean;
 }
 
+/** One recorded artifact read back for review. `available: false` is a normal
+ * answer — the file can be deleted or altered after the run, and the digest is
+ * re-verified on every read, so what is shown is always what was recorded. */
+export interface RunbookEvidenceContent {
+  evidence_id: string;
+  available: boolean;
+  text: string;
+  bytes: number;
+  redacted: boolean;
+  truncated: boolean;
+}
+
 export interface RunbookReportResumeEnvironment {
   resumed_at: string;
   app_version: string;
@@ -1013,6 +1025,12 @@ export const runbooksHistory = () =>
 
 export const runbooksReport = (runId: string) =>
   invoke<RunbookReportWire>("runbooks_report", { run_id: runId }).then(normalizeRunbookReport);
+
+export const runbooksEvidenceRead = (runId: string, evidenceId: string) =>
+  invoke<RunbookEvidenceContent>("runbooks_evidence_read", {
+    run_id: runId,
+    evidence_id: evidenceId,
+  });
 
 export const runbooksExport = (runId: string, destination: string) =>
   invoke<RunbookExportResult>("runbooks_export", { run_id: runId, destination });
