@@ -45,6 +45,39 @@ beforeEach(() => {
 });
 
 describe("RunbookHistory", () => {
+  it("settles on the empty state without automatically loading again", async () => {
+    useRunbookStore.getState().setHistory([]);
+    useRunbookStore.getState().selectHistoryRun(null);
+
+    render(<RunbookHistory />);
+
+    expect(await screen.findByText("No run history")).toBeInTheDocument();
+    expect(screen.queryByText("Loading…")).not.toBeInTheDocument();
+    expect(mocks.loadHistory).not.toHaveBeenCalled();
+  });
+
+  it("shows the pending state for an initial history load without starting another request", () => {
+    useRunbookStore.getState().setHistory([]);
+    useRunbookStore.getState().selectHistoryRun(null);
+    useRunbookStore.getState().setLoading("history", true);
+
+    render(<RunbookHistory />);
+
+    expect(screen.getByText("Loading…")).toBeInTheDocument();
+    expect(screen.queryByText("No run history")).not.toBeInTheDocument();
+    expect(mocks.loadHistory).not.toHaveBeenCalled();
+  });
+
+  it("loads history exactly once for an explicit refresh", async () => {
+    useRunbookStore.getState().setHistory([]);
+    useRunbookStore.getState().selectHistoryRun(null);
+
+    render(<RunbookHistory />);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh history" }));
+
+    await waitFor(() => expect(mocks.loadHistory).toHaveBeenCalledTimes(1));
+  });
+
   it("requires a second explicit click before deleting a terminal run", async () => {
     render(<RunbookHistory />);
 

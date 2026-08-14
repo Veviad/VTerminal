@@ -9,9 +9,10 @@
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::ipc::Channel;
@@ -20,16 +21,21 @@ use tauri::{Manager, State, Wry};
 use crate::database::DbState;
 use crate::pty::PtyManager;
 use crate::runbooks::db::{
-    self, ApprovalRecord, AttemptRecord, RunCreation, RunRecord, SourceRegistration,
+    self, ApprovalRecord, AttemptRecord, RunCreation, RunRecord, SourceKind, SourceRegistration,
     SourceRegistrationInput, StepRecord, StepSeed,
 };
 use crate::runbooks::definition::{ApplyAction, CheckAction, RunbookDefinition, VerifyAction};
+use crate::runbooks::drafts::{
+    RunbookDraft, RunbookDraftDocument, RunbookDraftPreview, RunbookDraftSummary,
+};
 use crate::runbooks::engine::{
     execute_runbook, resume_runbook, validate_runtime_command, EngineConfig, EngineContext,
     EngineRunSpec, OperatorDecisionResponse, RunbookDecisionState, RunbookManualIndex,
     TargetObserver,
 };
-use crate::runbooks::package::{load_package, DefinitionSnapshot, ValidatedPackage};
+use crate::runbooks::package::{
+    load_package, DefinitionSnapshot, ValidatedPackage, MAX_PACKAGE_ENTRIES,
+};
 use crate::runbooks::redact::{redact_sensitive, sha256_hex, FULL_EVIDENCE_BYTES};
 use crate::runbooks::report::RunbookReport;
 use crate::runbooks::runtime::{
@@ -52,6 +58,47 @@ const MAX_TERMINAL_ERROR_BYTES: usize = 8 * 1_024;
 const MAX_TERMINAL_DURATION_MS: u64 = 24 * 60 * 60 * 1_000;
 const HISTORY_LIMIT: u32 = 500;
 const MAX_CLEANUP_ERRORS: usize = 100;
+const BUILTIN_LIBRARY_DIRECTORY: &str = "runbook-library";
+const BUILTIN_PACKAGES_DIRECTORY: &str = "builtins";
+const AUTHORED_PACKAGES_DIRECTORY: &str = "authored";
+
+struct BuiltinPackage {
+    id: &'static str,
+    order: u32,
+    definition: &'static [u8],
+    readme: &'static [u8],
+}
+
+const BUILTIN_PACKAGES: &[BuiltinPackage] = &[
+    BuiltinPackage {
+        id: "macos-security-posture",
+        order: 0,
+        definition: include_bytes!(
+            "../../../examples/runbooks/macos-security-posture/runbook.vrun.yaml"
+        ),
+        readme: include_bytes!("../../../examples/runbooks/macos-security-posture/README.md"),
+    },
+    BuiltinPackage {
+        id: "macos-developer-workstation-health",
+        order: 1,
+        definition: include_bytes!(
+            "../../../examples/runbooks/macos-developer-workstation-health/runbook.vrun.yaml"
+        ),
+        readme: include_bytes!(
+            "../../../examples/runbooks/macos-developer-workstation-health/README.md"
+        ),
+    },
+    BuiltinPackage {
+        id: "macos-backup-storage-readiness",
+        order: 2,
+        definition: include_bytes!(
+            "../../../examples/runbooks/macos-backup-storage-readiness/runbook.vrun.yaml"
+        ),
+        readme: include_bytes!(
+            "../../../examples/runbooks/macos-backup-storage-readiness/README.md"
+        ),
+    },
+];
 
 /// The Runbooks engine deliberately owns independent rendezvous registries. In
 /// particular, ordinary AI approvals and `Auto all` cannot reach these maps.
@@ -79,6 +126,401 @@ impl RunbookCommandState {
             app_data_dir,
         }
     }
+}
+
+pub(crate) fn initialize_builtin_sources(
+    app_data_dir: &Path,
+    connection: &rusqlite::Connection,
+) -> Result<(), String> {
+    reconcile_builtin_sources(app_data_dir, connection).map(|_| ())
+}
+
+fn reconcile_builtin_sources(
+    app_data_dir: &Path,
+    connection: &rusqlite::Connection,
+) -> Result<Vec<SourceRegistration>, String> {
+    let package_root = app_data_dir
+        .join(BUILTIN_LIBRARY_DIRECTORY)
+        .join(BUILTIN_PACKAGES_DIRECTORY);
+    fs::create_dir_all(&package_root)
+        .map_err(|error| format!("create built-in runbook library: {error}"))?;
+    let root_metadata = fs::symlink_metadata(&package_root)
+        .map_err(|error| format!("inspect built-in runbook library: {error}"))?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err("built-in runbook library must be an ordinary directory".into());
+    }
+    restrict_builtin_directory(&package_root)?;
+
+    for builtin in BUILTIN_PACKAGES {
+        let package = materialize_builtin_package(&package_root, builtin)?;
+        let mut input = registration_input(&package, true, None)?;
+        input.source_kind = SourceKind::Builtin;
+        input.hidden = false;
+        input.builtin_order = Some(builtin.order);
+
+        let existing = db::get_source_by_package_path(connection, &input.package_path)?;
+        let is_current = existing.as_ref().is_some_and(|source| {
+            source.definition_id == input.definition_id
+                && source.definition_version == input.definition_version
+                && source.title == input.title
+                && source.source_sha256 == input.source_sha256
+                && source.canonical_sha256 == input.canonical_sha256
+                && source.valid
+                && source.validation_error.is_none()
+                && source.source_kind == SourceKind::Builtin
+                && source.builtin_order == Some(builtin.order)
+        });
+        if !is_current {
+            db::upsert_source(connection, &input)?;
+        }
+    }
+    db::list_sources(connection)
+}
+
+fn materialize_builtin_package(
+    package_root: &Path,
+    builtin: &BuiltinPackage,
+) -> Result<ValidatedPackage, String> {
+    validate_export_component(builtin.id, "built-in runbook id")?;
+    let destination = package_root.join(builtin.id);
+    match fs::symlink_metadata(&destination) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(format!(
+                    "built-in runbook path {} is not an ordinary directory",
+                    destination.display()
+                ));
+            }
+            if let Ok(package) = load_and_check_package(&destination) {
+                let readme_matches = package
+                    .readme_path
+                    .as_ref()
+                    .and_then(|path| fs::read(path).ok())
+                    .is_some_and(|bytes| bytes == builtin.readme);
+                let ansible_absent = match fs::symlink_metadata(destination.join("ansible")) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+                    Ok(_) | Err(_) => false,
+                };
+                if package.snapshot.source_yaml.as_bytes() == builtin.definition
+                    && package.definition.metadata.id == builtin.id
+                    && readme_matches
+                    && ansible_absent
+                {
+                    return Ok(package);
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "inspect built-in runbook {}: {error}",
+                destination.display()
+            ));
+        }
+    }
+
+    let suffix = uuid::Uuid::new_v4();
+    let staging = package_root.join(format!(".{}.staging-{suffix}", builtin.id));
+    fs::create_dir(&staging).map_err(|error| {
+        format!(
+            "create built-in runbook staging directory {}: {error}",
+            staging.display()
+        )
+    })?;
+    if let Err(error) = restrict_builtin_directory(&staging)
+        .and_then(|()| write_builtin_file(&staging.join("runbook.vrun.yaml"), builtin.definition))
+        .and_then(|()| write_builtin_file(&staging.join("README.md"), builtin.readme))
+        .and_then(|()| {
+            let package = load_and_check_package(&staging)?;
+            if package.definition.metadata.id != builtin.id
+                || package.snapshot.source_yaml.as_bytes() != builtin.definition
+            {
+                return Err(format!(
+                    "compiled built-in runbook {} has an unexpected identity",
+                    builtin.id
+                ));
+            }
+            Ok(())
+        })
+    {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+
+    let backup = package_root.join(format!(".{}.backup-{suffix}", builtin.id));
+    let had_destination = destination.exists();
+    if had_destination {
+        fs::rename(&destination, &backup).map_err(|error| {
+            let _ = fs::remove_dir_all(&staging);
+            format!(
+                "move previous built-in runbook {} aside: {error}",
+                destination.display()
+            )
+        })?;
+    }
+    if let Err(error) = fs::rename(&staging, &destination) {
+        if had_destination {
+            let _ = fs::rename(&backup, &destination);
+        }
+        let _ = fs::remove_dir_all(&staging);
+        return Err(format!(
+            "publish built-in runbook {}: {error}",
+            destination.display()
+        ));
+    }
+    if had_destination {
+        if let Err(error) = fs::remove_dir_all(&backup) {
+            log::warn!(
+                "could not remove superseded built-in runbook {}: {error}",
+                backup.display()
+            );
+        }
+    }
+    sync_directory(package_root)?;
+    load_and_check_package(&destination)
+}
+
+fn write_builtin_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| format!("create built-in runbook file {}: {error}", path.display()))?;
+    file.write_all(bytes)
+        .map_err(|error| format!("write built-in runbook file {}: {error}", path.display()))?;
+    file.sync_all()
+        .map_err(|error| format!("sync built-in runbook file {}: {error}", path.display()))
+}
+
+fn restrict_builtin_directory(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| {
+            format!(
+                "restrict built-in runbook directory {}: {error}",
+                path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn sync_directory(path: &Path) -> Result<(), String> {
+    OpenOptions::new()
+        .read(true)
+        .open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("sync directory {}: {error}", path.display()))
+}
+
+fn validate_draft_storage(document: &RunbookDraftDocument) -> Result<(), String> {
+    let json = crate::runbooks::drafts::document_json(document)?;
+    reject_sensitive_text(&json, "runbook draft")
+}
+
+fn validate_draft_preview(document: &RunbookDraftDocument) -> RunbookDraftPreview {
+    let mut preview = crate::runbooks::drafts::preview(document);
+    let sensitive = crate::runbooks::drafts::document_json(document)
+        .and_then(|json| reject_sensitive_text(&json, "runbook draft"));
+    if let Err(error) = sensitive {
+        preview
+            .issues
+            .push(crate::runbooks::definition::ValidationError {
+                path: "document".into(),
+                message: error,
+            });
+    }
+    if let Some(source) = preview.source_yaml.as_deref() {
+        if let Err(error) = reject_sensitive_text(source, "generated runbook definition") {
+            preview
+                .issues
+                .push(crate::runbooks::definition::ValidationError {
+                    path: "document".into(),
+                    message: error,
+                });
+        }
+    }
+    preview
+}
+
+fn draft_publication_changed(
+    previous_document_sha256: Option<&str>,
+    previous_version: Option<&str>,
+    document_sha256: &str,
+    next_version: &str,
+) -> Result<bool, String> {
+    let changed = previous_document_sha256 != Some(document_sha256);
+    if changed {
+        if let Some(previous) = previous_version {
+            let previous = semver::Version::parse(previous)
+                .map_err(|error| format!("stored published version is invalid: {error}"))?;
+            let next = semver::Version::parse(next_version)
+                .map_err(|error| format!("draft version is invalid: {error}"))?;
+            if next <= previous {
+                return Err(format!(
+                    "changed runbooks require a version greater than {previous}"
+                ));
+            }
+        }
+    }
+    Ok(changed)
+}
+
+#[derive(Debug)]
+struct AuthoredPublication {
+    root: PathBuf,
+    destination: PathBuf,
+    staging: PathBuf,
+    backup: Option<PathBuf>,
+    committed: bool,
+}
+
+impl AuthoredPublication {
+    fn commit(&mut self) {
+        self.committed = true;
+        if let Some(backup) = self.backup.take() {
+            if let Err(error) = fs::remove_dir_all(&backup) {
+                log::warn!(
+                    "remove previous authored runbook {}: {error}",
+                    backup.display()
+                );
+            }
+        }
+        if let Err(error) = sync_directory(&self.root) {
+            log::warn!("sync authored runbook library after publication: {error}");
+        }
+    }
+}
+
+impl Drop for AuthoredPublication {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        if self.destination.exists() {
+            let _ = fs::remove_dir_all(&self.destination);
+        }
+        if let Some(backup) = self.backup.as_ref() {
+            let _ = fs::rename(backup, &self.destination);
+        }
+        if self.staging.exists() {
+            let _ = fs::remove_dir_all(&self.staging);
+        }
+        let _ = sync_directory(&self.root);
+    }
+}
+
+fn publish_authored_package(
+    authored_root: &Path,
+    destination: &Path,
+    source_yaml: &[u8],
+    readme: &[u8],
+    expected_source_sha256: Option<&str>,
+    expected_readme_sha256: Option<&str>,
+) -> Result<AuthoredPublication, String> {
+    fs::create_dir_all(authored_root)
+        .map_err(|error| format!("create authored runbook library: {error}"))?;
+    let root_metadata = fs::symlink_metadata(authored_root)
+        .map_err(|error| format!("inspect authored runbook library: {error}"))?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err("authored runbook library must be an ordinary directory".into());
+    }
+    restrict_builtin_directory(authored_root)?;
+
+    let mut backup = None;
+    match fs::symlink_metadata(destination) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err("authored runbook package path is not an ordinary directory".into());
+            }
+            let expected_source = expected_source_sha256
+                .ok_or("an unexpected package already exists at this draft's app-managed path")?;
+            let expected_readme = expected_readme_sha256
+                .ok_or("an unexpected package already exists at this draft's app-managed path")?;
+            let mut names = fs::read_dir(destination)
+                .map_err(|error| format!("read authored runbook package: {error}"))?
+                .map(|entry| {
+                    entry
+                        .map(|entry| entry.file_name())
+                        .map_err(|error| format!("read authored runbook entry: {error}"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            names.sort();
+            if names
+                != [
+                    std::ffi::OsString::from("README.md"),
+                    std::ffi::OsString::from("runbook.vrun.yaml"),
+                ]
+            {
+                return Err("authored runbook package contains unexpected files; export it before resolving the drift".into());
+            }
+            for name in ["runbook.vrun.yaml", "README.md"] {
+                let metadata = fs::symlink_metadata(destination.join(name))
+                    .map_err(|error| format!("inspect authored runbook {name}: {error}"))?;
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return Err(format!("authored runbook {name} is not an ordinary file"));
+                }
+            }
+            let current_source = fs::read(destination.join("runbook.vrun.yaml"))
+                .map_err(|error| format!("read authored runbook definition: {error}"))?;
+            let current_readme = fs::read(destination.join("README.md"))
+                .map_err(|error| format!("read authored runbook README: {error}"))?;
+            if sha256_hex(&current_source) != expected_source
+                || sha256_hex(&current_readme) != expected_readme
+            {
+                return Err("authored runbook package changed outside the wizard; export it before resolving the drift".into());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if expected_source_sha256.is_some() || expected_readme_sha256.is_some() {
+                return Err("the previously published app-managed package is missing".into());
+            }
+        }
+        Err(error) => return Err(format!("inspect authored runbook package: {error}")),
+    }
+
+    let suffix = uuid::Uuid::new_v4();
+    let staging = authored_root.join(format!(".draft-staging-{suffix}"));
+    fs::create_dir(&staging)
+        .map_err(|error| format!("create authored runbook staging directory: {error}"))?;
+    restrict_builtin_directory(&staging)?;
+    if let Err(error) = write_builtin_file(&staging.join("runbook.vrun.yaml"), source_yaml)
+        .and_then(|()| write_builtin_file(&staging.join("README.md"), readme))
+        .and_then(|()| load_and_check_package(&staging).map(|_| ()))
+        .and_then(|()| sync_directory(&staging))
+    {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+
+    if destination.exists() {
+        let backup_path = authored_root.join(format!(".draft-backup-{suffix}"));
+        fs::rename(destination, &backup_path)
+            .map_err(|error| format!("move previous authored runbook aside: {error}"))?;
+        backup = Some(backup_path);
+    }
+    if let Err(error) = fs::rename(&staging, destination) {
+        if let Some(backup_path) = backup.as_ref() {
+            let _ = fs::rename(backup_path, destination);
+        }
+        let _ = fs::remove_dir_all(&staging);
+        return Err(format!("publish authored runbook package: {error}"));
+    }
+    let publication = AuthoredPublication {
+        root: authored_root.to_path_buf(),
+        destination: destination.to_path_buf(),
+        staging,
+        backup,
+        committed: false,
+    };
+    sync_directory(authored_root)?;
+    Ok(publication)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -314,9 +756,17 @@ pub fn runbooks_refresh(
         db::get_source(&connection, &source_id)?
             .ok_or_else(|| format!("unknown runbook source: {source_id}"))?
     };
+    if source.source_kind == SourceKind::Builtin {
+        return Err(
+            "included runbooks are refreshed automatically from the application bundle".into(),
+        );
+    }
     match load_and_check_package(Path::new(&source.package_path)) {
         Ok(package) => {
-            let input = registration_input(&package, true, None)?;
+            let mut input = registration_input(&package, true, None)?;
+            input.source_kind = source.source_kind;
+            input.hidden = source.hidden;
+            input.builtin_order = source.builtin_order;
             let connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
             db::upsert_source(&connection, &input)
         }
@@ -330,6 +780,9 @@ pub fn runbooks_refresh(
                 canonical_sha256: source.canonical_sha256.clone(),
                 valid: false,
                 validation_error: Some(bounded_error(&error)),
+                source_kind: source.source_kind,
+                hidden: source.hidden,
+                builtin_order: source.builtin_order,
             };
             let connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
             db::upsert_source(&connection, &input)
@@ -341,10 +794,11 @@ pub fn runbooks_refresh(
 pub fn runbooks_list(
     app: tauri::AppHandle<Wry>,
     db_state: State<'_, DbState>,
+    command_state: State<'_, Arc<RunbookCommandState>>,
 ) -> Result<Vec<SourceRegistration>, String> {
     gate(&app)?;
     let connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
-    db::list_sources(&connection)
+    reconcile_builtin_sources(&command_state.app_data_dir, &connection)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -363,6 +817,189 @@ pub fn runbooks_remove(
     }
 }
 
+#[tauri::command]
+pub fn runbooks_restore_builtins(
+    app: tauri::AppHandle<Wry>,
+    db_state: State<'_, DbState>,
+    command_state: State<'_, Arc<RunbookCommandState>>,
+) -> Result<Vec<SourceRegistration>, String> {
+    gate(&app)?;
+    let connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
+    reconcile_builtin_sources(&command_state.app_data_dir, &connection)?;
+    db::restore_builtin_sources(&connection)
+}
+
+#[tauri::command]
+pub fn runbooks_drafts_list(
+    app: tauri::AppHandle<Wry>,
+    db_state: State<'_, DbState>,
+) -> Result<Vec<RunbookDraftSummary>, String> {
+    gate(&app)?;
+    let connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
+    db::list_runbook_drafts(&connection)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn runbooks_draft_create(
+    app: tauri::AppHandle<Wry>,
+    db_state: State<'_, DbState>,
+    initial: Option<RunbookDraftDocument>,
+) -> Result<RunbookDraft, String> {
+    gate(&app)?;
+    let document = initial.unwrap_or_default();
+    validate_draft_storage(&document)?;
+    let connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
+    Ok(db::create_runbook_draft(&connection, &document)?.draft)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn runbooks_draft_get(
+    app: tauri::AppHandle<Wry>,
+    db_state: State<'_, DbState>,
+    draft_id: String,
+) -> Result<RunbookDraft, String> {
+    gate(&app)?;
+    validate_identifier(&draft_id, "draft id")?;
+    let connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
+    Ok(db::get_runbook_draft(&connection, &draft_id)?
+        .ok_or_else(|| format!("unknown runbook draft: {draft_id}"))?
+        .draft)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn runbooks_draft_save(
+    app: tauri::AppHandle<Wry>,
+    db_state: State<'_, DbState>,
+    draft_id: String,
+    expected_revision: i64,
+    document: RunbookDraftDocument,
+) -> Result<RunbookDraft, String> {
+    gate(&app)?;
+    validate_identifier(&draft_id, "draft id")?;
+    validate_draft_storage(&document)?;
+    let connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
+    Ok(db::save_runbook_draft(&connection, &draft_id, expected_revision, &document)?.draft)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn runbooks_draft_validate(
+    app: tauri::AppHandle<Wry>,
+    db_state: State<'_, DbState>,
+    draft_id: String,
+) -> Result<RunbookDraftPreview, String> {
+    gate(&app)?;
+    validate_identifier(&draft_id, "draft id")?;
+    let connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
+    let stored = db::get_runbook_draft(&connection, &draft_id)?
+        .ok_or_else(|| format!("unknown runbook draft: {draft_id}"))?;
+    Ok(validate_draft_preview(&stored.draft.document))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn runbooks_draft_discard(
+    app: tauri::AppHandle<Wry>,
+    db_state: State<'_, DbState>,
+    draft_id: String,
+) -> Result<(), String> {
+    gate(&app)?;
+    validate_identifier(&draft_id, "draft id")?;
+    let connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
+    if db::discard_runbook_draft(&connection, &draft_id)? {
+        Ok(())
+    } else {
+        Err(format!("unknown runbook draft: {draft_id}"))
+    }
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn runbooks_draft_publish(
+    app: tauri::AppHandle<Wry>,
+    db_state: State<'_, DbState>,
+    command_state: State<'_, Arc<RunbookCommandState>>,
+    draft_id: String,
+    expected_revision: i64,
+) -> Result<SourceRegistration, String> {
+    gate(&app)?;
+    validate_identifier(&draft_id, "draft id")?;
+    let connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
+    let stored = db::get_runbook_draft(&connection, &draft_id)?
+        .ok_or_else(|| format!("unknown runbook draft: {draft_id}"))?;
+    if stored.draft.revision != expected_revision {
+        return Err("runbook draft changed in another window; reload it before publishing".into());
+    }
+    let preview = validate_draft_preview(&stored.draft.document);
+    if !preview.issues.is_empty() {
+        return Err(format!(
+            "runbook draft is not publishable: {}",
+            preview
+                .issues
+                .iter()
+                .map(|issue| format!("{}: {}", issue.path, issue.message))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+    let definition = preview
+        .definition
+        .ok_or("validated draft has no definition")?;
+    let source_yaml = preview.source_yaml.ok_or("validated draft has no YAML")?;
+    let readme = preview.readme.ok_or("validated draft has no README")?;
+    let document_sha256 = sha256_hex(stored.document_json.as_bytes());
+
+    let changed = draft_publication_changed(
+        stored.last_published_document_sha256.as_deref(),
+        stored.draft.last_published_version.as_deref(),
+        &document_sha256,
+        &definition.metadata.version,
+    )?;
+    if !changed {
+        if let Some(source_id) = stored.draft.published_source_id.as_deref() {
+            if let Some(source) = db::get_source(&connection, source_id)? {
+                let package = load_and_check_package(Path::new(&source.package_path))?;
+                require_registered_snapshot(&source, &package)?;
+                return Ok(source);
+            }
+        }
+    }
+
+    let authored_root = command_state
+        .app_data_dir
+        .join(BUILTIN_LIBRARY_DIRECTORY)
+        .join(AUTHORED_PACKAGES_DIRECTORY);
+    let package_path = authored_root.join(&draft_id);
+    let mut publication = publish_authored_package(
+        &authored_root,
+        &package_path,
+        source_yaml.as_bytes(),
+        readme.as_bytes(),
+        stored.last_published_source_sha256.as_deref(),
+        stored.last_published_readme_sha256.as_deref(),
+    )?;
+    let package = load_and_check_package(&package_path)?;
+    let input = registration_input(&package, true, None)?;
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| format!("begin runbook publication transaction: {error}"))?;
+    let source = db::upsert_source(&transaction, &input)?;
+    db::mark_runbook_draft_published(
+        &transaction,
+        &draft_id,
+        expected_revision,
+        db::PublishedDraftHashes {
+            version: &definition.metadata.version,
+            document_sha256: &document_sha256,
+            source_sha256: &sha256_hex(source_yaml.as_bytes()),
+            readme_sha256: &sha256_hex(readme.as_bytes()),
+            source_id: &source.id,
+        },
+    )?;
+    transaction
+        .commit()
+        .map_err(|error| format!("commit runbook publication: {error}"))?;
+    publication.commit();
+    Ok(source)
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub fn runbooks_get_definition(
     app: tauri::AppHandle<Wry>,
@@ -376,6 +1013,9 @@ pub fn runbooks_get_definition(
         db::get_source(&connection, &source_id)?
             .ok_or_else(|| format!("unknown runbook source: {source_id}"))?
     };
+    if source.hidden {
+        return Err(format!("unknown runbook source: {source_id}"));
+    }
     if !source.valid {
         return Err(source
             .validation_error
@@ -414,6 +1054,9 @@ pub fn runbooks_start(
         db::get_source(&connection, &request.source_id)?
             .ok_or_else(|| format!("unknown runbook source: {}", request.source_id))?
     };
+    if source.hidden {
+        return Err(format!("unknown runbook source: {}", request.source_id));
+    }
     if !source.valid {
         return Err(source
             .validation_error
@@ -1140,6 +1783,42 @@ pub fn runbooks_export(
     )
 }
 
+#[tauri::command(rename_all = "snake_case")]
+pub fn runbooks_export_package(
+    app: tauri::AppHandle<Wry>,
+    db_state: State<'_, DbState>,
+    source_id: String,
+    destination: String,
+) -> Result<RunbookExportResult, String> {
+    gate(&app)?;
+    validate_identifier(&source_id, "source id")?;
+    validate_path_argument(&destination, "export destination")?;
+    let source = {
+        let connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
+        db::get_source(&connection, &source_id)?
+            .filter(|source| !source.hidden)
+            .ok_or_else(|| format!("unknown runbook source: {source_id}"))?
+    };
+    if !source.valid {
+        return Err(source
+            .validation_error
+            .clone()
+            .unwrap_or_else(|| "the runbook package is invalid; refresh it first".into()));
+    }
+    let package = match load_and_check_package(Path::new(&source.package_path)) {
+        Ok(package) => package,
+        Err(error) => {
+            mark_source_invalid(&db_state, &source, &error)?;
+            return Err(error);
+        }
+    };
+    if let Err(error) = require_registered_snapshot(&source, &package) {
+        mark_source_invalid(&db_state, &source, &error)?;
+        return Err(error);
+    }
+    export_runbook_package(&source, &package, Path::new(&destination))
+}
+
 fn spawn_engine(
     app: tauri::AppHandle<Wry>,
     state: Arc<RunbookCommandState>,
@@ -1660,6 +2339,9 @@ fn registration_input(
         canonical_sha256: package.snapshot.canonical_sha256.clone(),
         valid,
         validation_error,
+        source_kind: SourceKind::User,
+        hidden: false,
+        builtin_order: None,
     })
 }
 
@@ -1695,6 +2377,9 @@ fn invalid_registration_input(path: &Path, error: &str) -> Result<SourceRegistra
         canonical_sha256: identity,
         valid: false,
         validation_error: Some(bounded_error(error)),
+        source_kind: SourceKind::User,
+        hidden: false,
+        builtin_order: None,
     })
 }
 
@@ -1737,6 +2422,9 @@ fn mark_source_invalid(
             canonical_sha256: source.canonical_sha256.clone(),
             valid: false,
             validation_error: Some(bounded_error(error)),
+            source_kind: source.source_kind,
+            hidden: source.hidden,
+            builtin_order: source.builtin_order,
         },
     )?;
     Ok(())
@@ -2017,6 +2705,1012 @@ fn bounded_error(error: &str) -> String {
     format!("{}…", &sanitized[..end])
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PackageManifestEntry {
+    relative_path: PathBuf,
+    directory: bool,
+    bytes: u64,
+    sha256: String,
+}
+
+fn export_runbook_package(
+    source: &SourceRegistration,
+    package: &ValidatedPackage,
+    destination: &Path,
+) -> Result<RunbookExportResult, String> {
+    let definition_id = safe_package_component(&package.definition.metadata.id);
+    let definition_version = safe_package_component(&package.definition.metadata.version);
+    let bundle_name = format!("runbook-{definition_id}-v{definition_version}");
+    validate_export_component(&bundle_name, "runbook export directory")?;
+
+    #[cfg(target_vendor = "apple")]
+    {
+        export_runbook_package_pinned(source, package, destination, &bundle_name)
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    export_runbook_package_path(source, package, destination, &bundle_name)
+}
+
+#[cfg(target_vendor = "apple")]
+fn export_runbook_package_pinned(
+    source: &SourceRegistration,
+    package: &ValidatedPackage,
+    destination: &Path,
+    bundle_name: &str,
+) -> Result<RunbookExportResult, String> {
+    let manifest = package_manifest(&package.root, None)?;
+    let mut export = PinnedPackageExport::new(destination, bundle_name)?;
+    export.copy_manifest(&package.root, &manifest)?;
+
+    // Re-open the registered source after every byte has been copied. The
+    // source definition must still match its durable digests and the complete
+    // README/Ansible tree must still match the first pass. The destination is
+    // already byte-for-byte checked while streaming into pinned file handles.
+    let reloaded = load_and_check_package(&package.root)?;
+    require_registered_snapshot(source, &reloaded)?;
+    let current = package_manifest(&reloaded.root, None)?;
+    if current != manifest {
+        return Err(
+            "runbook package changed while it was being exported; refresh and try again".into(),
+        );
+    }
+    export.sync()?;
+    let output_dir = export.publish(bundle_name, &manifest)?;
+    Ok(RunbookExportResult {
+        destination: output_dir.to_string_lossy().into_owned(),
+        files: exported_file_paths(&output_dir, manifest),
+    })
+}
+
+#[cfg(not(target_vendor = "apple"))]
+fn export_runbook_package_path(
+    source: &SourceRegistration,
+    package: &ValidatedPackage,
+    destination: &Path,
+    bundle_name: &str,
+) -> Result<RunbookExportResult, String> {
+    let destination = canonical_export_directory(destination)?;
+    let output_dir = destination.join(&bundle_name);
+    match fs::symlink_metadata(&output_dir) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => {
+            return Err(format!(
+                "runbook export destination {} already exists",
+                output_dir.display()
+            ));
+        }
+        Err(error) => {
+            return Err(format!(
+                "inspect runbook export destination {}: {error}",
+                output_dir.display()
+            ));
+        }
+    }
+
+    let staging = destination.join(format!(".{bundle_name}.staging-{}", uuid::Uuid::new_v4()));
+    fs::create_dir(&staging).map_err(|error| {
+        format!(
+            "create runbook export staging directory {}: {error}",
+            staging.display()
+        )
+    })?;
+    if let Err(error) = restrict_builtin_directory(&staging) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+
+    let prepared = (|| -> Result<Vec<PackageManifestEntry>, String> {
+        let copied = package_manifest(&package.root, Some(&staging))?;
+
+        // Re-open both the registered definition and the complete package tree
+        // after copying. Definition drift is checked against the durable DB
+        // digests; README/Ansible drift is checked against the first manifest.
+        let reloaded = load_and_check_package(&package.root)?;
+        require_registered_snapshot(source, &reloaded)?;
+        let current = package_manifest(&reloaded.root, None)?;
+        if current != copied {
+            return Err(
+                "runbook package changed while it was being exported; refresh and try again".into(),
+            );
+        }
+
+        let staged = load_and_check_package(&staging)?;
+        if staged.snapshot != reloaded.snapshot
+            || staged.definition.metadata.id != reloaded.definition.metadata.id
+            || staged.definition.metadata.version != reloaded.definition.metadata.version
+        {
+            return Err("staged runbook export does not match its validated source".into());
+        }
+        let staged_manifest = package_manifest(&staged.root, None)?;
+        if staged_manifest != copied {
+            return Err("staged runbook export failed its package integrity check".into());
+        }
+        for entry in copied.iter().filter(|entry| entry.directory).rev() {
+            sync_directory(&staging.join(&entry.relative_path))?;
+        }
+        sync_directory(&staging)?;
+        Ok(copied)
+    })();
+
+    let manifest = match prepared {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error);
+        }
+    };
+    if let Err(error) = publish_export_directory(&staging, &output_dir) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    sync_directory(&destination)?;
+
+    Ok(RunbookExportResult {
+        destination: output_dir.to_string_lossy().into_owned(),
+        files: exported_file_paths(&output_dir, manifest),
+    })
+}
+
+fn exported_file_paths(output_dir: &Path, manifest: Vec<PackageManifestEntry>) -> Vec<String> {
+    manifest
+        .into_iter()
+        .filter(|entry| !entry.directory)
+        .map(|entry| {
+            output_dir
+                .join(entry.relative_path)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect()
+}
+
+#[cfg(not(target_vendor = "apple"))]
+fn canonical_export_directory(destination: &Path) -> Result<PathBuf, String> {
+    if destination
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+    {
+        return Err("export destination must not contain parent traversal".into());
+    }
+    let absolute = if destination.is_absolute() {
+        destination.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| format!("resolve current directory for export: {error}"))?
+            .join(destination)
+    };
+    let mut ancestors = absolute.ancestors().collect::<Vec<_>>();
+    ancestors.reverse();
+    for ancestor in ancestors {
+        if ancestor.as_os_str().is_empty() {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(ancestor).map_err(|error| {
+            format!(
+                "inspect export destination component {}: {error}",
+                ancestor.display()
+            )
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(format!(
+                "export destination component {} is not an ordinary directory",
+                ancestor.display()
+            ));
+        }
+    }
+    fs::canonicalize(&absolute)
+        .map_err(|error| format!("resolve export destination {}: {error}", absolute.display()))
+}
+
+fn package_manifest(
+    package_root: &Path,
+    copy_to: Option<&Path>,
+) -> Result<Vec<PackageManifestEntry>, String> {
+    let package_root = fs::canonicalize(package_root)
+        .map_err(|error| format!("resolve runbook package for export: {error}"))?;
+    let entries = collect_package_entries(&package_root)?;
+    let mut manifest = Vec::with_capacity(entries.len());
+    for (relative_path, directory) in entries {
+        let source_path = package_root.join(&relative_path);
+        if directory {
+            if let Some(output_root) = copy_to {
+                let output = output_root.join(&relative_path);
+                fs::create_dir(&output).map_err(|error| {
+                    format!(
+                        "create exported package directory {}: {error}",
+                        output.display()
+                    )
+                })?;
+                restrict_builtin_directory(&output)?;
+            }
+            manifest.push(PackageManifestEntry {
+                relative_path,
+                directory: true,
+                bytes: 0,
+                sha256: String::new(),
+            });
+            continue;
+        }
+        let output = copy_to.map(|root| root.join(&relative_path));
+        let (bytes, sha256) = read_package_file(&package_root, &source_path, output.as_deref())?;
+        manifest.push(PackageManifestEntry {
+            relative_path,
+            directory: false,
+            bytes,
+            sha256,
+        });
+    }
+    Ok(manifest)
+}
+
+fn collect_package_entries(package_root: &Path) -> Result<Vec<(PathBuf, bool)>, String> {
+    let root_metadata = fs::symlink_metadata(package_root)
+        .map_err(|error| format!("inspect runbook package root: {error}"))?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err("runbook package root is not an ordinary directory".into());
+    }
+    let mut stack = vec![package_root.to_path_buf()];
+    let mut entries = Vec::new();
+    let mut folded_paths = std::collections::HashSet::new();
+    while let Some(directory) = stack.pop() {
+        for entry in fs::read_dir(&directory)
+            .map_err(|error| format!("read runbook package directory: {error}"))?
+        {
+            let entry = entry.map_err(|error| format!("read runbook package entry: {error}"))?;
+            if entries.len() >= MAX_PACKAGE_ENTRIES {
+                return Err(format!(
+                    "runbook package contains more than {MAX_PACKAGE_ENTRIES} entries"
+                ));
+            }
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|error| format!("inspect runbook package entry: {error}"))?;
+            if metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "symlinks are not allowed in runbook packages: {}",
+                    path.display()
+                ));
+            }
+            if !metadata.is_file() && !metadata.is_dir() {
+                return Err(format!(
+                    "unsupported special file in runbook package: {}",
+                    path.display()
+                ));
+            }
+            let resolved = fs::canonicalize(&path)
+                .map_err(|error| format!("resolve runbook package entry: {error}"))?;
+            if !resolved.starts_with(package_root) {
+                return Err(format!(
+                    "runbook package entry escapes its root: {}",
+                    resolved.display()
+                ));
+            }
+            let relative = path
+                .strip_prefix(package_root)
+                .map_err(|_| "runbook package entry escapes its root")?
+                .to_path_buf();
+            for component in relative.components() {
+                let Component::Normal(component) = component else {
+                    return Err("runbook package contains an unsafe path component".into());
+                };
+                let component = component
+                    .to_str()
+                    .ok_or("runbook package paths must be UTF-8")?;
+                validate_export_component(component, "runbook package path component")?;
+            }
+            let folded = relative.to_string_lossy().to_ascii_lowercase();
+            if !folded_paths.insert(folded) {
+                return Err("runbook package paths collide after portable normalization".into());
+            }
+            let is_directory = metadata.is_dir();
+            if is_directory {
+                stack.push(path);
+            }
+            entries.push((relative, is_directory));
+        }
+    }
+    entries.sort_by(|(left_path, _), (right_path, _)| {
+        left_path
+            .components()
+            .count()
+            .cmp(&right_path.components().count())
+            .then_with(|| left_path.cmp(right_path))
+    });
+    Ok(entries)
+}
+
+fn read_package_file(
+    package_root: &Path,
+    source: &Path,
+    destination: Option<&Path>,
+) -> Result<(u64, String), String> {
+    let mut output = if let Some(destination) = destination {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        Some(options.open(destination).map_err(|error| {
+            format!(
+                "create exported package file {}: {error}",
+                destination.display()
+            )
+        })?)
+    } else {
+        None
+    };
+    read_package_file_to_handle(package_root, source, output.as_mut())
+}
+
+fn read_package_file_to_handle(
+    package_root: &Path,
+    source: &Path,
+    mut output: Option<&mut std::fs::File>,
+) -> Result<(u64, String), String> {
+    let named_metadata = fs::symlink_metadata(source)
+        .map_err(|error| format!("inspect runbook package file {}: {error}", source.display()))?;
+    if named_metadata.file_type().is_symlink() || !named_metadata.is_file() {
+        return Err(format!(
+            "runbook package file {} is not an ordinary file",
+            source.display()
+        ));
+    }
+    let resolved = fs::canonicalize(source)
+        .map_err(|error| format!("resolve runbook package file {}: {error}", source.display()))?;
+    if !resolved.starts_with(package_root) {
+        return Err(format!(
+            "runbook package file {} escapes its root",
+            source.display()
+        ));
+    }
+    let mut source_options = OpenOptions::new();
+    source_options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        source_options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut input = source_options
+        .open(source)
+        .map_err(|error| format!("open runbook package file {}: {error}", source.display()))?;
+    let opened_metadata = input
+        .metadata()
+        .map_err(|error| format!("inspect opened runbook package file: {error}"))?;
+    if !opened_metadata.is_file() {
+        return Err(format!(
+            "runbook package file {} is not an ordinary file",
+            source.display()
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if named_metadata.dev() != opened_metadata.dev()
+            || named_metadata.ino() != opened_metadata.ino()
+        {
+            return Err(format!(
+                "runbook package file {} changed while it was opened",
+                source.display()
+            ));
+        }
+    }
+
+    let mut hasher = Sha256::new();
+    let mut total = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = input
+            .read(&mut buffer)
+            .map_err(|error| format!("read runbook package file {}: {error}", source.display()))?;
+        if read == 0 {
+            break;
+        }
+        total = total
+            .checked_add(read as u64)
+            .ok_or("runbook package file is too large")?;
+        hasher.update(&buffer[..read]);
+        if let Some(output) = output.as_deref_mut() {
+            output
+                .write_all(&buffer[..read])
+                .map_err(|error| format!("write exported runbook package file: {error}"))?;
+        }
+    }
+    if total != opened_metadata.len() {
+        return Err(format!(
+            "runbook package file {} changed while it was read",
+            source.display()
+        ));
+    }
+    if let Some(output) = output {
+        output
+            .sync_all()
+            .map_err(|error| format!("sync exported runbook package file: {error}"))?;
+    }
+    let digest = hasher.finalize();
+    let mut sha256 = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(sha256, "{byte:02x}");
+    }
+    Ok((total, sha256))
+}
+
+#[cfg(target_vendor = "apple")]
+struct CreatedExportEntry {
+    relative_path: PathBuf,
+    parent: PathBuf,
+    name: std::ffi::CString,
+    device: u64,
+    inode: u64,
+    directory: bool,
+}
+
+/// A package export writes only relative to retained directory handles. Even if
+/// another process renames the selected folder or replaces its pathname, writes,
+/// cleanup and final publication remain bound to the directory the user chose.
+#[cfg(target_vendor = "apple")]
+struct PinnedPackageExport {
+    destination: std::fs::File,
+    display_destination: PathBuf,
+    staging_name: std::ffi::CString,
+    staging: std::fs::File,
+    directories: BTreeMap<PathBuf, std::fs::File>,
+    files: BTreeMap<PathBuf, std::fs::File>,
+    created: Vec<CreatedExportEntry>,
+    published: bool,
+}
+
+#[cfg(target_vendor = "apple")]
+impl PinnedPackageExport {
+    fn new(destination: &Path, bundle_name: &str) -> Result<Self, String> {
+        use std::os::unix::fs::MetadataExt;
+
+        let destination_handle = open_pinned_export_directory(destination)?;
+        let opened = destination_handle
+            .metadata()
+            .map_err(|error| format!("inspect pinned export destination: {error}"))?;
+        let display_destination = fs::canonicalize(destination)
+            .map_err(|error| format!("resolve export destination: {error}"))?;
+        let named = fs::symlink_metadata(&display_destination)
+            .map_err(|error| format!("inspect resolved export destination: {error}"))?;
+        if named.file_type().is_symlink()
+            || !named.is_dir()
+            || named.dev() != opened.dev()
+            || named.ino() != opened.ino()
+        {
+            return Err("export destination changed while it was being pinned".into());
+        }
+
+        let bundle_name = export_entry_name(bundle_name)?;
+        Self::require_absent(
+            &destination_handle,
+            &bundle_name,
+            "runbook export destination",
+        )?;
+        let staging_name = export_entry_name(&format!(
+            ".{}.staging-{}",
+            bundle_name.to_string_lossy(),
+            uuid::Uuid::new_v4()
+        ))?;
+        let staging = create_pinned_export_directory_at(&destination_handle, &staging_name)?;
+        Ok(Self {
+            destination: destination_handle,
+            display_destination,
+            staging_name,
+            staging,
+            directories: BTreeMap::new(),
+            files: BTreeMap::new(),
+            created: Vec::new(),
+            published: false,
+        })
+    }
+
+    fn require_absent(
+        directory: &std::fs::File,
+        name: &std::ffi::CStr,
+        label: &str,
+    ) -> Result<(), String> {
+        use std::os::fd::AsRawFd;
+
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        let result = unsafe {
+            libc::fstatat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                stat.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if result == 0 {
+            return Err(format!("{label} {} already exists", name.to_string_lossy()));
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ENOENT) {
+            Ok(())
+        } else {
+            Err(format!("inspect {label}: {error}"))
+        }
+    }
+
+    fn parent(&self, relative: &Path) -> Result<&std::fs::File, String> {
+        if relative.as_os_str().is_empty() {
+            Ok(&self.staging)
+        } else {
+            self.directories.get(relative).ok_or_else(|| {
+                format!(
+                    "export package parent {} was not created",
+                    relative.display()
+                )
+            })
+        }
+    }
+
+    fn relative_parts(relative: &Path) -> Result<(PathBuf, std::ffi::CString), String> {
+        let parent = relative
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .to_path_buf();
+        let name = relative
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or("export package entry must have a UTF-8 filename")?;
+        Ok((parent, export_entry_name(name)?))
+    }
+
+    fn create_directory(&mut self, relative: &Path) -> Result<(), String> {
+        use std::os::unix::fs::MetadataExt;
+
+        let (parent_path, name) = Self::relative_parts(relative)?;
+        let directory = {
+            let parent = self.parent(&parent_path)?;
+            create_pinned_export_directory_at(parent, &name)?
+        };
+        let metadata = directory
+            .metadata()
+            .map_err(|error| format!("inspect created export directory: {error}"))?;
+        self.created.push(CreatedExportEntry {
+            relative_path: relative.to_path_buf(),
+            parent: parent_path,
+            name,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            directory: true,
+        });
+        self.directories.insert(relative.to_path_buf(), directory);
+        Ok(())
+    }
+
+    fn create_file(&mut self, relative: &Path) -> Result<&mut std::fs::File, String> {
+        use std::os::unix::fs::MetadataExt;
+
+        let (parent_path, name) = Self::relative_parts(relative)?;
+        let file = {
+            let parent = self.parent(&parent_path)?;
+            create_pinned_export_file_at(parent, &name)?
+        };
+        let metadata = file
+            .metadata()
+            .map_err(|error| format!("inspect created export file: {error}"))?;
+        self.created.push(CreatedExportEntry {
+            relative_path: relative.to_path_buf(),
+            parent: parent_path,
+            name,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            directory: false,
+        });
+        self.files.insert(relative.to_path_buf(), file);
+        self.files
+            .get_mut(relative)
+            .ok_or_else(|| "created export file handle was not retained".into())
+    }
+
+    fn copy_manifest(
+        &mut self,
+        package_root: &Path,
+        manifest: &[PackageManifestEntry],
+    ) -> Result<(), String> {
+        let package_root = fs::canonicalize(package_root)
+            .map_err(|error| format!("resolve runbook package for export: {error}"))?;
+        for entry in manifest {
+            if entry.directory {
+                self.create_directory(&entry.relative_path)?;
+                continue;
+            }
+            let output = self.create_file(&entry.relative_path)?;
+            let (bytes, sha256) = read_package_file_to_handle(
+                &package_root,
+                &package_root.join(&entry.relative_path),
+                Some(output),
+            )?;
+            if bytes != entry.bytes || sha256 != entry.sha256 {
+                return Err(format!(
+                    "runbook package file {} changed while it was copied",
+                    entry.relative_path.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn sync(&self) -> Result<(), String> {
+        for directory in self.directories.values() {
+            directory
+                .sync_all()
+                .map_err(|error| format!("sync exported package directory: {error}"))?;
+        }
+        self.staging
+            .sync_all()
+            .map_err(|error| format!("sync exported package root: {error}"))
+    }
+
+    fn directory_entry_names(
+        directory: &std::fs::File,
+    ) -> Result<std::collections::BTreeSet<Vec<u8>>, String> {
+        use std::os::fd::AsRawFd;
+
+        let duplicate = unsafe { libc::dup(directory.as_raw_fd()) };
+        if duplicate < 0 {
+            return Err(format!(
+                "duplicate exported package directory handle: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let stream = unsafe { libc::fdopendir(duplicate) };
+        if stream.is_null() {
+            let error = std::io::Error::last_os_error();
+            unsafe {
+                libc::close(duplicate);
+            }
+            return Err(format!("open exported package directory stream: {error}"));
+        }
+
+        let mut names = std::collections::BTreeSet::new();
+        loop {
+            let entry = unsafe { libc::readdir(stream) };
+            if entry.is_null() {
+                break;
+            }
+            let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+            if !matches!(name, b"." | b"..") {
+                names.insert(name.to_vec());
+            }
+        }
+        if unsafe { libc::closedir(stream) } != 0 {
+            return Err(format!(
+                "close exported package directory stream: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(names)
+    }
+
+    fn verify_integrity(&mut self, manifest: &[PackageManifestEntry]) -> Result<(), String> {
+        use std::io::SeekFrom;
+        use std::os::unix::fs::MetadataExt;
+
+        if self.created.len() != manifest.len() {
+            return Err("staged runbook export has an unexpected number of entries".into());
+        }
+
+        let mut expected_entries = manifest
+            .iter()
+            .map(|entry| (entry.relative_path.clone(), entry.directory))
+            .collect::<BTreeMap<_, _>>();
+        let mut expected_children = BTreeMap::<PathBuf, std::collections::BTreeSet<Vec<u8>>>::new();
+        expected_children.entry(PathBuf::new()).or_default();
+        for entry in &self.created {
+            if expected_entries.remove(&entry.relative_path) != Some(entry.directory) {
+                return Err(format!(
+                    "staged runbook export contains unexpected entry {}",
+                    entry.relative_path.display()
+                ));
+            }
+            let parent = self.parent(&entry.parent)?;
+            if !Self::named_entry_is_owned(parent, &entry.name, entry.device, entry.inode) {
+                return Err(format!(
+                    "staged runbook export entry {} was replaced before publication",
+                    entry.relative_path.display()
+                ));
+            }
+            let handle_metadata = if entry.directory {
+                self.directories
+                    .get(&entry.relative_path)
+                    .ok_or_else(|| {
+                        format!(
+                            "staged runbook export directory {} is not pinned",
+                            entry.relative_path.display()
+                        )
+                    })?
+                    .metadata()
+            } else {
+                self.files
+                    .get(&entry.relative_path)
+                    .ok_or_else(|| {
+                        format!(
+                            "staged runbook export file {} is not pinned",
+                            entry.relative_path.display()
+                        )
+                    })?
+                    .metadata()
+            }
+            .map_err(|error| {
+                format!(
+                    "inspect pinned runbook export entry {}: {error}",
+                    entry.relative_path.display()
+                )
+            })?;
+            if handle_metadata.dev() != entry.device || handle_metadata.ino() != entry.inode {
+                return Err(format!(
+                    "pinned runbook export entry {} changed identity",
+                    entry.relative_path.display()
+                ));
+            }
+            expected_children
+                .entry(entry.parent.clone())
+                .or_default()
+                .insert(entry.name.to_bytes().to_vec());
+            if entry.directory {
+                expected_children
+                    .entry(entry.relative_path.clone())
+                    .or_default();
+            }
+        }
+        if !expected_entries.is_empty() {
+            return Err("staged runbook export is missing manifest entries".into());
+        }
+
+        let root_names = Self::directory_entry_names(&self.staging)?;
+        if root_names
+            != expected_children
+                .remove(&PathBuf::new())
+                .unwrap_or_default()
+        {
+            return Err("staged runbook export root contains unexpected entries".into());
+        }
+        for (relative, directory) in &self.directories {
+            let actual = Self::directory_entry_names(directory)?;
+            let expected = expected_children.remove(relative).unwrap_or_default();
+            if actual != expected {
+                return Err(format!(
+                    "staged runbook export directory {} contains unexpected entries",
+                    relative.display()
+                ));
+            }
+        }
+        if !expected_children.is_empty() {
+            return Err("staged runbook export directory manifest is incomplete".into());
+        }
+
+        // This is deliberately the final validation before rename. Keep the
+        // read/write handles alive so a pathname swap cannot redirect hashing.
+        for entry in manifest.iter().filter(|entry| !entry.directory) {
+            let file = self.files.get_mut(&entry.relative_path).ok_or_else(|| {
+                format!(
+                    "staged runbook export file {} is not pinned",
+                    entry.relative_path.display()
+                )
+            })?;
+            file.seek(SeekFrom::Start(0)).map_err(|error| {
+                format!(
+                    "rewind staged runbook export file {}: {error}",
+                    entry.relative_path.display()
+                )
+            })?;
+            let mut hasher = Sha256::new();
+            let mut total = 0u64;
+            let mut buffer = [0u8; 64 * 1024];
+            loop {
+                let read = file.read(&mut buffer).map_err(|error| {
+                    format!(
+                        "read staged runbook export file {}: {error}",
+                        entry.relative_path.display()
+                    )
+                })?;
+                if read == 0 {
+                    break;
+                }
+                total = total
+                    .checked_add(read as u64)
+                    .ok_or("staged runbook export file is too large")?;
+                hasher.update(&buffer[..read]);
+            }
+            let digest = hasher.finalize();
+            let sha256 = digest
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            if total != entry.bytes || sha256 != entry.sha256 {
+                return Err(format!(
+                    "staged runbook export file {} failed its final integrity check",
+                    entry.relative_path.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn named_entry_is_owned(
+        parent: &std::fs::File,
+        name: &std::ffi::CStr,
+        device: u64,
+        inode: u64,
+    ) -> bool {
+        use std::os::fd::AsRawFd;
+
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe {
+            libc::fstatat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                stat.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } != 0
+        {
+            return false;
+        }
+        let stat = unsafe { stat.assume_init() };
+        stat.st_dev as u64 == device && stat.st_ino == inode
+    }
+
+    fn staging_is_owned(&self) -> bool {
+        use std::os::unix::fs::MetadataExt;
+
+        self.staging.metadata().is_ok_and(|metadata| {
+            Self::named_entry_is_owned(
+                &self.destination,
+                &self.staging_name,
+                metadata.dev(),
+                metadata.ino(),
+            )
+        })
+    }
+
+    fn current_destination_path(&self) -> PathBuf {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
+
+        let mut buffer = vec![0i8; libc::PATH_MAX as usize];
+        if unsafe {
+            libc::fcntl(
+                self.destination.as_raw_fd(),
+                libc::F_GETPATH,
+                buffer.as_mut_ptr(),
+            )
+        } == 0
+        {
+            let path = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) };
+            PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes()))
+        } else {
+            self.display_destination.clone()
+        }
+    }
+
+    fn publish(
+        &mut self,
+        bundle_name: &str,
+        manifest: &[PackageManifestEntry],
+    ) -> Result<PathBuf, String> {
+        use std::os::fd::AsRawFd;
+
+        if !self.staging_is_owned() {
+            return Err("runbook export staging directory changed before publication".into());
+        }
+        let bundle_name = export_entry_name(bundle_name)?;
+        Self::require_absent(
+            &self.destination,
+            &bundle_name,
+            "runbook export destination",
+        )?;
+        self.verify_integrity(manifest)?;
+        let result = unsafe {
+            libc::renameatx_np(
+                self.destination.as_raw_fd(),
+                self.staging_name.as_ptr(),
+                self.destination.as_raw_fd(),
+                bundle_name.as_ptr(),
+                libc::RENAME_EXCL,
+            )
+        };
+        if result != 0 {
+            return Err(format!(
+                "publish runbook export without overwriting existing data: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        self.published = true;
+        if let Err(error) = self.destination.sync_all() {
+            log::warn!("sync published runbook export directory failed: {error}");
+        }
+        Ok(self
+            .current_destination_path()
+            .join(bundle_name.to_string_lossy().as_ref()))
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+impl Drop for PinnedPackageExport {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+
+        if self.published {
+            return;
+        }
+        for entry in self.created.iter().rev() {
+            let Ok(parent) = self.parent(&entry.parent) else {
+                continue;
+            };
+            if !Self::named_entry_is_owned(parent, &entry.name, entry.device, entry.inode) {
+                continue;
+            }
+            let flags = if entry.directory {
+                libc::AT_REMOVEDIR
+            } else {
+                0
+            };
+            if unsafe { libc::unlinkat(parent.as_raw_fd(), entry.name.as_ptr(), flags) } != 0 {
+                log::warn!(
+                    "could not clean owned runbook export entry {}: {}",
+                    entry.name.to_string_lossy(),
+                    std::io::Error::last_os_error()
+                );
+            }
+        }
+        if self.staging_is_owned()
+            && unsafe {
+                libc::unlinkat(
+                    self.destination.as_raw_fd(),
+                    self.staging_name.as_ptr(),
+                    libc::AT_REMOVEDIR,
+                )
+            } != 0
+        {
+            log::warn!(
+                "could not clean owned runbook export staging directory: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+}
+
+fn safe_package_component(value: &str) -> String {
+    let value = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let value = value.trim_matches(|character: char| !character.is_ascii_alphanumeric());
+    if value.is_empty() {
+        "runbook".into()
+    } else {
+        value.chars().take(80).collect()
+    }
+}
+
+#[cfg(not(target_vendor = "apple"))]
+fn publish_export_directory(staging: &Path, destination: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(destination) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => {
+            return Err(format!(
+                "runbook export destination {} already exists",
+                destination.display()
+            ));
+        }
+        Err(error) => return Err(format!("inspect runbook export destination: {error}")),
+    }
+    fs::rename(staging, destination)
+        .map_err(|error| format!("atomically publish runbook export: {error}"))
+}
+
 fn export_report_bundle(
     app_data_dir: &Path,
     report: &RunbookReport,
@@ -2185,6 +3879,181 @@ fn evidence_export_name(id: &str) -> String {
 }
 
 #[cfg(unix)]
+fn export_entry_name(value: &str) -> Result<std::ffi::CString, String> {
+    if value.is_empty()
+        || value == "."
+        || value == ".."
+        || value.as_bytes().contains(&b'/')
+        || value.as_bytes().contains(&0)
+    {
+        return Err("export filename is not a safe directory entry".into());
+    }
+    std::ffi::CString::new(value).map_err(|_| "export filename contains NUL".into())
+}
+
+#[cfg(unix)]
+fn open_pinned_export_directory(path: &Path) -> Result<std::fs::File, String> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+    {
+        return Err("export destination must not contain parent traversal".into());
+    }
+
+    let start = if path.is_absolute() { "/" } else { "." };
+    let start = std::ffi::CString::new(start).expect("static path contains no NUL");
+    let fd = unsafe {
+        libc::open(
+            start.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if fd < 0 {
+        return Err(format!(
+            "open export path root: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let mut directory = unsafe { std::fs::File::from_raw_fd(fd) };
+    for component in path.components() {
+        let component = match component {
+            Component::RootDir | Component::CurDir => continue,
+            Component::Normal(value) => value,
+            Component::ParentDir | Component::Prefix(_) => {
+                return Err("export destination must not contain parent traversal".into());
+            }
+        };
+        let component = std::ffi::CString::new(component.as_bytes())
+            .map_err(|_| "export destination contains NUL".to_string())?;
+        let next = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                component.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if next < 0 {
+            return Err(format!(
+                "open pinned export destination component: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        directory = unsafe { std::fs::File::from_raw_fd(next) };
+    }
+    Ok(directory)
+}
+
+#[cfg(unix)]
+fn create_pinned_export_directory_at(
+    parent: &std::fs::File,
+    entry: &std::ffi::CStr,
+) -> Result<std::fs::File, String> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let created = unsafe { libc::mkdirat(parent.as_raw_fd(), entry.as_ptr(), 0o700) };
+    if created != 0 {
+        return Err(format!(
+            "create export directory: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let mut named_stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let stated = unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            entry.as_ptr(),
+            named_stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if stated != 0 {
+        return Err(format!(
+            "inspect newly created export directory: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let named_stat = unsafe { named_stat.assume_init() };
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            entry.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if fd < 0 {
+        return Err(format!(
+            "open pinned export directory: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let directory = unsafe { std::fs::File::from_raw_fd(fd) };
+    let mut opened_stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(directory.as_raw_fd(), opened_stat.as_mut_ptr()) } != 0 {
+        return Err(format!(
+            "inspect opened export directory: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let opened_stat = unsafe { opened_stat.assume_init() };
+    if named_stat.st_dev != opened_stat.st_dev || named_stat.st_ino != opened_stat.st_ino {
+        return Err("new export directory was replaced before it could be pinned".into());
+    }
+    if opened_stat.st_uid != unsafe { libc::geteuid() }
+        || opened_stat.st_mode & libc::S_IFMT != libc::S_IFDIR
+        || opened_stat.st_mode & 0o077 != 0
+    {
+        return Err("new export directory has unsafe ownership, type, or permissions".into());
+    }
+    parent
+        .sync_all()
+        .map_err(|error| format!("sync export parent directory: {error}"))?;
+    Ok(directory)
+}
+
+#[cfg(unix)]
+fn create_pinned_export_file_at(
+    directory: &std::fs::File,
+    entry: &std::ffi::CStr,
+) -> Result<std::fs::File, String> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            entry.as_ptr(),
+            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(format!(
+            "create export file: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+
+#[cfg(unix)]
+fn write_pinned_export_file_at(
+    directory: &std::fs::File,
+    entry: &std::ffi::CStr,
+    display: &Path,
+    bytes: &[u8],
+) -> Result<String, String> {
+    let mut file = create_pinned_export_file_at(directory, entry)
+        .map_err(|error| format!("{error} ({})", display.display()))?;
+    file.write_all(bytes)
+        .map_err(|error| format!("write export file {}: {error}", display.display()))?;
+    file.sync_all()
+        .map_err(|error| format!("sync export file {}: {error}", display.display()))?;
+    Ok(display.to_string_lossy().into_owned())
+}
+
+#[cfg(unix)]
 fn write_export_bundle(
     destination: &Path,
     bundle_name: &str,
@@ -2192,176 +4061,29 @@ fn write_export_bundle(
     markdown: &[u8],
     evidence_files: Vec<(String, Vec<u8>)>,
 ) -> Result<(PathBuf, Vec<String>), String> {
-    use std::ffi::{CStr, CString};
-    use std::os::fd::{AsRawFd, FromRawFd};
-    use std::os::unix::ffi::OsStrExt;
-
-    fn name(value: &str) -> Result<CString, String> {
-        if value.is_empty()
-            || value == "."
-            || value == ".."
-            || value.as_bytes().contains(&b'/')
-            || value.as_bytes().contains(&0)
-        {
-            return Err("export filename is not a safe directory entry".into());
-        }
-        CString::new(value).map_err(|_| "export filename contains NUL".into())
-    }
-    fn open_directory(path: &Path) -> Result<std::fs::File, String> {
-        let start = if path.is_absolute() { "/" } else { "." };
-        let start = CString::new(start).expect("static path contains no NUL");
-        let fd = unsafe {
-            libc::open(
-                start.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-            )
-        };
-        if fd < 0 {
-            return Err(format!(
-                "open export path root: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        let mut directory = unsafe { std::fs::File::from_raw_fd(fd) };
-        for component in path.components() {
-            let component = match component {
-                Component::RootDir | Component::CurDir => continue,
-                Component::Normal(value) => value,
-                Component::ParentDir | Component::Prefix(_) => {
-                    return Err("export destination must not contain parent traversal".into());
-                }
-            };
-            let component = CString::new(component.as_bytes())
-                .map_err(|_| "export destination contains NUL".to_string())?;
-            let next = unsafe {
-                libc::openat(
-                    directory.as_raw_fd(),
-                    component.as_ptr(),
-                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-                )
-            };
-            if next < 0 {
-                return Err(format!(
-                    "open pinned export destination component: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
-            directory = unsafe { std::fs::File::from_raw_fd(next) };
-        }
-        Ok(directory)
-    }
-    fn create_directory_at(parent: &std::fs::File, entry: &CStr) -> Result<std::fs::File, String> {
-        let created = unsafe { libc::mkdirat(parent.as_raw_fd(), entry.as_ptr(), 0o700) };
-        if created != 0 {
-            return Err(format!(
-                "create export directory: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        let mut named_stat = std::mem::MaybeUninit::<libc::stat>::uninit();
-        let stated = unsafe {
-            libc::fstatat(
-                parent.as_raw_fd(),
-                entry.as_ptr(),
-                named_stat.as_mut_ptr(),
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        };
-        if stated != 0 {
-            return Err(format!(
-                "inspect newly created export directory: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        let named_stat = unsafe { named_stat.assume_init() };
-        let fd = unsafe {
-            libc::openat(
-                parent.as_raw_fd(),
-                entry.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-            )
-        };
-        if fd < 0 {
-            return Err(format!(
-                "open pinned export directory: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        let directory = unsafe { std::fs::File::from_raw_fd(fd) };
-        let mut opened_stat = std::mem::MaybeUninit::<libc::stat>::uninit();
-        if unsafe { libc::fstat(directory.as_raw_fd(), opened_stat.as_mut_ptr()) } != 0 {
-            return Err(format!(
-                "inspect opened export directory: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        let opened_stat = unsafe { opened_stat.assume_init() };
-        if named_stat.st_dev != opened_stat.st_dev || named_stat.st_ino != opened_stat.st_ino {
-            return Err("new export directory was replaced before it could be pinned".into());
-        }
-        if opened_stat.st_uid != unsafe { libc::geteuid() }
-            || opened_stat.st_mode & libc::S_IFMT != libc::S_IFDIR
-            || opened_stat.st_mode & 0o077 != 0
-        {
-            return Err("new export directory has unsafe ownership, type, or permissions".into());
-        }
-        parent
-            .sync_all()
-            .map_err(|error| format!("sync export parent directory: {error}"))?;
-        Ok(directory)
-    }
-    fn write_file_at(
-        directory: &std::fs::File,
-        entry: &CStr,
-        display: &Path,
-        bytes: &[u8],
-    ) -> Result<String, String> {
-        let fd = unsafe {
-            libc::openat(
-                directory.as_raw_fd(),
-                entry.as_ptr(),
-                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-                0o600,
-            )
-        };
-        if fd < 0 {
-            return Err(format!(
-                "create export file {}: {}",
-                display.display(),
-                std::io::Error::last_os_error()
-            ));
-        }
-        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
-        file.write_all(bytes)
-            .map_err(|error| format!("write export file {}: {error}", display.display()))?;
-        file.sync_all()
-            .map_err(|error| format!("sync export file {}: {error}", display.display()))?;
-        Ok(display.to_string_lossy().into_owned())
-    }
-
-    let pinned_destination = open_directory(destination)?;
-    let bundle_entry = name(bundle_name)?;
-    let bundle = create_directory_at(&pinned_destination, &bundle_entry)?;
+    let pinned_destination = open_pinned_export_directory(destination)?;
+    let bundle_entry = export_entry_name(bundle_name)?;
+    let bundle = create_pinned_export_directory_at(&pinned_destination, &bundle_entry)?;
     let output_dir = destination.join(bundle_name);
     let mut written = Vec::new();
-    written.push(write_file_at(
+    written.push(write_pinned_export_file_at(
         &bundle,
-        &name("report.json")?,
+        &export_entry_name("report.json")?,
         &output_dir.join("report.json"),
         canonical_json,
     )?);
-    written.push(write_file_at(
+    written.push(write_pinned_export_file_at(
         &bundle,
-        &name("report.md")?,
+        &export_entry_name("report.md")?,
         &output_dir.join("report.md"),
         markdown,
     )?);
     if !evidence_files.is_empty() {
-        let evidence = create_directory_at(&bundle, &name("evidence")?)?;
+        let evidence = create_pinned_export_directory_at(&bundle, &export_entry_name("evidence")?)?;
         for (filename, bytes) in evidence_files {
-            written.push(write_file_at(
+            written.push(write_pinned_export_file_at(
                 &evidence,
-                &name(&filename)?,
+                &export_entry_name(&filename)?,
                 &output_dir.join("evidence").join(filename),
                 &bytes,
             )?);
@@ -2441,6 +4163,82 @@ fn now() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TempRoot(PathBuf);
+
+    impl TempRoot {
+        fn new(label: &str) -> Self {
+            let temp_directory = fs::canonicalize(std::env::temp_dir()).unwrap();
+            let path = temp_directory.join(format!(
+                "vterminal-{label}-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn runbook_db() -> rusqlite::Connection {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys=ON;
+                 CREATE TABLE schema_version(version INTEGER PRIMARY KEY);",
+            )
+            .unwrap();
+        db::migrate_v6(&connection).unwrap();
+        db::migrate_v8(&connection).unwrap();
+        db::migrate_v9(&connection).unwrap();
+        connection
+    }
+
+    fn write_export_test_package(root: &Path) -> ValidatedPackage {
+        let source = r#"apiVersion: runbooks.veviad.com/v1alpha1
+kind: Runbook
+metadata:
+  id: export-roundtrip
+  version: 1.0.0
+  title: Export round trip
+spec:
+  target:
+    kind: active-terminal
+  declaredCapabilities:
+    network: false
+    privilege: none
+    writes: []
+  steps:
+    - id: inspect
+      title: Inspect the target
+      check:
+        uses: shell
+        with:
+          command: uname -s
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]
+"#;
+        fs::create_dir_all(root.join("ansible/group_vars")).unwrap();
+        fs::write(root.join("runbook.vrun.yaml"), source).unwrap();
+        fs::write(root.join("README.md"), b"# Export round trip\n").unwrap();
+        fs::write(
+            root.join("ansible/site.yml"),
+            b"- hosts: all\n  tasks: []\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("ansible/group_vars/all.yml"),
+            b"assessment_only: true\n",
+        )
+        .unwrap();
+        load_and_check_package(root).unwrap()
+    }
 
     fn definition_with_steps(steps: &str) -> RunbookDefinition {
         let source = format!(
@@ -2655,6 +4453,418 @@ spec:
         assert_eq!(safe_file_component("***"), "runbook");
         assert_eq!(evidence_export_name("CON"), "evidence-CON.txt");
         assert!(!evidence_export_name("a.b").contains('/'));
+    }
+
+    #[test]
+    fn bundled_runbooks_seed_idempotently_hide_and_restore_in_fixed_order() {
+        let app_data = TempRoot::new("builtin-runbooks");
+        let connection = runbook_db();
+
+        let first = reconcile_builtin_sources(&app_data.0, &connection).unwrap();
+        assert_eq!(
+            first
+                .iter()
+                .map(|source| source.definition_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "macos-security-posture",
+                "macos-developer-workstation-health",
+                "macos-backup-storage-readiness",
+            ]
+        );
+        for (index, source) in first.iter().enumerate() {
+            assert_eq!(source.source_kind, SourceKind::Builtin);
+            assert_eq!(source.builtin_order, Some(index as u32));
+            assert!(!source.hidden);
+            let package = load_and_check_package(Path::new(&source.package_path)).unwrap();
+            assert_eq!(package.definition.metadata.id, source.definition_id);
+            assert_eq!(package.definition.metadata.version, "1.0.0");
+            let expected_steps: &[&str] = match source.definition_id.as_str() {
+                "macos-security-posture" => &[
+                    "supported-macos-target",
+                    "filevault-enabled",
+                    "sip-enabled",
+                    "gatekeeper-enabled",
+                    "application-firewall-enabled",
+                    "security-data-updates-enabled",
+                ],
+                "macos-developer-workstation-health" => &[
+                    "supported-macos-target",
+                    "free-space-input-in-range",
+                    "xcode-command-line-tools-ready",
+                    "macos-sdk-ready",
+                    "git-ready",
+                    "shell-running-natively",
+                    "minimum-free-space-available",
+                    "homebrew-available-when-required",
+                ],
+                "macos-backup-storage-readiness" => &[
+                    "supported-macos-target",
+                    "free-space-input-in-range",
+                    "backup-age-input-in-range",
+                    "minimum-free-space-available",
+                    "time-machine-destination-configured",
+                    "latest-backup-recent",
+                    "root-volume-uses-apfs",
+                    "local-snapshot-present-when-required",
+                ],
+                unexpected => panic!("unexpected built-in runbook {unexpected}"),
+            };
+            assert_eq!(
+                package
+                    .definition
+                    .spec
+                    .steps
+                    .iter()
+                    .map(|step| step.id.as_str())
+                    .collect::<Vec<_>>(),
+                expected_steps
+            );
+            assert!(!package.definition.uses_unavailable_executor());
+            assert!(!package.definition.spec.declared_capabilities.network);
+            assert!(package
+                .definition
+                .spec
+                .declared_capabilities
+                .writes
+                .is_empty());
+            assert_eq!(
+                package.definition.spec.declared_capabilities.privilege,
+                crate::runbooks::definition::Privilege::None
+            );
+            assert!(package.definition.spec.steps.iter().all(|step| matches!(
+                &step.check,
+                CheckAction::Shell { .. }
+            ) && step.apply.is_none()
+                && step.verify.is_none()));
+            assert_eq!(
+                package.definition.spec.defaults.on_failure,
+                crate::runbooks::definition::FailurePolicy::Continue
+            );
+            assert_eq!(
+                package.definition.spec.steps[0].on_failure,
+                Some(crate::runbooks::definition::FailurePolicy::Stop)
+            );
+        }
+
+        let second = reconcile_builtin_sources(&app_data.0, &connection).unwrap();
+        assert_eq!(
+            second
+                .iter()
+                .map(|source| (&source.id, &source.created_at, &source.updated_at))
+                .collect::<Vec<_>>(),
+            first
+                .iter()
+                .map(|source| (&source.id, &source.created_at, &source.updated_at))
+                .collect::<Vec<_>>()
+        );
+
+        let hidden_id = first[1].id.clone();
+        assert!(db::remove_source(&connection, &hidden_id).unwrap());
+        let visible = reconcile_builtin_sources(&app_data.0, &connection).unwrap();
+        assert_eq!(visible.len(), 2);
+        let hidden = db::get_source(&connection, &hidden_id).unwrap().unwrap();
+        assert!(hidden.hidden);
+        assert_eq!(hidden.id, hidden_id);
+
+        // App-owned bytes are repaired from the compiled copy, without
+        // resurrecting a source that the user deliberately hid.
+        let hidden_package = Path::new(&hidden.package_path);
+        fs::write(hidden_package.join("README.md"), b"tampered\n").unwrap();
+        fs::create_dir(hidden_package.join("ansible")).unwrap();
+        fs::write(
+            hidden_package.join("ansible/injected.yml"),
+            b"- hosts: all\n  tasks: []\n",
+        )
+        .unwrap();
+        let reconciled = reconcile_builtin_sources(&app_data.0, &connection).unwrap();
+        assert_eq!(reconciled.len(), 2);
+        let repaired = db::get_source(&connection, &hidden_id).unwrap().unwrap();
+        assert_eq!(repaired.id, hidden_id);
+        assert!(repaired.hidden);
+        assert_eq!(
+            fs::read(hidden_package.join("README.md")).unwrap(),
+            BUILTIN_PACKAGES[1].readme
+        );
+        assert!(!hidden_package.join("ansible").exists());
+
+        let restored = db::restore_builtin_sources(&connection).unwrap();
+        assert_eq!(restored.len(), 3);
+        assert_eq!(restored[0].definition_id, "macos-security-posture");
+        assert_eq!(restored[1].id, hidden_id);
+    }
+
+    #[test]
+    fn package_export_round_trips_every_allowed_file_and_refuses_collision() {
+        let root = TempRoot::new("package-export-roundtrip");
+        let source_root = root.0.join("source");
+        let destination = root.0.join("exports");
+        fs::create_dir(&source_root).unwrap();
+        fs::create_dir(&destination).unwrap();
+        let package = write_export_test_package(&source_root);
+        let connection = runbook_db();
+        let source = db::upsert_source(
+            &connection,
+            &registration_input(&package, true, None).unwrap(),
+        )
+        .unwrap();
+
+        let exported = export_runbook_package(&source, &package, &destination).unwrap();
+        let output = destination.join("runbook-export-roundtrip-v1.0.0");
+        assert_eq!(Path::new(&exported.destination), output);
+        assert_eq!(exported.files.len(), 4);
+        let imported = load_and_check_package(&output).unwrap();
+        assert_eq!(imported.snapshot, package.snapshot);
+        assert_eq!(
+            fs::read(output.join("README.md")).unwrap(),
+            fs::read(source_root.join("README.md")).unwrap()
+        );
+        assert_eq!(
+            fs::read(output.join("ansible/site.yml")).unwrap(),
+            fs::read(source_root.join("ansible/site.yml")).unwrap()
+        );
+        assert_eq!(
+            fs::read(output.join("ansible/group_vars/all.yml")).unwrap(),
+            fs::read(source_root.join("ansible/group_vars/all.yml")).unwrap()
+        );
+        assert_eq!(
+            registration_input(&imported, true, None)
+                .unwrap()
+                .source_kind,
+            SourceKind::User
+        );
+
+        let collision = export_runbook_package(&source, &package, &destination).unwrap_err();
+        assert!(collision.contains("already exists"), "{collision}");
+        assert!(!fs::read_dir(&destination).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".staging-")
+        }));
+    }
+
+    #[test]
+    fn authored_publication_is_atomic_rollback_safe_and_drift_checked() {
+        let temp = TempRoot::new("authored-publication");
+        let source_root = temp.0.join("source");
+        let package = write_export_test_package(&source_root);
+        let source_v1 = package.snapshot.source_yaml.as_bytes().to_vec();
+        let readme_v1 = fs::read(package.readme_path.unwrap()).unwrap();
+        let authored_root = temp.0.join("authored");
+        let destination = authored_root.join("draft-1");
+
+        let mut first = publish_authored_package(
+            &authored_root,
+            &destination,
+            &source_v1,
+            &readme_v1,
+            None,
+            None,
+        )
+        .unwrap();
+        first.commit();
+        assert_eq!(
+            fs::read(destination.join("runbook.vrun.yaml")).unwrap(),
+            source_v1
+        );
+
+        let source_v2 = String::from_utf8(source_v1.clone())
+            .unwrap()
+            .replace("version: 1.0.0", "version: 1.1.0")
+            .into_bytes();
+        let readme_v2 = b"# Updated\n".to_vec();
+        {
+            let _uncommitted = publish_authored_package(
+                &authored_root,
+                &destination,
+                &source_v2,
+                &readme_v2,
+                Some(&sha256_hex(&source_v1)),
+                Some(&sha256_hex(&readme_v1)),
+            )
+            .unwrap();
+            assert_eq!(
+                fs::read(destination.join("runbook.vrun.yaml")).unwrap(),
+                source_v2
+            );
+        }
+        assert_eq!(
+            fs::read(destination.join("runbook.vrun.yaml")).unwrap(),
+            source_v1
+        );
+
+        fs::write(destination.join("unexpected.txt"), b"drift").unwrap();
+        let error = publish_authored_package(
+            &authored_root,
+            &destination,
+            &source_v2,
+            &readme_v2,
+            Some(&sha256_hex(&source_v1)),
+            Some(&sha256_hex(&readme_v1)),
+        )
+        .unwrap_err();
+        assert!(error.contains("unexpected files"));
+        assert_eq!(
+            fs::read(destination.join("unexpected.txt")).unwrap(),
+            b"drift"
+        );
+    }
+
+    #[test]
+    fn changed_drafts_require_a_strictly_greater_semantic_version() {
+        assert!(!draft_publication_changed(Some("same"), Some("1.0.0"), "same", "1.0.0").unwrap());
+        assert!(draft_publication_changed(Some("old"), Some("1.0.0"), "new", "1.0.1").unwrap());
+        assert!(
+            draft_publication_changed(Some("old"), Some("1.0.0"), "new", "1.0.0")
+                .unwrap_err()
+                .contains("greater than 1.0.0")
+        );
+        assert!(
+            draft_publication_changed(Some("old"), Some("1.0.0"), "new", "0.9.0")
+                .unwrap_err()
+                .contains("greater than 1.0.0")
+        );
+    }
+
+    #[test]
+    fn wizard_preview_rejects_secret_like_generated_content() {
+        let mut document = RunbookDraftDocument {
+            definition_id: "sensitive-check".into(),
+            version: "1.0.0".into(),
+            title: "Sensitive Check".into(),
+            platform: crate::runbooks::drafts::DraftPlatform::Any,
+            ..Default::default()
+        };
+        document.steps.push(crate::runbooks::drafts::DraftStep {
+            id: "inspect".into(),
+            title: "Inspect".into(),
+            required: true,
+            on_failure: None,
+            check: crate::runbooks::drafts::DraftCheck::Shell {
+                command: "curl -u operator:credential https://example.invalid".into(),
+                env: BTreeMap::new(),
+                compliant_exit_codes: vec![0],
+                noncompliant_exit_codes: vec![1],
+            },
+        });
+        let preview = validate_draft_preview(&document);
+        assert!(preview.issues.iter().any(|issue| issue.path == "document"));
+    }
+
+    #[test]
+    fn package_export_rejects_definition_drift_without_partial_output() {
+        let root = TempRoot::new("package-export-drift");
+        let source_root = root.0.join("source");
+        let destination = root.0.join("exports");
+        fs::create_dir(&source_root).unwrap();
+        fs::create_dir(&destination).unwrap();
+        let package = write_export_test_package(&source_root);
+        let connection = runbook_db();
+        let source = db::upsert_source(
+            &connection,
+            &registration_input(&package, true, None).unwrap(),
+        )
+        .unwrap();
+        let mut definition = fs::read_to_string(source_root.join("runbook.vrun.yaml")).unwrap();
+        definition.push_str("# drift\n");
+        fs::write(source_root.join("runbook.vrun.yaml"), definition).unwrap();
+
+        let error = export_runbook_package(&source, &package, &destination).unwrap_err();
+        assert!(error.contains("changed since its last refresh"), "{error}");
+        assert!(fs::read_dir(&destination).unwrap().next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_export_rejects_source_and_destination_symlinks_and_traversal() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempRoot::new("package-export-path-safety");
+        let source_root = root.0.join("source");
+        let destination = root.0.join("exports");
+        let real_destination = root.0.join("real-exports");
+        let linked_destination = root.0.join("linked-exports");
+        fs::create_dir(&source_root).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::create_dir(&real_destination).unwrap();
+        let package = write_export_test_package(&source_root);
+        let connection = runbook_db();
+        let source = db::upsert_source(
+            &connection,
+            &registration_input(&package, true, None).unwrap(),
+        )
+        .unwrap();
+
+        fs::remove_file(source_root.join("ansible/site.yml")).unwrap();
+        symlink(
+            source_root.join("README.md"),
+            source_root.join("ansible/site.yml"),
+        )
+        .unwrap();
+        let source_error = export_runbook_package(&source, &package, &destination).unwrap_err();
+        assert!(
+            source_error.contains("symlinks are not allowed"),
+            "{source_error}"
+        );
+        assert!(fs::read_dir(&destination).unwrap().next().is_none());
+
+        fs::remove_file(source_root.join("ansible/site.yml")).unwrap();
+        fs::write(
+            source_root.join("ansible/site.yml"),
+            b"- hosts: all\n  tasks: []\n",
+        )
+        .unwrap();
+        symlink(&real_destination, &linked_destination).unwrap();
+        let destination_error =
+            export_runbook_package(&source, &package, &linked_destination).unwrap_err();
+        assert!(
+            destination_error.contains("not an ordinary directory")
+                || destination_error.contains("open pinned export destination component"),
+            "{destination_error}"
+        );
+        let traversal_error =
+            export_runbook_package(&source, &package, &destination.join("nested/..")).unwrap_err();
+        assert!(
+            traversal_error.contains("parent traversal"),
+            "{traversal_error}"
+        );
+        assert!(fs::read_dir(&real_destination).unwrap().next().is_none());
+    }
+
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn pinned_package_export_is_not_redirected_by_destination_swap() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempRoot::new("package-export-destination-swap");
+        let source_root = root.0.join("source");
+        let selected = root.0.join("selected");
+        let moved = root.0.join("selected-moved");
+        let decoy = root.0.join("decoy");
+        fs::create_dir(&source_root).unwrap();
+        fs::create_dir(&selected).unwrap();
+        fs::create_dir(&decoy).unwrap();
+        let package = write_export_test_package(&source_root);
+        let manifest = package_manifest(&package.root, None).unwrap();
+        let bundle_name = "runbook-export-roundtrip-v1.0.0";
+        let mut export = PinnedPackageExport::new(&selected, bundle_name).unwrap();
+
+        // Replace the selected pathname after the destination and staging
+        // handles are pinned. No later write, cleanup, or rename may follow it.
+        fs::rename(&selected, &moved).unwrap();
+        symlink(&decoy, &selected).unwrap();
+        export.copy_manifest(&package.root, &manifest).unwrap();
+        export.sync().unwrap();
+        let published = export.publish(bundle_name, &manifest).unwrap();
+
+        assert_eq!(published, moved.join(bundle_name));
+        assert_eq!(
+            load_and_check_package(&published).unwrap().snapshot,
+            package.snapshot
+        );
+        assert!(fs::read_dir(&decoy).unwrap().next().is_none());
     }
 
     #[test]

@@ -26,10 +26,6 @@ export function RunbookHistory() {
   const [confirmDeleteRunId, setConfirmDeleteRunId] = useState<string | null>(null);
 
   useEffect(() => {
-    if (history.length === 0 && !loadingHistory) void loadHistory();
-  }, [history.length, loadHistory, loadingHistory]);
-
-  useEffect(() => {
     setConfirmDeleteRunId(null);
   }, [selectedRunId]);
 
@@ -164,7 +160,7 @@ export function RunbookHistory() {
         )}
         {selected && !sources.some((source) => source.source_id === selected.source_id) && report?.run_id === selectedRunId && (
           <p className="mt-3 flex items-center gap-1.5 text-[10px] text-text-muted">
-            <RotateCcw size={10} /> Re-run is unavailable because the package registration was removed. The historical report is retained.
+            <RotateCcw size={10} /> Re-run is unavailable because the package registration was removed or hidden. The historical report is retained.
           </p>
         )}
         {selectedRunId && !loadingReport && !report && (

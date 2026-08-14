@@ -23,6 +23,7 @@ import type {
   EvidenceMode,
   RunbookEvent,
   RunbookOperatorDecision,
+  RunbookSource,
   RunbookStartRequest,
   RunbookTargetContext,
 } from "../lib/runbooks";
@@ -67,6 +68,70 @@ function sameTarget(left: RunbookTargetContext, right: RunbookTargetContext): bo
   );
 }
 
+let definitionRequestSequence = 0;
+let libraryRequestSequence = 0;
+let sourceSelectionSequence = 0;
+
+function cancelDefinitionRequest(): void {
+  definitionRequestSequence += 1;
+  useRunbookStore.getState().setLoading("definition", false);
+}
+
+async function loadSelectedDefinition(sourceId: string): Promise<void> {
+  const requestSequence = ++definitionRequestSequence;
+  useRunbookStore.getState().setLoading("definition", true);
+  try {
+    const definition = await api.runbooksGetDefinition(sourceId);
+    const current = useRunbookStore.getState();
+    if (
+      requestSequence === definitionRequestSequence &&
+      current.selectedSourceId === sourceId
+    ) {
+      current.setDefinition(definition);
+    }
+  } catch (error) {
+    const current = useRunbookStore.getState();
+    if (
+      requestSequence === definitionRequestSequence &&
+      current.selectedSourceId === sourceId
+    ) {
+      current.setError(String(error));
+    }
+  } finally {
+    const current = useRunbookStore.getState();
+    if (
+      requestSequence === definitionRequestSequence &&
+      current.selectedSourceId === sourceId
+    ) {
+      current.setLoading("definition", false);
+    }
+  }
+}
+
+async function installLibrarySources(sources: RunbookSource[]): Promise<void> {
+  const store = useRunbookStore.getState();
+  const previousSourceId = store.selectedSourceId;
+  const current = sources.find(
+    (source) => source.source_id === previousSourceId && source.state === "valid",
+  );
+  const selected = current ?? sources.find((source) => source.state === "valid") ?? null;
+  store.setSources(sources);
+
+  if (!selected) {
+    sourceSelectionSequence += 1;
+    store.selectSource(null);
+    cancelDefinitionRequest();
+    return;
+  }
+  if (selected.source_id === previousSourceId && store.definition) return;
+
+  if (selected.source_id !== previousSourceId) {
+    sourceSelectionSequence += 1;
+    store.selectSource(selected.source_id);
+  }
+  await loadSelectedDefinition(selected.source_id);
+}
+
 const approvalPromptBindings = new Map<string, string>();
 
 export function useRunbooks() {
@@ -81,6 +146,7 @@ export function useRunbooks() {
   const loadHistory = useCallback(async () => {
     const store = useRunbookStore.getState();
     store.setLoading("history", true);
+    store.setError(null);
     try {
       const history = await api.runbooksHistory();
       store.setHistory(history);
@@ -345,19 +411,23 @@ export function useRunbooks() {
   );
 
   const loadLibrary = useCallback(async () => {
+    const requestSequence = ++libraryRequestSequence;
     const store = useRunbookStore.getState();
     store.setLoading("library", true);
+    store.setError(null);
     try {
       const sources = await api.runbooksList();
-      store.setSources(sources);
-      const selected = store.selectedSourceId;
-      if (selected && !sources.some((source) => source.source_id === selected)) {
-        store.selectSource(null);
+      if (requestSequence === libraryRequestSequence) {
+        await installLibrarySources(sources);
       }
     } catch (error) {
-      store.setError(String(error));
+      if (requestSequence === libraryRequestSequence) {
+        useRunbookStore.getState().setError(String(error));
+      }
     } finally {
-      store.setLoading("library", false);
+      if (requestSequence === libraryRequestSequence) {
+        useRunbookStore.getState().setLoading("library", false);
+      }
     }
   }, []);
 
@@ -389,17 +459,103 @@ export function useRunbooks() {
 
   const importPackage = useCallback(async (path: string) => {
     const store = useRunbookStore.getState();
+    const selectionSequence = ++sourceSelectionSequence;
     store.setBusyAction("import");
     store.setError(null);
     try {
       const source = await api.runbooksImport(path);
       store.upsertSource(source);
-      store.selectSource(source.source_id);
-      if (source.state === "valid") {
-        store.setDefinition(await api.runbooksGetDefinition(source.source_id));
+      if (selectionSequence === sourceSelectionSequence) {
+        useRunbookStore.getState().selectSource(source.source_id);
+        if (source.state === "valid") {
+          await loadSelectedDefinition(source.source_id);
+        } else {
+          cancelDefinitionRequest();
+        }
       }
-      store.setNotice(source.state === "valid" ? "Runbook imported and validated." : null);
+      if (selectionSequence === sourceSelectionSequence) {
+        useRunbookStore
+          .getState()
+          .setNotice(source.state === "valid" ? "Runbook imported and validated." : null);
+      }
       return source;
+    } catch (error) {
+      if (selectionSequence === sourceSelectionSequence) {
+        useRunbookStore.getState().setError(String(error));
+      }
+      return null;
+    } finally {
+      store.setBusyAction(null);
+    }
+  }, []);
+
+  const selectSource = useCallback(async (sourceId: string) => {
+    sourceSelectionSequence += 1;
+    useRunbookStore.getState().selectSource(sourceId);
+    await loadSelectedDefinition(sourceId);
+  }, []);
+
+  const refreshSource = useCallback(async (sourceId: string) => {
+    const store = useRunbookStore.getState();
+    const selectionSequence = sourceSelectionSequence;
+    store.setBusyAction(`refresh:${sourceId}`);
+    store.setError(null);
+    try {
+      const source = await api.runbooksRefresh(sourceId);
+      store.upsertSource(source);
+      const current = useRunbookStore.getState();
+      if (current.selectedSourceId === sourceId) {
+        if (source.state === "valid") {
+          await loadSelectedDefinition(sourceId);
+        } else {
+          cancelDefinitionRequest();
+          current.setDefinition(null);
+        }
+      }
+      if (selectionSequence === sourceSelectionSequence) {
+        useRunbookStore.getState().setNotice("Package refreshed from disk.");
+      }
+    } catch (error) {
+      if (selectionSequence === sourceSelectionSequence) {
+        useRunbookStore.getState().setError(String(error));
+      }
+    } finally {
+      store.setBusyAction(null);
+    }
+  }, []);
+
+  const removeSource = useCallback(async (sourceId: string) => {
+    const store = useRunbookStore.getState();
+    const source = store.sources.find((item) => item.source_id === sourceId) ?? null;
+    store.setBusyAction(`remove:${sourceId}`);
+    store.setError(null);
+    store.setNotice(null);
+    try {
+      await api.runbooksRemove(sourceId);
+      await installLibrarySources(
+        useRunbookStore.getState().sources.filter((item) => item.source_id !== sourceId),
+      );
+      store.setNotice(
+        source?.source_kind === "builtin"
+          ? "Included runbook hidden. Restore examples can add it back; historical runs were retained."
+          : "Package registration removed. Historical runs were retained.",
+      );
+    } catch (error) {
+      store.setError(String(error));
+    } finally {
+      store.setBusyAction(null);
+    }
+  }, []);
+
+  const exportPackage = useCallback(async (sourceId: string, destination: string) => {
+    const store = useRunbookStore.getState();
+    store.setBusyAction(`export-package:${sourceId}`);
+    store.setError(null);
+    store.setNotice(null);
+    try {
+      const result = await api.runbooksExportPackage(sourceId, destination);
+      store.setNotice(`Runbook package exported to ${result.destination}.`);
+      return result;
     } catch (error) {
       store.setError(String(error));
       return null;
@@ -408,49 +564,19 @@ export function useRunbooks() {
     }
   }, []);
 
-  const selectSource = useCallback(async (sourceId: string) => {
+  const restoreBuiltins = useCallback(async () => {
     const store = useRunbookStore.getState();
-    store.selectSource(sourceId);
-    store.setLoading("definition", true);
-    try {
-      store.setDefinition(await api.runbooksGetDefinition(sourceId));
-    } catch (error) {
-      store.setError(String(error));
-    } finally {
-      store.setLoading("definition", false);
-    }
-  }, []);
-
-  const refreshSource = useCallback(async (sourceId: string) => {
-    const store = useRunbookStore.getState();
-    store.setBusyAction(`refresh:${sourceId}`);
+    store.setBusyAction("restore-builtins");
     store.setError(null);
+    store.setNotice(null);
     try {
-      const source = await api.runbooksRefresh(sourceId);
-      store.upsertSource(source);
-      if (store.selectedSourceId === sourceId) {
-        store.setDefinition(
-          source.state === "valid" ? await api.runbooksGetDefinition(sourceId) : null,
-        );
-      }
-      store.setNotice("Package refreshed from disk.");
+      const sources = await api.runbooksRestoreBuiltins();
+      await installLibrarySources(sources);
+      store.setNotice("Included runbook examples restored.");
+      return sources;
     } catch (error) {
       store.setError(String(error));
-    } finally {
-      store.setBusyAction(null);
-    }
-  }, []);
-
-  const removeSource = useCallback(async (sourceId: string) => {
-    const store = useRunbookStore.getState();
-    store.setBusyAction(`remove:${sourceId}`);
-    store.setError(null);
-    try {
-      await api.runbooksRemove(sourceId);
-      store.deleteSource(sourceId);
-      store.setNotice("Package registration removed. Historical runs were retained.");
-    } catch (error) {
-      store.setError(String(error));
+      return null;
     } finally {
       store.setBusyAction(null);
     }
@@ -733,6 +859,8 @@ export function useRunbooks() {
     selectSource,
     refreshSource,
     removeSource,
+    exportPackage,
+    restoreBuiltins,
     start,
     resume,
     cancel,

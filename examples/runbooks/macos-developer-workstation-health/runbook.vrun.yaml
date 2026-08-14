@@ -1,0 +1,131 @@
+apiVersion: runbooks.veviad.com/v1alpha1
+kind: Runbook
+
+metadata:
+  id: macos-developer-workstation-health
+  version: 1.0.0
+  title: macOS Developer Workstation Health
+  description: |
+    Assess core developer tooling and capacity on a macOS 13 or newer workstation.
+
+    Homebrew is optional: enable its input only when it is part of the expected
+    workstation baseline. No software is installed or changed.
+  tags: [macos, development, assessment]
+
+spec:
+  target:
+    kind: active-terminal
+
+  inputs:
+    minimumFreeSpaceGb:
+      type: integer
+      description: Minimum required free space in GiB. Accepted assessment range is 1 through 1000.
+      default: 20
+    requireHomebrew:
+      type: boolean
+      description: Whether Homebrew must be installed in a standard Apple Silicon or Intel location.
+      default: false
+
+  declaredCapabilities:
+    network: false
+    privilege: none
+    writes: []
+
+  defaults:
+    onFailure: continue
+
+  steps:
+    - id: supported-macos-target
+      title: Target is running macOS 13 or newer
+      required: true
+      onFailure: stop
+      check:
+        uses: shell
+        with:
+          command: 'test "$(uname -s)" = Darwin && major="$(sw_vers -productVersion | cut -d. -f1)" && test "$major" -ge 13 || exit 64'
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]
+
+    - id: free-space-input-in-range
+      title: Minimum free-space input is between 1 and 1000 GiB
+      required: true
+      check:
+        uses: shell
+        with:
+          command: 'test "$VRUN_MINIMUM_FREE_SPACE_GB" -ge 1 && test "$VRUN_MINIMUM_FREE_SPACE_GB" -le 1000'
+          env:
+            VRUN_MINIMUM_FREE_SPACE_GB: minimumFreeSpaceGb
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]
+
+    - id: xcode-command-line-tools-ready
+      title: Xcode Command Line Tools are selected
+      required: true
+      check:
+        uses: shell
+        with:
+          command: 'if xcode-select -p >/dev/null 2>&1; then true; else false; fi'
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]
+
+    - id: macos-sdk-ready
+      title: The active Xcode toolchain provides a macOS SDK
+      required: true
+      check:
+        uses: shell
+        with:
+          command: 'if xcrun --sdk macosx --show-sdk-path >/dev/null 2>&1; then true; else false; fi'
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]
+
+    - id: git-ready
+      title: Git is available through the active developer toolchain
+      required: true
+      check:
+        uses: shell
+        with:
+          command: 'if xcrun --find git >/dev/null 2>&1; then true; else false; fi'
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]
+
+    - id: shell-running-natively
+      title: The current shell is not running through Rosetta translation
+      required: true
+      check:
+        uses: shell
+        with:
+          command: 'translated="$(sysctl -in sysctl.proc_translated 2>/dev/null || true)"; test "${translated:-0}" -ne 1'
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]
+
+    - id: minimum-free-space-available
+      title: The startup disk meets the configured free-space minimum
+      required: true
+      check:
+        uses: shell
+        with:
+          command: 'df -Pk / | awk -v minimum="$VRUN_MINIMUM_FREE_SPACE_GB" ''NR == 2 { found = 1; ok = ($4 / 1048576) >= minimum } END { exit (found && ok) ? 0 : 1 }'''
+          env:
+            VRUN_MINIMUM_FREE_SPACE_GB: minimumFreeSpaceGb
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]
+
+    - id: homebrew-available-when-required
+      title: Homebrew is available when requested
+      required: true
+      check:
+        uses: shell
+        with:
+          command: 'test "$VRUN_REQUIRE_HOMEBREW" = false || test -x /opt/homebrew/bin/brew || test -x /usr/local/bin/brew'
+          env:
+            VRUN_REQUIRE_HOMEBREW: requireHomebrew
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]

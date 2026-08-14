@@ -7,6 +7,7 @@
 pub mod agent_executor;
 pub mod db;
 pub mod definition;
+pub mod drafts;
 pub mod engine;
 pub mod package;
 pub mod redact;

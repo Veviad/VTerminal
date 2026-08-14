@@ -12,7 +12,7 @@
 # it claims to be built from — the artifact would be unreproducible from source.
 #
 #   ./scripts/check-version.sh            # the three manifests must agree
-#   ./scripts/check-version.sh v0.2.0     # ...and must match the tag
+#   ./scripts/check-version.sh v0.2.4     # ...and must match the tag
 #
 set -euo pipefail
 

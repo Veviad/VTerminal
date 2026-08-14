@@ -75,7 +75,7 @@ export function RunbookReportViewer({
               disabled={busyAction === "export"}
               className={primaryButton}
             >
-              <Download size={11} /> {busyAction === "export" ? "Exporting…" : "Export"}
+              <Download size={11} /> {busyAction === "export" ? "Exporting…" : "Export report"}
             </button>
           </div>
         </div>

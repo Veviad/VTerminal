@@ -1,0 +1,93 @@
+apiVersion: runbooks.veviad.com/v1alpha1
+kind: Runbook
+
+metadata:
+  id: macos-security-posture
+  version: 1.0.0
+  title: macOS Security Posture
+  description: |
+    Assess foundational security controls on a macOS 13 or newer workstation.
+
+    This runbook does not remediate settings. It records each independent check
+    so an operator can decide what, if anything, should change afterward.
+  tags: [macos, security, assessment]
+
+spec:
+  target:
+    kind: active-terminal
+
+  declaredCapabilities:
+    network: false
+    privilege: none
+    writes: []
+
+  defaults:
+    onFailure: continue
+
+  steps:
+    - id: supported-macos-target
+      title: Target is running macOS 13 or newer
+      required: true
+      onFailure: stop
+      check:
+        uses: shell
+        with:
+          command: 'test "$(uname -s)" = Darwin && major="$(sw_vers -productVersion | cut -d. -f1)" && test "$major" -ge 13 || exit 64'
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]
+
+    - id: filevault-enabled
+      title: FileVault full-disk encryption is enabled
+      required: true
+      check:
+        uses: shell
+        with:
+          command: "fdesetup status | grep -q '^FileVault is On\\.'"
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]
+
+    - id: sip-enabled
+      title: System Integrity Protection is enabled
+      required: true
+      check:
+        uses: shell
+        with:
+          command: "csrutil status | grep -q '^System Integrity Protection status: enabled\\.'"
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]
+
+    - id: gatekeeper-enabled
+      title: Gatekeeper app assessments are enabled
+      required: true
+      check:
+        uses: shell
+        with:
+          command: "spctl --status | grep -q '^assessments enabled$'"
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]
+
+    - id: application-firewall-enabled
+      title: The macOS application firewall is enabled
+      required: true
+      check:
+        uses: shell
+        with:
+          command: "/usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate | grep -q '^Firewall is enabled'"
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]
+
+    - id: security-data-updates-enabled
+      title: Critical and system-data updates install automatically
+      required: true
+      check:
+        uses: shell
+        with:
+          command: 'test "$(defaults read /Library/Preferences/com.apple.SoftwareUpdate CriticalUpdateInstall 2>/dev/null)" = 1 && test "$(defaults read /Library/Preferences/com.apple.SoftwareUpdate ConfigDataInstall 2>/dev/null)" = 1'
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]

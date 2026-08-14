@@ -6,6 +6,10 @@ const mocks = vi.hoisted(() => ({
   submitTerminal: vi.fn(async () => {}),
   runInTerminal: vi.fn(),
   list: vi.fn(),
+  getDefinition: vi.fn(),
+  removeSource: vi.fn(),
+  exportPackage: vi.fn(),
+  restoreBuiltins: vi.fn(),
   history: vi.fn(),
   get: vi.fn(),
   report: vi.fn(),
@@ -26,6 +30,10 @@ vi.mock("../lib/runbooks", async (importOriginal) => {
     runbooksStart: mocks.start,
     runbooksSubmitTerminalResult: mocks.submitTerminal,
     runbooksList: mocks.list,
+    runbooksGetDefinition: mocks.getDefinition,
+    runbooksRemove: mocks.removeSource,
+    runbooksExportPackage: mocks.exportPackage,
+    runbooksRestoreBuiltins: mocks.restoreBuiltins,
     runbooksHistory: mocks.history,
     runbooksGet: mocks.get,
     runbooksReport: mocks.report,
@@ -59,8 +67,10 @@ import {
 import type {
   RunbookDeleteResult,
   RunbookEvent,
+  RunbookDefinition,
   RunbookHistoryEntry,
   RunbookRun,
+  RunbookSource,
   RunbookStartRequest,
   RunbookRunState,
 } from "../lib/runbooks";
@@ -79,6 +89,37 @@ function historyEntry(runId: string, state: RunbookRunState, startedAt: string):
     duration_ms: null,
     checked_steps: 0,
     total_steps: 1,
+  };
+}
+
+function source(
+  sourceId: string,
+  sourceKind: RunbookSource["source_kind"] = "user",
+  state: RunbookSource["state"] = "valid",
+): RunbookSource {
+  return {
+    source_id: sourceId,
+    source_kind: sourceKind,
+    package_path: `/runbooks/${sourceId}`,
+    definition_id: sourceId,
+    version: "1.0.0",
+    title: sourceId,
+    digest_sha256: `${sourceId}-digest`,
+    state,
+    validation_issues: [],
+    imported_at: "2026-08-13T12:00:00Z",
+    refreshed_at: "2026-08-13T12:00:00Z",
+  };
+}
+
+function definition(id: string): RunbookDefinition {
+  return {
+    kind: "Runbook",
+    metadata: { id, version: "1.0.0", title: id },
+    spec: {
+      target: { kind: "active-terminal" },
+      steps: [{ id: "one", title: "One", required: true, check: { uses: "manual", instructions: "Check" } }],
+    },
   };
 }
 
@@ -142,6 +183,10 @@ beforeEach(() => {
   mocks.submitTerminal.mockClear();
   mocks.runInTerminal.mockReset();
   mocks.list.mockReset();
+  mocks.getDefinition.mockReset();
+  mocks.removeSource.mockReset();
+  mocks.exportPackage.mockReset();
+  mocks.restoreBuiltins.mockReset();
   mocks.history.mockReset();
   mocks.get.mockReset();
   mocks.report.mockReset();
@@ -154,6 +199,13 @@ beforeEach(() => {
   mocks.cancel.mockReset();
   mocks.waitForTerminal.mockReset();
   mocks.list.mockResolvedValue([]);
+  mocks.getDefinition.mockImplementation(async (sourceId: string) => definition(sourceId));
+  mocks.removeSource.mockResolvedValue(undefined);
+  mocks.exportPackage.mockResolvedValue({
+    destination: "/exports/runbook-example-v1.0.0",
+    files: ["runbook.vrun.yaml"],
+  });
+  mocks.restoreBuiltins.mockResolvedValue([]);
   mocks.history.mockResolvedValue([]);
   mocks.runInTerminal.mockImplementation(async (_sessionId, _attemptId, _command, options) => {
     const authorized = await options.beforeWrite?.();
@@ -525,6 +577,207 @@ describe("useRunbooks channel activation", () => {
 });
 
 describe("useRunbooks recovery and deletion", () => {
+  it("performs one history request during empty initialization", async () => {
+    const { result } = renderHook(() => useRunbooks());
+    await act(async () => {
+      await result.current.initialize();
+    });
+
+    expect(mocks.list).toHaveBeenCalledTimes(1);
+    expect(mocks.history).toHaveBeenCalledTimes(1);
+    expect(useRunbookStore.getState().history).toEqual([]);
+    expect(useRunbookStore.getState().loadingHistory).toBe(false);
+  });
+
+  it("settles a failed history request until the caller explicitly retries", async () => {
+    mocks.history.mockRejectedValue(new Error("history unavailable"));
+    const { result } = renderHook(() => useRunbooks());
+
+    await act(async () => {
+      await result.current.loadHistory();
+    });
+
+    expect(mocks.history).toHaveBeenCalledTimes(1);
+    expect(useRunbookStore.getState().loadingHistory).toBe(false);
+    expect(useRunbookStore.getState().error).toContain("history unavailable");
+
+    mocks.history.mockResolvedValue([]);
+    await act(async () => {
+      await result.current.loadHistory();
+    });
+    expect(mocks.history).toHaveBeenCalledTimes(2);
+    expect(useRunbookStore.getState().error).toBeNull();
+  });
+
+  it("selects and loads the first valid source returned by the library", async () => {
+    mocks.list.mockResolvedValue([
+      source("invalid", "user", "invalid"),
+      source("builtin-security", "builtin"),
+      source("user-baseline"),
+    ]);
+    const { result } = renderHook(() => useRunbooks());
+
+    await act(async () => {
+      await result.current.loadLibrary();
+    });
+
+    expect(useRunbookStore.getState().selectedSourceId).toBe("builtin-security");
+    expect(mocks.getDefinition).toHaveBeenCalledWith("builtin-security");
+    expect(useRunbookStore.getState().definition?.metadata.id).toBe("builtin-security");
+  });
+
+  it("ignores an older library response after a newer refresh completes", async () => {
+    let resolveFirst!: (value: RunbookSource[]) => void;
+    let resolveSecond!: (value: RunbookSource[]) => void;
+    const firstLibrary = new Promise<RunbookSource[]>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const secondLibrary = new Promise<RunbookSource[]>((resolve) => {
+      resolveSecond = resolve;
+    });
+    mocks.list
+      .mockImplementationOnce(() => firstLibrary)
+      .mockImplementationOnce(() => secondLibrary);
+    const { result } = renderHook(() => useRunbooks());
+
+    let firstRequest!: Promise<void>;
+    let secondRequest!: Promise<void>;
+    act(() => {
+      firstRequest = result.current.loadLibrary();
+      secondRequest = result.current.loadLibrary();
+    });
+    await act(async () => {
+      resolveSecond([source("newer")]);
+      await secondRequest;
+    });
+    expect(useRunbookStore.getState().sources.map((item) => item.source_id)).toEqual(["newer"]);
+    expect(useRunbookStore.getState().selectedSourceId).toBe("newer");
+    expect(useRunbookStore.getState().loadingLibrary).toBe(false);
+
+    await act(async () => {
+      resolveFirst([source("older")]);
+      await firstRequest;
+    });
+    expect(useRunbookStore.getState().sources.map((item) => item.source_id)).toEqual(["newer"]);
+    expect(useRunbookStore.getState().selectedSourceId).toBe("newer");
+    expect(useRunbookStore.getState().definition?.metadata.id).toBe("newer");
+    expect(useRunbookStore.getState().loadingLibrary).toBe(false);
+  });
+
+  it("ignores an older definition response after a newer source is selected", async () => {
+    let resolveFirst!: (value: RunbookDefinition) => void;
+    let resolveSecond!: (value: RunbookDefinition) => void;
+    const firstDefinition = new Promise<RunbookDefinition>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const secondDefinition = new Promise<RunbookDefinition>((resolve) => {
+      resolveSecond = resolve;
+    });
+    mocks.getDefinition.mockImplementation((sourceId: string) =>
+      sourceId === "first" ? firstDefinition : secondDefinition,
+    );
+    useRunbookStore.getState().setSources([source("first"), source("second")]);
+    const { result } = renderHook(() => useRunbooks());
+
+    let firstRequest!: Promise<void>;
+    let secondRequest!: Promise<void>;
+    act(() => {
+      firstRequest = result.current.selectSource("first");
+      secondRequest = result.current.selectSource("second");
+    });
+    await act(async () => {
+      resolveSecond(definition("second"));
+      await secondRequest;
+    });
+    expect(useRunbookStore.getState().selectedSourceId).toBe("second");
+    expect(useRunbookStore.getState().definition?.metadata.id).toBe("second");
+    expect(useRunbookStore.getState().loadingDefinition).toBe(false);
+
+    await act(async () => {
+      resolveFirst(definition("first"));
+      await firstRequest;
+    });
+    expect(useRunbookStore.getState().selectedSourceId).toBe("second");
+    expect(useRunbookStore.getState().definition?.metadata.id).toBe("second");
+    expect(useRunbookStore.getState().loadingDefinition).toBe(false);
+  });
+
+  it("ignores an older definition error after a newer source has loaded", async () => {
+    let rejectFirst!: (reason: Error) => void;
+    const firstDefinition = new Promise<RunbookDefinition>((_resolve, reject) => {
+      rejectFirst = reject;
+    });
+    mocks.getDefinition.mockImplementation((sourceId: string) =>
+      sourceId === "first" ? firstDefinition : Promise.resolve(definition("second")),
+    );
+    useRunbookStore.getState().setSources([source("first"), source("second")]);
+    const { result } = renderHook(() => useRunbooks());
+
+    let firstRequest!: Promise<void>;
+    await act(async () => {
+      firstRequest = result.current.selectSource("first");
+      await result.current.selectSource("second");
+    });
+    await act(async () => {
+      rejectFirst(new Error("stale definition failure"));
+      await firstRequest;
+    });
+
+    expect(useRunbookStore.getState().selectedSourceId).toBe("second");
+    expect(useRunbookStore.getState().definition?.metadata.id).toBe("second");
+    expect(useRunbookStore.getState().error).toBeNull();
+    expect(useRunbookStore.getState().loadingDefinition).toBe(false);
+  });
+
+  it("restores examples, preserves backend ordering, and selects the first valid source", async () => {
+    const restored = [source("builtin-security", "builtin"), source("user-baseline")];
+    mocks.restoreBuiltins.mockResolvedValue(restored);
+    const { result } = renderHook(() => useRunbooks());
+
+    await act(async () => {
+      await result.current.restoreBuiltins();
+    });
+
+    expect(mocks.restoreBuiltins).toHaveBeenCalledTimes(1);
+    expect(useRunbookStore.getState().sources).toEqual(restored);
+    expect(useRunbookStore.getState().selectedSourceId).toBe("builtin-security");
+    expect(useRunbookStore.getState().notice).toBe("Included runbook examples restored.");
+  });
+
+  it("hides an included source, retains the explanatory notice, and selects a fallback", async () => {
+    useRunbookStore.getState().setSources([
+      source("builtin-security", "builtin"),
+      source("builtin-developer", "builtin"),
+    ]);
+    useRunbookStore.getState().selectSource("builtin-security");
+    const { result } = renderHook(() => useRunbooks());
+
+    await act(async () => {
+      await result.current.removeSource("builtin-security");
+    });
+
+    expect(mocks.removeSource).toHaveBeenCalledWith("builtin-security");
+    expect(useRunbookStore.getState().sources.map((item) => item.source_id)).toEqual([
+      "builtin-developer",
+    ]);
+    expect(useRunbookStore.getState().selectedSourceId).toBe("builtin-developer");
+    expect(useRunbookStore.getState().notice).toContain("Included runbook hidden");
+  });
+
+  it("exports a reusable package with source and destination feedback", async () => {
+    const { result } = renderHook(() => useRunbooks());
+
+    await act(async () => {
+      await result.current.exportPackage("builtin-security", "/exports");
+    });
+
+    expect(mocks.exportPackage).toHaveBeenCalledWith("builtin-security", "/exports");
+    expect(useRunbookStore.getState().notice).toContain(
+      "/exports/runbook-example-v1.0.0",
+    );
+    expect(useRunbookStore.getState().busyAction).toBeNull();
+  });
+
   it("hydrates the most recent nonterminal run during initialization", async () => {
     mocks.history.mockResolvedValue([
       historyEntry("run-done", "succeeded", "2026-08-13T12:03:00Z"),

@@ -13,9 +13,82 @@ import { prefixCommandEnvironment } from "./ptyExecShell";
  */
 
 export type RunbookSourceState = "valid" | "invalid" | "missing";
+export type RunbookSourceKind = "user" | "builtin";
 export type EvidenceMode = "none" | "tail" | "full";
 export type OnFailure = "pause" | "stop" | "continue";
 export type RunbookActionKind = "shell" | "agent" | "manual" | "ansible.playbook";
+export type RunbookDraftPlatform = "macos13" | "linux" | "any";
+
+export interface RunbookDraftInput {
+  id: string;
+  type: RunbookInputType;
+  description: string;
+  required: boolean;
+  default: string | number | boolean | null;
+  values: string[];
+}
+
+export type RunbookDraftCheck =
+  | {
+      kind: "shell";
+      command: string;
+      env: Record<string, string>;
+      compliantExitCodes: number[];
+      noncompliantExitCodes: number[];
+    }
+  | { kind: "manual"; instructions: string };
+
+export interface RunbookDraftStep {
+  id: string;
+  title: string;
+  required: boolean;
+  onFailure: OnFailure | null;
+  check: RunbookDraftCheck;
+}
+
+export interface RunbookDraftDocument {
+  definitionId: string;
+  version: string;
+  title: string;
+  description: string;
+  tags: string[];
+  platform: RunbookDraftPlatform;
+  network: boolean;
+  privilege: "none" | "root";
+  defaultOnFailure: OnFailure;
+  inputs: RunbookDraftInput[];
+  steps: RunbookDraftStep[];
+}
+
+export interface RunbookDraft {
+  id: string;
+  revision: number;
+  document: RunbookDraftDocument;
+  publishedSourceId: string | null;
+  lastPublishedVersion: string | null;
+  dirty: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RunbookDraftSummary {
+  id: string;
+  revision: number;
+  title: string;
+  definitionId: string;
+  version: string;
+  publishedSourceId: string | null;
+  lastPublishedVersion: string | null;
+  dirty: boolean;
+  updatedAt: string;
+}
+
+export interface RunbookDraftPreview {
+  definition: RunbookDefinition | null;
+  sourceYaml: string | null;
+  readme: string | null;
+  issues: Array<{ path: string; message: string }>;
+}
 
 export interface RunbookValidationIssue {
   path: string | null;
@@ -24,6 +97,7 @@ export interface RunbookValidationIssue {
 
 export interface RunbookSource {
   source_id: string;
+  source_kind: RunbookSourceKind;
   package_path: string;
   definition_id: string | null;
   version: string | null;
@@ -37,6 +111,7 @@ export interface RunbookSource {
 
 export interface RunbookSourceWire {
   id: string;
+  source_kind: RunbookSourceKind;
   package_path: string;
   definition_id: string;
   definition_version: string;
@@ -734,6 +809,43 @@ export const runbooksList = () =>
 export const runbooksRemove = (sourceId: string) =>
   invoke<void>("runbooks_remove", { source_id: sourceId });
 
+export const runbooksRestoreBuiltins = () =>
+  invoke<RunbookSourceWire[]>("runbooks_restore_builtins").then((sources) =>
+    sources.map(normalizeRunbookSource)
+  );
+
+export const runbooksDraftsList = () =>
+  invoke<RunbookDraftSummary[]>("runbooks_drafts_list");
+
+export const runbooksDraftCreate = (initial?: RunbookDraftDocument) =>
+  invoke<RunbookDraft>("runbooks_draft_create", { initial: initial ?? null });
+
+export const runbooksDraftGet = (draftId: string) =>
+  invoke<RunbookDraft>("runbooks_draft_get", { draft_id: draftId });
+
+export const runbooksDraftSave = (
+  draftId: string,
+  expectedRevision: number,
+  document: RunbookDraftDocument,
+) =>
+  invoke<RunbookDraft>("runbooks_draft_save", {
+    draft_id: draftId,
+    expected_revision: expectedRevision,
+    document,
+  });
+
+export const runbooksDraftValidate = (draftId: string) =>
+  invoke<RunbookDraftPreview>("runbooks_draft_validate", { draft_id: draftId });
+
+export const runbooksDraftPublish = (draftId: string, expectedRevision: number) =>
+  invoke<RunbookSourceWire>("runbooks_draft_publish", {
+    draft_id: draftId,
+    expected_revision: expectedRevision,
+  }).then(normalizeRunbookSource);
+
+export const runbooksDraftDiscard = (draftId: string) =>
+  invoke<void>("runbooks_draft_discard", { draft_id: draftId });
+
 export const runbooksGetDefinition = (sourceId: string) =>
   invoke<RunbookDefinition>("runbooks_get_definition", { source_id: sourceId });
 
@@ -891,6 +1003,12 @@ export const runbooksReport = (runId: string) =>
 export const runbooksExport = (runId: string, destination: string) =>
   invoke<RunbookExportResult>("runbooks_export", { run_id: runId, destination });
 
+export const runbooksExportPackage = (sourceId: string, destination: string) =>
+  invoke<RunbookExportResult>("runbooks_export_package", {
+    source_id: sourceId,
+    destination,
+  });
+
 /** Historical deletion is always an explicit, confirmed UI gesture. Removing a
  * package registration remains a separate operation and never calls this. */
 export const runbooksDelete = (runId: string) =>
@@ -1038,6 +1156,7 @@ export function normalizeRunbookReport(report: RunbookReportWire): RunbookReport
 export function normalizeRunbookSource(source: RunbookSourceWire): RunbookSource {
   return {
     source_id: source.id,
+    source_kind: source.source_kind ?? "user",
     package_path: source.package_path,
     definition_id: source.definition_id,
     version: source.definition_version,
