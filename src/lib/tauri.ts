@@ -242,7 +242,10 @@ export async function agentStart(
       context,
       history,
       images,
-      doc_buckets: docBuckets,
+      // `agent_start` uses Tauri's default camelCase argument mapping. Sending
+      // `doc_buckets` here silently deserializes the optional Rust argument as
+      // `None`, which removes `search_docs` from the agent's tool vector.
+      docBuckets,
       onEvent: channel,
     });
   } finally {

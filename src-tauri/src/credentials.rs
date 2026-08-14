@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
 use tauri::{Manager, Wry};
@@ -292,6 +292,10 @@ impl CredentialStore for SystemStore {
 
 pub struct CredentialStoreState {
     store: Arc<dyn CredentialStore>,
+    /// Successful secret reads stay in zeroizing process memory until app exit.
+    /// Holding the mutex across a cold Keychain read also prevents concurrent
+    /// consumers from opening duplicate authorization dialogs for the same item.
+    cache: Mutex<BTreeMap<CredentialId, Secret>>,
     blocked: AtomicBool,
 }
 
@@ -299,6 +303,7 @@ impl CredentialStoreState {
     pub fn system() -> Self {
         Self {
             store: Arc::new(SystemStore),
+            cache: Mutex::new(BTreeMap::new()),
             blocked: AtomicBool::new(false),
         }
     }
@@ -307,6 +312,7 @@ impl CredentialStoreState {
     fn with_store(store: Arc<dyn CredentialStore>) -> Self {
         Self {
             store,
+            cache: Mutex::new(BTreeMap::new()),
             blocked: AtomicBool::new(false),
         }
     }
@@ -332,9 +338,23 @@ impl CredentialStoreState {
 
     pub fn get(&self, id: &CredentialId) -> Result<Option<Secret>, String> {
         self.ready()?;
-        self.store
-            .get(id)
-            .map_err(|error| self.operation_error(error))
+        let mut cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(secret) = cache.get(id) {
+            return Ok(Some(secret.clone()));
+        }
+        match self.store.get(id) {
+            Ok(Some(secret)) => {
+                cache.insert(id.clone(), secret.clone());
+                Ok(Some(secret))
+            }
+            // Missing values and failures stay retryable. Only an actual secret
+            // needs caching to prevent another Keychain authorization prompt.
+            Ok(None) => Ok(None),
+            Err(error) => Err(self.operation_error(error)),
+        }
     }
 
     pub fn has(&self, id: &CredentialId) -> Result<bool, String> {
@@ -346,19 +366,42 @@ impl CredentialStoreState {
 
     pub fn set_or_clear(&self, id: &CredentialId, value: String) -> Result<(), String> {
         self.ready()?;
-        let result = if value.trim().is_empty() {
-            self.store.delete(id)
+        let secret = if value.trim().is_empty() {
+            None
         } else {
-            self.store.set(id, &Secret::new(value))
+            Some(Secret::new(value))
         };
-        result.map_err(|error| self.operation_error(error))
+        match &secret {
+            Some(secret) => self.store.set(id, secret),
+            None => self.store.delete(id),
+        }
+        .map_err(|error| self.operation_error(error))?;
+
+        let mut cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match secret {
+            Some(secret) => {
+                cache.insert(id.clone(), secret);
+            }
+            None => {
+                cache.remove(id);
+            }
+        }
+        Ok(())
     }
 
     pub fn delete(&self, id: &CredentialId) -> Result<(), String> {
         self.ready()?;
         self.store
             .delete(id)
-            .map_err(|error| self.operation_error(error))
+            .map_err(|error| self.operation_error(error))?;
+        self.cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(id);
+        Ok(())
     }
 }
 
@@ -574,12 +617,13 @@ fn contains_credential_shape(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
     #[derive(Default)]
     struct MemoryStore {
         values: Mutex<BTreeMap<CredentialId, String>>,
         fail_after: Mutex<Option<usize>>,
+        read_failures: Mutex<Vec<VaultError>>,
+        read_delay: std::time::Duration,
         writes: Mutex<usize>,
         reads: Mutex<usize>,
         presence_checks: Mutex<usize>,
@@ -592,6 +636,20 @@ mod tests {
                 ..Self::default()
             }
         }
+
+        fn failing_reads(errors: Vec<VaultError>) -> Self {
+            Self {
+                read_failures: Mutex::new(errors),
+                ..Self::default()
+            }
+        }
+
+        fn with_read_delay(delay: std::time::Duration) -> Self {
+            Self {
+                read_delay: delay,
+                ..Self::default()
+            }
+        }
     }
 
     impl CredentialStore for MemoryStore {
@@ -600,6 +658,12 @@ mod tests {
         }
         fn get(&self, id: &CredentialId) -> Result<Option<Secret>, VaultError> {
             *self.reads.lock().unwrap() += 1;
+            if !self.read_delay.is_zero() {
+                std::thread::sleep(self.read_delay);
+            }
+            if let Some(error) = self.read_failures.lock().unwrap().pop() {
+                return Err(error);
+            }
             Ok(self
                 .values
                 .lock()
@@ -674,6 +738,85 @@ mod tests {
         assert!(!format!("{secret:?}").contains("sentinel-secret"));
         state.delete(&id).unwrap();
         assert!(!state.has(&id).unwrap());
+    }
+
+    #[test]
+    fn successful_reads_are_cached_for_the_app_process() {
+        let backend = Arc::new(MemoryStore::default());
+        let id = CredentialId::Qdrant("connection/origin".into());
+        backend
+            .values
+            .lock()
+            .unwrap()
+            .insert(id.clone(), "qdrant-sentinel".into());
+        let state = CredentialStoreState::with_store(backend.clone());
+
+        for _ in 0..2 {
+            assert_eq!(state.get(&id).unwrap().unwrap().expose(), "qdrant-sentinel");
+        }
+        assert_eq!(*backend.reads.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn concurrent_consumers_share_one_successful_keychain_read() {
+        let backend = Arc::new(MemoryStore::with_read_delay(
+            std::time::Duration::from_millis(25),
+        ));
+        let id = CredentialId::Anthropic;
+        backend
+            .values
+            .lock()
+            .unwrap()
+            .insert(id.clone(), "anthropic-sentinel".into());
+        let state = Arc::new(CredentialStoreState::with_store(backend.clone()));
+
+        let readers = (0..4)
+            .map(|_| {
+                let state = state.clone();
+                let id = id.clone();
+                std::thread::spawn(move || state.get(&id).unwrap().unwrap())
+            })
+            .collect::<Vec<_>>();
+        for reader in readers {
+            assert_eq!(reader.join().unwrap().expose(), "anthropic-sentinel");
+        }
+        assert_eq!(*backend.reads.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn writes_prime_and_clears_evict_the_process_cache() {
+        let backend = Arc::new(MemoryStore::default());
+        let state = CredentialStoreState::with_store(backend.clone());
+        let id = CredentialId::Mistral;
+
+        state.set_or_clear(&id, "first-sentinel".into()).unwrap();
+        assert_eq!(state.get(&id).unwrap().unwrap().expose(), "first-sentinel");
+        assert_eq!(*backend.reads.lock().unwrap(), 0);
+
+        state.set_or_clear(&id, "second-sentinel".into()).unwrap();
+        assert_eq!(state.get(&id).unwrap().unwrap().expose(), "second-sentinel");
+        assert_eq!(*backend.reads.lock().unwrap(), 0);
+
+        state.set_or_clear(&id, "".into()).unwrap();
+        assert!(state.get(&id).unwrap().is_none());
+        assert_eq!(*backend.reads.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn cancelled_reads_are_not_cached_and_can_be_retried() {
+        let backend = Arc::new(MemoryStore::failing_reads(vec![VaultError::Cancelled]));
+        let id = CredentialId::OpenAi;
+        backend
+            .values
+            .lock()
+            .unwrap()
+            .insert(id.clone(), "openai-sentinel".into());
+        let state = CredentialStoreState::with_store(backend.clone());
+
+        assert_eq!(state.get(&id).unwrap_err(), CANCELLED_ERROR);
+        assert_eq!(state.get(&id).unwrap().unwrap().expose(), "openai-sentinel");
+        assert_eq!(state.get(&id).unwrap().unwrap().expose(), "openai-sentinel");
+        assert_eq!(*backend.reads.lock().unwrap(), 2);
     }
 
     fn legacy() -> LegacyCredentials {

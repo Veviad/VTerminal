@@ -1,6 +1,12 @@
 import { act, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Attachment, ChatMessage, Session, StreamEvent } from "../lib/types";
+import type {
+  Attachment,
+  ChatMessage,
+  KnowledgeBucketRef,
+  Session,
+  StreamEvent,
+} from "../lib/types";
 
 const api = vi.hoisted(() => ({
   aiSuggest: vi.fn(),
@@ -96,6 +102,21 @@ beforeEach(() => {
 });
 
 describe("AI generation ownership", () => {
+  it("forwards attached Qdrant buckets when starting an agent run", async () => {
+    const bucket: KnowledgeBucketRef = {
+      source: "qdrant",
+      connection_id: "connection-1",
+      collection: "manuals",
+    };
+    useAppStore.getState().attachBucketToAi(SID, bucket);
+    const { result } = renderHook(() => useAiStream());
+
+    await act(async () => result.current.startAgent(SID, "search the manuals"));
+
+    expect(api.agentStart).toHaveBeenCalledOnce();
+    expect(api.agentStart.mock.calls[0][5]).toEqual([bucket]);
+  });
+
   it("accepts an agent transcript after Done clears requestId", async () => {
     const backend = deferred<ChatMessage[]>();
     let onEvent!: (event: StreamEvent) => void;
