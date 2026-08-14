@@ -225,8 +225,13 @@ function StepGoal({ goal }: { goal: RunbookGoal }) {
         Met when {goal.checks.length === 1 ? "this condition holds" : "all of these hold"}:
       </p>
       <ul className="mt-1 space-y-0.5">
-        {goal.checks.map((check) => (
-          <li key={check.command} className="font-mono text-[9px] text-text-secondary">
+        {/* Index in the key: nothing stops two conditions sharing a command
+            with different expected codes, and the list never reorders. */}
+        {goal.checks.map((check, index) => (
+          <li
+            key={`${index}-${check.command}`}
+            className="font-mono text-[9px] text-text-secondary"
+          >
             <span className="text-text-muted">exit {check.expect.join(" or ")} · </span>
             {check.command}
           </li>

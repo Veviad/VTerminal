@@ -106,7 +106,11 @@ fn the_hardening_example_is_goal_directed_and_bounded() {
         assert!(!goal.checks.is_empty());
         // The point of the example: no `check:` and no `verify:` of their own,
         // because the goal conditions serve as both.
-        assert!(step.check.is_none(), "{} should not restate a check", step.id);
+        assert!(
+            step.check.is_none(),
+            "{} should not restate a check",
+            step.id
+        );
         assert!(
             step.verify.is_none(),
             "{} should not restate a verify",

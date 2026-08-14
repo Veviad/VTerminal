@@ -53,7 +53,9 @@ export function RunbookPreflight({
   // A package with its own request, or a changed policy, moves the floor. Reset
   // rather than clamp so the control never shows a stale higher choice the
   // operator did not make for THIS runbook.
-  useEffect(() => setRequested(floor), [floor]);
+  useEffect(() => {
+    setRequested(floor);
+  }, [floor]);
 
   const choices = evidenceModesAtOrAbove(floor);
   // Name whichever source actually raised the floor, so a greyed-out choice is
@@ -167,7 +169,9 @@ export function RunbookPreflight({
               type="button"
               role="radio"
               aria-checked={evidenceMode === mode}
-              onClick={() => setRequested(mode)}
+              onClick={() => {
+                setRequested(mode);
+              }}
               className={`rounded px-2 py-1.5 text-[10px] transition-colors ${
                 evidenceMode === mode
                   ? "bg-accent text-bg-primary"
