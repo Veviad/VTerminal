@@ -118,6 +118,23 @@
         }
       ]
     },
+    "AuditSettings": {
+      "additionalProperties": false,
+      "description": "What a package asks the operator to keep as an audit record.\n\nThis is a request, never a grant. The operator's Settings → Runbooks policy\nsupplies the floor, and a package that asks for less than the floor gets the\nfloor anyway — see `EvidenceRecordingPolicy::floor`.",
+      "properties": {
+        "recordOutput": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidenceCaptureMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
     "CheckAction": {
       "description": "A check must distinguish a compliant result from a non-compliant result.\nAny other shell exit code is an execution error, not merely non-compliance.",
       "oneOf": [
@@ -250,6 +267,14 @@
       },
       "type": "object"
     },
+    "EvidenceCaptureMode": {
+      "enum": [
+        "none",
+        "tail",
+        "full"
+      ],
+      "type": "string"
+    },
     "FailurePolicy": {
       "enum": [
         "pause",
@@ -359,6 +384,17 @@
     "Spec": {
       "additionalProperties": false,
       "properties": {
+        "audit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuditSettings"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Absent unless the package asks for a specific retention level. It MUST\nstay `skip_serializing_if`: canonical JSON is hashed into every source\nregistration and every persisted run, and an always-emitted `\"audit\":\nnull` would change `canonical_sha256` for every definition that already\nexists — which `verify_snapshot_bytes` treats as a corrupt run rather\nthan a stale one, and no refresh can repair that."
+        },
         "declaredCapabilities": {
           "$ref": "#/$defs/DeclaredCapabilities",
           "default": {

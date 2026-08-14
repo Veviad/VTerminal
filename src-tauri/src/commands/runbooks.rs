@@ -45,11 +45,12 @@ use crate::runbooks::runtime::{
 };
 use crate::runbooks::state::{
     ApprovalDecision, ApprovalStatus, AttemptStatus, EvidenceAvailability, EvidenceCaptureMode,
-    PauseDecision, RunStatus, RunbookPhase, StepStatus, TargetBinding, VerificationAssurance,
-    Waiver,
+    EvidenceRecordingPolicy, PauseDecision, RunStatus, RunbookPhase, StepStatus, TargetBinding,
+    VerificationAssurance, Waiver,
 };
 
 const RUNBOOKS_SETTING: &str = "runbooks_enabled";
+const RECORDING_POLICY_SETTING: &str = "runbooks_output_recording";
 const MAIN_DATABASE_FILE: &str = "veviad-shell.db";
 const MAX_ID_BYTES: usize = 256;
 const MAX_TARGET_FIELD_BYTES: usize = 4_096;
@@ -727,6 +728,30 @@ fn gate(app: &tauri::AppHandle<Wry>) -> Result<(), String> {
     }
 }
 
+/// The operator's retention floor. An unreadable or unrecognised stored value
+/// falls back to the default rather than erroring: this decides how much of a
+/// run is KEPT, and refusing to start a run over a malformed preference would
+/// be a worse outcome than recording the documented default amount.
+fn recording_policy(app: &tauri::AppHandle<Wry>) -> EvidenceRecordingPolicy {
+    crate::commands::settings::read_string(app, RECORDING_POLICY_SETTING)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_default()
+}
+
+/// The capture mode a run actually gets.
+///
+/// The webview picks a mode in preflight, but the operator's policy is the
+/// floor and it is applied HERE, not in the picker: clamping only frontend-side
+/// would leave the audit level settable by a stale or modified webview, which
+/// is the same threat model `gate()` exists for. A request may only be raised.
+fn resolved_evidence_mode(
+    requested: EvidenceCaptureMode,
+    policy: EvidenceRecordingPolicy,
+    declared: Option<EvidenceCaptureMode>,
+) -> EvidenceCaptureMode {
+    requested.at_least(policy.floor(declared))
+}
+
 #[tauri::command]
 pub fn runbooks_import(
     app: tauri::AppHandle<Wry>,
@@ -1086,6 +1111,12 @@ pub fn runbooks_start(
         "runbook inputs",
     )?;
 
+    let evidence_mode = resolved_evidence_mode(
+        request.evidence_mode,
+        recording_policy(&app),
+        package.definition.declared_record_output(),
+    );
+
     let active_model = crate::commands::ai::active_model(&app);
     let config = engine_config(&app, active_model);
     // Fail before creating durable active state if a background connection to
@@ -1102,7 +1133,7 @@ pub fn runbooks_start(
         canonical_sha256: package.snapshot.canonical_sha256.clone(),
         target: request.target_context.clone(),
         inputs: Value::Object(resolved.clone().into_iter().collect()),
-        evidence_mode: request.evidence_mode,
+        evidence_mode,
         app_version: env!("CARGO_PKG_VERSION").into(),
         model: Some(active_model.id.into()),
         steps: package
@@ -1129,7 +1160,7 @@ pub fn runbooks_start(
         definition_snapshot: package.snapshot,
         target: request.target_context,
         inputs: resolved,
-        evidence_mode: request.evidence_mode,
+        evidence_mode,
         app_version: creation.app_version,
         model: creation.model,
         created_at: record.created_at,
@@ -4163,6 +4194,44 @@ fn now() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stale_webview_cannot_record_less_than_the_operator_allows() {
+        use EvidenceCaptureMode::{Full, None as NoCapture, Tail};
+        use EvidenceRecordingPolicy as Policy;
+
+        // The preflight picker will not offer a below-floor mode, but the
+        // request arrives over IPC and is not trusted. Every downgrade attempt
+        // is silently raised rather than rejected: the operator asked for at
+        // least this much evidence, and failing the run would keep none of it.
+        for requested in [NoCapture, Tail, Full] {
+            assert_eq!(resolved_evidence_mode(requested, Policy::All, None), Full);
+            assert_eq!(
+                resolved_evidence_mode(requested, Policy::All, Some(NoCapture)),
+                Full,
+                "a package cannot opt out of an operator's record-everything policy",
+            );
+        }
+
+        // Raising a single run above the floor stays available.
+        assert_eq!(
+            resolved_evidence_mode(Full, Policy::None, None),
+            Full,
+            "`none` is off by default, not recording forbidden",
+        );
+        assert_eq!(resolved_evidence_mode(NoCapture, Policy::None, None), NoCapture);
+
+        // `runbook` defers to the package, and to tail when it asks for nothing.
+        assert_eq!(resolved_evidence_mode(NoCapture, Policy::Runbook, None), Tail);
+        assert_eq!(
+            resolved_evidence_mode(NoCapture, Policy::Runbook, Some(Full)),
+            Full,
+        );
+        assert_eq!(
+            resolved_evidence_mode(Full, Policy::Runbook, Some(NoCapture)),
+            Full,
+        );
+    }
 
     struct TempRoot(PathBuf);
 

@@ -12,6 +12,8 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
+use super::state::EvidenceCaptureMode;
+
 pub const API_VERSION: &str = "runbooks.veviad.com/v1alpha1";
 pub const KIND: &str = "Runbook";
 pub const MAX_DEFINITION_BYTES: usize = 1024 * 1024;
@@ -55,7 +57,28 @@ pub struct Spec {
     pub declared_capabilities: DeclaredCapabilities,
     #[serde(default)]
     pub defaults: Defaults,
+    /// Absent unless the package asks for a specific retention level. It MUST
+    /// stay `skip_serializing_if`: canonical JSON is hashed into every source
+    /// registration and every persisted run, and an always-emitted `"audit":
+    /// null` would change `canonical_sha256` for every definition that already
+    /// exists — which `verify_snapshot_bytes` treats as a corrupt run rather
+    /// than a stale one, and no refresh can repair that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit: Option<AuditSettings>,
     pub steps: Vec<Step>,
+}
+
+/// What a package asks the operator to keep as an audit record.
+///
+/// This is a request, never a grant. The operator's Settings → Runbooks policy
+/// supplies the floor, and a package that asks for less than the floor gets the
+/// floor anyway — see `EvidenceRecordingPolicy::floor`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_output: Option<EvidenceCaptureMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -349,6 +372,12 @@ impl RunbookDefinition {
 
     pub fn effective_failure_policy(&self, step: &Step) -> FailurePolicy {
         step.on_failure.unwrap_or(self.spec.defaults.on_failure)
+    }
+
+    /// The retention this package asks for, if any. The operator's policy still
+    /// decides the floor; this only ever raises a run above `tail`.
+    pub fn declared_record_output(&self) -> Option<EvidenceCaptureMode> {
+        self.spec.audit.and_then(|audit| audit.record_output)
     }
 
     /// Resolve provided values over definition defaults and validate the exact data

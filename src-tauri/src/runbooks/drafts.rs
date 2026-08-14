@@ -294,6 +294,9 @@ fn build_definition(document: &RunbookDraftDocument) -> RunbookDefinition {
             defaults: Defaults {
                 on_failure: document.default_on_failure,
             },
+            // The wizard authors assessments and never asks for a retention
+            // level; the operator's Settings → Runbooks policy decides.
+            audit: None,
             steps,
         },
     }

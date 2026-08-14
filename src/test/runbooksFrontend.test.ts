@@ -1,11 +1,18 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import {
+  atLeastEvidence,
   commandWithRunbookEnvironment,
   createRunbookEventBuffer,
+  definitionRecordOutput,
+  evidenceFloor,
+  evidenceModesAtOrAbove,
+  evidenceTailLimit,
   isCheckedStepState,
   normalizeRunbookReport,
   pollRunbookUntilTerminal,
+  type EvidenceMode,
+  type RunbookDefinition,
   type RunbookEvent,
   type RunbookReportWire,
   type RunbookRun,
@@ -405,6 +412,52 @@ describe("canonical report projection", () => {
       executed_command: "edited command",
     });
     expect(report.deviations[0].message).toContain("edited_command");
+  });
+});
+
+describe("evidence recording policy", () => {
+  it("mirrors the Rust floor for every policy and declaration", () => {
+    expect(evidenceFloor("all", null)).toBe("full");
+    expect(evidenceFloor("all", "none")).toBe("full");
+    expect(evidenceFloor("none", "full")).toBe("none");
+    expect(evidenceFloor("runbook", null)).toBe("tail");
+    expect(evidenceFloor("runbook", "full")).toBe("full");
+    expect(evidenceFloor("runbook", "none")).toBe("none");
+  });
+
+  it("raises a request to the floor and never lowers it", () => {
+    expect(atLeastEvidence("none", "full")).toBe("full");
+    expect(atLeastEvidence("tail", "full")).toBe("full");
+    expect(atLeastEvidence("full", "none")).toBe("full");
+    expect(atLeastEvidence("tail", "none")).toBe("tail");
+  });
+
+  it("offers only the modes at or above the floor", () => {
+    expect(evidenceModesAtOrAbove("none")).toEqual(["none", "tail", "full"]);
+    expect(evidenceModesAtOrAbove("tail")).toEqual(["tail", "full"]);
+    // `all` leaves the operator no choice at all, which is what an audit
+    // floor means — the picker collapses to a single option.
+    expect(evidenceModesAtOrAbove("full")).toEqual(["full"]);
+  });
+
+  it("reads a package's request and treats its absence as no request", () => {
+    const definition = (audit?: { recordOutput?: EvidenceMode }): RunbookDefinition => ({
+      kind: "Runbook",
+      metadata: { id: "d", version: "1.0.0", title: "D" },
+      spec: { target: { kind: "active-terminal" }, steps: [], ...(audit ? { audit } : {}) },
+    });
+    expect(definitionRecordOutput(definition())).toBeNull();
+    expect(definitionRecordOutput(definition({ recordOutput: "full" }))).toBe("full");
+  });
+
+  it("harvests nothing at all when the run keeps no output", () => {
+    // Not merely a smaller cap: Rust discards this output, so harvesting it
+    // would move bytes the operator declined to keep across the IPC boundary.
+    expect(evidenceTailLimit("none")).toBe(0);
+    expect(evidenceTailLimit("tail")).toBe(8_192);
+    expect(evidenceTailLimit("full")).toBe(1_048_576);
+    // A run row missing its mode falls back to the column's SQL default.
+    expect(evidenceTailLimit(undefined)).toBe(8_192);
   });
 });
 

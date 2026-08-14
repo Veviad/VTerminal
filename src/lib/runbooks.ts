@@ -15,6 +15,17 @@ import { prefixCommandEnvironment } from "./ptyExecShell";
 export type RunbookSourceState = "valid" | "invalid" | "missing";
 export type RunbookSourceKind = "user" | "builtin";
 export type EvidenceMode = "none" | "tail" | "full";
+/** Ordered least- to most-retaining; the preflight picker renders this order. */
+export const EVIDENCE_MODES: readonly EvidenceMode[] = ["none", "tail", "full"];
+/** Operator policy from Settings → Runbooks. Deliberately a different set of
+ * spellings from `EvidenceMode`: `runbook` is not a capture mode and both
+ * SQLite columns would reject it. */
+export type EvidenceRecordingPolicy = "none" | "runbook" | "all";
+export const EVIDENCE_RECORDING_POLICIES: readonly EvidenceRecordingPolicy[] = [
+  "none",
+  "runbook",
+  "all",
+];
 export type OnFailure = "pause" | "stop" | "continue";
 export type RunbookActionKind = "shell" | "agent" | "manual" | "ansible.playbook";
 export type RunbookDraftPlatform = "macos13" | "linux" | "any";
@@ -205,6 +216,9 @@ export interface RunbookDefinition {
     declaredCapabilities?: RunbookCapabilities;
     declared_capabilities?: RunbookCapabilities;
     defaults?: { onFailure?: OnFailure; on_failure?: OnFailure };
+    /** What the package asks the operator to keep. A request, not a grant:
+     * Settings → Runbooks supplies the floor and can only raise this. */
+    audit?: { recordOutput?: EvidenceMode | null } | null;
     steps: RunbookStepDefinition[];
   };
   source_id?: string;
@@ -1041,6 +1055,49 @@ export function definitionApiVersion(definition: RunbookDefinition): string {
 
 export function definitionCapabilities(definition: RunbookDefinition): RunbookCapabilities {
   return definition.spec.declaredCapabilities ?? definition.spec.declared_capabilities ?? {};
+}
+
+/** Mirrors `EvidenceCaptureMode::retention_rank`. Declaration order in the
+ * union is a wire detail, so the ranking is written out rather than derived. */
+const EVIDENCE_RETENTION_RANK: Record<EvidenceMode, number> = { none: 0, tail: 1, full: 2 };
+
+/** Mirrors `EvidenceRecordingPolicy::floor`.
+ *
+ * `runbooks_start` applies the same clamp server-side and is what actually
+ * enforces the policy — this copy only decides which choices preflight offers,
+ * so the operator is never shown a mode the backend would silently override. */
+export function evidenceFloor(
+  policy: EvidenceRecordingPolicy,
+  declared: EvidenceMode | null | undefined,
+): EvidenceMode {
+  if (policy === "all") return "full";
+  if (policy === "none") return "none";
+  return declared ?? "tail";
+}
+
+/** Mirrors `EvidenceCaptureMode::at_least`: raise to the floor, never lower. */
+export function atLeastEvidence(requested: EvidenceMode, floor: EvidenceMode): EvidenceMode {
+  return EVIDENCE_RETENTION_RANK[requested] >= EVIDENCE_RETENTION_RANK[floor] ? requested : floor;
+}
+
+/** The modes an operator may still choose for one run under `floor`. */
+export function evidenceModesAtOrAbove(floor: EvidenceMode): EvidenceMode[] {
+  return EVIDENCE_MODES.filter((mode) => EVIDENCE_RETENTION_RANK[mode] >= EVIDENCE_RETENTION_RANK[floor]);
+}
+
+export function definitionRecordOutput(definition: RunbookDefinition): EvidenceMode | null {
+  return definition.spec.audit?.recordOutput ?? null;
+}
+
+/** Bytes of terminal output to harvest for one attempt.
+ *
+ * Mirrors `OUTPUT_TAIL_BYTES` / `FULL_EVIDENCE_BYTES` in Rust's redact.rs. Zero
+ * for `none` is the point: Rust discards that output anyway, so harvesting it
+ * only moves bytes the operator declined to keep across the IPC boundary. An
+ * unknown mode is treated as `tail`, which is also the run row's SQL default. */
+export function evidenceTailLimit(mode: EvidenceMode | null | undefined): number {
+  if (mode === "none") return 0;
+  return mode === "full" ? 1_048_576 : 8_192;
 }
 
 export function defaultRunbookInputs(

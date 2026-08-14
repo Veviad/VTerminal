@@ -644,6 +644,22 @@ export const S = {
         "While disabled, Rust refuses every Runbooks command and the workspace is hidden.",
       enabledNotice:
         "Definitions are imported from local folders and edited outside the app. Runs keep an immutable snapshot even if the source changes later.",
+      recording: "Record terminal output",
+      recordingHint:
+        "The least a run keeps as an audit record. A run can be raised above this before it starts, never lowered. Output is redacted and capped before it is stored, and only what the terminal still holds in scrollback can be captured.",
+      recordingOptions: {
+        none: "Never",
+        runbook: "As the runbook asks",
+        all: "Always, in full",
+      },
+      recordingDescriptions: {
+        none: "Nothing is kept unless you raise a single run before starting it. Results, timestamps, approvals and operator comments are still recorded.",
+        runbook:
+          "Each package decides. A package that asks for nothing gets an 8 KiB redacted tail per attempt — the behaviour before this setting existed.",
+        all: "Every attempt keeps a redacted artifact of up to 1 MiB in protected app data, and no run can opt out.",
+      },
+      recordingRetention:
+        "Recorded output is kept until the run is deleted. Deleting a run removes its artifacts from disk.",
     },
     about: {
       version: "Version",

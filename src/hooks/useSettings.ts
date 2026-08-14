@@ -5,6 +5,7 @@ import { useAppStore } from "../stores/appStore";
 import { useRunbookStore } from "../stores/runbookStore";
 import { abortSession, interruptJob } from "../lib/ptyExec";
 import { revokeAllLiveRunbookRuns } from "../lib/runbookLiveJobs";
+import type { EvidenceRecordingPolicy } from "../lib/runbooks";
 import { updateAllTermOptions } from "../lib/termRegistry";
 import { clampPanelRatio } from "../lib/panelRatio";
 
@@ -54,6 +55,7 @@ export function useSettings() {
       autoUpdateEnabled: s.auto_update_enabled,
       docsEnabled: s.docs_enabled,
       runbooksEnabled: s.runbooks_enabled,
+      runbooksOutputRecording: s.runbooks_output_recording,
       hasApiKey: {
         anthropic: s.has_anthropic_api_key,
         openai: s.has_openai_api_key,
@@ -173,6 +175,12 @@ export function useSettings() {
       useAppStore.setState({ docsEnabled: patch.docs_enabled });
     if (patch.runbooks_enabled !== undefined) {
       useAppStore.setState({ runbooksEnabled: patch.runbooks_enabled });
+    }
+    if (patch.runbooks_output_recording !== undefined) {
+      // Rust already rejected anything outside the union before this resolved.
+      useAppStore.setState({
+        runbooksOutputRecording: patch.runbooks_output_recording as EvidenceRecordingPolicy,
+      });
     }
     // Keys are write-only. Mirror only whether one is now present — the value
     // itself is never held frontend-side.

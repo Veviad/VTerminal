@@ -122,6 +122,11 @@ pub fn get_settings(app: tauri::AppHandle<Wry>) -> Result<Value, String> {
         // active terminal. Keep the backend capability unreachable until the
         // user explicitly opts in; every `runbooks_*` command enforces this.
         "runbooks_enabled": get("runbooks_enabled", json!(false)),
+        // How much terminal output a run keeps as an audit record. This is a
+        // FLOOR, not the mode: preflight may raise a single run above it and
+        // may never drop below it. `runbook` defers to the package and is the
+        // default because it reproduces the pre-policy behaviour exactly.
+        "runbooks_output_recording": get("runbooks_output_recording", json!("runbook")),
         "log_level": get("log_level", json!("info")),
     }))
 }
@@ -169,6 +174,7 @@ pub fn save_settings(
     auto_update_enabled: Option<bool>,
     docs_enabled: Option<bool>,
     runbooks_enabled: Option<bool>,
+    runbooks_output_recording: Option<String>,
     log_level: Option<String>,
 ) -> Result<(), String> {
     let store = app.store(STORE_NAME).map_err(|e| e.to_string())?;
@@ -349,6 +355,14 @@ pub fn save_settings(
     }
     if let Some(v) = runbooks_enabled {
         store.set("runbooks_enabled", json!(v));
+    }
+    if let Some(v) = runbooks_output_recording {
+        // Parse rather than allowlist a literal array: `EvidenceRecordingPolicy`
+        // owns these spellings, and an unknown value must be rejected here
+        // instead of silently falling back to the inline default on the next
+        // read, which would look like the setting had simply not been saved.
+        v.parse::<crate::runbooks::state::EvidenceRecordingPolicy>()?;
+        store.set("runbooks_output_recording", json!(v));
     }
     if let Some(v) = log_level {
         store.set("log_level", json!(v));

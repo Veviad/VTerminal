@@ -320,7 +320,12 @@ export function useRunbooks() {
           event.command,
           {
             timeoutMs: event.timeout_ms,
-            tailLimit: run?.evidence_mode === "full" ? 1_048_576 : 8_192,
+            // A capture GATE, not just a size cap. `none` used to still harvest
+            // 8 KiB and ship it over IPC for Rust to discard, so output the
+            // operator asked never to keep was read out of the terminal and
+            // crossed a process boundary anyway. Zero keeps the honest
+            // observed/truncated counters without carrying the bytes.
+            tailLimit: api.evidenceTailLimit(run?.evidence_mode),
             environment: event.environment,
             // Rust emits the exact pager/stdin/input wrapper persisted in the
             // canonical attempt record. Do not transform it a second time here.

@@ -526,6 +526,7 @@ fn canonicalize(path: &Path) -> Result<PathBuf, PackageError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runbooks::state::EvidenceCaptureMode;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     struct TempPackage(PathBuf);
@@ -719,6 +720,80 @@ spec:
 
         fs::remove_dir_all(&package.0).unwrap();
         fs::rename(moved, &package.0).unwrap();
+    }
+
+    /// Every byte a definition without optional extras canonicalises to.
+    ///
+    /// `canonical_sha256` is registered per source and baked into every
+    /// persisted run, and `verify_snapshot_bytes` re-canonicalises a stored run
+    /// and demands byte equality. So a new field that serialises when absent
+    /// does not merely invalidate a registration — a refresh fixes that — it
+    /// makes every run recorded by an older build permanently unresumable.
+    /// Note the pre-existing `"apply":null` / `"verify":null` / `"onFailure":null`
+    /// below: those fields predate the rule and show exactly what it prevents.
+    /// Add `#[serde(default, skip_serializing_if = ...)]` to anything new here.
+    const CANONICAL_WITHOUT_OPTIONAL_FIELDS: &str = concat!(
+        r#"{"apiVersion":"runbooks.veviad.com/v1alpha1","kind":"Runbook","#,
+        r#""metadata":{"description":"","id":"inspect-host","tags":[],"#,
+        r#""title":"Inspect host","version":"1.0.0"},"#,
+        r#""spec":{"declaredCapabilities":{"network":false,"privilege":"none","writes":[]},"#,
+        r#""defaults":{"onFailure":"pause"},"inputs":{},"#,
+        r#""steps":[{"apply":null,"check":{"outcomes":{"compliantExitCodes":[0],"#,
+        r#""noncompliantExitCodes":[1]},"uses":"shell","#,
+        r#""with":{"command":"uname -s","env":{}}},"id":"kernel-present","#,
+        r#""onFailure":null,"required":true,"title":"Check the kernel","verify":null}],"#,
+        r#""target":{"kind":"active-terminal"}}}"#,
+    );
+
+    #[test]
+    fn an_unset_optional_field_never_reaches_canonical_json() {
+        let definition = parse_and_validate(ASSESSMENT).unwrap();
+        let canonical = canonical_json(&definition).unwrap();
+        assert_eq!(canonical, CANONICAL_WITHOUT_OPTIONAL_FIELDS);
+        assert!(definition.declared_record_output().is_none());
+    }
+
+    #[test]
+    fn an_audit_request_is_carried_and_changes_only_that_definition() {
+        let baseline = parse_and_validate(ASSESSMENT).unwrap();
+        let requested = ASSESSMENT.replace(
+            "  target:\n    kind: active-terminal\n",
+            "  target:\n    kind: active-terminal\n  audit:\n    recordOutput: full\n",
+        );
+        let requested = parse_and_validate(&requested).unwrap();
+
+        assert_eq!(
+            requested.declared_record_output(),
+            Some(EvidenceCaptureMode::Full)
+        );
+        let canonical = canonical_json(&requested).unwrap();
+        assert!(canonical.contains(r#""audit":{"recordOutput":"full"}"#));
+        assert_ne!(
+            snapshot_definition(ASSESSMENT, &baseline)
+                .unwrap()
+                .canonical_sha256,
+            snapshot_definition("", &requested).unwrap().canonical_sha256,
+        );
+    }
+
+    #[test]
+    fn an_unknown_audit_field_is_rejected() {
+        let source = ASSESSMENT.replace(
+            "  target:\n    kind: active-terminal\n",
+            "  target:\n    kind: active-terminal\n  audit:\n    keepForever: true\n",
+        );
+        assert!(parse_and_validate(&source).is_err());
+    }
+
+    #[test]
+    fn a_recording_policy_spelling_is_not_a_capture_mode() {
+        // `runbook` is the operator policy, never something a package can ask
+        // for: the package says how much to keep, the operator says the floor.
+        let source = ASSESSMENT.replace(
+            "  target:\n    kind: active-terminal\n",
+            "  target:\n    kind: active-terminal\n  audit:\n    recordOutput: runbook\n",
+        );
+        assert!(parse_and_validate(&source).is_err());
     }
 
     #[test]
