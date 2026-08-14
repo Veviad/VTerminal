@@ -517,6 +517,17 @@ impl RunbookDefinition {
         self.spec.audit.and_then(|audit| audit.record_output)
     }
 
+    /// Whether any phase hands work to the model. Discovery exists only to fill
+    /// an agent prompt, so a definition without one should not spend the
+    /// operator's approvals gathering facts nothing will read.
+    pub fn uses_agent_action(&self) -> bool {
+        self.spec.steps.iter().any(|step| {
+            matches!(step.check, Some(CheckAction::Agent { .. }))
+                || matches!(step.apply, Some(ApplyAction::Agent { .. }))
+                || matches!(step.verify, Some(VerifyAction::Agent { .. }))
+        })
+    }
+
     /// Resolve provided values over definition defaults and validate the exact data
     /// that may be exposed to an executor. Unknown input IDs and missing required
     /// values fail before a run is created.
