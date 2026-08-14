@@ -21,6 +21,7 @@ import { useAppStore } from "../stores/appStore";
 import { useRunbookStore } from "../stores/runbookStore";
 import type {
   EvidenceMode,
+  RunbookApprovalRequest,
   RunbookEvent,
   RunbookOperatorDecision,
   RunbookRun,
@@ -91,6 +92,78 @@ function stopApproveAllFlow(runId: string): void {
 function isApproveAllFlowActive(runId: string, token: number): boolean {
   const active = approvalAllFlows.get(runId);
   return Object.is(active, token);
+}
+
+/** Why an automatic-approval wait ended. */
+type ApprovalWait =
+  | { kind: "approval"; approval: RunbookApprovalRequest }
+  /** Operator pause, manual step, or a finished run — all documented stops. */
+  | { kind: "settled" }
+  /** The operator pressed Stop auto-approve, or another flow superseded this. */
+  | { kind: "stopped" }
+  | { kind: "timeout" };
+
+/** Wait for the run to offer its next approval.
+ *
+ * Approving does not run the command — it releases the engine, which then
+ * dispatches into the terminal and blocks. The run is legitimately `running`
+ * for as long as that command takes, so there is nothing useful to sample once
+ * a response returns. The next approval arrives as an EVENT or not at all.
+ *
+ * Resolves immediately when the condition already holds, so a run that has
+ * already offered its next approval never waits.
+ */
+function waitForNextApproval(
+  runId: string,
+  seen: Set<string>,
+  isActive: () => boolean,
+  timeoutMs: number,
+): Promise<ApprovalWait> {
+  const evaluate = (): ApprovalWait | null => {
+    if (!isActive()) return { kind: "stopped" };
+    const run = getRunById(runId);
+    // A run that vanished, paused for the operator, needs a manual outcome, or
+    // finished is done with unattended approval either way.
+    if (!run || run.pending_operator || run.pending_manual) {
+      return { kind: "settled" };
+    }
+    if (api.isTerminalRunState(run.status) || run.status === "interrupted") {
+      return { kind: "settled" };
+    }
+    const approval = run.pending_approval;
+    if (approval && !seen.has(approval.approval_id)) {
+      return { kind: "approval", approval };
+    }
+    return null;
+  };
+
+  const immediate = evaluate();
+  if (immediate) return Promise.resolve(immediate);
+
+  return new Promise<ApprovalWait>((resolve) => {
+    let done = false;
+    const settle = (outcome: ApprovalWait) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      unsubscribe();
+      resolve(outcome);
+    };
+    const timer = setTimeout(() => settle({ kind: "timeout" }), timeoutMs);
+    const unsubscribe = useRunbookStore.subscribe(() => {
+      const outcome = evaluate();
+      if (outcome) settle(outcome);
+    });
+  });
+}
+
+/** How long one approved command may take before the flow gives up waiting.
+ *
+ * Mirrors the engine's own budget — `command_timeout_secs` plus the 15s it
+ * allows itself past a timeout — so a slow but healthy step never breaks the
+ * flow, while a wedged engine still releases it. */
+function approvalWaitBudgetMs(): number {
+  return (useAppStore.getState().agentCommandTimeoutSecs + 15 + 5) * 1_000;
 }
 
 function getRunById(runId: string): RunbookRun | null {
@@ -823,7 +896,7 @@ export function useRunbooks() {
         if (clearBusy && useRunbookStore.getState().busyAction === busyAction) {
           store.setBusyAction(null);
         }
-        return;
+        return false;
       }
       if (approval.approval_id !== approvalId) {
         store.setError(
@@ -832,14 +905,14 @@ export function useRunbooks() {
         if (clearBusy && useRunbookStore.getState().busyAction === busyAction) {
           store.setBusyAction(null);
         }
-        return;
+        return false;
       }
       if (approval.command.trim().length === 0) {
         store.setError("Approval command content is empty.");
         if (clearBusy && useRunbookStore.getState().busyAction === busyAction) {
           store.setBusyAction(null);
         }
-        return;
+        return false;
       }
 
       const modelInvocation = approval.command.startsWith(
@@ -851,7 +924,7 @@ export function useRunbooks() {
           store.setError(
             "Confirm the visible POSIX shell prompt before approving this action.",
           );
-          return;
+          return false;
         }
         const sessionId = run.target.session_id;
         if (
@@ -861,19 +934,20 @@ export function useRunbooks() {
           store.setError(
             "Select the bound terminal before approving this action.",
           );
-          return;
+          return false;
         }
         promptBinding = captureApprovalPromptBinding(sessionId);
         if (!promptBinding) {
           store.setError(
             "The visible terminal is not in a stable normal-buffer prompt state.",
           );
-          return;
+          return false;
         }
         approvalPromptBindings.set(approvalId, promptBinding);
       }
 
       store.setBusyAction(busyAction);
+      let delivered = false;
       try {
         await api.runbooksRespondApproval(
           runId,
@@ -882,6 +956,7 @@ export function useRunbooks() {
           command,
           shellAttested,
         );
+        delivered = true;
         await refreshRun(runId);
       } catch (error) {
         if (promptBinding) releaseApprovalPromptBinding(promptBinding);
@@ -892,6 +967,7 @@ export function useRunbooks() {
           store.setBusyAction(null);
         }
       }
+      return delivered;
     },
     [refreshRun],
   );
@@ -930,31 +1006,27 @@ export function useRunbooks() {
       const store = useRunbookStore.getState();
       store.setBusyAction(`approve-all:${runId}`);
       store.setError(null);
+      const isActive = () => isApproveAllFlowActive(runId, autoApproveToken);
       try {
-        while (isApproveAllFlowActive(runId, autoApproveToken)) {
-          const currentRun = getRunById(runId);
-          if (!currentRun) {
-            store.setError("The active run is no longer available.");
-            break;
-          }
-          if (
-            currentRun.status !== "waiting_approval" ||
-            currentRun.pending_operator ||
-            currentRun.pending_manual
-          ) {
-            break;
-          }
-          const approval = currentRun.pending_approval;
-          if (!approval) {
-            store.setError("Runbook approval state is missing.");
-            break;
-          }
-          if (observedApprovals.has(approval.approval_id)) {
+        while (isActive()) {
+          // Blocks until the run offers an approval this flow has not already
+          // handled, or reaches a state where unattended approval must stop.
+          const next = await waitForNextApproval(
+            runId,
+            observedApprovals,
+            isActive,
+            approvalWaitBudgetMs(),
+          );
+          if (next.kind === "stopped") break;
+          if (next.kind === "settled") break;
+          if (next.kind === "timeout") {
             store.setError(
-              "Automatic approval stopped because the approval state did not advance.",
+              "Automatic approval stopped: the run did not reach its next approval in time. Approve the remaining steps individually.",
             );
             break;
           }
+
+          const approval = next.approval;
           observedApprovals.add(approval.approval_id);
           const modelInvocation = approval.command.startsWith(
             "model://configured-agent/",
@@ -971,7 +1043,7 @@ export function useRunbooks() {
             break;
           }
 
-          await respondApprovalInternal(
+          const delivered = await respondApprovalInternal(
             runId,
             approval.approval_id,
             true,
@@ -980,11 +1052,10 @@ export function useRunbooks() {
             `approve-all:${runId}`,
             false,
           );
-
-          const refreshedRun = getRunById(runId);
-          if (!isApproveAllFlowActive(runId, autoApproveToken)) break;
-          if (!refreshedRun || refreshedRun.status !== "waiting_approval")
-            break;
+          // A refused or failed response has already explained itself. Waiting
+          // on after one would sit until the deadline for an approval the
+          // engine is never going to replace.
+          if (!delivered) break;
         }
       } catch (error) {
         store.setError(String(error));

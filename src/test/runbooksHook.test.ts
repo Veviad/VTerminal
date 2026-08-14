@@ -956,16 +956,19 @@ describe("useRunbooks recovery and deletion", () => {
         active_phase: "apply",
       },
     );
-    const terminal = {
+    // The run ENDS after the second approval. It does not sit in `running`:
+    // that is the transient state while an approved command is dispatched, and
+    // treating it as the exit is what made this stop after one approval.
+    const finished = {
       ...first,
-      status: "running" as const,
+      status: "succeeded" as const,
       active_phase: null,
       pending_approval_id: null,
       pending_approval: null,
     };
 
     useRunbookStore.getState().setActiveRun(first);
-    mocks.get.mockResolvedValueOnce(second).mockResolvedValueOnce(terminal);
+    mocks.get.mockResolvedValueOnce(second).mockResolvedValueOnce(finished);
 
     const { result } = renderHook(() => useRunbooks());
 
@@ -991,6 +994,137 @@ describe("useRunbooks recovery and deletion", () => {
       true,
     );
     expect(useRunbookStore.getState().error).toBeNull();
+    expect(useRunbookStore.getState().busyAction).toBeNull();
+  });
+
+  it("approveAllPendingSteps waits for the next approval to be offered", async () => {
+    // The sequence that actually happens. Approving does not run the command:
+    // it releases the engine, which dispatches into the terminal and blocks. So
+    // the run is `running` with NO pending approval for as long as that command
+    // takes, and the next approval arrives later, as an event.
+    const first = waitingApprovalRun("run-wait", "approval-1", "printf one");
+    const dispatching = {
+      ...first,
+      status: "running" as const,
+      pending_approval_id: null,
+      pending_approval: null,
+    };
+    useRunbookStore.getState().setActiveRun(first);
+    mocks.get.mockResolvedValue(dispatching);
+
+    const { result } = renderHook(() => useRunbooks());
+    let flow: Promise<void> | undefined;
+    await act(async () => {
+      flow = result.current.approveAllPendingSteps("run-wait");
+      await Promise.resolve();
+    });
+
+    await vi.waitFor(() => expect(mocks.respondApproval).toHaveBeenCalledTimes(1));
+    // Still going: the old code exited here, having seen `running`.
+    expect(useRunbookStore.getState().busyAction).toBe("approve-all:run-wait");
+
+    await act(async () => {
+      useRunbookStore.getState().dispatchEvent({
+        type: "ApprovalRequested",
+        run_id: "run-wait",
+        approval_id: "approval-2",
+        step_id: "one",
+        phase: "apply",
+        command: "printf two",
+        explanation: "second",
+        classification: {
+          read_only: false,
+          network: false,
+          privileged: false,
+          opaque: true,
+        },
+      });
+    });
+
+    await vi.waitFor(() => expect(mocks.respondApproval).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      useRunbookStore.getState().dispatchEvent({
+        type: "RunFinished",
+        run_id: "run-wait",
+        state: "succeeded",
+      });
+      await flow;
+    });
+
+    expect(mocks.respondApproval).toHaveBeenNthCalledWith(
+      2,
+      "run-wait",
+      "approval-2",
+      true,
+      "printf two",
+      true,
+    );
+    expect(useRunbookStore.getState().error).toBeNull();
+    expect(useRunbookStore.getState().busyAction).toBeNull();
+  });
+
+  it("approveAllPendingSteps gives up if the next approval never arrives", async () => {
+    // The wait is bounded by the engine's own command budget, so a wedged run
+    // hands itself back instead of holding the button for ever.
+    const first = waitingApprovalRun("run-wedge", "approval-1", "printf one");
+    useRunbookStore.getState().setActiveRun(first);
+    mocks.get.mockResolvedValue({
+      ...first,
+      status: "running" as const,
+      pending_approval_id: null,
+      pending_approval: null,
+    });
+
+    vi.useFakeTimers();
+    try {
+      const { result } = renderHook(() => useRunbooks());
+      let flow: Promise<void> | undefined;
+      await act(async () => {
+        flow = result.current.approveAllPendingSteps("run-wedge");
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        // Past `agentCommandTimeoutSecs` (120s default) plus the engine's own
+        // 15s grace plus slack.
+        await vi.advanceTimersByTimeAsync(141_000);
+        await flow;
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(mocks.respondApproval).toHaveBeenCalledTimes(1);
+    expect(useRunbookStore.getState().error).toContain("did not reach its next approval in time");
+    expect(useRunbookStore.getState().busyAction).toBeNull();
+  });
+
+  it("approveAllPendingSteps releases a flow that is stopped mid-wait", async () => {
+    // "Stop auto-approve" has to work while the flow is blocked waiting for the
+    // next approval, which is where it spends nearly all of its time.
+    const first = waitingApprovalRun("run-stop", "approval-1", "printf one");
+    useRunbookStore.getState().setActiveRun(first);
+    mocks.get.mockResolvedValue({
+      ...first,
+      status: "running" as const,
+      pending_approval_id: null,
+      pending_approval: null,
+    });
+
+    const { result } = renderHook(() => useRunbooks());
+    let flow: Promise<void> | undefined;
+    await act(async () => {
+      flow = result.current.approveAllPendingSteps("run-stop");
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(mocks.respondApproval).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      result.current.cancelApproveAll("run-stop");
+      await flow;
+    });
+
+    expect(mocks.respondApproval).toHaveBeenCalledTimes(1);
     expect(useRunbookStore.getState().busyAction).toBeNull();
   });
 
