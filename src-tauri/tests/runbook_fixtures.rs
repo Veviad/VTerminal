@@ -77,7 +77,14 @@ fn reusable_example_packages_load_and_create_immutable_snapshots() {
 
 #[test]
 fn checked_in_invalid_definitions_fail_closed_by_error_class() {
-    for name in ["unknown-field", "unknown-action", "duplicate-field"] {
+    for name in [
+        "unknown-field",
+        "unknown-action",
+        "duplicate-field",
+        // The goal block widens what the parser accepts, so it needs the same
+        // closed-deserialization guarantee as everything that came before it.
+        "unknown-goal-field",
+    ] {
         let error = parse_and_validate(&fixture_source("invalid", name)).unwrap_err();
         assert!(
             matches!(error, DefinitionError::Yaml(_)),
@@ -88,6 +95,7 @@ fn checked_in_invalid_definitions_fail_closed_by_error_class() {
     for (name, expected) in [
         ("duplicate-step-id", "duplicate step ID"),
         ("invalid-semver", "semantic version"),
+        ("goal-without-conditions", "at least one check"),
     ] {
         let error = parse_and_validate(&fixture_source("invalid", name)).unwrap_err();
         assert!(

@@ -24,8 +24,8 @@ use super::agent_executor::{
     AgentPhaseConfig,
 };
 use super::definition::{
-    ApplyAction, CheckAction, CheckOutcomes, FailurePolicy, RunbookDefinition, ShellAction, Step,
-    VerifyAction, MAX_SHELL_COMMAND_CHARS, RUNBOOK_ENV_PREFIX,
+    ApplyAction, CheckAction, CheckOutcomes, FailurePolicy, Goal, RunbookDefinition, ShellAction,
+    Step, VerifyAction, MAX_SHELL_COMMAND_CHARS, RUNBOOK_ENV_PREFIX,
 };
 use super::package::DefinitionSnapshot;
 use super::redact::{sanitize_evidence, sanitize_output_tail};
@@ -387,6 +387,11 @@ enum PhaseActionRef<'a> {
     ShellVerify(&'a ShellAction, &'a [i32]),
     Agent(&'a str),
     Manual(&'a str),
+    /// The step's `goal.checks`, standing in for an absent `check:` or
+    /// `verify:`. One block then serves both, which is what the shipped Linux
+    /// baseline was already doing by hand — its check and verify commands are
+    /// byte-identical.
+    Goal(&'a Goal),
     Unavailable(&'static str),
 }
 
@@ -752,13 +757,21 @@ impl<'a> EngineRunner<'a> {
     }
 
     async fn run_step(&mut self, index: usize, step: &Step) -> Result<StepFlow, String> {
-        let check_action = match &step.check {
-            CheckAction::Shell { action, outcomes } => PhaseActionRef::ShellCheck(action, outcomes),
-            CheckAction::Agent { instructions } => PhaseActionRef::Agent(instructions),
-            CheckAction::Manual { instructions } => PhaseActionRef::Manual(instructions),
-            CheckAction::AnsiblePlaybook { .. } => {
+        let check_action = match (&step.check, &step.goal) {
+            (Some(CheckAction::Shell { action, outcomes }), _) => {
+                PhaseActionRef::ShellCheck(action, outcomes)
+            }
+            (Some(CheckAction::Agent { instructions }), _) => PhaseActionRef::Agent(instructions),
+            (Some(CheckAction::Manual { instructions }), _) => PhaseActionRef::Manual(instructions),
+            (Some(CheckAction::AnsiblePlaybook { .. }), _) => {
                 PhaseActionRef::Unavailable("ansible.playbook adapter is not available in v1")
             }
+            // An explicit `check:` always wins; the goal only stands in when
+            // the author wrote none. Validation guarantees one of the two.
+            (None, Some(goal)) => PhaseActionRef::Goal(goal),
+            (None, None) => PhaseActionRef::Unavailable(
+                "step declares neither a check action nor goal conditions",
+            ),
         };
         let check = self
             .run_phase(index, step, RunbookPhase::Check, check_action)
@@ -832,18 +845,23 @@ impl<'a> EngineRunner<'a> {
     async fn run_verify(&mut self, index: usize, step: &Step) -> Result<StepFlow, String> {
         // This is deliberately an error even though strict definition validation
         // already guarantees it: an apply success can never check the item.
-        let verify = step
-            .verify
-            .as_ref()
-            .ok_or_else(|| format!("step {} applied without a verify action", step.id))?;
-        let verify_action = match verify {
-            VerifyAction::Shell {
-                action,
-                pass_exit_codes,
-            } => PhaseActionRef::ShellVerify(action, pass_exit_codes),
-            VerifyAction::Agent { instructions } => PhaseActionRef::Agent(instructions),
-            VerifyAction::Manual { instructions } => PhaseActionRef::Manual(instructions),
-            VerifyAction::AnsiblePlaybook { .. } => {
+        let verify_action = match (&step.verify, &step.goal) {
+            (None, Some(goal)) => PhaseActionRef::Goal(goal),
+            (None, None) => {
+                return Err(format!("step {} applied without a verify action", step.id))
+            }
+            (
+                Some(VerifyAction::Shell {
+                    action,
+                    pass_exit_codes,
+                }),
+                _,
+            ) => PhaseActionRef::ShellVerify(action, pass_exit_codes),
+            (Some(VerifyAction::Agent { instructions }), _) => PhaseActionRef::Agent(instructions),
+            (Some(VerifyAction::Manual { instructions }), _) => {
+                PhaseActionRef::Manual(instructions)
+            }
+            (Some(VerifyAction::AnsiblePlaybook { .. }), _) => {
                 PhaseActionRef::Unavailable("ansible.playbook adapter is not available in v1")
             }
         };
@@ -944,6 +962,7 @@ impl<'a> EngineRunner<'a> {
             PhaseActionRef::Manual(instructions) => {
                 self.execute_manual(index, step, phase, instructions).await
             }
+            PhaseActionRef::Goal(goal) => self.execute_goal(index, step, phase, goal).await,
             PhaseActionRef::Unavailable(reason) => Ok(PhaseRun::Completed {
                 completion: PhaseCompletion {
                     run_id: self.spec.run_id.clone(),
@@ -1111,6 +1130,109 @@ impl<'a> EngineRunner<'a> {
         Ok(())
     }
 
+    /// Run every goal check and grade them here, in the engine.
+    ///
+    /// This is the whole point of `goal.checks`: on an agent phase the verdict
+    /// used to be whatever the model put in `phase_complete`. Now the model's
+    /// summary is narration and these exit codes decide.
+    ///
+    /// The checks are ordinary visible-terminal commands, so the assurance is
+    /// still `shell_observed` — the same as a `verify: shell`. Nothing here
+    /// claims a more trustworthy executor; what changed is who reads the result.
+    ///
+    /// Every check runs even after one fails, because a report saying which two
+    /// of four conditions are unmet is worth more than one saying "something".
+    /// A single unknown outcome makes the whole phase unknown, which pauses for
+    /// the operator regardless of `onFailure`.
+    async fn execute_goal(
+        &mut self,
+        index: usize,
+        step: &Step,
+        phase: RunbookPhase,
+        goal: &Goal,
+    ) -> Result<PhaseRun, String> {
+        let mut failures: Vec<String> = Vec::new();
+        let mut unknown: Option<String> = None;
+        let total = goal.checks.len();
+
+        for (position, check) in goal.checks.iter().enumerate() {
+            validate_runtime_command(&check.command)?;
+            let environment = self.resolve_environment_map(&check.env)?;
+            let outcome = self
+                .execute_command(
+                    index,
+                    step,
+                    phase,
+                    &check.command,
+                    environment,
+                    "goal",
+                    &format!("Verify goal condition {} of {total}", position + 1),
+                    &check.expect,
+                )
+                .await?;
+            match outcome {
+                CommandDispatch::Cancelled => return Ok(PhaseRun::Cancelled),
+                CommandDispatch::Paused(reason) => return Ok(PhaseRun::Paused(reason)),
+                CommandDispatch::Observed(observed) => match observed.exit_code {
+                    Some(exit) if check.expect.contains(&exit) => {}
+                    Some(exit) => {
+                        failures.push(format!("condition {} exited with {exit}", position + 1))
+                    }
+                    None => {
+                        unknown.get_or_insert_with(|| {
+                            observed.error.clone().unwrap_or_else(|| {
+                                format!("condition {} had an unknown outcome", position + 1)
+                            })
+                        });
+                    }
+                },
+            }
+        }
+
+        let (result, summary) = if let Some(reason) = unknown {
+            (
+                PhaseResult::Unknown,
+                format!("goal could not be evaluated: {reason}"),
+            )
+        } else if failures.is_empty() {
+            (
+                match phase {
+                    RunbookPhase::Check => PhaseResult::Compliant,
+                    RunbookPhase::Apply => PhaseResult::Applied,
+                    RunbookPhase::Verify => PhaseResult::Verified,
+                },
+                format!("all {total} goal conditions are met"),
+            )
+        } else {
+            (
+                // On a check, unmet conditions are the work to do. After an
+                // apply they mean the remediation did not achieve the goal.
+                match phase {
+                    RunbookPhase::Check => PhaseResult::Noncompliant,
+                    _ => PhaseResult::Failed,
+                },
+                format!(
+                    "{} of {total} goal conditions unmet: {}",
+                    failures.len(),
+                    failures.join("; ")
+                ),
+            )
+        };
+
+        Ok(PhaseRun::Completed {
+            completion: PhaseCompletion {
+                run_id: self.spec.run_id.clone(),
+                step_id: step.id.clone(),
+                phase,
+                result,
+                assurance: (phase == RunbookPhase::Verify)
+                    .then_some(VerificationAssurance::ShellObserved),
+                summary,
+            },
+            operator_comment: None,
+        })
+    }
+
     async fn execute_shell<F>(
         &mut self,
         index: usize,
@@ -1182,8 +1304,15 @@ impl<'a> EngineRunner<'a> {
     }
 
     fn resolve_environment(&self, action: &ShellAction) -> Result<HashMap<String, String>, String> {
+        self.resolve_environment_map(&action.env)
+    }
+
+    fn resolve_environment_map(
+        &self,
+        env: &std::collections::BTreeMap<String, String>,
+    ) -> Result<HashMap<String, String>, String> {
         let mut environment = HashMap::new();
-        for (name, input_id) in &action.env {
+        for (name, input_id) in env {
             if !is_valid_runbook_environment_name(name) {
                 return Err(format!(
                     "environment mapping {name} is outside the dedicated {RUNBOOK_ENV_PREFIX}<NAME> namespace"

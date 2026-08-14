@@ -1981,7 +1981,7 @@ fn spawn_engine(
 fn runbook_requires_model_provider(definition: &RunbookDefinition, config: &EngineConfig) -> bool {
     config.summarize_with_model
         || definition.spec.steps.iter().any(|step| {
-            matches!(&step.check, CheckAction::Agent { .. })
+            matches!(&step.check, Some(CheckAction::Agent { .. }))
                 || step
                     .apply
                     .as_ref()
@@ -2314,7 +2314,9 @@ fn pending_manual_view(run: &RunRecord) -> Result<Option<PendingManualView>, Str
         step.apply.as_ref(),
         step.verify.as_ref(),
     ) {
-        (RunbookPhase::Check, CheckAction::Manual { instructions }, _, _) => Some(instructions),
+        (RunbookPhase::Check, Some(CheckAction::Manual { instructions }), _, _) => {
+            Some(instructions)
+        }
         (RunbookPhase::Apply, _, Some(ApplyAction::Manual { instructions }), _) => {
             Some(instructions)
         }
@@ -4674,7 +4676,7 @@ spec:
             );
             assert!(package.definition.spec.steps.iter().all(|step| matches!(
                 &step.check,
-                CheckAction::Shell { .. }
+                Some(CheckAction::Shell { .. })
             ) && step.apply.is_none()
                 && step.verify.is_none()));
             assert_eq!(

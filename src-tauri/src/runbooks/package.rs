@@ -456,8 +456,13 @@ fn validate_ansible_references(
 ) -> Result<(), PackageError> {
     for step in &definition.spec.steps {
         match &step.check {
-            CheckAction::AnsiblePlaybook { action } => validate_ansible_reference(root, action)?,
-            CheckAction::Shell { .. } | CheckAction::Agent { .. } | CheckAction::Manual { .. } => {}
+            Some(CheckAction::AnsiblePlaybook { action }) => {
+                validate_ansible_reference(root, action)?
+            }
+            Some(
+                CheckAction::Shell { .. } | CheckAction::Agent { .. } | CheckAction::Manual { .. },
+            )
+            | None => {}
         }
         if let Some(action) = &step.apply {
             match action {
@@ -751,6 +756,19 @@ spec:
         let canonical = canonical_json(&definition).unwrap();
         assert_eq!(canonical, CANONICAL_WITHOUT_OPTIONAL_FIELDS);
         assert!(definition.declared_record_output().is_none());
+        // Named individually as well as pinned above, so a failure says which
+        // field leaked rather than only that the digest moved.
+        for key in [
+            r#""audit""#,
+            r#""goal""#,
+            r#""constraints""#,
+            r#""context""#,
+        ] {
+            assert!(
+                !canonical.contains(key),
+                "{key} must be skipped when unset or every existing run becomes unresumable",
+            );
+        }
     }
 
     #[test]

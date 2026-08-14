@@ -247,7 +247,7 @@ fn build_definition(document: &RunbookDraftDocument) -> RunbookDefinition {
         id: step.id.clone(),
         title: step.title.clone(),
         required: step.required,
-        check: match &step.check {
+        check: Some(match &step.check {
             DraftCheck::Shell {
                 command,
                 env,
@@ -266,9 +266,14 @@ fn build_definition(document: &RunbookDraftDocument) -> RunbookDefinition {
             DraftCheck::Manual { instructions } => CheckAction::Manual {
                 instructions: instructions.clone(),
             },
-        },
+        }),
         apply: None,
         verify: None,
+        // The wizard authors assessments only: no agent action, so nothing for
+        // a goal to direct and no bounds to place on it.
+        goal: None,
+        constraints: None,
+        context: None,
         on_failure: step.on_failure,
     }));
     RunbookDefinition {
@@ -293,10 +298,12 @@ fn build_definition(document: &RunbookDraftDocument) -> RunbookDefinition {
             },
             defaults: Defaults {
                 on_failure: document.default_on_failure,
+                constraints: None,
             },
             // The wizard authors assessments and never asks for a retention
             // level; the operator's Settings → Runbooks policy decides.
             audit: None,
+            context: None,
             steps,
         },
     }
@@ -320,7 +327,7 @@ fn platform_guard(platform: DraftPlatform) -> Option<Step> {
         id: id.into(),
         title: title.into(),
         required: true,
-        check: CheckAction::Shell {
+        check: Some(CheckAction::Shell {
             action: ShellAction {
                 command: command.into(),
                 env: BTreeMap::new(),
@@ -329,9 +336,12 @@ fn platform_guard(platform: DraftPlatform) -> Option<Step> {
                 compliant_exit_codes: vec![0],
                 noncompliant_exit_codes: vec![1],
             },
-        },
+        }),
         apply: None,
         verify: None,
+        goal: None,
+        constraints: None,
+        context: None,
         on_failure: Some(FailurePolicy::Stop),
     })
 }
@@ -496,7 +506,7 @@ mod tests {
         assert_eq!(definition.spec.inputs.len(), 5);
         assert!(matches!(
             definition.spec.steps[2].check,
-            CheckAction::Manual { .. }
+            Some(CheckAction::Manual { .. })
         ));
         assert!(!definition.uses_unavailable_executor());
     }

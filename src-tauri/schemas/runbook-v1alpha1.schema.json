@@ -236,6 +236,58 @@
       ],
       "type": "object"
     },
+    "Constraints": {
+      "additionalProperties": false,
+      "description": "Per-step bounds on what an agent phase may do.\n\nEvery field NARROWS. `spec.declaredCapabilities` is preflight disclosure the\nengine never reads; these are enforced in `run_command` before an approval\ncard is drawn, so a refusal costs the model a round instead of costing the\noperator a click on something that cannot run.\n\nThe command scans are best-effort in exactly the way the agent panel's are:\nthey cannot see through a script the model wrote in an earlier step, a shell\nalias, or `python -c`. They are not a sandbox and must never be sold as one.",
+      "properties": {
+        "maxCommands": {
+          "description": "Proposals this phase may make, refusals included. Exhausting it pauses\nthe step for the operator rather than failing the run.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "maxRounds": {
+          "description": "Model rounds. May only LOWER the operator's `agent_max_iterations`\nsetting — a definition cannot raise someone else's limit.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "maxSeconds": {
+          "description": "Wall clock for the whole phase.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "network": {
+          "description": "`false` refuses a proposal that looks networked.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "privilege": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Privilege"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`none` refuses a proposal that escalates privilege."
+        }
+      },
+      "type": "object"
+    },
     "DeclaredCapabilities": {
       "additionalProperties": false,
       "properties": {
@@ -260,11 +312,45 @@
     "Defaults": {
       "additionalProperties": false,
       "properties": {
+        "constraints": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Constraints"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Applied to every step that declares none of its own. A step's block\nreplaces this wholesale rather than merging field by field, so one\nglance at a step tells you its bounds."
+        },
         "onFailure": {
           "$ref": "#/$defs/FailurePolicy",
           "default": "pause"
         }
       },
+      "type": "object"
+    },
+    "DiscoveryProbe": {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "type": "string"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "name": {
+          "description": "Label the output is filed under in the prompt.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "command"
+      ],
       "type": "object"
     },
     "EvidenceCaptureMode": {
@@ -282,6 +368,56 @@
         "continue"
       ],
       "type": "string"
+    },
+    "Goal": {
+      "additionalProperties": false,
+      "description": "What a step must achieve, and how the ENGINE decides it did.\n\nWithout this an agent phase's only input is prose, and the only thing that\ndecides whether the goal was reached is the model's own `phase_complete`.\n`checks` are ordinary shell probes the engine runs and grades itself, so the\nmodel's summary becomes narration rather than the verdict.\n\nThey are not a stronger executor: like every other visible-terminal command\nthey are `shell_observed`, not attested. What changes is who decides.",
+      "properties": {
+        "checks": {
+          "description": "Deterministic probes. The goal is met only if every one of them exits\nwith a code it declares.",
+          "items": {
+            "$ref": "#/$defs/GoalCheck"
+          },
+          "type": "array"
+        },
+        "intent": {
+          "description": "Prose for the model: what \"done\" means, in the author's words.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "intent",
+        "checks"
+      ],
+      "type": "object"
+    },
+    "GoalCheck": {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "type": "string"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Same `VRUN_<NAME>` → input-id mapping a shell action uses; values are\nnever interpolated into the command text.",
+          "type": "object"
+        },
+        "expect": {
+          "description": "Exit codes that mean this probe passed.",
+          "items": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "command",
+        "expect"
+      ],
+      "type": "object"
     },
     "InputDefinition": {
       "additionalProperties": false,
@@ -395,6 +531,17 @@
           ],
           "description": "Absent unless the package asks for a specific retention level. It MUST\nstay `skip_serializing_if`: canonical JSON is hashed into every source\nregistration and every persisted run, and an always-emitted `\"audit\":\nnull` would change `canonical_sha256` for every definition that already\nexists — which `verify_snapshot_bytes` treats as a corrupt run rather\nthan a stale one, and no refresh can repair that."
         },
+        "context": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpecContext"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Target facts gathered once, before the first step."
+        },
         "declaredCapabilities": {
           "$ref": "#/$defs/DeclaredCapabilities",
           "default": {
@@ -432,6 +579,19 @@
       ],
       "type": "object"
     },
+    "SpecContext": {
+      "additionalProperties": false,
+      "description": "Facts gathered about the target once per run, before the first step.\n\nThis is what makes a distribution-agnostic runbook possible: the model can\nread `/etc/os-release` and which package manager exists instead of guessing\nbetween `ufw` and `firewalld`. Probes are ordinary approval-gated commands —\nthere is no exemption for a read-only one.",
+      "properties": {
+        "discover": {
+          "items": {
+            "$ref": "#/$defs/DiscoveryProbe"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "Step": {
       "additionalProperties": false,
       "properties": {
@@ -447,7 +607,45 @@
           "default": null
         },
         "check": {
-          "$ref": "#/$defs/CheckAction"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CheckAction"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Absent when `goal.checks` supplies the check phase instead. Every new\nfield here MUST keep `skip_serializing_if`: canonical JSON is hashed\ninto every registration and every persisted run, and a field that\nserializes when unset changes `canonical_sha256` for definitions that\nalready exist — which `verify_snapshot_bytes` reads as corruption\nrather than staleness, and no refresh repairs."
+        },
+        "constraints": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Constraints"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "context": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StepContext"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "goal": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Goal"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "id": {
           "type": "string"
@@ -484,9 +682,26 @@
       },
       "required": [
         "id",
-        "title",
-        "check"
+        "title"
       ],
+      "type": "object"
+    },
+    "StepContext": {
+      "additionalProperties": false,
+      "description": "What a step's agent phase is allowed to know.",
+      "properties": {
+        "inputs": {
+          "description": "Input ids whose resolved VALUES are rendered into the prompt. An\nexplicit list, mirroring a shell action's `env`: nothing about a run\nreaches the model implicitly.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "priorSteps": {
+          "description": "Include earlier steps' ids, statuses and bounded summaries.",
+          "type": "boolean"
+        }
+      },
       "type": "object"
     },
     "Target": {
