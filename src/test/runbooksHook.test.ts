@@ -140,6 +140,35 @@ function run(runId: string, status: RunbookRunState): RunbookRun {
   };
 }
 
+function waitingApprovalRun(
+  runId: string,
+  approvalId: string,
+  command: string,
+  overrides: Partial<RunbookRun> = {},
+): RunbookRun {
+  return {
+    ...run(runId, "waiting_approval"),
+    active_step_id: "one",
+    active_phase: "check",
+    pending_approval_id: approvalId,
+    pending_approval: {
+      approval_id: approvalId,
+      run_id: runId,
+      step_id: "one",
+      phase: "check",
+      command,
+      explanation: "Runbook approval",
+      classification: {
+        read_only: false,
+        network: false,
+        privileged: false,
+        opaque: true,
+      },
+    },
+    ...overrides,
+  };
+}
+
 function approvalEvent(runId: string, approvalId: string, command: string): RunbookEvent {
   return {
     type: "ApprovalRequested",
@@ -775,6 +804,93 @@ describe("useRunbooks recovery and deletion", () => {
     expect(useRunbookStore.getState().notice).toContain(
       "/exports/runbook-example-v1.0.0",
     );
+    expect(useRunbookStore.getState().busyAction).toBeNull();
+  });
+
+  it("approveAllPendingSteps can drain multiple waiting approvals", async () => {
+    const first = waitingApprovalRun("run-approve-all", "approval-1", "printf one");
+    const second = waitingApprovalRun("run-approve-all", "approval-2", "printf two", {
+      active_phase: "apply",
+    });
+    const terminal = {
+      ...first,
+      status: "running" as const,
+      active_phase: null,
+      pending_approval_id: null,
+      pending_approval: null,
+    };
+
+    useRunbookStore.getState().setActiveRun(first);
+    mocks.get
+      .mockResolvedValueOnce(second)
+      .mockResolvedValueOnce(terminal);
+
+    const { result } = renderHook(() => useRunbooks());
+
+    await act(async () => {
+      await result.current.approveAllPendingSteps("run-approve-all");
+    });
+
+    expect(mocks.respondApproval).toHaveBeenCalledTimes(2);
+    expect(mocks.respondApproval).toHaveBeenNthCalledWith(
+      1,
+      "run-approve-all",
+      "approval-1",
+      true,
+      "printf one",
+      true,
+    );
+    expect(mocks.respondApproval).toHaveBeenNthCalledWith(
+      2,
+      "run-approve-all",
+      "approval-2",
+      true,
+      "printf two",
+      true,
+    );
+    expect(useRunbookStore.getState().error).toBeNull();
+    expect(useRunbookStore.getState().busyAction).toBeNull();
+  });
+
+  it("approveAllPendingSteps stops when a run enters a manual or operator pause", async () => {
+    const first = waitingApprovalRun("run-paused", "approval-1", "printf one");
+    const paused = {
+      ...first,
+      status: "waiting_operator" as const,
+      pending_approval_id: null,
+      pending_approval: null,
+      pending_operator: {
+        run_id: "run-paused",
+        step_id: "one",
+        reason: "human decision required",
+        choices: ["retry", "skip", "waive", "stop"],
+      },
+    };
+    useRunbookStore.getState().setActiveRun(first);
+    mocks.get.mockResolvedValueOnce(paused);
+
+    const { result } = renderHook(() => useRunbooks());
+    await act(async () => {
+      await result.current.approveAllPendingSteps("run-paused");
+    });
+
+    expect(mocks.respondApproval).toHaveBeenCalledTimes(1);
+    expect(useRunbookStore.getState().error).toBeNull();
+    expect(useRunbookStore.getState().busyAction).toBeNull();
+  });
+
+  it("approveAllPendingSteps surfaces response errors and exits", async () => {
+    const first = waitingApprovalRun("run-fail", "approval-1", "printf one");
+    useRunbookStore.getState().setActiveRun(first);
+    mocks.respondApproval.mockRejectedValueOnce(new Error("approval denied"));
+
+    const { result } = renderHook(() => useRunbooks());
+    await act(async () => {
+      await result.current.approveAllPendingSteps("run-fail");
+    });
+
+    expect(mocks.respondApproval).toHaveBeenCalledTimes(1);
+    expect(useRunbookStore.getState().error).toContain("approval");
     expect(useRunbookStore.getState().busyAction).toBeNull();
   });
 

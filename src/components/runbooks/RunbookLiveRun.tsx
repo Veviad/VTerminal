@@ -3,6 +3,7 @@ import {
   Circle,
   CircleSlash,
   Clock3,
+  Eye,
   FileText,
   Loader2,
   PauseCircle,
@@ -11,13 +12,20 @@ import {
   TriangleAlert,
   XCircle,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { useRunbooks, describeRunbookTarget } from "../../hooks/useRunbooks";
-import { isCheckedStepState, isTerminalRunState, type RunbookStepRun } from "../../lib/runbooks";
+import {
+  isCheckedStepState,
+  isTerminalRunState,
+  runbooksGetDefinition,
+  type RunbookDefinition,
+  type RunbookStepRun,
+} from "../../lib/runbooks";
 import { useRunbookStore } from "../../stores/runbookStore";
 import { RunbookApprovalCard } from "./RunbookApprovalCard";
 import { RunbookManualCard, RunbookPauseCard } from "./RunbookOperatorCards";
+import { RunbookDefinitionPreview } from "./RunbookDefinitionPreview";
 import { RunbookReportViewer } from "./RunbookReportViewer";
 import {
   dangerButton,
@@ -32,9 +40,22 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
   const run = useRunbookStore((state) => state.activeRun);
   const report = useRunbookStore((state) => state.report);
   const busyAction = useRunbookStore((state) => state.busyAction);
-  const { cancel, resume, respondApproval, decide, submitManual, loadReport } = useRunbooks();
+  const {
+    cancel,
+    resume,
+    respondApproval,
+    approveAllPendingSteps,
+    cancelApproveAll,
+    decide,
+    submitManual,
+    loadReport,
+  } = useRunbooks();
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [showReport, setShowReport] = useState(false);
+  const [showDefinitionReview, setShowDefinitionReview] = useState(false);
+  const [definitionReview, setDefinitionReview] = useState<RunbookDefinition | null>(null);
+  const [definitionReviewLoading, setDefinitionReviewLoading] = useState(false);
+  const [definitionReviewError, setDefinitionReviewError] = useState<string | null>(null);
 
   if (!run) {
     return (
@@ -64,11 +85,72 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
   const checked = run.steps.filter((step) => isCheckedStepState(step.status)).length;
   const terminal = isTerminalRunState(run.status);
   const active = run.steps.find((step) => step.id === run.active_step_id) ?? null;
+  const autoApproving = busyAction === `approve-all:${run.run_id}`;
+
+  useEffect(() => {
+    setShowDefinitionReview(false);
+    setDefinitionReview(null);
+    setDefinitionReviewLoading(false);
+    setDefinitionReviewError(null);
+  }, [run.run_id]);
 
   const openReport = async () => {
     if (report?.run_id !== run.run_id) await loadReport(run.run_id);
     setShowReport(true);
   };
+
+  const openRunbookReview = async () => {
+    setShowDefinitionReview(true);
+    setDefinitionReviewError(null);
+    if (
+      definitionReview &&
+      definitionReview.metadata.id === run.definition_id &&
+      definitionReview.metadata.version === run.definition_version
+    ) return;
+
+    if (!run.source_id) {
+      setDefinitionReviewError("This run no longer has an associated source to review.");
+      return;
+    }
+
+    setDefinitionReviewLoading(true);
+    try {
+      const next = await runbooksGetDefinition(run.source_id);
+      if (run.run_id !== useRunbookStore.getState().activeRun?.run_id) return;
+      setDefinitionReview(next);
+    } catch (error) {
+      setDefinitionReviewError(String(error));
+    } finally {
+      setDefinitionReviewLoading(false);
+    }
+  };
+
+  if (showDefinitionReview) {
+    return (
+      <div className="min-h-0 flex-1 overflow-y-auto p-4">
+        <button onClick={() => setShowDefinitionReview(false)} className={`${secondaryButton} mb-4`}>
+          ← Checklist
+        </button>
+        {definitionReviewLoading && (
+          <p className="flex items-center gap-1.5 px-2 py-5 text-[11px] text-text-muted">
+            <Loader2 size={12} className="animate-spin" /> Loading definition…
+          </p>
+        )}
+        {definitionReviewError && (
+          <p className="rounded-md border border-error/30 bg-error/10 p-2 text-[10px] text-error">
+            {definitionReviewError}
+          </p>
+        )}
+        {definitionReview ? (
+          <RunbookDefinitionPreview definition={definitionReview} />
+        ) : !definitionReviewLoading ? (
+          <p className="px-2 py-4 text-[11px] text-text-muted">
+            The runbook definition could not be loaded for review.
+          </p>
+        ) : null}
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto p-4">
@@ -94,6 +176,13 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
                   <FileText size={11} /> View report
                 </button>
               )}
+              <button
+                onClick={() => void openRunbookReview()}
+                disabled={definitionReviewLoading}
+                className={secondaryButton}
+              >
+                <Eye size={11} /> Review runbook
+              </button>
               {run.status === "interrupted" && sessionId && (
                 <button
                   onClick={() => void resume(run.run_id, sessionId)}
@@ -151,20 +240,30 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
         </section>
 
         {run.pending_approval && (
-          <RunbookApprovalCard
-            approval={run.pending_approval}
-            busy={busyAction === `approval:${run.pending_approval.approval_id}`}
-            targetLabel={describeRunbookTarget(run.target)}
-            onRespond={(approved, command, shellAttested) =>
-              void respondApproval(
-                run.run_id,
-                run.pending_approval!.approval_id,
-                approved,
-                command,
-                shellAttested,
-              )
-            }
-          />
+          <section className="space-y-2">
+            {autoApproving && (
+              <p className="rounded-md border border-accent/30 bg-accent/5 px-2 py-1.5 text-[10px] text-accent">
+                Automatically acknowledging remaining approvals in this run. Manual/operator steps will stop auto mode.
+              </p>
+            )}
+            <RunbookApprovalCard
+              approval={run.pending_approval}
+              targetLabel={describeRunbookTarget(run.target)}
+              busy={busyAction !== null}
+              autoApproving={autoApproving}
+              onApproveAll={() => void approveAllPendingSteps(run.run_id)}
+              onCancelApproveAll={() => void cancelApproveAll(run.run_id)}
+              onRespond={(approved, command, shellAttested) =>
+                void respondApproval(
+                  run.run_id,
+                  run.pending_approval!.approval_id,
+                  approved,
+                  command,
+                  shellAttested,
+                )
+              }
+            />
+          </section>
         )}
 
         {run.pending_manual && (

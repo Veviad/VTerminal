@@ -57,7 +57,7 @@
       <section class="guide-hero" aria-labelledby="guide-title">
         <div class="guide-hero-inner">
             <span class="guide-status"
-            >Available in 0.2.4 · Experimental · Disabled by default</span
+            >Available in 0.2.6 · Experimental · Disabled by default</span
             >
           <h1 id="guide-title">Reusable Runbooks</h1>
           <p class="guide-hero-copy">
@@ -142,8 +142,8 @@
                 <div>
                   <strong>Run beside the terminal</strong>
                   Follow the live checklist, approve actions, resolve pauses,
-                  add comments, then inspect or export the final report from
-                  History.
+                  review the runbook definition mid-flight, add comments, then
+                  inspect or export the final report from History.
                 </div>
               </li>
             </ol>
@@ -568,11 +568,21 @@ spec:
                 including checks and verification. Apply always requires it.
               </li>
               <li>
-                Runbooks do not honor the agent panel's <em>Auto all</em>
-                setting. Edited commands are retained as deviations.
+                Model phases are opaque and must be approved one step at a
+                time.
               </li>
               <li>
-                Model phases are opaque and require their own approval.
+                If you prefer, use <em>Acknowledge and approve all remaining
+                steps</em> in live mode to continue through later approvals.
+                It stops when the approval state repeats, when a pause appears,
+                or when the run leaves approval status.
+              </li>
+              <li>
+                This flow is different from the agent panel’s
+                <em>Auto all</em> setting and can only advance runbook
+                approvals.
+              </li>
+              <li>
                 On-device models are reported as local; cloud and configured
                 remote providers are additionally reported as networked.
               </li>

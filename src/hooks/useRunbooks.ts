@@ -71,6 +71,17 @@ function sameTarget(left: RunbookTargetContext, right: RunbookTargetContext): bo
 let definitionRequestSequence = 0;
 let libraryRequestSequence = 0;
 let sourceSelectionSequence = 0;
+let approvalFlowSequence = 0;
+const approvalAllFlows = new Map<string, number>();
+
+function stopApproveAllFlow(runId: string): void {
+  const current = approvalAllFlows.get(runId) ?? 0;
+  approvalAllFlows.set(runId, current + 1);
+}
+
+function isApproveAllFlowActive(runId: string, token: number): boolean {
+  return approvalAllFlows.get(runId) === token;
+}
 
 function cancelDefinitionRequest(): void {
   definitionRequestSequence += 1;
@@ -707,24 +718,49 @@ export function useRunbooks() {
     }
   }, [loadHistory, loadReport]);
 
-  const respondApproval = useCallback(
+  const respondApprovalInternal = useCallback(
     async (
       runId: string,
       approvalId: string,
       approved: boolean,
       command: string | null,
       shellAttested: boolean,
+      busyAction: string,
+      clearBusy = true,
     ) => {
       const store = useRunbookStore.getState();
-      const approval = store.runsById[runId]?.pending_approval;
-      const modelInvocation = approval?.command.startsWith("model://configured-agent/") ?? false;
+      const run = store.runsById[runId] ?? store.activeRun;
+      const approval = run?.pending_approval;
+      if (!approval) {
+        store.setError("No pending approval was found for this run.");
+        if (clearBusy && useRunbookStore.getState().busyAction === busyAction) {
+          store.setBusyAction(null);
+        }
+        return;
+      }
+      if (approval.approval_id !== approvalId) {
+        store.setError("This approval request changed before it was submitted.");
+        if (clearBusy && useRunbookStore.getState().busyAction === busyAction) {
+          store.setBusyAction(null);
+        }
+        return;
+      }
+      if (approval.command.trim().length === 0) {
+        store.setError("Approval command content is empty.");
+        if (clearBusy && useRunbookStore.getState().busyAction === busyAction) {
+          store.setBusyAction(null);
+        }
+        return;
+      }
+
+      const modelInvocation = approval.command.startsWith("model://configured-agent/");
       let promptBinding: string | null = null;
       if (approved && !modelInvocation) {
         if (!shellAttested) {
           store.setError("Confirm the visible POSIX shell prompt before approving this action.");
           return;
         }
-        const sessionId = store.runsById[runId]?.target.session_id;
+        const sessionId = run.target.session_id;
         if (!sessionId || useAppStore.getState().activeSessionId !== sessionId) {
           store.setError("Select the bound terminal before approving this action.");
           return;
@@ -736,7 +772,8 @@ export function useRunbooks() {
         }
         approvalPromptBindings.set(approvalId, promptBinding);
       }
-      store.setBusyAction(`approval:${approvalId}`);
+
+      store.setBusyAction(busyAction);
       try {
         await api.runbooksRespondApproval(
           runId,
@@ -751,11 +788,111 @@ export function useRunbooks() {
         approvalPromptBindings.delete(approvalId);
         store.setError(String(error));
       } finally {
-        store.setBusyAction(null);
+        if (clearBusy && useRunbookStore.getState().busyAction === busyAction) {
+          store.setBusyAction(null);
+        }
       }
     },
     [refreshRun],
   );
+
+  const respondApproval = useCallback(
+    async (
+      runId: string,
+      approvalId: string,
+      approved: boolean,
+      command: string | null,
+      shellAttested: boolean,
+    ) => {
+      stopApproveAllFlow(runId);
+      await respondApprovalInternal(
+        runId,
+        approvalId,
+        approved,
+        command,
+        shellAttested,
+        `approval:${approvalId}`,
+      );
+    },
+    [respondApprovalInternal],
+  );
+
+  const approveAllPendingSteps = useCallback(async (runId: string) => {
+    const run = useRunbookStore.getState().runsById[runId] ?? useRunbookStore.getState().activeRun;
+    if (!run || run.run_id !== runId || run.status !== "waiting_approval") {
+      return;
+    }
+
+    const autoApproveToken = ++approvalFlowSequence;
+    approvalAllFlows.set(runId, autoApproveToken);
+    const observedApprovals = new Set<string>();
+    const store = useRunbookStore.getState();
+    store.setBusyAction(`approve-all:${runId}`);
+    store.setError(null);
+    try {
+      while (isApproveAllFlowActive(runId, autoApproveToken)) {
+        const currentRun = useRunbookStore.getState().runsById[runId]
+          ?? useRunbookStore.getState().activeRun;
+        if (!currentRun || currentRun.run_id !== runId) {
+          store.setError("The active run is no longer available.");
+          break;
+        }
+        if (currentRun.status !== "waiting_approval" || currentRun.pending_operator || currentRun.pending_manual) {
+          break;
+        }
+        const approval = currentRun.pending_approval;
+        if (!approval) {
+          store.setError("Runbook approval state is missing.");
+          break;
+        }
+        if (observedApprovals.has(approval.approval_id)) {
+          store.setError("Automatic approval stopped because the approval state did not advance.");
+          break;
+        }
+        observedApprovals.add(approval.approval_id);
+        const modelInvocation = approval.command.startsWith("model://configured-agent/");
+        if (
+          !modelInvocation &&
+          (!approval.command.trim() || approval.command.length > 4_096 || /[\r\n\0]/.test(approval.command))
+        ) {
+          store.setError("Automatic approval stopped because an approval command is invalid.");
+          break;
+        }
+
+        await respondApprovalInternal(
+          runId,
+          approval.approval_id,
+          true,
+          modelInvocation ? null : approval.command,
+          modelInvocation ? false : true,
+          `approve-all:${runId}`,
+          false,
+        );
+
+        const refreshedRun = useRunbookStore.getState().runsById[runId]
+          ?? useRunbookStore.getState().activeRun;
+        if (!isApproveAllFlowActive(runId, autoApproveToken)) break;
+        if (!refreshedRun || refreshedRun.status !== "waiting_approval") break;
+      }
+    } catch (error) {
+      store.setError(String(error));
+    } finally {
+      if (isApproveAllFlowActive(runId, autoApproveToken)) {
+        approvalAllFlows.delete(runId);
+      }
+      if (useRunbookStore.getState().busyAction === `approve-all:${runId}`) {
+        store.setBusyAction(null);
+      }
+    }
+  }, [respondApprovalInternal]);
+
+  const cancelApproveAll = useCallback((runId: string) => {
+    stopApproveAllFlow(runId);
+    const store = useRunbookStore.getState();
+    if (store.busyAction === `approve-all:${runId}`) {
+      store.setBusyAction(null);
+    }
+  }, []);
 
   const decide = useCallback(
     async (runId: string, decision: RunbookOperatorDecision) => {
@@ -865,6 +1002,8 @@ export function useRunbooks() {
     resume,
     cancel,
     respondApproval,
+    approveAllPendingSteps,
+    cancelApproveAll,
     decide,
     submitManual,
     loadHistory,

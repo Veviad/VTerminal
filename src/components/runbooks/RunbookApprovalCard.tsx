@@ -2,25 +2,29 @@ import { AlertTriangle, Network, Play, ShieldAlert, Square, TerminalSquare } fro
 import { useEffect, useState } from "react";
 
 import type { RunbookApprovalRequest } from "../../lib/runbooks";
-import { dangerButton, primaryButton, runbookInputClass } from "./runbookUi";
+import { dangerButton, primaryButton, runbookInputClass, secondaryButton } from "./runbookUi";
 
 export function RunbookApprovalCard({
   approval,
   busy,
   targetLabel,
   onRespond,
+  onApproveAll,
+  onCancelApproveAll,
+  autoApproving,
 }: {
   approval: RunbookApprovalRequest;
   busy: boolean;
   targetLabel: string;
   onRespond(approved: boolean, command: string | null, shellAttested: boolean): void;
+  onApproveAll?: () => void;
+  onCancelApproveAll?: () => void;
+  autoApproving?: boolean;
 }) {
   const [command, setCommand] = useState(approval.command);
-  const [shellAttested, setShellAttested] = useState(false);
 
   useEffect(() => {
     setCommand(approval.command);
-    setShellAttested(false);
   }, [approval.approval_id, approval.command]);
 
   const modelInvocation = approval.command.startsWith("model://configured-agent/");
@@ -76,36 +80,28 @@ export function RunbookApprovalCard({
         </div>
       ) : (
         <div className="space-y-2">
-        <label className="block space-y-1">
-          <span className="flex items-center gap-1 text-[10px] text-text-muted">
-            <TerminalSquare size={10} /> Exact command to run in the visible terminal
-          </span>
-          <textarea
-            value={command}
-            onChange={(event) => setCommand(event.target.value)}
-            spellCheck={false}
-            rows={3}
-            className={`${runbookInputClass} resize-none font-mono text-[10px] leading-relaxed ${invalid ? "border-error" : ""}`}
-          />
-          <span className={`block text-[9px] ${invalid ? "text-error" : "text-text-muted"}`}>
-            {invalid
-              ? "Commands must be one non-empty line of at most 4,096 characters."
-              : edited
-                ? "Edited command — the original and executed form will both appear in the report."
-                : "The command is typed once. It is never retried automatically."}
-          </span>
-        </label>
-        <label className="flex cursor-pointer items-start gap-2 rounded border border-warning/30 bg-warning/10 px-2 py-2 text-[10px] leading-relaxed text-text-secondary">
-          <input
-            type="checkbox"
-            checked={shellAttested}
-            onChange={(event) => setShellAttested(event.target.checked)}
-            className="mt-0.5"
-          />
-          <span>
-            I confirm the visible prompt is on the bound target <strong>{targetLabel}</strong>, is a POSIX shell prompt, and I trust this session&apos;s shell, functions, aliases, and PATH. The observed result is not deterministic shell attestation.
-          </span>
-        </label>
+          <label className="block space-y-1">
+            <span className="flex items-center gap-1 text-[10px] text-text-muted">
+              <TerminalSquare size={10} /> Exact command to run in the visible terminal
+            </span>
+            <textarea
+              value={command}
+              onChange={(event) => setCommand(event.target.value)}
+              spellCheck={false}
+              rows={3}
+              className={`${runbookInputClass} resize-none font-mono text-[10px] leading-relaxed ${invalid ? "border-error" : ""}`}
+            />
+            <span className={`block text-[9px] ${invalid ? "text-error" : "text-text-muted"}`}>
+              {invalid
+                ? "Commands must be one non-empty line of at most 4,096 characters."
+                : edited
+                  ? "Edited command — the original and executed form will both appear in the report."
+                  : "Approve when the visible terminal row is the bound target. The command is used once."}
+            </span>
+            <span className="block text-[9px] leading-relaxed text-text-muted">
+              This approval attests that the command runs in <strong>{targetLabel}</strong> under an operator-confirmed visible prompt.
+            </span>
+          </label>
         </div>
       )}
 
@@ -117,13 +113,42 @@ export function RunbookApprovalCard({
         >
           <Square size={10} /> Decline and pause
         </button>
-        <button
-          onClick={() => onRespond(true, modelInvocation ? null : command, shellAttested)}
-          disabled={busy || (!modelInvocation && (invalid || !shellAttested))}
-          className={`${primaryButton} flex-1`}
-        >
-          <Play size={10} /> {busy ? "Responding…" : modelInvocation ? "Allow model once" : edited ? "Confirm prompt & approve edit" : "Confirm prompt & approve"}
-        </button>
+
+        {autoApproving ? (
+          <button
+            onClick={() => onCancelApproveAll?.()}
+            disabled={!onCancelApproveAll}
+            className={`${dangerButton} flex-1`}
+          >
+            <Square size={10} /> Stop auto-approve
+          </button>
+        ) : (
+          <>
+            <button
+              onClick={() => onRespond(true, modelInvocation ? null : command, !modelInvocation)}
+              disabled={busy || (!modelInvocation && invalid)}
+              className={`${primaryButton} flex-1`}
+            >
+              <Play size={10} /> {busy
+                ? "Responding…"
+                : modelInvocation
+                  ? "Allow model once"
+                  : edited
+                    ? "Acknowledge and approve step edit"
+                    : "Acknowledge and approve step"}
+            </button>
+            {onApproveAll && (
+              <button
+                onClick={() => onApproveAll()}
+                disabled={busy}
+                className={`${secondaryButton} flex-1`}
+                title="Acknowledge and approve the current approval and all remaining approvals in this run."
+              >
+                <Play size={10} /> Acknowledge and approve all remaining steps
+              </button>
+            )}
+          </>
+        )}
       </div>
     </section>
   );
