@@ -22,6 +22,19 @@ export interface RunbookStoreState {
   /** Durable live-run registry. `activeRun` is only the run selected in the UI. */
   runsById: Record<string, RunbookRun>;
   activeRun: RunbookRun | null;
+  /** Bumped by every event that names a run.
+   *
+   * A durable `runbooks_get` is a snapshot of the moment it was ISSUED, but it
+   * is applied whenever it happens to come back. Without this, a read issued
+   * before an approval existed lands after `ApprovalRequested` and erases it —
+   * the run then sits on a spinner while the engine waits for a click the
+   * operator can no longer make. Callers capture this before the request and
+   * hand it back, and a snapshot older than the newest event is dropped.
+   *
+   * A `Map` rather than a record: the key is a run id from the backend, and a
+   * plain object indexed by it is both a lint sink and reachable by
+   * `__proto__`. */
+  runRevisions: ReadonlyMap<string, number>;
   history: RunbookHistoryEntry[];
   selectedHistoryRunId: string | null;
   report: RunbookReport | null;
@@ -42,7 +55,11 @@ export interface RunbookStoreState {
   selectSource(sourceId: string | null): void;
   setDefinition(definition: RunbookDefinition | null): void;
   setActiveRun(run: RunbookRun | null): void;
-  upsertRun(run: RunbookRun): void;
+  /** `issuedAtRevision` makes the write conditional: pass the value
+   * `runRevisions[runId]` held when the fetch started and the snapshot is
+   * discarded if any event has landed since. Omit it for an operator-initiated
+   * read, which is authoritative by definition. */
+  upsertRun(run: RunbookRun, issuedAtRevision?: number): void;
   updateStep(step: RunbookStepRun): void;
   setHistory(history: RunbookHistoryEntry[]): void;
   deleteHistoryRun(runId: string): void;
@@ -66,6 +83,7 @@ interface RunbookStoreData {
   definition: RunbookDefinition | null;
   runsById: Record<string, RunbookRun>;
   activeRun: RunbookRun | null;
+  runRevisions: ReadonlyMap<string, number>;
   history: RunbookHistoryEntry[];
   selectedHistoryRunId: string | null;
   report: RunbookReport | null;
@@ -87,6 +105,7 @@ const emptyState = (): RunbookStoreData => ({
   definition: null,
   runsById: {},
   activeRun: null,
+  runRevisions: new Map<string, number>(),
   history: [],
   selectedHistoryRunId: null,
   report: null,
@@ -143,8 +162,18 @@ export const useRunbookStore = create<RunbookStoreState>((set) => ({
         runsById: { ...state.runsById, [merged.run_id]: merged },
       };
     }),
-  upsertRun: (run) =>
+  upsertRun: (run, issuedAtRevision) =>
     set((state) => {
+      if (
+        issuedAtRevision !== undefined &&
+        (state.runRevisions.get(run.run_id) ?? 0) !== issuedAtRevision
+      ) {
+        // An event landed while this snapshot was in flight, so it describes a
+        // moment that has already been overtaken. Applying it would undo the
+        // event — most visibly by clearing a pending approval that has just
+        // arrived, which leaves the run spinning with nothing to approve.
+        return state;
+      }
       const current = state.runsById[run.run_id] ??
         (state.activeRun?.run_id === run.run_id ? state.activeRun : null);
       const merged = mergeRun(current, run);
@@ -194,8 +223,19 @@ export const useRunbookStore = create<RunbookStoreState>((set) => ({
           (state.activeRun?.run_id === eventRunId ? state.activeRun : null)
         : null;
 
+      // Every event for a run advances its revision, including the ones that
+      // change nothing here. A durable snapshot issued before this point is
+      // stale whatever the event said, because the row it read has moved on.
+      const runRevisions = eventRunId
+        ? new Map(state.runRevisions).set(
+            eventRunId,
+            (state.runRevisions.get(eventRunId) ?? 0) + 1,
+          )
+        : state.runRevisions;
+
       const withRun = (next: RunbookRun) => ({
         events,
+        runRevisions,
         runsById: { ...state.runsById, [next.run_id]: next },
         activeRun: state.activeRun?.run_id === next.run_id ? next : state.activeRun,
       });
@@ -204,10 +244,11 @@ export const useRunbookStore = create<RunbookStoreState>((set) => ({
         case "RunStarted":
           return {
             events,
+            runRevisions,
             error: null,
           };
         case "StepChanged": {
-          if (!run || run.run_id !== event.run_id) return { events };
+          if (!run || run.run_id !== event.run_id) return { events, runRevisions };
           return withRun({
               ...run,
               active_step_id: event.step_id,
@@ -222,7 +263,7 @@ export const useRunbookStore = create<RunbookStoreState>((set) => ({
           });
         }
         case "ApprovalRequested":
-          if (!run || run.run_id !== event.run_id) return { events };
+          if (!run || run.run_id !== event.run_id) return { events, runRevisions };
           return withRun({
               ...run,
               status: "waiting_approval",
@@ -230,9 +271,9 @@ export const useRunbookStore = create<RunbookStoreState>((set) => ({
               pending_approval: event,
           });
         case "RunInTerminal":
-          return { events };
+          return { events, runRevisions };
         case "OperatorDecisionRequired":
-          if (!run || run.run_id !== event.run_id) return { events };
+          if (!run || run.run_id !== event.run_id) return { events, runRevisions };
           return withRun({
               ...run,
               status: "waiting_operator",
@@ -241,10 +282,10 @@ export const useRunbookStore = create<RunbookStoreState>((set) => ({
               pending_manual: event.manual ?? run.pending_manual,
           });
         case "ReportReady":
-          if (!run || run.run_id !== event.run_id) return { events };
+          if (!run || run.run_id !== event.run_id) return { events, runRevisions };
           return withRun({ ...run, report_ready: true });
         case "RunFinished":
-          if (!run || run.run_id !== event.run_id) return { events };
+          if (!run || run.run_id !== event.run_id) return { events, runRevisions };
           return withRun({
               ...run,
               status: event.state,
@@ -255,7 +296,7 @@ export const useRunbookStore = create<RunbookStoreState>((set) => ({
               pending_manual: null,
           });
         case "Error":
-          return { events, error: event.message };
+          return { events, runRevisions, error: event.message };
       }
     }),
   setLoading: (key, loading) => {

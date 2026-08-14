@@ -372,9 +372,20 @@ cannot drive the same terminal at once.
   terminal change prevents dispatch. **A compromised interactive shell is
   outside the trust model.**
 - Approvals are single-click. In a live run you can also
-  **Acknowledge and approve all remaining steps**, which stops at the first
-  non-approval pause, terminal-status change, repeated approval id or command
-  validation issue. Runbooks do not mirror the agent panel's `Auto all`.
+  **Acknowledge and approve all remaining steps**. It approves the current
+  request, then waits for each approved command to finish in the terminal
+  before the next approval appears — a step that takes minutes is normal and
+  does not end the flow. It stops at the first operator pause, manual step,
+  finished run, or command that fails validation, and **Stop auto-approve**
+  ends it at any point, including mid-wait. If a run goes quiet for longer than
+  one command's timeout allows, the flow hands the remaining approvals back to
+  you rather than holding the button indefinitely. The same approval is never
+  approved twice. Runbooks do not mirror the agent panel's `Auto all`.
+- **Abort run** stops an active run and returns you to the Library. It is two
+  clicks, it sends SIGINT to an owned foreground command, and it cannot prove
+  the process stopped or undo a mutation already made — the active step is
+  reported `unknown`. If the abort does not take, the run stays in front of you
+  with its error rather than being navigated away from.
 - **A model phase has its own approval**, separate from the shell approvals for
   the commands it later proposes. That card names the step's goal and its
   enforced bounds, because a model phase is opaque and this is the only moment

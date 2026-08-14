@@ -676,9 +676,17 @@ spec:
               </li>
               <li>
                 If you prefer, use <em>Acknowledge and approve all remaining
-                steps</em> in live mode to continue through later approvals.
-                It stops when the approval state repeats, when a pause appears,
-                or when the run leaves approval status.
+                steps</em> in live mode to continue through later approvals. It
+                waits for each approved command to finish before the next
+                approval appears, so a step that takes minutes is normal. It
+                stops at the first operator pause, manual step, finished run or
+                invalid command, and <em>Stop auto-approve</em> ends it at any
+                point.
+              </li>
+              <li>
+                <em>Abort run</em> stops an active run and returns you to the
+                Library. It cannot prove the process stopped or undo a change
+                already made; the active step is reported unknown.
               </li>
               <li>
                 This flow is different from the agent panel’s

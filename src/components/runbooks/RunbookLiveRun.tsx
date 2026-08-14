@@ -60,6 +60,38 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
     string | null
   >(null);
 
+  // LAST HOOK IN THIS COMPONENT. Everything below is guarded by early returns —
+  // no run selected, the report sub-view, the definition sub-view — so a hook
+  // placed after them is skipped on those renders and React tears the whole app
+  // down with "rendered fewer hooks than expected". This effect used to sit
+  // below two of them, which made **View report** on a finished run a
+  // guaranteed crash: that button only exists once the run is terminal.
+  const activeRunId = run?.run_id ?? null;
+  useEffect(() => {
+    setShowDefinitionReview(false);
+    setDefinitionReview(null);
+    setDefinitionReviewLoading(false);
+    setDefinitionReviewError(null);
+  }, [activeRunId]);
+
+  /** Stop the run and leave the run view.
+   *
+   * Cancelling used to strand the operator on a dead checklist. `cancel`
+   * reports failure by setting the store error rather than throwing, so the
+   * decision to navigate is made on the outcome: only a run that actually
+   * reached a terminal state gets left behind. A cancel that did not take
+   * keeps the run in front of the operator, next to its error. */
+  const abortRun = async (runId: string) => {
+    await cancel(runId);
+    const store = useRunbookStore.getState();
+    // `cancel` installs the settled run as the active one, so that is the
+    // authoritative outcome to read here.
+    const stopped = store.activeRun;
+    if (stopped?.run_id === runId && isTerminalRunState(stopped.status)) {
+      store.setView("library");
+    }
+  };
+
   const ignoreAsync = (operation?: Promise<unknown>) => {
     if (!operation || typeof operation.then !== "function") return;
     operation.catch((error) => {
@@ -108,13 +140,6 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
   const pendingApproval = run.pending_approval;
   const pendingManual = run.pending_manual;
   const pendingOperator = run.pending_operator;
-
-  useEffect(() => {
-    setShowDefinitionReview(false);
-    setDefinitionReview(null);
-    setDefinitionReviewLoading(false);
-    setDefinitionReviewError(null);
-  }, [run.run_id]);
 
   const openReport = async () => {
     if (report?.run_id !== run.run_id) await loadReport(run.run_id);
@@ -241,7 +266,7 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
                     onClick={() => {
                       if (confirmCancel) {
                         setConfirmCancel(false);
-                        ignoreAsync(cancel(run.run_id));
+                        ignoreAsync(abortRun(run.run_id));
                       } else {
                         setConfirmCancel(true);
                       }
@@ -251,13 +276,14 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
                     className={confirmCancel ? dangerButton : secondaryButton}
                   >
                     <Square size={10} />{" "}
-                    {confirmCancel ? "Confirm cancel" : "Cancel"}
+                    {confirmCancel ? "Confirm abort" : "Abort run"}
                   </button>
                   {confirmCancel && (
                     <p className="max-w-64 text-right text-[9px] leading-snug text-warning">
-                      Sends SIGINT to an owned foreground command, but cannot
-                      prove or undo changes already made. The active step will
-                      be reported unknown.
+                      Stops the run and returns to the Library. Sends SIGINT to
+                      an owned foreground command, but cannot prove or undo
+                      changes already made. The active step will be reported
+                      unknown.
                     </p>
                   )}
                 </div>
