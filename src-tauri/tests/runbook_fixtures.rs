@@ -35,18 +35,21 @@ fn fixture_source(group: &str, name: &str) -> String {
 
 #[test]
 fn reusable_example_packages_load_and_create_immutable_snapshots() {
+    // The baseline is at 2.0.0 because its steps changed meaning: one goal now
+    // serves as both check and verify where two identical commands used to.
     let cases = [
-        ("linux-server-security-baseline", 2, false, true),
-        ("idempotent-software-install", 1, true, true),
-        ("manual-server-assessment", 2, false, false),
+        ("linux-server-security-baseline", "2.0.0", 2, false, true),
+        ("idempotent-software-install", "1.0.0", 1, true, true),
+        ("manual-server-assessment", "1.0.0", 2, false, false),
+        ("linux-host-hardening", "1.0.0", 4, true, true),
     ];
 
-    for (name, step_count, network, has_apply) in cases {
+    for (name, version, step_count, network, has_apply) in cases {
         let package = load_package(example(name))
             .unwrap_or_else(|error| panic!("example {name} must load: {error}"));
 
         assert_eq!(package.definition.metadata.id, name);
-        assert_eq!(package.definition.metadata.version, "1.0.0");
+        assert_eq!(package.definition.metadata.version, version);
         assert_eq!(package.definition.spec.steps.len(), step_count);
         assert_eq!(
             package.definition.spec.declared_capabilities.network,
@@ -73,6 +76,69 @@ fn reusable_example_packages_load_and_create_immutable_snapshots() {
             serde_json::from_str(&package.snapshot.canonical_json).unwrap();
         assert_eq!(canonical["metadata"]["id"], name);
     }
+}
+
+/// The goal-directed example, checked for the properties that make it one.
+///
+/// Shipped examples are the working documentation for a feature, so this pins
+/// the shape a reader is meant to copy rather than only that the file parses.
+#[test]
+fn the_hardening_example_is_goal_directed_and_bounded() {
+    let package = load_package(example("linux-host-hardening")).expect("example must load");
+    let definition = &package.definition;
+
+    // One discovery block serves the whole run; without it the model would be
+    // guessing between ufw and firewalld on every step.
+    let discover = &definition
+        .spec
+        .context
+        .as_ref()
+        .expect("the example must discover its target")
+        .discover;
+    assert_eq!(discover.len(), 4);
+    assert!(discover.iter().any(|probe| probe.name == "os_release"));
+
+    for step in &definition.spec.steps {
+        let goal = step
+            .goal
+            .as_ref()
+            .unwrap_or_else(|| panic!("{} must state a goal", step.id));
+        assert!(!goal.checks.is_empty());
+        // The point of the example: no `check:` and no `verify:` of their own,
+        // because the goal conditions serve as both.
+        assert!(step.check.is_none(), "{} should not restate a check", step.id);
+        assert!(
+            step.verify.is_none(),
+            "{} should not restate a verify",
+            step.id
+        );
+        assert!(step.apply.is_some(), "{} must remediate", step.id);
+    }
+
+    // The two SSH steps edit a local file, so they declare no network. That is
+    // the narrowing this feature exists for and it must survive an edit.
+    let ssh_steps: Vec<_> = definition
+        .spec
+        .steps
+        .iter()
+        .filter(|step| step.id.starts_with("ssh-"))
+        .collect();
+    assert_eq!(ssh_steps.len(), 2);
+    for step in ssh_steps {
+        assert_eq!(
+            step.constraints.and_then(|c| c.network),
+            Some(false),
+            "{} must refuse the network",
+            step.id
+        );
+    }
+
+    // A hardening run keeps its evidence: the operator's policy may raise this,
+    // never lower it.
+    assert_eq!(
+        definition.declared_record_output(),
+        Some(vterminal_lib::runbooks::state::EvidenceCaptureMode::Full)
+    );
 }
 
 #[test]
