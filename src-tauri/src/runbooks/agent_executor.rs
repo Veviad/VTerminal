@@ -432,7 +432,7 @@ fn render_observation(observation: &AgentCommandObservation) -> String {
     )
 }
 
-async fn provider_round(
+pub(super) async fn provider_round(
     provider: &dyn Provider,
     messages: Vec<ChatMessage>,
     tools: Vec<ToolDef>,

@@ -5,6 +5,7 @@
 //! document retrieval and ordinary AI conversations.
 
 pub mod agent_executor;
+pub mod authoring;
 pub mod db;
 pub mod definition;
 pub mod drafts;

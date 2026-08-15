@@ -38,6 +38,7 @@ const document: RunbookDraftDocument = {
   network: false,
   privilege: "none",
   defaultOnFailure: "continue",
+  writes: [],
   inputs: [],
   steps: [
     {
@@ -52,9 +53,18 @@ const document: RunbookDraftDocument = {
         compliantExitCodes: [0],
         noncompliantExitCodes: [1],
       },
+      apply: null,
+      verify: null,
     },
   ],
 };
+
+/** The document from the most recent autosave. `.at()` is unavailable under the
+ *  build's lib target, so index arithmetic rather than `calls.at(-1)`. */
+function lastSaved(): RunbookDraftDocument {
+  const calls = mocks.save.mock.calls;
+  return calls[calls.length - 1][2] as RunbookDraftDocument;
+}
 
 function draft(revision = 1, nextDocument = document): RunbookDraft {
   return {
@@ -107,7 +117,7 @@ describe("NewRunbookWizard", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "New" }));
     await waitFor(() => expect(mocks.list).toHaveBeenCalledTimes(1));
-    fireEvent.click(screen.getByRole("button", { name: /Create a new assessment/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Start from scratch/ }));
     await screen.findByRole("heading", { name: "New runbook wizard" });
 
     fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Updated Health" } });
@@ -154,8 +164,8 @@ describe("NewRunbookWizard", () => {
     });
     render(<NewRunbookWizard onPublished={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "New" }));
-    await screen.findByRole("button", { name: /Create a new assessment/ });
-    fireEvent.click(screen.getByRole("button", { name: /Create a new assessment/ }));
+    await screen.findByRole("button", { name: /Start from scratch/ });
+    fireEvent.click(screen.getByRole("button", { name: /Start from scratch/ }));
     await screen.findByRole("heading", { name: "New runbook wizard" });
     fireEvent.click(screen.getByRole("button", { name: /Review/ }));
     const issue = await screen.findByRole("button", { name: /metadata.id/ });
@@ -163,5 +173,69 @@ describe("NewRunbookWizard", () => {
     expect(mocks.publish).not.toHaveBeenCalled();
     fireEvent.click(issue);
     await waitFor(() => expect(screen.getByLabelText("Runbook ID")).toHaveFocus());
+  });
+
+  it("adds apply AND verify together, because one without the other cannot publish", async () => {
+    render(<NewRunbookWizard onPublished={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "New" }));
+    await waitFor(() => expect(mocks.list).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: /Start from scratch/ }));
+    await screen.findByRole("heading", { name: "New runbook wizard" });
+
+    fireEvent.click(screen.getByRole("button", { name: /Checks/ }));
+    fireEvent.click(await screen.findByRole("checkbox", { name: /Remediate when this check fails/ }));
+
+    expect(screen.getByText(/Apply — the change/)).toBeInTheDocument();
+    expect(screen.getByText(/Verify — proof it worked/)).toBeInTheDocument();
+
+    await waitFor(() => expect(mocks.save).toHaveBeenCalled(), { timeout: 1500 });
+    const saved = lastSaved();
+    expect(saved.steps[0].apply).not.toBeNull();
+    expect(saved.steps[0].verify).not.toBeNull();
+    // The check is the usual proof, so verify is seeded from it rather than
+    // left blank for the operator to retype.
+    expect(saved.steps[0].verify).toMatchObject({ kind: "shell", command: "true" });
+  });
+
+  it("removes verify when remediation is turned back off", async () => {
+    render(<NewRunbookWizard onPublished={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "New" }));
+    await waitFor(() => expect(mocks.list).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: /Start from scratch/ }));
+    await screen.findByRole("heading", { name: "New runbook wizard" });
+    fireEvent.click(screen.getByRole("button", { name: /Checks/ }));
+
+    const toggle = await screen.findByRole("checkbox", { name: /Remediate when this check fails/ });
+    fireEvent.click(toggle);
+    // Wait for the ON state to persist first: toggling straight back would
+    // restore the original document, and autosave correctly dedupes that.
+    await waitFor(
+      () => expect(lastSaved().steps[0].apply).not.toBeNull(),
+      { timeout: 1500 },
+    );
+
+    fireEvent.click(toggle);
+    await waitFor(
+      () => expect(lastSaved().steps[0].apply).toBeNull(),
+      { timeout: 1500 },
+    );
+    // Verify must go with it — the backend rejects it standing alone.
+    expect(lastSaved().steps[0].verify).toBeNull();
+    expect(screen.queryByText(/Verify — proof it worked/)).not.toBeInTheDocument();
+  });
+
+  it("declares write paths, which preflight shows before anything runs", async () => {
+    render(<NewRunbookWizard onPublished={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "New" }));
+    await waitFor(() => expect(mocks.list).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: /Start from scratch/ }));
+    await screen.findByRole("heading", { name: "New runbook wizard" });
+
+    fireEvent.change(screen.getByLabelText(/Paths this runbook writes to/), {
+      target: { value: "/etc/nginx, /opt/homebrew" },
+    });
+    await waitFor(() => expect(mocks.save).toHaveBeenCalled(), { timeout: 1500 });
+    const saved = lastSaved();
+    expect(saved.writes).toEqual(["/etc/nginx", "/opt/homebrew"]);
   });
 });

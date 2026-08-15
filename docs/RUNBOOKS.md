@@ -11,6 +11,7 @@ the switch is a capability gate and not a UI preference.
 
 - [Five-minute tour](#five-minute-tour)
 - [Writing one without YAML: the wizard](#writing-one-without-yaml-the-wizard)
+- [Writing one from what you already did: AI](#writing-one-from-what-you-already-did-ai)
 - [Writing YAML](#writing-yaml)
 - [Goal-directed steps](#goal-directed-steps)
 - [Approvals and the trust model](#approvals-and-the-trust-model)
@@ -49,25 +50,52 @@ importable folders, including the two that use AI.
 
 ## Writing one without YAML: the wizard
 
-**Library → New** opens a four-stage wizard. It works offline, saves as you
-type, and never calls a model — including to write the runbook itself.
+**Library → New** opens a four-stage wizard. It works offline and saves as you
+type.
 
 | Stage | What you set |
 |---|---|
-| **Basics** | id, version, title, description, tags, target platform (macOS 13+, Linux, Any), default failure policy, whether the runbook needs network or root |
+| **Basics** | id, version, title, description, tags, target platform (macOS 13+, Linux, Any), default failure policy, whether the runbook needs network or root, and the absolute paths it writes to |
 | **Inputs** | string, integer, boolean, path or enum, each with a description, a default and whether it is required |
-| **Checks** | ordered steps, each either a shell command with explicit `VRUN_*` input mappings and exit codes, or a manual question for the operator |
+| **Checks** | ordered steps, each with a check — a shell command with explicit `VRUN_*` input mappings and exit codes, or a manual question — and optionally an **apply** that fixes what the check found plus a **verify** that proves it worked |
 | **Review** | validation issues you can click to jump to, three summary tiles, and the exact YAML that will be published |
 
 Choosing macOS or Linux adds a locked first step that stops the run on the wrong
 platform. **Any** adds no guard, so your commands must handle portability
 themselves.
 
-**The wizard writes assessments only.** It declares an empty write set and
-cannot author `apply`, `verify`, `agent`, `goal` or Ansible actions. That is
-deliberate: the wizard is for "tell me the state of this machine", and anything
-that changes a machine deserves to be read as YAML before it runs. When you need
-more, publish what you have, export it, and edit the file — see below.
+Ticking **Remediate when this check fails** adds the apply and verify phases
+together, because a runbook that changes something without proving it worked is
+rejected at publish time. Verify is seeded from the check, which is usually the
+right proof. Every path the runbook writes to belongs in the Basics list: it is
+shown in preflight before the first command runs.
+
+The wizard still cannot author `agent`, `goal` or Ansible actions. Those change
+who decides whether a step succeeded, so they are read as YAML before they run —
+publish what you have, export it, and edit the file. See below.
+
+---
+
+## Writing one from what you already did: AI
+
+**Library → New → Generate with AI** authors a draft from a plain-language
+requirement and, optionally, a terminal session as context.
+
+The usual case: you installed and configured something by hand in a tab, and you
+want a runbook that does it again elsewhere. Attach that session and the model
+turns what you ran into steps — the command you used becomes the `apply`, and
+the way you would tell it already happened becomes the `check` and the `verify`.
+
+What leaves your machine is shown before it is sent. Pick the session, untick
+any command you do not want to share, and edit the assembled text directly; that
+box is the payload, verbatim. Attaching is unavailable when terminal context is
+switched off in **Settings → AI**, and for a tab that has run a Runbook (its
+output is suppressed so redacted evidence cannot be recovered).
+
+The result is an ordinary draft. It opens on **Review** with its validation
+issues listed, every field editable, and nothing saved to the Library until you
+publish it — the same path a hand-written draft takes. Generated commands get no
+special trust: each one is still approved in your terminal when the runbook runs.
 
 Drafts stay out of the Library until **Publish to Library** succeeds.
 Publication generates `runbook.vrun.yaml` and `README.md` and then applies the

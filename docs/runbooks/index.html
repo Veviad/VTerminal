@@ -57,7 +57,7 @@
       <section class="guide-hero" aria-labelledby="guide-title">
         <div class="guide-hero-inner">
             <span class="guide-status"
-            >Available in 0.2.6 · Experimental · Disabled by default</span
+            >Available in 0.2.8 · Experimental · Disabled by default</span
             >
           <h1 id="guide-title">Reusable Runbooks</h1>
           <p class="guide-hero-copy">
@@ -85,6 +85,7 @@
           <ol>
             <li><a href="#getting-started">Getting started</a></li>
             <li><a href="#new-runbook-wizard">New runbook wizard</a></li>
+            <li><a href="#ai-authoring">Generate with AI</a></li>
             <li><a href="#included-examples">Included examples</a></li>
             <li><a href="#package-format">Package format</a></li>
             <li><a href="#export-and-reuse">Export &amp; reuse</a></li>
@@ -172,12 +173,13 @@
             aria-labelledby="new-runbook-wizard-title"
           >
             <p class="eyebrow">Create Without YAML</p>
-            <h2 id="new-runbook-wizard-title">Build an Assessment in VTerminal</h2>
+            <h2 id="new-runbook-wizard-title">Build a Runbook in VTerminal</h2>
             <p>
-              Choose <strong>New</strong> in the Library to open the deterministic,
-              offline assessment builder. Drafts autosave in app-managed storage
-              and remain resumable across restarts. They cannot be run until the
-              final package passes the same strict validation as an import.
+              Choose <strong>New</strong> in the Library to open the
+              deterministic, offline builder. Drafts autosave in app-managed
+              storage and remain resumable across restarts. They cannot be run
+              until the final package passes the same strict validation as an
+              import.
             </p>
             <ol class="guide-steps">
               <li>
@@ -185,7 +187,8 @@
                 <div>
                   <strong>Basics</strong>
                   Set the stable ID, semantic version, title, description, tags,
-                  failure policy, and declared network or root capability.
+                  failure policy, declared network or root capability, and the
+                  absolute paths the runbook writes to.
                 </div>
               </li>
               <li>
@@ -199,10 +202,12 @@
               <li>
                 <span>03</span>
                 <div>
-                  <strong>Checks</strong>
+                  <strong>Steps</strong>
                   Order shell or manual checks. Shell inputs use explicit
                   <code>VRUN_*</code> environment mappings and
-                  compliant/non-compliant exit codes.
+                  compliant/non-compliant exit codes. Tick
+                  <strong>Remediate when this check fails</strong> to add an
+                  apply that fixes it and a verify that proves it worked.
                 </div>
               </li>
               <li>
@@ -215,12 +220,15 @@
               </li>
             </ol>
             <div class="guide-callout">
-              <strong>Assessment-only by design.</strong>
+              <strong>Apply and verify travel together.</strong>
               <p>
-                The wizard generates no apply, verify, agent, Ansible, or write
-                actions. macOS 13+ and Linux choices add a locked stopping target
-                guard; Any adds no guard and requires portable commands. Export a
-                published package for advanced YAML authoring.
+                A step that changes something must prove it worked, so the two
+                phases are added and removed as a pair — a runbook with an apply
+                and no verify is rejected at publish time. The wizard still
+                generates no agent, goal, or Ansible actions: those change who
+                decides whether a step succeeded, so they are read as YAML before
+                they run. macOS 13+ and Linux choices add a locked stopping target
+                guard; Any adds no guard and requires portable commands.
               </p>
             </div>
             <p>
@@ -230,6 +238,65 @@
               republishing. Discarding a published draft detaches wizard editing
               but leaves the published source and historical snapshots intact.
             </p>
+          </section>
+
+          <section
+            class="guide-section"
+            id="ai-authoring"
+            aria-labelledby="ai-authoring-title"
+          >
+            <p class="eyebrow">New in 0.2.8</p>
+            <h2 id="ai-authoring-title">Turn What You Just Did Into a Runbook</h2>
+            <p>
+              <strong>New → Generate with AI</strong> authors a draft from a
+              plain-language requirement and, optionally, the terminal session
+              where you already did the work by hand. Install and configure
+              something once, attach that tab, and the model turns the commands
+              you ran into steps: what you ran becomes the
+              <code>apply</code>, and the way you would tell it already happened
+              becomes the <code>check</code> and the <code>verify</code>.
+            </p>
+            <ol class="guide-steps">
+              <li>
+                <span>01</span>
+                <div>
+                  <strong>Describe it</strong>
+                  Say what the runbook should do. Requirements alone are enough —
+                  the terminal is optional context, not a requirement.
+                </div>
+              </li>
+              <li>
+                <span>02</span>
+                <div>
+                  <strong>Choose what you share</strong>
+                  Pick the session, untick any command you do not want to send,
+                  and edit the assembled transcript directly. That box is the
+                  payload, verbatim.
+                </div>
+              </li>
+              <li>
+                <span>03</span>
+                <div>
+                  <strong>Review before saving</strong>
+                  The result opens on Review as an ordinary draft, validated,
+                  with every field editable. Nothing reaches the Library until
+                  you publish it.
+                </div>
+              </li>
+            </ol>
+            <div class="guide-callout">
+              <strong>Generated commands earn no extra trust.</strong>
+              <p>
+                The model writes a draft, never a running command: each line is
+                still approved in your terminal when the runbook runs. Output is
+                constrained to shell and manual actions by the draft format
+                itself, and every generated document passes the same validation
+                and secret scan as a hand-written one — a credential echoed out
+                of a transcript is refused, not published. Attaching a terminal
+                is unavailable when terminal context is switched off in
+                Settings → AI, and for any tab that has run a Runbook.
+              </p>
+            </div>
           </section>
 
           <section

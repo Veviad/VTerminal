@@ -288,6 +288,7 @@ pub fn run() {
             commands::runbooks::runbooks_draft_get,
             commands::runbooks::runbooks_draft_save,
             commands::runbooks::runbooks_draft_validate,
+            commands::runbooks::runbooks_ai_generate,
             commands::runbooks::runbooks_draft_publish,
             commands::runbooks::runbooks_draft_discard,
             commands::runbooks::runbooks_get_definition,
