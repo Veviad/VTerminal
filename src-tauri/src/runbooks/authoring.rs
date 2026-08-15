@@ -159,7 +159,8 @@ fn repair_request(issues: &[ValidationError], document: &RunbookDraftDocument) -
              you did not write and must not add — so spec.steps[N] is your step N-1.",
         );
     } else {
-        request.push_str("\nPaths are into the generated definition; spec.steps[N] is your step N.");
+        request
+            .push_str("\nPaths are into the generated definition; spec.steps[N] is your step N.");
     }
     request.push_str(" Keep every step that was not named above unchanged.");
     request
