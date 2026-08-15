@@ -50,8 +50,7 @@ beforeEach(() => {
 
 describe("contextAvailability", () => {
   it("honours the operator's standing answer without asking again", () => {
-    useAppStore.setState({ sendContextToAi: false } as never);
-    const verdict = contextAvailability("s1");
+    const verdict = contextAvailability("s1", false);
     expect(verdict.available).toBe(false);
     expect(verdict.available === false && verdict.reason).toContain("Settings");
   });
@@ -61,8 +60,8 @@ describe("contextAvailability", () => {
     // evidence cannot be recovered from a raw capture. This path must not be
     // the hole in that boundary.
     protectRunbookTerminal("s1");
-    expect(contextAvailability("s1").available).toBe(false);
-    expect(contextAvailability("s2").available).toBe(true);
+    expect(contextAvailability("s1", true).available).toBe(false);
+    expect(contextAvailability("s2", true).available).toBe(true);
   });
 });
 

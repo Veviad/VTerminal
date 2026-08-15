@@ -141,8 +141,6 @@ describe("RunbookAiGenerator", () => {
   });
 
   it("sends the operator's edit verbatim, so a redaction cannot be undone", async () => {
-    // The payload tracks the checkboxes until it is edited. If ticking a box
-    // afterwards regenerated it, a hand-removed secret would silently return.
     openPanel();
     requirement("repeat this");
     attachContext();
@@ -155,6 +153,41 @@ describe("RunbookAiGenerator", () => {
       expect(mocks.generate).toHaveBeenCalled();
     });
     expect(mocks.generate.mock.calls[0][2]).toBe("redacted by hand");
+  });
+
+  it("does NOT rebuild the payload when a box is toggled after an edit", async () => {
+    // The reported failure: rebuilding on toggle reintroduced a secret the
+    // operator had already deleted, silently, while they were still editing.
+    openPanel();
+    requirement("repeat this");
+    attachContext();
+
+    const payload = await screen.findByLabelText(/Exactly this text is sent/i);
+    fireEvent.change(payload, { target: { value: "$ nginx -t\nok" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: /brew install nginx/i }));
+
+    expect(screen.getByText(/Edited by hand/i)).toBeInTheDocument();
+    clickGenerate();
+    await waitFor(() => {
+      expect(mocks.generate).toHaveBeenCalled();
+    });
+    expect(mocks.generate.mock.calls[0][2]).toBe("$ nginx -t\nok");
+  });
+
+  it("keeps the edit when the session is switched, and discards it only on request", async () => {
+    useAppStore.setState({ sessions: [session("s1"), session("s2")] } as never);
+    openPanel();
+    requirement("repeat this");
+    attachContext();
+
+    const payload = await screen.findByLabelText(/Exactly this text is sent/i);
+    fireEvent.change(payload, { target: { value: "redacted by hand" } });
+    fireEvent.change(screen.getByLabelText(/^Session/), { target: { value: "s2" } });
+    expect(screen.getByLabelText(/Exactly this text is sent/i)).toHaveValue("redacted by hand");
+
+    // Going back to the generated text is possible, but has to be asked for.
+    fireEvent.click(screen.getByRole("button", { name: /Discard edits/i }));
+    expect(screen.getByLabelText(/Exactly this text is sent/i)).not.toHaveValue("redacted by hand");
   });
 
   it("refuses the attachment when the operator switched context off", async () => {

@@ -18,7 +18,7 @@ use crate::provider::{ChatMessage, ChatParams, Effort, Provider, ToolChoiceMode}
 
 use super::agent_executor::provider_round;
 use super::definition::ValidationError;
-use super::drafts::{RunbookDraftDocument, MAX_DRAFT_JSON_BYTES};
+use super::drafts::{DraftPlatform, RunbookDraftDocument, MAX_DRAFT_JSON_BYTES};
 
 /// The operator's own words. Generous: a detailed requirement is the cheapest
 /// way to get a usable runbook, so this only exists to bound the request.
@@ -78,7 +78,7 @@ pub async fn author_draft(
     // remaining issues against an editable document faster than a third round
     // can guess at them.
     messages.push(ChatMessage::assistant(raw));
-    messages.push(ChatMessage::user(repair_request(&issues)));
+    messages.push(ChatMessage::user(repair_request(&issues, &document)));
     let repaired = round(provider, messages, effort, cancel).await?;
 
     match parse_generated_draft(&repaired) {
@@ -137,7 +137,7 @@ fn author_request(requirements: &str, terminal_context: Option<&str>) -> String 
     request
 }
 
-fn repair_request(issues: &[ValidationError]) -> String {
+fn repair_request(issues: &[ValidationError], document: &RunbookDraftDocument) -> String {
     let mut request = String::from(
         "That document was rejected. Fix exactly these problems and reply with the corrected \
          JSON object only:\n",
@@ -145,14 +145,30 @@ fn repair_request(issues: &[ValidationError]) -> String {
     for issue in issues {
         request.push_str(&format!("- {}: {}\n", issue.path, issue.message));
     }
-    // The paths are definition paths, and the definition has a platform guard
-    // step the draft never contains. Saying so stops the model renumbering its
-    // own steps to match, which turns one bad step into a shuffled document.
-    request.push_str(
-        "\nPaths are into the generated definition, whose spec.steps[0] is a platform guard you \
-         did not write and must not add. Keep every step that was not named above unchanged.",
-    );
+    // The paths index the generated DEFINITION, which for a platform-specific
+    // runbook carries a guard step at spec.steps[0] that the draft does not.
+    // Saying so stops the model renumbering its own steps to match, which turns
+    // one bad step into a shuffled document.
+    //
+    // Conditional, because `Any` generates no guard and the indexes then line up
+    // exactly. Claiming a guard that is not there is the same error in reverse:
+    // the model shifts a correct index and edits the wrong step.
+    if platform_guard_offset(document) == 1 {
+        request.push_str(
+            "\nPaths are into the generated definition, whose spec.steps[0] is a platform guard \
+             you did not write and must not add — so spec.steps[N] is your step N-1.",
+        );
+    } else {
+        request.push_str("\nPaths are into the generated definition; spec.steps[N] is your step N.");
+    }
+    request.push_str(" Keep every step that was not named above unchanged.");
     request
+}
+
+/// 1 when `build_definition` prepends an OS guard step, so a definition path
+/// can be read back onto the draft the model wrote.
+fn platform_guard_offset(document: &RunbookDraftDocument) -> usize {
+    usize::from(document.platform != DraftPlatform::Any)
 }
 
 /// Pull the document out of whatever the model wrapped it in.
@@ -296,16 +312,30 @@ mod tests {
         assert!(request.contains("…truncated…"));
     }
 
-    /// The paths the validator reports index the DEFINITION, which carries a
-    /// platform-guard step the draft does not. Without saying so the model
-    /// renumbers its own steps and a one-step fix becomes a rewrite.
+    /// The paths the validator reports index the DEFINITION, which for a
+    /// platform-specific runbook carries a guard step the draft does not.
+    /// Without saying so the model renumbers its own steps and a one-step fix
+    /// becomes a rewrite — and claiming a guard that is NOT there shifts a
+    /// correct index the same way, so the note has to track the platform.
     #[test]
-    fn repair_request_lists_paths_and_warns_about_the_guard_step() {
-        let request = repair_request(&[ValidationError {
+    fn repair_request_describes_the_offset_its_platform_actually_produces() {
+        let issue = ValidationError {
             path: "spec.steps[1].verify".into(),
             message: "is required when apply is present".into(),
-        }]);
+        };
+
+        let mut guarded = parse_generated_draft(MINIMAL).unwrap();
+        guarded.platform = DraftPlatform::Linux;
+        let request = repair_request(std::slice::from_ref(&issue), &guarded);
         assert!(request.contains("spec.steps[1].verify: is required when apply is present"));
         assert!(request.contains("platform guard"));
+
+        // `Any` generates no guard, so the indexes line up and the note must not
+        // tell the model to shift them.
+        let mut unguarded = guarded.clone();
+        unguarded.platform = DraftPlatform::Any;
+        let request = repair_request(std::slice::from_ref(&issue), &unguarded);
+        assert!(!request.contains("platform guard"));
+        assert!(request.contains("spec.steps[N] is your step N."));
     }
 }

@@ -48,9 +48,16 @@ export type ContextAvailability =
  * a tab that has executed a Runbook line suppresses its scrollback for the rest
  * of its life so redacted evidence cannot be recovered from a raw capture — but
  * this path must not be the hole in that boundary.
+ *
+ * The flag is a PARAMETER rather than a store read so a caller can subscribe to
+ * it: read through `getState()` this would not re-render when the operator
+ * changed the setting with the panel open.
  */
-export function contextAvailability(sessionId: string | null): ContextAvailability {
-  if (!useAppStore.getState().sendContextToAi) {
+export function contextAvailability(
+  sessionId: string | null,
+  sendContextToAi: boolean,
+): ContextAvailability {
+  if (!sendContextToAi) {
     return {
       available: false,
       reason: "Terminal context is switched off in Settings → AI.",
@@ -74,8 +81,9 @@ export function contextAvailability(sessionId: string | null): ContextAvailabili
  * chosen it.
  */
 export function collectSessionBlocks(sessionId: string): RunbookContextBlock[] {
-  if (!contextAvailability(sessionId).available) return [];
-  const ui = useAppStore.getState().sessionUi[sessionId];
+  const state = useAppStore.getState();
+  if (!contextAvailability(sessionId, state.sendContextToAi).available) return [];
+  const ui = state.sessionUi[sessionId];
   return (ui?.blocks ?? [])
     .filter((b: Block) => b.state === "done" && b.command.trim() && b.origin !== "agent")
     .map((b: Block) => {

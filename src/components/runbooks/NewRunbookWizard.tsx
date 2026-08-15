@@ -33,12 +33,11 @@ import {
   type RunbookSource,
 } from "../../lib/runbooks";
 import { RunbookAiGenerator } from "./RunbookAiGenerator";
+import { fieldClass, labelClass, parseCodes, parseMappings, TextField } from "./runbookFields";
+import { Remediation } from "./RunbookRemediationFields";
 import { secondaryButton } from "./runbookUi";
 
 const stages = ["Basics", "Inputs", "Checks", "Review"] as const;
-const fieldClass =
-  "mt-1 w-full rounded-md border border-border-subtle bg-bg-card px-2 py-1.5 text-[11px] text-text-primary outline-none focus:border-accent";
-const labelClass = "block text-[9px] text-text-muted";
 
 export function NewRunbookWizard({
   onPublished,
@@ -578,120 +577,6 @@ function ShellCheck({ check, onChange }: { check: Extract<RunbookDraftStep["chec
   }} /></div></details></div>;
 }
 
-/**
- * Apply and verify, which turn a step from a report into a repair.
- *
- * The two are added and removed TOGETHER because the backend rejects an apply
- * with nothing to prove it worked. Offering them separately would let the
- * operator build a document that cannot be published and only find out on the
- * Review stage.
- */
-function Remediation({ step, onChange }: { step: RunbookDraftStep; onChange: (step: RunbookDraftStep) => void }) {
-  const enabled = step.apply !== null;
-  const enable = () => {
-    onChange({
-      ...step,
-      apply: { kind: "shell", command: "", env: {}, successExitCodes: [0] },
-      // Re-running the check is the usual proof, so seed it with that.
-      verify: step.check.kind === "shell"
-        ? { kind: "shell", command: step.check.command, env: step.check.env, passExitCodes: [0] }
-        : { kind: "shell", command: "", env: {}, passExitCodes: [0] },
-    });
-  };
-  return (
-    <div className="mt-3 border-t border-border-subtle pt-2">
-      <label className="flex items-center gap-1.5 text-[9px] text-text-secondary"><input type="checkbox" checked={enabled} onChange={(event) => {
-        if (event.target.checked) enable();
-        else onChange({ ...step, apply: null, verify: null });
-      }} /> Remediate when this check fails</label>
-      {enabled && step.apply && (
-        <div className="mt-2 space-y-3">
-          <PhaseFields
-            legend="Apply — the change. Must be safe to run twice."
-            kind={step.apply.kind}
-            onKind={(kind) => {
-              onChange({ ...step, apply: kind === "manual" ? { kind: "manual", instructions: "" } : { kind: "shell", command: "", env: {}, successExitCodes: [0] } });
-            }}
-            action={step.apply}
-            codesLabel="Success codes"
-            codes={step.apply.kind === "shell" ? step.apply.successExitCodes : []}
-            onAction={(command, env) => {
-              onChange({ ...step, apply: { kind: "shell", command, env, successExitCodes: step.apply?.kind === "shell" ? step.apply.successExitCodes : [0] } });
-            }}
-            onCodes={(codes) => {
-              if (step.apply?.kind === "shell") onChange({ ...step, apply: { ...step.apply, successExitCodes: codes } });
-            }}
-            onInstructions={(instructions) => {
-              onChange({ ...step, apply: { kind: "manual", instructions } });
-            }}
-          />
-          {step.verify && (
-            <PhaseFields
-              legend="Verify — proof it worked. Required."
-              kind={step.verify.kind}
-              onKind={(kind) => {
-                onChange({ ...step, verify: kind === "manual" ? { kind: "manual", instructions: "" } : { kind: "shell", command: "", env: {}, passExitCodes: [0] } });
-              }}
-              action={step.verify}
-              codesLabel="Pass codes"
-              codes={step.verify.kind === "shell" ? step.verify.passExitCodes : []}
-              onAction={(command, env) => {
-                onChange({ ...step, verify: { kind: "shell", command, env, passExitCodes: step.verify?.kind === "shell" ? step.verify.passExitCodes : [0] } });
-              }}
-              onCodes={(codes) => {
-                if (step.verify?.kind === "shell") onChange({ ...step, verify: { ...step.verify, passExitCodes: codes } });
-              }}
-              onInstructions={(instructions) => {
-                onChange({ ...step, verify: { kind: "manual", instructions } });
-              }}
-            />
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** One phase's editor. Apply and verify differ only in what their exit codes
- *  are called, which is why they share this. */
-function PhaseFields({ legend, kind, onKind, action, codesLabel, codes, onAction, onCodes, onInstructions }: {
-  legend: string;
-  kind: "shell" | "manual";
-  onKind: (kind: "shell" | "manual") => void;
-  action: { kind: "shell"; command: string; env: Record<string, string> } | { kind: "manual"; instructions: string };
-  codesLabel: string;
-  codes: number[];
-  onAction: (command: string, env: Record<string, string>) => void;
-  onCodes: (codes: number[]) => void;
-  onInstructions: (instructions: string) => void;
-}) {
-  return (
-    <fieldset className="rounded-md border border-border-subtle p-2">
-      <legend className="px-1 text-[9px] text-text-muted">{legend}</legend>
-      <label className={labelClass}>Type<select className={fieldClass} value={kind} onChange={(event) => {
-        onKind(event.target.value as "shell" | "manual");
-      }}><option value="shell">Shell</option><option value="manual">Manual</option></select></label>
-      {action.kind === "shell" ? (
-        <div className="mt-2 space-y-2">
-          <label className={labelClass}>Single-line command<textarea className={`${fieldClass} min-h-16 font-mono`} value={action.command} onChange={(event) => {
-            onAction(event.target.value, action.env);
-          }} /></label>
-          <label className={labelClass}>Input mappings (one <code>VRUN_NAME=inputId</code> per line)<textarea className={`${fieldClass} min-h-14 font-mono`} value={Object.entries(action.env).map(([name, id]) => `${name}=${id}`).join("\n")} onChange={(event) => {
-            onAction(action.command, parseMappings(event.target.value));
-          }} /></label>
-          <details><summary className="cursor-pointer text-[9px] text-text-muted">Advanced exit codes</summary><div className="mt-2"><TextField label={codesLabel} value={codes.join(", ")} onChange={(value) => {
-            onCodes(parseCodes(value));
-          }} /></div></details>
-        </div>
-      ) : (
-        <label className={`${labelClass} mt-2`}>Operator instructions<textarea className={`${fieldClass} min-h-20`} value={action.instructions} onChange={(event) => {
-          onInstructions(event.target.value);
-        }} /></label>
-      )}
-    </fieldset>
-  );
-}
-
 function Review({ preview, document, onIssue }: { preview: RunbookDraftPreview | null; document: RunbookDraftDocument; onIssue: (path: string) => void }) {
   if (!preview) return <p className="py-10 text-center text-[10px] text-text-muted">Saving and validating preview…</p>;
   return <div className="mx-auto max-w-3xl space-y-3"><div className={`rounded-lg border p-3 ${preview.issues.length ? "border-error/30 bg-error/10" : "border-success/30 bg-success/10"}`}><p className="text-[11px] font-medium text-text-primary">{preview.issues.length ? `${preview.issues.length} issue${preview.issues.length === 1 ? "" : "s"} must be fixed` : "Ready to publish"}</p>{preview.issues.map((issue, index) => <button type="button" key={`${issue.path}:${index}`} onClick={() => {
@@ -700,9 +585,6 @@ function Review({ preview, document, onIssue }: { preview: RunbookDraftPreview |
 }
 
 type EditorProps = { document: RunbookDraftDocument; onChange: (document: RunbookDraftDocument) => void };
-function TextField({ inputId, label, value, placeholder, onChange }: { inputId?: string; label: string; value: string; placeholder?: string; onChange: (value: string) => void }) { return <label className={labelClass}>{label}<input id={inputId} className={fieldClass} value={value} placeholder={placeholder} onChange={(event) => {
-  onChange(event.target.value);
-}} /></label>; }
 function DefaultField({ input, onChange }: { input: RunbookDraftInput; onChange: (value: string | number | boolean | null) => void }) { if (input.type === "boolean") return <label className={labelClass}>Default<select className={fieldClass} value={input.default == null ? "" : String(input.default)} onChange={(event) => {
   onChange(event.target.value === "" ? null : event.target.value === "true");
 }}><option value="">No default</option><option value="false">false</option><option value="true">true</option></select></label>; return <TextField label="Default (optional)" value={input.default == null ? "" : String(input.default)} onChange={(value) => {
@@ -711,5 +593,3 @@ function DefaultField({ input, onChange }: { input: RunbookDraftInput; onChange:
 function IconButton({ label, disabled, onClick, children }: { label: string; disabled?: boolean; onClick: () => void; children: ReactNode }) { return <button type="button" aria-label={label} disabled={disabled} onClick={onClick} className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text-primary disabled:opacity-30">{children}</button>; }
 function Empty({ children }: { children: ReactNode }) { return <p className="rounded-lg border border-dashed border-border-subtle p-5 text-center text-[10px] text-text-muted">{children}</p>; }
 function Summary({ label, value }: { label: string; value: string }) { return <div className="rounded border border-border-subtle bg-bg-card p-2"><p className="text-text-muted">{label}</p><p className="mt-1 text-text-primary">{value}</p></div>; }
-function parseCodes(value: string): number[] { return value.split(",").map((item) => Number(item.trim())).filter((item) => Number.isInteger(item)); }
-function parseMappings(value: string): Record<string, string> { return Object.fromEntries(value.split("\n").map((line) => line.split("=", 2).map((part) => part.trim())).filter(([name, id]) => Boolean(name && id))); }

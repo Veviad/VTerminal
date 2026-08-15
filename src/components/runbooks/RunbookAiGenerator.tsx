@@ -57,24 +57,28 @@ export function RunbookAiGenerator({
   const chosenSession = sessionId ?? activeSessionId ?? sessions[0]?.id ?? null;
 
   const availability = useMemo(
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    () => contextAvailability(chosenSession),
+    () => contextAvailability(chosenSession, sendContextToAi),
     [chosenSession, sendContextToAi],
   );
+  // The store's block list is the dependency, but the OUTPUT is scraped from the
+  // live xterm buffer rather than read from here — so this is what tells the
+  // memo a new command has landed and the buffer is worth re-reading.
+  const storedBlocks = chosenSession ? sessionUi[chosenSession]?.blocks : undefined;
   const blocks = useMemo(
-    () => (chosenSession && attach ? collectSessionBlocks(chosenSession) : []),
-    // `sessionUi` is not read directly here, but a new block landing in the
-    // store must re-read the buffer — output is scraped live, not stored.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [chosenSession, attach, sessionUi],
+    () => (chosenSession && attach && storedBlocks ? collectSessionBlocks(chosenSession) : []),
+    [chosenSession, attach, storedBlocks],
   );
 
   const [excluded, setExcluded] = useState<Set<string>>(new Set());
   const included = blocks.filter((block) => !excluded.has(block.id));
 
-  // `null` until the operator types: the payload tracks the checkboxes until it
-  // is edited, and is verbatim afterwards. Anything else would silently discard
-  // a redaction the moment a box was ticked.
+  // `null` until the operator types. After that the text is verbatim and NOTHING
+  // regenerates it implicitly — not a checkbox, not the session picker.
+  //
+  // This is the one rule that makes hand-redaction trustworthy. Rebuilding the
+  // payload when a box is ticked would reintroduce a secret the operator had
+  // already deleted, silently, at the moment they were still editing. Going back
+  // to the generated text is possible but has to be asked for.
   const [edited, setEdited] = useState<string | null>(null);
   const payload = edited ?? renderContext(included);
 
@@ -163,7 +167,6 @@ export function RunbookAiGenerator({
           disabled={!availability.available}
           onChange={(event) => {
             setAttach(event.target.checked);
-            setEdited(null);
           }}
         />
         Use a terminal session as context
@@ -182,7 +185,6 @@ export function RunbookAiGenerator({
               onChange={(event) => {
                 setSessionId(event.target.value);
                 setExcluded(new Set());
-                setEdited(null);
               }}
             >
               {sessions.map((session) => (
@@ -211,7 +213,6 @@ export function RunbookAiGenerator({
                       else next.add(block.id);
                       return next;
                     });
-                    setEdited(null);
                   }}
                 />
               ))}
@@ -228,6 +229,23 @@ export function RunbookAiGenerator({
               }}
             />
           </label>
+          {edited !== null && (
+            // Says out loud what the checkboxes no longer do. Without this the
+            // selection above looks live while the payload has stopped tracking
+            // it, and the operator cannot tell which one is being sent.
+            <p className="flex items-center justify-between gap-2 text-[9px] text-text-muted">
+              <span>Edited by hand. The selection above no longer changes this text.</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setEdited(null);
+                }}
+                className="shrink-0 text-accent hover:underline"
+              >
+                Discard edits
+              </button>
+            </p>
+          )}
         </div>
       )}
 
