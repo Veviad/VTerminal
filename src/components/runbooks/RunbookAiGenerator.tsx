@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 
 import { aiCancel } from "../../lib/tauri";
 import {
+  blocksOf,
   collectSessionBlocks,
   contextAvailability,
   renderContext,
@@ -60,12 +61,21 @@ export function RunbookAiGenerator({
     () => contextAvailability(chosenSession, sendContextToAi),
     [chosenSession, sendContextToAi],
   );
-  // The store's block list is the dependency, but the OUTPUT is scraped from the
-  // live xterm buffer rather than read from here — so this is what tells the
-  // memo a new command has landed and the buffer is worth re-reading.
-  const storedBlocks = chosenSession ? sessionUi[chosenSession]?.blocks : undefined;
+  // Driven by `sessions`, which is in tab order — iterating the sessionUi record
+  // instead would list the picker in whatever order that object happens to hold.
+  // The Map is what keeps the lookup off a variable bracket index, which reads
+  // as an object-injection sink to static analysis.
+  const sessionOptions = useMemo(() => {
+    const ui = new Map(Object.entries(sessionUi));
+    return sessions.map((session) => ({
+      id: session.id,
+      label: resolveSessionTitle(session, ui.get(session.id)),
+    }));
+  }, [sessions, sessionUi]);
+
+  const storedBlocks = blocksOf(sessionUi, chosenSession);
   const blocks = useMemo(
-    () => (chosenSession && attach && storedBlocks ? collectSessionBlocks(chosenSession) : []),
+    () => (chosenSession && attach ? collectSessionBlocks(chosenSession) : []),
     [chosenSession, attach, storedBlocks],
   );
 
@@ -187,9 +197,9 @@ export function RunbookAiGenerator({
                 setExcluded(new Set());
               }}
             >
-              {sessions.map((session) => (
-                <option key={session.id} value={session.id}>
-                  {resolveSessionTitle(session, sessionUi[session.id])}
+              {sessionOptions.map(({ id, label }) => (
+                <option key={id} value={id}>
+                  {label}
                 </option>
               ))}
             </select>

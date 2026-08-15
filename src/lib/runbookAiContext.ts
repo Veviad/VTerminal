@@ -12,7 +12,7 @@
  * has, and the model is being asked to read all of it.
  */
 
-import { useAppStore } from "../stores/appStore";
+import { useAppStore, type SessionUiState } from "../stores/appStore";
 import { readBlockOutput } from "../hooks/useAiStream";
 import { isRunbookTerminalProtected } from "./runbookTerminalPrivacy";
 import type { Block } from "./types";
@@ -73,6 +73,26 @@ export function contextAvailability(
 }
 
 /**
+ * One session's blocks, looked up without a variable bracket index.
+ *
+ * `sessionUi[sessionId]` reads as an object-injection sink to static analysis,
+ * and the tab count is small enough that scanning the entries costs nothing.
+ * Also the dependency the generator's memo watches: output is scraped from the
+ * live xterm buffer, so this list is what says a new command has landed.
+ */
+export function blocksOf(
+  sessionUi: Record<string, SessionUiState>,
+  sessionId: string | null,
+): Block[] {
+  if (!sessionId) return NO_BLOCKS;
+  return Object.entries(sessionUi).find(([id]) => id === sessionId)?.[1].blocks ?? NO_BLOCKS;
+}
+
+/** A stable reference, so a session with no entry does not hand a caller's memo
+ *  a fresh array on every render. */
+const NO_BLOCKS: Block[] = [];
+
+/**
  * Every finished command in one session, oldest first.
  *
  * Agent-run blocks are excluded for the same reason `buildTerminalContext`
@@ -83,8 +103,7 @@ export function contextAvailability(
 export function collectSessionBlocks(sessionId: string): RunbookContextBlock[] {
   const state = useAppStore.getState();
   if (!contextAvailability(sessionId, state.sendContextToAi).available) return [];
-  const ui = state.sessionUi[sessionId];
-  return (ui?.blocks ?? [])
+  return blocksOf(state.sessionUi, sessionId)
     .filter((b: Block) => b.state === "done" && b.command.trim() && b.origin !== "agent")
     .map((b: Block) => {
       const output = readBlockOutput(sessionId, b, BLOCK_OUTPUT_LIMIT);
