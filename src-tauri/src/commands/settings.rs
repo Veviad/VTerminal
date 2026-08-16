@@ -539,6 +539,7 @@ pub enum WslStatus {
     #[cfg(target_os = "windows")]
     MissingTools,
     Error,
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     NotApplicable,
 }
 
@@ -945,10 +946,12 @@ pub fn read_u32(app: &tauri::AppHandle<Wry>, key: &str, default: u32) -> u32 {
 
 #[cfg(test)]
 mod credential_tests {
+    #[cfg(unix)]
+    use super::command_output_bounded;
     use super::{
-        aggregate_local_acceleration, command_output_bounded, decode_windows_command_output,
-        parse_default_wsl_list, read_credential_with, settings_credential_presence,
-        LocalAccelerationInfo, WslStatus, WSL_REQUIRED_TOOLS_PROBE,
+        aggregate_local_acceleration, decode_windows_command_output, parse_default_wsl_list,
+        read_credential_with, settings_credential_presence, LocalAccelerationInfo, WslStatus,
+        WSL_REQUIRED_TOOLS_PROBE,
     };
 
     fn acceleration(backend: &str, device: Option<&str>) -> LocalAccelerationInfo {

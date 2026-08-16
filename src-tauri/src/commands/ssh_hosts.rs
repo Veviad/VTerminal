@@ -373,9 +373,9 @@ fn wsl_ssh_context() -> Result<WslSshContext, String> {
 pub fn ssh_wsl_identity_root() -> Result<Option<String>, String> {
     #[cfg(target_os = "windows")]
     {
-        return Ok(Some(
+        Ok(Some(
             wsl_ssh_context()?.ssh_dir.to_string_lossy().into_owned(),
-        ));
+        ))
     }
     #[cfg(not(target_os = "windows"))]
     Ok(None)
@@ -438,7 +438,7 @@ pub fn ssh_wsl_path_from_host(path: String) -> Result<String, String> {
                 "the selected WSL identity file does not exist or is not a regular file".into(),
             );
         }
-        return Ok(linux_path);
+        Ok(linux_path)
     }
     #[cfg(not(target_os = "windows"))]
     Ok(path)

@@ -145,6 +145,7 @@ const WSL_WRITE_WRAPPER: &str = "umask 077; dir=\"$HOME/.local/share/vterminal\"
 /// a percent-encoded OSC 7 cwd report, and the typed command as a base64 OSC
 /// 6973 payload (buffer-scraping the command is unreliable with RPROMPT/PS2).
 /// Guarded against double-injection; coexists with starship/p10k.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 const VTERMINAL_ZSH: &str = r#"# vterminal integration (version: __VERSION__)
 if [[ -n "$VTERMINAL_INTEGRATION" ]]; then
   return
@@ -206,6 +207,7 @@ add-zsh-hook preexec __vterminal_preexec
 /// the next stub.
 ///
 /// .zshenv runs FIRST and may itself relocate ZDOTDIR — honor that.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 const ZSHENV: &str = r#"# vterminal generated zdotdir (version: __VERSION__)
 VTERMINAL_ZDOTDIR="$ZDOTDIR"
 if [[ -n "$VTERMINAL_ORIG_ZDOTDIR" ]]; then
@@ -219,6 +221,7 @@ VTERMINAL_USER_ZDOTDIR="$ZDOTDIR"
 ZDOTDIR="$VTERMINAL_ZDOTDIR"
 "#;
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 const ZPROFILE: &str = r#"# vterminal generated zdotdir (version: __VERSION__)
 ZDOTDIR="$VTERMINAL_USER_ZDOTDIR"
 [[ -f "$ZDOTDIR/.zprofile" ]] && source "$ZDOTDIR/.zprofile"
@@ -229,6 +232,7 @@ ZDOTDIR="$VTERMINAL_ZDOTDIR"
 /// .zshrc: chain the user's (with their ZDOTDIR), layer the integration on
 /// top, and LEAVE ZDOTDIR as the user's — .zlogin and anything else that
 /// inspects it later sees the real value.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 const ZSHRC: &str = r#"# vterminal generated zdotdir (version: __VERSION__)
 ZDOTDIR="$VTERMINAL_USER_ZDOTDIR"
 [[ -f "$ZDOTDIR/.zshrc" ]] && source "$ZDOTDIR/.zshrc"
@@ -242,6 +246,7 @@ fi
 unset VTERMINAL_ZDOTDIR VTERMINAL_USER_ZDOTDIR
 "#;
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub fn ensure_zdotdir(app: &tauri::AppHandle<Wry>) -> Result<PathBuf, String> {
     let dir = app
         .path()
@@ -390,10 +395,10 @@ pub fn shell_integration_status(
 
 #[cfg(test)]
 mod windows_tests {
-    use super::{
-        wait_for_child_bounded, VTERMINAL_BASH, WSL_BASH_WRAPPER, WSL_WRITE_BASHRC,
-        WSL_WRITE_WRAPPER,
-    };
+    #[cfg(unix)]
+    use super::{wait_for_child_bounded, WSL_WRITE_BASHRC, WSL_WRITE_WRAPPER};
+    use super::{VTERMINAL_BASH, WSL_BASH_WRAPPER};
+    #[cfg(unix)]
     use std::time::Duration;
 
     #[cfg(unix)]

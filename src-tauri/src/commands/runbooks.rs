@@ -418,7 +418,7 @@ fn restrict_builtin_directory(path: &Path) -> Result<(), String> {
 fn sync_directory(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        return crate::windows_fs::sync_directory(path);
+        crate::windows_fs::sync_directory(path)
     }
     #[cfg(not(target_os = "windows"))]
     OpenOptions::new()
@@ -3034,7 +3034,7 @@ fn export_runbook_package_path(
     bundle_name: &str,
 ) -> Result<RunbookExportResult, String> {
     let destination = canonical_export_directory(destination)?;
-    let output_dir = destination.join(&bundle_name);
+    let output_dir = destination.join(bundle_name);
     match fs::symlink_metadata(&output_dir) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Ok(_) => {

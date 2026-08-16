@@ -8,7 +8,7 @@
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-#[cfg(not(target_os = "windows"))]
+#[cfg(any(not(target_os = "windows"), test))]
 use std::fs::File;
 use std::fs::{self, OpenOptions};
 use std::io::Read;
@@ -3317,8 +3317,8 @@ pub fn find_evidence(
 fn sync_directory(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        return crate::windows_fs::sync_directory(path)
-            .map_err(|error| format!("sync evidence directory: {error}"));
+        crate::windows_fs::sync_directory(path)
+            .map_err(|error| format!("sync evidence directory: {error}"))
     }
     #[cfg(not(target_os = "windows"))]
     File::open(path)

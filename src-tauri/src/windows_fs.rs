@@ -1106,6 +1106,7 @@ fn mark_delete(file: &File, path: &Path) -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
+#[allow(dead_code)]
 pub fn collect_tree_no_reparse(
     root: &Path,
     max_entries: usize,
@@ -1220,6 +1221,7 @@ pub fn remove_file_no_reparse(path: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
+#[allow(dead_code)]
 pub fn remove_empty_directory_no_reparse(path: &Path) -> Result<Option<bool>, String> {
     let (parent_path, leaf) = protected_parent_and_leaf(path)?;
     let parent = pin_path_with_access(&parent_path, ExpectedKind::Directory, CREATE_PARENT_ACCESS)?;

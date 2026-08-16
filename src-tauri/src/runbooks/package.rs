@@ -464,7 +464,7 @@ fn validate_package_tree(root: &Path) -> Result<(), PackageError> {
     Ok(())
 }
 
-#[cfg(any(not(unix), test))]
+#[cfg(any(all(not(unix), not(target_os = "windows")), test))]
 fn read_definition(path: &Path) -> Result<Vec<u8>, PackageError> {
     // Open once without following the leaf, then validate and read that same
     // handle through a hard cap. A metadata(path) + fs::read(path) sequence can
@@ -594,7 +594,7 @@ fn is_package_link(metadata: &fs::Metadata) -> bool {
     }
     #[cfg(target_os = "windows")]
     {
-        return crate::windows_fs::is_reparse(metadata);
+        crate::windows_fs::is_reparse(metadata)
     }
     #[cfg(not(target_os = "windows"))]
     false
@@ -603,12 +603,10 @@ fn is_package_link(metadata: &fs::Metadata) -> bool {
 fn canonicalize(path: &Path) -> Result<PathBuf, PackageError> {
     #[cfg(target_os = "windows")]
     {
-        return crate::windows_fs::validate_local_ntfs_path(path).map_err(|message| {
-            PackageError::Io {
-                path: path.to_path_buf(),
-                source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, message),
-            }
-        });
+        crate::windows_fs::validate_local_ntfs_path(path).map_err(|message| PackageError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, message),
+        })
     }
     #[cfg(not(target_os = "windows"))]
     fs::canonicalize(path).map_err(|source| PackageError::Io {
