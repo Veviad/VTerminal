@@ -224,6 +224,7 @@ jobs:
         env:
           CARGO_BUILD_JOBS: 1
           CMAKE_BUILD_PARALLEL_LEVEL: 1
+          CMAKE_GENERATOR: Ninja
         run: cargo clippy --all-targets --locked --features local-llm -- -D warnings
 
       - name: Test (local-llm)
@@ -231,6 +232,7 @@ jobs:
         env:
           CARGO_BUILD_JOBS: 1
           CMAKE_BUILD_PARALLEL_LEVEL: 1
+          CMAKE_GENERATOR: Ninja
         run: cargo test --locked --features local-llm
 
       # Exercise the exact one-installer CPU+Vulkan payload used by releases,
@@ -240,6 +242,7 @@ jobs:
         env:
           CARGO_BUILD_JOBS: 1
           CMAKE_BUILD_PARALLEL_LEVEL: 1
+          CMAKE_GENERATOR: Ninja
         run: |
           ./scripts/build-windows.ps1
           $installer = Get-ChildItem src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis -Filter '*setup.exe'
