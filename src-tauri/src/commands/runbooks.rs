@@ -2271,9 +2271,9 @@ fn cleanup_evidence_artifacts(
                 // the confirmed run. Hashes protect export integrity, but a
                 // crash may leave a partial staging/final file; mismatch must
                 // not make explicit history deletion impossible.
-                Ok(Some(path)) => match fs::remove_file(&path) {
-                    Ok(()) => removed_any = true,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Ok(Some(path)) => match remove_evidence_artifact(&path) {
+                    Ok(true) => removed_any = true,
+                    Ok(false) => {}
                     Err(error) => {
                         artifact_error = true;
                         push_cleanup_error(
@@ -2296,39 +2296,13 @@ fn cleanup_evidence_artifacts(
     // Never recurse. An empty, ordinary per-run directory can be removed; any
     // untracked content is retained and reported for explicit operator review.
     let run_directory = root.join(&expected_directory);
-    match fs::symlink_metadata(&run_directory) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => push_cleanup_error(
+    match remove_empty_evidence_directory(&run_directory) {
+        Ok(None | Some(true)) => {}
+        Ok(Some(false)) => push_cleanup_error(
             &mut outcome.errors,
-            format!("cannot inspect the evidence run directory: {error}"),
+            "evidence run directory contains untracked content; retained".into(),
         ),
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-            push_cleanup_error(
-                &mut outcome.errors,
-                "evidence run directory is not an ordinary confined directory; retained".into(),
-            );
-        }
-        Ok(_) => match fs::read_dir(&run_directory) {
-            Ok(mut entries) => {
-                if entries.next().is_none() {
-                    if let Err(error) = fs::remove_dir(&run_directory) {
-                        push_cleanup_error(
-                            &mut outcome.errors,
-                            format!("cannot remove the empty evidence run directory: {error}"),
-                        );
-                    }
-                } else {
-                    push_cleanup_error(
-                        &mut outcome.errors,
-                        "evidence run directory contains untracked content; retained".into(),
-                    );
-                }
-            }
-            Err(error) => push_cleanup_error(
-                &mut outcome.errors,
-                format!("cannot read the evidence run directory: {error}"),
-            ),
-        },
+        Err(error) => push_cleanup_error(&mut outcome.errors, error),
     }
     outcome.complete = outcome.errors.is_empty();
     outcome
@@ -2385,6 +2359,53 @@ fn confined_evidence_file(
         ));
     }
     Ok(Some(canonical))
+}
+
+#[cfg(target_os = "windows")]
+fn remove_evidence_artifact(path: &Path) -> Result<bool, String> {
+    crate::windows_fs::remove_file_no_reparse(path)
+        .map_err(|error| format!("delete evidence artifact: {error}"))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn remove_evidence_artifact(path: &Path) -> Result<bool, String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("delete evidence artifact: {error}")),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn remove_empty_evidence_directory(path: &Path) -> Result<Option<bool>, String> {
+    crate::windows_fs::remove_empty_directory_no_reparse(path)
+        .map_err(|error| format!("inspect or remove the evidence run directory: {error}"))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn remove_empty_evidence_directory(path: &Path) -> Result<Option<bool>, String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "cannot inspect the evidence run directory: {error}"
+            ))
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(
+            "evidence run directory is not an ordinary confined directory; retained".into(),
+        );
+    }
+    let mut entries = fs::read_dir(path)
+        .map_err(|error| format!("cannot read the evidence run directory: {error}"))?;
+    if entries.next().is_some() {
+        return Ok(Some(false));
+    }
+    fs::remove_dir(path)
+        .map_err(|error| format!("cannot remove the empty evidence run directory: {error}"))?;
+    Ok(Some(true))
 }
 
 fn push_cleanup_error(errors: &mut Vec<String>, error: String) {
