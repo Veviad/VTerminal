@@ -152,6 +152,9 @@ export function RunbookReportViewer({
                 {approval.proposed_command && approval.proposed_command !== approval.executed_command && (
                   <p className="text-[9px] text-warning">Edited from: {approval.proposed_command}</p>
                 )}
+                {approval.reason && (
+                  <p className="text-[9px] text-text-muted">{approval.reason}</p>
+                )}
               </div>
             ))}
           </div>

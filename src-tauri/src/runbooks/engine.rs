@@ -667,6 +667,7 @@ impl<'a> EngineRunner<'a> {
                     output_redacted: attempt.output_redacted,
                     output_truncated: attempt.output_truncated,
                     error: attempt.error.clone(),
+                    structured_outcomes: attempt.structured_outcomes.clone(),
                     intent_at: attempt.intent_at.clone(),
                     result_at: attempt.result_at.clone(),
                 })
@@ -1644,6 +1645,7 @@ impl<'a> EngineRunner<'a> {
             output_redacted: false,
             output_truncated: false,
             error: None,
+            structured_outcomes: None,
             intent_at,
             result_at: None,
         });
@@ -1796,6 +1798,7 @@ impl<'a> EngineRunner<'a> {
                     output_captured_bytes,
                     source_truncated,
                     error: cleaned_error.as_deref(),
+                    structured_outcomes: None,
                 },
             )?;
             // Tail evidence is fully represented inside SQLite, so record its
@@ -1850,6 +1853,7 @@ impl<'a> EngineRunner<'a> {
             attempt.status = status;
             attempt.exit_code = exit_code;
             attempt.duration_ms = duration_ms;
+            attempt.structured_outcomes = None;
             attempt.output_tail = attempt_output.as_ref().map(|value| value.text.clone());
             attempt.output_observed_bytes = output_observed_bytes;
             attempt.output_captured_bytes = output_captured_bytes;
@@ -1956,6 +1960,8 @@ impl<'a> EngineRunner<'a> {
                 network: request.network,
                 privileged: request.privileged,
                 opaque: request.opaque,
+                project_digest: request.project_digest.clone(),
+                inventory_digest: request.inventory_digest.clone(),
             },
         )?;
         super::db::transition_run(

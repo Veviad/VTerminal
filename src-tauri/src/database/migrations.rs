@@ -43,6 +43,9 @@ pub fn run(conn: &Connection) -> Result<(), String> {
     if version < 9 {
         crate::runbooks::db::migrate_v9(conn)?;
     }
+    if version < 10 {
+        crate::runbooks::db::migrate_v10(conn)?;
+    }
     crate::runbooks::db::ensure_v6_runtime_indexes(conn)?;
 
     Ok(())

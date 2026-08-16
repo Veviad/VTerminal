@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
   claimTerminal: vi.fn(),
   respondApproval: vi.fn(),
   capturePrompt: vi.fn(),
+  awaitPrompt: vi.fn(),
   abortSession: vi.fn(),
   interruptJob: vi.fn(),
   cancel: vi.fn(),
@@ -47,6 +48,7 @@ vi.mock("../lib/runbooks", async (importOriginal) => {
 
 vi.mock("../lib/ptyExec", () => ({
   abortSession: mocks.abortSession,
+  awaitApprovalPromptBinding: mocks.awaitPrompt,
   captureApprovalPromptBinding: mocks.capturePrompt,
   interruptJob: mocks.interruptJob,
   releaseApprovalPromptBinding: vi.fn(),
@@ -240,6 +242,7 @@ beforeEach(() => {
   mocks.claimTerminal.mockReset();
   mocks.respondApproval.mockReset();
   mocks.capturePrompt.mockReset();
+  mocks.awaitPrompt.mockReset();
   mocks.abortSession.mockReset();
   mocks.interruptJob.mockReset();
   mocks.cancel.mockReset();
@@ -270,6 +273,7 @@ beforeEach(() => {
   mocks.claimTerminal.mockResolvedValue(true);
   mocks.respondApproval.mockResolvedValue(undefined);
   mocks.capturePrompt.mockReturnValue("prompt-binding");
+  mocks.awaitPrompt.mockResolvedValue("prompt-binding");
   mocks.cancel.mockResolvedValue(undefined);
   mocks.waitForTerminal.mockImplementation(async (runId: string) =>
     run(runId, "cancelled"),
@@ -352,7 +356,6 @@ describe("useRunbooks channel activation", () => {
         "approval-early",
         true,
         "sshd -T",
-        true,
       );
     });
     act(() =>
@@ -412,7 +415,6 @@ describe("useRunbooks channel activation", () => {
         "approval-replayed",
         true,
         "touch /tmp/must-not-repeat",
-        true,
       );
     });
     act(() =>
@@ -488,7 +490,6 @@ describe("useRunbooks channel activation", () => {
         "approval-target",
         true,
         "printf ok",
-        true,
       );
     });
     act(() =>
@@ -573,7 +574,6 @@ describe("useRunbooks channel activation", () => {
         "approval-cancel-race",
         true,
         "touch /tmp/must-not-run-after-cancel",
-        true,
       );
     });
     act(() =>
@@ -641,7 +641,6 @@ describe("useRunbooks channel activation", () => {
         "approval-evicted",
         true,
         "printf still-owned",
-        true,
       );
     });
     act(() =>
@@ -942,99 +941,170 @@ describe("useRunbooks recovery and deletion", () => {
     expect(useRunbookStore.getState().busyAction).toBeNull();
   });
 
-  it("approveAllPendingSteps can drain multiple waiting approvals", async () => {
-    const first = waitingApprovalRun(
-      "run-approve-all",
-      "approval-1",
-      "printf one",
-    );
-    const second = waitingApprovalRun(
-      "run-approve-all",
-      "approval-2",
-      "printf two",
-      {
-        active_phase: "apply",
-      },
-    );
-    const terminal = {
-      ...first,
+  it("auto-approves a later approval that arrives after a command ran", async () => {
+    // The realistic sequence, and the one the old drain loop could not survive:
+    // the engine leaves waiting_approval as soon as it is answered, runs the
+    // command, and only then requests the next approval. The per-run event
+    // channel is what carries the mode across that gap.
+    const armed = waitingApprovalRun("run-auto", "approval-1", "printf one");
+    useRunbookStore.getState().setActiveRun(armed);
+    useAppStore.setState({ activeSessionId: "session-1" });
+    mocks.get.mockResolvedValue({
+      ...armed,
       status: "running" as const,
-      active_phase: null,
       pending_approval_id: null,
       pending_approval: null,
-    };
-
-    useRunbookStore.getState().setActiveRun(first);
-    mocks.get.mockResolvedValueOnce(second).mockResolvedValueOnce(terminal);
-
-    const { result } = renderHook(() => useRunbooks());
-
-    await act(async () => {
-      await result.current.approveAllPendingSteps("run-approve-all");
     });
 
-    expect(mocks.respondApproval).toHaveBeenCalledTimes(2);
+    const { result } = renderHook(() => useRunbooks());
+    await act(async () => {
+      await result.current.approveAllPendingSteps("run-auto", "printf edited");
+    });
+
     expect(mocks.respondApproval).toHaveBeenNthCalledWith(
       1,
-      "run-approve-all",
+      "run-auto",
       "approval-1",
       true,
-      "printf one",
-      true,
+      "printf edited",
+      "acknowledged",
     );
+    expect(useRunbookStore.getState().autoApproveRuns["run-auto"]).toBeDefined();
+
+    // The run has moved on; the next approval arrives only as an event.
+    await act(async () => {
+      await result.current.handleRunbookEvent(
+        approvalEvent("run-auto", "approval-2", "printf two"),
+      );
+    });
+
     expect(mocks.respondApproval).toHaveBeenNthCalledWith(
       2,
-      "run-approve-all",
+      "run-auto",
       "approval-2",
       true,
       "printf two",
-      true,
+      "pre_authorized",
     );
     expect(useRunbookStore.getState().error).toBeNull();
     expect(useRunbookStore.getState().busyAction).toBeNull();
   });
 
-  it("approveAllPendingSteps stops when a run enters a manual or operator pause", async () => {
-    const first = waitingApprovalRun("run-paused", "approval-1", "printf one");
-    const paused = {
-      ...first,
-      status: "waiting_operator" as const,
-      pending_approval_id: null,
-      pending_approval: null,
-      pending_operator: {
-        run_id: "run-paused",
-        step_id: "one",
-        reason: "human decision required",
-        choices: ["retry", "skip", "waive", "stop"],
-      },
-    };
-    useRunbookStore.getState().setActiveRun(first);
-    mocks.get.mockResolvedValueOnce(paused);
+  it("never approves the same approval twice when an event is replayed", async () => {
+    const armed = waitingApprovalRun("run-dupe", "approval-1", "printf one");
+    useRunbookStore.getState().setActiveRun(armed);
+    useAppStore.setState({ activeSessionId: "session-1" });
+    mocks.get.mockResolvedValue(armed);
+    useRunbookStore.getState().setAutoApprove("run-dupe", true);
 
     const { result } = renderHook(() => useRunbooks());
+    const event = approvalEvent("run-dupe", "approval-9", "printf nine");
     await act(async () => {
-      await result.current.approveAllPendingSteps("run-paused");
+      await result.current.handleRunbookEvent(event);
+      await result.current.handleRunbookEvent(event);
     });
 
     expect(mocks.respondApproval).toHaveBeenCalledTimes(1);
     expect(useRunbookStore.getState().error).toBeNull();
-    expect(useRunbookStore.getState().busyAction).toBeNull();
   });
 
-  it("approveAllPendingSteps surfaces response errors and exits", async () => {
-    const first = waitingApprovalRun("run-fail", "approval-1", "printf one");
-    useRunbookStore.getState().setActiveRun(first);
+  it("stops auto-approve and says why when the bound terminal is not visible", async () => {
+    const armed = waitingApprovalRun("run-hidden", "approval-1", "printf one");
+    useRunbookStore.getState().setActiveRun(armed);
+    mocks.get.mockResolvedValue(armed);
+    useRunbookStore.getState().setAutoApprove("run-hidden", true);
+    useAppStore.setState({ activeSessionId: "session-other" });
+
+    const { result } = renderHook(() => useRunbooks());
+    await act(async () => {
+      await result.current.handleRunbookEvent(
+        approvalEvent("run-hidden", "approval-2", "printf two"),
+      );
+    });
+
+    expect(mocks.respondApproval).not.toHaveBeenCalled();
+    expect(useRunbookStore.getState().autoApproveRuns["run-hidden"]).toBeUndefined();
+    expect(useRunbookStore.getState().error).toContain("bound terminal");
+  });
+
+  it("stops auto-approve when the terminal never reaches a quiet prompt", async () => {
+    const armed = waitingApprovalRun("run-noisy", "approval-1", "printf one");
+    useRunbookStore.getState().setActiveRun(armed);
+    mocks.get.mockResolvedValue(armed);
+    useRunbookStore.getState().setAutoApprove("run-noisy", true);
+    useAppStore.setState({ activeSessionId: "session-1" });
+    mocks.awaitPrompt.mockResolvedValue(null);
+
+    const { result } = renderHook(() => useRunbooks());
+    await act(async () => {
+      await result.current.handleRunbookEvent(
+        approvalEvent("run-noisy", "approval-2", "printf two"),
+      );
+    });
+
+    expect(mocks.respondApproval).not.toHaveBeenCalled();
+    expect(useRunbookStore.getState().autoApproveRuns["run-noisy"]).toBeUndefined();
+    expect(useRunbookStore.getState().error).toContain("quiet shell prompt");
+  });
+
+  it("stops auto-approve when the run needs an operator decision", async () => {
+    const armed = waitingApprovalRun("run-pause", "approval-1", "printf one");
+    useRunbookStore.getState().setActiveRun(armed);
+    mocks.get.mockResolvedValue(armed);
+    useRunbookStore.getState().setAutoApprove("run-pause", true);
+
+    const { result } = renderHook(() => useRunbooks());
+    await act(async () => {
+      await result.current.handleRunbookEvent({
+        type: "OperatorDecisionRequired",
+        run_id: "run-pause",
+        step_id: "one",
+        reason: "human decision required",
+        choices: ["retry", "skip", "waive", "stop"],
+      } as never);
+    });
+
+    expect(useRunbookStore.getState().autoApproveRuns["run-pause"]).toBeUndefined();
+    expect(useRunbookStore.getState().error).toContain("operator decision");
+  });
+
+  it("a manual approval takes the wheel back from auto-approve", async () => {
+    const armed = waitingApprovalRun("run-manual", "approval-1", "printf one");
+    useRunbookStore.getState().setActiveRun(armed);
+    mocks.get.mockResolvedValue(armed);
+    useAppStore.setState({ activeSessionId: "session-1" });
+    useRunbookStore.getState().setAutoApprove("run-manual", true);
+
+    const { result } = renderHook(() => useRunbooks());
+    await act(async () => {
+      await result.current.respondApproval(
+        "run-manual",
+        "approval-1",
+        true,
+        "printf one",
+      );
+    });
+
+    expect(useRunbookStore.getState().autoApproveRuns["run-manual"]).toBeUndefined();
+  });
+
+  it("does not arm auto-approve when the visible approval is refused", async () => {
+    const armed = waitingApprovalRun("run-refuse", "approval-1", "printf one");
+    useRunbookStore.getState().setActiveRun(armed);
+    mocks.get.mockResolvedValue(armed);
+    useAppStore.setState({ activeSessionId: "session-1" });
     mocks.respondApproval.mockRejectedValueOnce(new Error("approval denied"));
 
     const { result } = renderHook(() => useRunbooks());
     await act(async () => {
-      await result.current.approveAllPendingSteps("run-fail");
+      await result.current.approveAllPendingSteps("run-refuse", "printf one");
     });
 
-    expect(mocks.respondApproval).toHaveBeenCalledTimes(1);
+    expect(useRunbookStore.getState().autoApproveRuns["run-refuse"]).toBeUndefined();
     expect(useRunbookStore.getState().error).toContain("approval");
     expect(useRunbookStore.getState().busyAction).toBeNull();
   });
+
 
   it("hydrates the most recent nonterminal run during initialization", async () => {
     mocks.history.mockResolvedValue([

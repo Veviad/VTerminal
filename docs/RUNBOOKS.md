@@ -200,21 +200,40 @@ the same terminal concurrently.
   apparently harmless commands through aliases, exported functions, PATH
   shims, loader variables, or already-root SSH/container context, so it cannot
   be proven read-only from command text alone.
-- Every shell approval displays the immutable run target and requires an
-  operator to attest that the visible row is a POSIX shell prompt on that
-  host/container and that the session's shell, functions, aliases, and PATH are
-  trusted. The app binds that click to the exact terminal row, cursor, and
-  input/output epoch for 30 seconds; any intervening terminal change prevents
-  dispatch. A compromised interactive shell remains outside v1's trust model.
+- Every shell approval displays the immutable run target and the exact command.
+  There is no separate attestation checkbox: clicking **Approve this step** is
+  the operator's acknowledgement that the visible row is a POSIX shell prompt on
+  that host/container. The app binds that click to the exact terminal row,
+  cursor, and input/output epoch for 30 seconds; any intervening terminal change
+  prevents dispatch. The session's shell, functions, aliases, and PATH sit inside
+  the target trust boundary and are not independently verified. A compromised
+  interactive shell remains outside v1's trust model.
 - Networked, privileged, or opaque checks and verifies require approval and are
   reported as phase deviations.
-- Runbook approvals are single-click by default. In live mode, you can also use
-  **Acknowledge and approve all remaining steps** to continue through later
-  approvals automatically. The flow stops at the first non-approval pause,
-  terminal-status change, repeated approval-id, or command validation issue.
-- Model phases are opaque and still require their own approval action; this is
-  separate from shell approvals and still reports any model/provider network use.
-- Runbooks do not mirror the agent panel’s `Auto all` behavior for any phase.
+- **Approve every later step unseen** arms run-level auto-approve. The approval
+  in front of you is granted with the command shown, including any edit you made.
+  Every later approval in the same run is then granted automatically, using the
+  command the runbook proposed, and is never displayed to you first. Nothing is
+  excluded: `apply` phases and networked, privileged, opaque, and
+  configured-model approvals are all covered.
+- Auto-approve is scoped to one run, is never persisted, and is never inherited
+  by another run. It is unrelated to the agent panel's `Auto all`, which can
+  never settle a runbook approval.
+- Auto-approve stops, and says why, when: you press **Stop auto-approve**; you
+  approve or decline any step by hand; the run needs an operator decision or a
+  manual step; the run finishes, is cancelled, or errors; the bound terminal is
+  no longer the visible terminal; the bound terminal does not reach a stable,
+  quiet shell prompt in time; or a proposed command is empty, longer than 4,096
+  characters, or contains control characters. It never grants an approval it
+  cannot grant safely, and it never stops silently.
+- Every automatically granted approval is recorded durably as pre-authorized —
+  "operator pre-authorized this step via run-level auto-approve …; the proposed
+  command was not individually displayed" — and that wording appears in the
+  report's approvals table under **Basis**, and in the phase-deviation detail
+  where one applies.
+- Model phases are opaque and require their own approval action, separate from
+  shell approvals, and still report any model/provider network use. Under
+  auto-approve that approval is granted automatically like any other.
 - The proposed and executed commands are both retained when an operator edits a
   command.
 - Visible-terminal shell checks and verification are reported as
@@ -222,7 +241,7 @@ the same terminal concurrently.
   token prevents stale/replayed terminal output from settling a different
   attempt; it cannot prove that an operator-trusted interactive shell evaluated
   the textual line exactly. The shell and its startup configuration remain part
-  of the explicitly attested target trust boundary.
+  of the target trust boundary the operator accepted when binding the run.
 - Once a terminal executes a Runbook action, its raw scrollback is excluded
   from restore/archive persistence and OSC 52 clipboard writes remain disabled
   for that terminal's lifetime. Semantic shell/cwd markers are quarantined

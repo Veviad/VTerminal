@@ -205,6 +205,54 @@ export function releaseApprovalPromptBinding(token: string): void {
   approvalPromptBindings.delete(token);
 }
 
+/** Capture a binding once the terminal has been quiet for `quiescenceMs`.
+ *
+ * `promptMatchesApproval` compares `lastDataAt`/`lastUserInputAt` for EXACT
+ * equality, and `runInTerminal` consumes the binding before its own tolerant
+ * quiescence wait — so a binding taken while the shell is still painting its
+ * prompt is invalid by the time it is used, and the attempt settles unknown with
+ * `target_changed`. A human clicking Approve is always already at a quiet
+ * prompt; run-level auto-approve is not, because it answers `ApprovalRequested`
+ * milliseconds after the previous command finished. Hence the wait, and hence it
+ * lives here rather than in `runInTerminal`.
+ *
+ * Resolves null on timeout, a closed terminal, or the alternate screen. The
+ * timeout stays well under `APPROVAL_PROMPT_TTL_MS` so a returned token always
+ * has time left to be consumed.
+ */
+export function awaitApprovalPromptBinding(
+  sessionId: string,
+  opts: { quiescenceMs?: number; timeoutMs?: number } = {},
+): Promise<string | null> {
+  const quiescenceMs = opts.quiescenceMs ?? QUIESCENCE_MS;
+  const timeoutMs = opts.timeoutMs ?? 5_000;
+  const deadline = Date.now() + timeoutMs;
+
+  return new Promise((resolve) => {
+    const tick = () => {
+      const entry = getTerm(sessionId);
+      if (!entry || entry.disposed) {
+        resolve(null);
+        return;
+      }
+      const now = Date.now();
+      if (
+        now - entry.lastDataAt >= quiescenceMs &&
+        now - entry.lastUserInputAt >= quiescenceMs
+      ) {
+        resolve(captureApprovalPromptBinding(sessionId));
+        return;
+      }
+      if (now >= deadline) {
+        resolve(null);
+        return;
+      }
+      setTimeout(tick, IDLE_POLL_MS);
+    };
+    tick();
+  });
+}
+
 function consumeApprovalPromptBinding(
   token: string | undefined,
   sessionId: string,

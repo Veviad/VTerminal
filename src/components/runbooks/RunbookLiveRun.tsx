@@ -40,6 +40,13 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
   const run = useRunbookStore((state) => state.activeRun);
   const report = useRunbookStore((state) => state.report);
   const busyAction = useRunbookStore((state) => state.busyAction);
+  // Select a primitive: zustand compares with Object.is, so returning the map
+  // itself would re-render on every unrelated run's change.
+  const autoApproving = useRunbookStore((state) =>
+    state.activeRun
+      ? state.autoApproveRuns[state.activeRun.run_id] !== undefined
+      : false,
+  );
   const {
     cancel,
     resume,
@@ -66,6 +73,17 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
       useRunbookStore.getState().setError(String(error));
     });
   };
+
+  // Every hook must sit above the early returns below. This reset used to live
+  // beside the other run-derived values, past `if (!run)` and the report view,
+  // so selecting a run or opening the report changed the hook count mid-render
+  // and React threw its "rendered more/fewer hooks" invariant.
+  useEffect(() => {
+    setShowDefinitionReview(false);
+    setDefinitionReview(null);
+    setDefinitionReviewLoading(false);
+    setDefinitionReviewError(null);
+  }, [run?.run_id]);
 
   if (!run) {
     return (
@@ -104,17 +122,9 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
   const terminal = isTerminalRunState(run.status);
   const active =
     run.steps.find((step) => step.id === run.active_step_id) ?? null;
-  const autoApproving = busyAction === `approve-all:${run.run_id}`;
   const pendingApproval = run.pending_approval;
   const pendingManual = run.pending_manual;
   const pendingOperator = run.pending_operator;
-
-  useEffect(() => {
-    setShowDefinitionReview(false);
-    setDefinitionReview(null);
-    setDefinitionReviewLoading(false);
-    setDefinitionReviewError(null);
-  }, [run.run_id]);
 
   const openReport = async () => {
     if (report?.run_id !== run.run_id) await loadReport(run.run_id);
@@ -303,22 +313,21 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
             <RunbookApprovalCard
               approval={pendingApproval}
               targetLabel={describeRunbookTarget(run.target)}
-              busy={busyAction !== null}
+              busy={busyAction === `approval:${pendingApproval.approval_id}`}
               autoApproving={autoApproving}
-              onApproveAll={() => {
-                ignoreAsync(approveAllPendingSteps(run.run_id));
+              onApproveAll={(command) => {
+                ignoreAsync(approveAllPendingSteps(run.run_id, command));
               }}
               onCancelApproveAll={() => {
                 cancelApproveAll(run.run_id);
               }}
-              onRespond={(approved, command, shellAttested) => {
+              onRespond={(approved, command) => {
                 ignoreAsync(
                   respondApproval(
                     run.run_id,
                     pendingApproval.approval_id,
                     approved,
                     command,
-                    shellAttested,
                   ),
                 );
               }}

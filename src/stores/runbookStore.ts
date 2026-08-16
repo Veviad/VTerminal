@@ -21,6 +21,12 @@ export interface RunbookStoreState {
   /** Durable live-run registry. `activeRun` is only the run selected in the UI. */
   runsById: Record<string, RunbookRun>;
   activeRun: RunbookRun | null;
+  /** Runs whose remaining approvals the operator pre-authorized. Per run,
+   *  frontend-only, never persisted and never inherited by another run — the
+   *  same stance as `aiStreams[id].permissionMode` in appStore. Deliberately
+   *  NOT the agent's permission mode: `RunbookApprovalState` is kept separate
+   *  in Rust so agent `Auto all` can never settle a runbook gate. */
+  autoApproveRuns: Record<string, RunbookAutoApproveState>;
   history: RunbookHistoryEntry[];
   selectedHistoryRunId: string | null;
   report: RunbookReport | null;
@@ -49,6 +55,8 @@ export interface RunbookStoreState {
   setReport(report: RunbookReport | null): void;
   dispatchEvent(event: RunbookEvent): void;
   setLoading(key: LoadingKey, loading: boolean): void;
+  setAutoApprove(runId: string, on: boolean): void;
+  noteAutoApproved(runId: string, approvalId: string): void;
   setBusyAction(action: string | null): void;
   setError(error: string | null): void;
   setNotice(notice: string | null): void;
@@ -65,6 +73,12 @@ interface RunbookStoreData {
   definition: RunbookDefinition | null;
   runsById: Record<string, RunbookRun>;
   activeRun: RunbookRun | null;
+  /** Runs whose remaining approvals the operator pre-authorized. Per run,
+   *  frontend-only, never persisted and never inherited by another run — the
+   *  same stance as `aiStreams[id].permissionMode` in appStore. Deliberately
+   *  NOT the agent's permission mode: `RunbookApprovalState` is kept separate
+   *  in Rust so agent `Auto all` can never settle a runbook gate. */
+  autoApproveRuns: Record<string, RunbookAutoApproveState>;
   history: RunbookHistoryEntry[];
   selectedHistoryRunId: string | null;
   report: RunbookReport | null;
@@ -78,6 +92,13 @@ interface RunbookStoreData {
   notice: string | null;
 }
 
+/** Live state of run-level auto-approve. Its presence IS the armed flag; the
+ *  ids are the approvals it has already granted, so a replayed
+ *  `ApprovalRequested` cannot be answered twice. */
+export interface RunbookAutoApproveState {
+  grantedApprovalIds: string[];
+}
+
 const emptyState = (): RunbookStoreData => ({
   workspaceOpen: false,
   view: "library",
@@ -86,6 +107,7 @@ const emptyState = (): RunbookStoreData => ({
   definition: null,
   runsById: {},
   activeRun: null,
+  autoApproveRuns: {},
   history: [],
   selectedHistoryRunId: null,
   report: null,
@@ -266,6 +288,35 @@ export const useRunbookStore = create<RunbookStoreState>((set) => ({
     };
     set({ [field[key]]: loading } as Partial<RunbookStoreState>);
   },
+  setAutoApprove: (runId, on) =>
+    set((state) => {
+      if (!on) {
+        if (!(runId in state.autoApproveRuns)) return {};
+        const next = { ...state.autoApproveRuns };
+        delete next[runId];
+        return { autoApproveRuns: next };
+      }
+      if (state.autoApproveRuns[runId]) return {};
+      return {
+        autoApproveRuns: {
+          ...state.autoApproveRuns,
+          [runId]: { grantedApprovalIds: [] },
+        },
+      };
+    }),
+  noteAutoApproved: (runId, approvalId) =>
+    set((state) => {
+      const current = state.autoApproveRuns[runId];
+      if (!current || current.grantedApprovalIds.includes(approvalId)) return {};
+      return {
+        autoApproveRuns: {
+          ...state.autoApproveRuns,
+          [runId]: {
+            grantedApprovalIds: [...current.grantedApprovalIds, approvalId],
+          },
+        },
+      };
+    }),
   setBusyAction: (busyAction) => set({ busyAction }),
   setError: (error) => set({ error }),
   setNotice: (notice) => set({ notice }),
