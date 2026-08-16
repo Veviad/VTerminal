@@ -5,9 +5,6 @@ import { describeRemote } from "./nesting";
 import type { Session } from "./types";
 import type { SessionUiState } from "../stores/appStore";
 
-/** macOS-only app, so the home prefix is a constant rather than an env lookup. */
-const HOME_PREFIX = "/Users/";
-
 /** Runners whose first word says nothing on its own — `npm`, `git` and friends
  *  need their subcommand to be a useful tab label. */
 const RUNNERS = new Set([
@@ -35,10 +32,11 @@ const MAX_COMMAND_LABEL = 20;
 /** `/Users/me/src/app` → `~/src/app`, `/Users/me` → `~`. Shared with the status
  *  bar so the two surfaces can never disagree about what home looks like. */
 export function collapseHome(path: string): string {
-  if (!path.startsWith(HOME_PREFIX)) return path;
-  const rest = path.slice(HOME_PREFIX.length);
-  const slash = rest.indexOf("/");
-  return slash === -1 ? "~" : `~${rest.slice(slash)}`;
+  // WSL reports Linux paths over OSC 7, while macOS reports /Users paths.
+  // Browser code cannot query either home directory, so collapse their stable
+  // shapes without persisting or exposing the username.
+  const match = /^\/(?:Users|home)\/[^/]+(\/.*)?$/.exec(path);
+  return match ? `~${match[1] ?? ""}` : path;
 }
 
 /** The directory component of a tab label: `~` at home, else the leaf. */

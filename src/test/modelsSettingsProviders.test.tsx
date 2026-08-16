@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { CatalogEntry } from "../lib/types";
 import { S } from "../lib/strings";
 
@@ -90,6 +90,27 @@ describe("ModelsSettings provider sections", () => {
     expect(screen.getByText("OpenAI")).toBeTruthy();
     expect(screen.getByText("Anthropic")).toBeTruthy();
     expect(screen.getByText("Mistral")).toBeTruthy();
+  });
+
+  it("shows chat accelerator device memory and fallback state", async () => {
+    render(<ModelsSettings />);
+    await screen.findByText("GPT-5.6 Terra");
+
+    act(() => {
+      useAppStore.setState({
+        modelState: "ready",
+        localAcceleration: {
+          backend: "vulkan",
+          device_name: "Radeon 780M",
+          device_memory_bytes: 8_000_000_000,
+          fallback_reason: null,
+        },
+      });
+    });
+
+    expect(
+      screen.getByText("Chat inference: VULKAN · Radeon 780M · 8.0 GB device memory"),
+    ).toBeInTheDocument();
   });
 
   it("gives OpenAI a reachable API-key field", async () => {

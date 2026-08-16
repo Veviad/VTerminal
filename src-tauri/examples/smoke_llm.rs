@@ -31,9 +31,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let messages = vec![
         ChatMessage::system(vterminal_lib::agent::prompts::SUGGEST),
-        ChatMessage::user(
-            "OS: macOS\nShell: /bin/zsh\nWorking directory: /Users/test\nRequest: list all files larger than 100MB in my home directory",
-        ),
+        ChatMessage::user(if cfg!(target_os = "windows") {
+            "OS: Windows 11\nShell: /bin/bash in WSL2\nWorking directory: /home/test\nRequest: list all files larger than 100MB in my home directory"
+        } else {
+            "OS: macOS\nShell: /bin/zsh\nWorking directory: /Users/test\nRequest: list all files larger than 100MB in my home directory"
+        }),
     ];
     let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
     let (tx, mut rx) = tokio::sync::mpsc::channel::<ProviderEvent>(64);

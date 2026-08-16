@@ -20,6 +20,7 @@ import { S } from "../lib/strings";
 import { autoRuns } from "../lib/permissionMode";
 import type { AiMessage, Block, StreamEvent, TerminalContext } from "../lib/types";
 import { normalizeKnowledgeBucketRef } from "../lib/knowledge";
+import { defaultShell, localOsLabel } from "../lib/platform";
 
 let requestCounter = 1;
 
@@ -71,9 +72,9 @@ export function buildTerminalContext(sessionId: string): TerminalContext {
     return {
       session_id: sessionId,
       cwd: null,
-      shell: session?.shell ?? "/bin/zsh",
+      shell: session?.shell ?? defaultShell(),
       git_branch: null,
-      os: "macOS",
+      os: localOsLabel(),
       recent_blocks: [],
       remote: null,
       screen_tail: "",
@@ -86,9 +87,9 @@ export function buildTerminalContext(sessionId: string): TerminalContext {
     // remote cwd is unknown. Sending the stale local path is worse than null:
     // the model would reason confidently about the wrong filesystem.
     cwd: remote ? null : (ui?.cwd ?? null),
-    shell: session?.shell ?? "/bin/zsh",
+    shell: session?.shell ?? defaultShell(),
     git_branch: remote ? null : (ui?.gitBranch ?? null),
-    os: remote ? "unknown (remote host)" : "macOS",
+    os: remote ? "unknown (remote host)" : localOsLabel(),
     recent_blocks: recentBlocks,
     remote,
     screen_tail: readScreenTail(sessionId),

@@ -1,14 +1,14 @@
 # VTerminal
 
-A lean, AI-powered terminal for macOS — Warp-style command blocks and an AI agent, without the bulk. Local models run **in-process** with Metal acceleration: no Ollama, no vLLM, no daemon to babysit. Cloud models sit behind the same interface, so switching between on-device and frontier models is one keystroke.
+A lean, AI-powered terminal for macOS and Windows 11 — Warp-style command blocks and an AI agent, without the bulk. Local models run **in-process** with Metal on Mac or Vulkan with CPU fallback on Windows: no Ollama, no vLLM, no daemon to babysit. Cloud models sit behind the same interface.
 
-**[Download the latest release for macOS](https://vterminal.veviad.com/#download)** (Apple Silicon) · **[vterminal.veviad.com](https://vterminal.veviad.com)**
+**[Download the latest release](https://vterminal.veviad.com/#download)** (macOS Apple Silicon or Windows 11 x64) · **[vterminal.veviad.com](https://vterminal.veviad.com)**
 
-The sections below build from source. If you just want to run the app, take the download above — published macOS releases beginning with v0.2.3 include on-device inference and are Developer ID signed with hardened runtime, notarized by Apple, and stapled for normal Gatekeeper verification. No **Open Anyway** or quarantine workaround is required.
+The sections below build from source. If you just want to run the app, take the download above — release installers include on-device inference. Published macOS releases beginning with v0.2.3 are Developer ID signed with hardened runtime, notarized by Apple, and stapled for normal Gatekeeper verification. Windows releases are Authenticode signed.
 
-Upgrading from an older build? Quit VTerminal completely before replacing `/Applications/VTerminal.app`, eject any older VTerminal disk images, then launch the copy in Applications. Otherwise macOS can reopen the old running or mounted copy even though the new app was installed.
+On macOS, quit VTerminal completely before replacing `/Applications/VTerminal.app` and eject older disk images. On Windows, run the newer signed per-user installer; it upgrades the existing installation and preserves app data.
 
-![platform](https://img.shields.io/badge/macOS-Apple%20Silicon-black)
+![platform](https://img.shields.io/badge/macOS%20%7C%20Windows%2011-Apple%20Silicon%20%7C%20x64-black)
 ![stack](https://img.shields.io/badge/Tauri%202-Rust-informational)
 ![ui](https://img.shields.io/badge/React%2019-Tailwind%204-informational)
 ![license](https://img.shields.io/badge/license-GPL--3.0-blue)
@@ -21,14 +21,14 @@ Upgrading from an older build? Quit VTerminal completely before replacing `/Appl
 
 Modern AI terminals tend to be Electron apps that phone home for every completion. VTerminal takes the opposite position:
 
-- **Your shell, not a reimplementation.** A real `zsh -il` login shell over a PTY. vim, htop, tmux, and `ssh` all behave exactly as they do in Terminal.app.
+- **Your shell, not a reimplementation.** A real `zsh -il` on macOS or default-distribution WSL2 Bash on Windows over a native PTY. vim, htop, tmux, and `ssh` behave like they do in the underlying shell.
 - **On-device by default.** The default model is a 9B GGUF running inside the app process via llama.cpp. Nothing leaves the machine unless you pick a cloud model.
 - **Nothing runs without you.** Model-authored commands always pass an approval gate. Natural-language suggestions are *inserted* into your prompt, never executed.
 
 ## Features
 
 **Terminal**
-- Real `zsh` login shell via `portable-pty`, xterm.js 6 with a WebGL renderer, tabs, split search
+- Real `zsh` on macOS or default-distribution WSL2 Bash on Windows via `portable-pty`, xterm.js 6 with a WebGL renderer, tabs, split search
 - Flow-controlled output — `cat`-ing a gigabyte file won't balloon memory
 - Full TUI support, and saved SSH hosts with one-click connect
 
@@ -37,7 +37,7 @@ Modern AI terminals tend to be Electron apps that phone home for every completio
 - Restored tabs never reconnect on their own — an `ssh` tab offers *Reconnect* instead
 
 **AI**
-- **Command suggestion** (⌘I, or `#` at an empty prompt) — describe the goal, get a command inserted into your prompt
+- **Command suggestion** (⌘I on macOS, Ctrl+Shift+I on Windows, or `#` at an empty prompt) — describe the goal, get a command inserted into your prompt
 - **Explain & fix** — one click on a failed block streams a diagnosis and a corrected command
 - **Ask** — a chat panel with your blocks, output, and files as context
 - **Agent mode** — multi-step runs that propose commands, execute them in your *visible* terminal, and read the real output
@@ -48,18 +48,18 @@ Modern AI terminals tend to be Electron apps that phone home for every completio
 
 **Interface**
 - Six themes — Veviad Developer UI (default), Veviad UI, Midnight, Nord, Solarized Dark, Light — each with a matched terminal ANSI palette
-- ⌘K palette for actions, persistent command history, and model switching
+- Command palette (⌘K on macOS, Ctrl+Shift+K on Windows), persistent command history, and model switching
 - Resizable AI panel that keeps its proportion when you resize the window
 
 ## Requirements
 
 | | |
 |---|---|
-| **OS** | macOS on Apple Silicon (Intel is untested) |
+| **OS** | macOS on Apple Silicon, or Windows 11 x64 with WSL2, a default distribution, and Bash |
 | **Node** | 20 or newer |
 | **Rust** | pinned by `rust-toolchain.toml` |
-| **Xcode CLT** | `xcode-select --install` |
-| **cmake** | `brew install cmake` — **only** for the `local-llm` feature |
+| **Native tools** | macOS: Xcode CLT; Windows: Visual Studio Build Tools with MSVC and Windows SDK |
+| **cmake / Vulkan SDK** | Local inference only; Vulkan SDK is required for a Windows source build |
 
 `cmake` is required because the `local-llm` feature compiles llama.cpp from source. Terminal-only and cloud-only builds do not need it.
 
@@ -79,7 +79,7 @@ That gives you the terminal plus cloud AI. To add on-device inference:
 npm run tauri dev -- --features local-llm
 ```
 
-> The first `local-llm` build compiles llama.cpp and its Metal kernels — budget **10–30 minutes**. Incremental builds afterwards are normal speed.
+> The first `local-llm` build compiles llama.cpp and its Metal or Vulkan/CPU backends — budget **10–30 minutes**. Incremental builds afterwards are normal speed.
 
 Then open **Settings → Models**, download **Qwen3.5 9B** (~5.3 GB), and press **Load**.
 
@@ -91,14 +91,39 @@ npm run tauri build -- --features local-llm
 
 This local artifact uses whatever signing identity is configured on your Mac; it does not reproduce the Developer ID-signed and notarized GitHub release unless you supply the corresponding release signing environment.
 
+On Windows 11, first confirm `wsl.exe --status` reports WSL2 and a default
+distribution. Then build the local NSIS package (unsigned unless the Azure
+signing variables are configured):
+
+```powershell
+npm run build:windows
+```
+
+For a downloaded release, fetch the installer and `SHA256SUMS.txt` from the same
+GitHub release, then verify the installer in PowerShell before running it:
+
+```powershell
+Get-FileHash .\VTerminal_*_x64-setup.exe -Algorithm SHA256
+Get-AuthenticodeSignature .\VTerminal_*_x64-setup.exe
+```
+
+Compare the first command's hash with `SHA256SUMS.txt`; the Authenticode status
+must be `Valid`. The installer is per-user and VTerminal checks WSL2/Bash on
+first launch rather than making an administrator-level WSL change.
+
+The app launches only the fixed default-distribution WSL2/Bash backend. Native
+PowerShell, cmd, distro selection, Windows 10, ARM64, MSI, and Store packaging
+are intentionally outside this beta. See the [Windows build, troubleshooting,
+and clean-VM acceptance guide](docs/WINDOWS.md).
+
 ## Experimental updates
 
-VTerminal includes an experimental signed update chain for macOS Apple Silicon releases. Open **Settings → Updates** to check manually or opt in to automatic checks.
+VTerminal includes an experimental signed update chain for macOS Apple Silicon and Windows 11 x64 releases. Open **Settings → Updates** to check manually or opt in to automatic checks.
 
 - **Automatic updates are off by default.** Enabling them checks immediately, then every 24 hours.
 - **Stable releases and prereleases share one channel.** Manual **Check now** remains available while automatic checks are disabled.
 - **Installation is never silent.** VTerminal shows the release notes and asks before downloading, installing, and restarting; running terminal processes stop during the restart.
-- **Updater archives are cryptographically verified.** The updater signature is separate from the app's Developer ID code signature, hardened runtime, and Apple notarization ticket; published macOS releases beginning with v0.2.3 carry both protections.
+- **Updater payloads are cryptographically verified.** The updater signature is separate from macOS Developer ID/notarization and Windows Authenticode verification.
 
 ## Models
 
@@ -110,11 +135,11 @@ the model being downloaded.
 
 | Model | Notes |
 |---|---|
-| Qwen3.5 4B / 9B | 9B is the default — sized to run on a 32 GB M1 Pro |
+| Qwen3.5 4B / 9B | 9B is the default — sized to run on a 32 GB machine |
 | Qwen3.6 27B | needs a large-memory machine |
 | Gemma 4 E2B / E4B / 31B | |
 
-**Cloud** — bring your own API key; provider keys, Hugging Face tokens, and remote-server tokens are stored by the Rust backend in macOS Keychain (service `com.veviad.terminal`) and never round-trip to the UI or `settings.json`.
+**Cloud** — bring your own API key; provider keys, Hugging Face tokens, and remote-server tokens are stored by the Rust backend in macOS Keychain or Windows Credential Manager (service `com.veviad.terminal`) and never round-trip to the UI or `settings.json`.
 
 - Anthropic — Claude Haiku 4.5, Sonnet 5, Opus 5
 - OpenAI — GPT-5.6 Luna, Terra, Sol
@@ -145,9 +170,9 @@ The built-in artifacts are pinned, checksum-verified, loaded and tested by the a
 
 Qdrant receives extracted manifests, chunks, metadata and vectors, not original binaries. Read-only credentials can attach and search; wider permissions unlock document upload, replace and deletion or collection management. Upload jobs persist immediately, run automatically in the background and stay visible through Extract → Chunk → Embed → Upload, including retryable failures. TurboQuant is an advanced, opt-in sidecar for Qdrant 1.18+; bits4 is recommended, original vectors remain, and confirmed state is read back from Qdrant before the UI reports success.
 
-The signed standalone `vterminal-docs` CLI installs from the UI into `~/.local/bin` without editing shell profiles. It shares the app's saved profiles, connections, model cache, chunking and job records. It can list profiles; list/test connections; list/create/delete buckets; list/ingest/replace/delete documents; and search, with JSON output and stdin support. Text, structured text, page JSON and text-layer PDFs work headlessly; OCR-required inputs direct you to the UI.
+The signed standalone `vterminal-docs` CLI installs from the UI into `~/.local/bin` on macOS. The Windows installer places it under `%LOCALAPPDATA%\Programs\VTerminal\bin`, and the Settings action reports or repairs that managed copy. Windows setup manages only that exact user PATH entry, and uninstall removes only the managed entry. It shares the app's saved profiles, connections, model cache, chunking and job records. It can list profiles; list/test connections; list/create/delete buckets; list/ingest/replace/delete documents; and search, with JSON output and stdin support. Text, structured text, page JSON and text-layer PDFs work headlessly; OCR-required inputs direct you to the UI.
 
-Local embedding stays on the Mac. Qdrant and cloud-provider credentials stay backend-only in macOS Keychain. Before the first cloud ingestion, the UI explains that document chunks—and later search queries—will leave the device. Embedding profiles are immutable fingerprints of the exact model, revision, dimensions and query/document transforms; changing any of those creates a new profile and requires re-embedding.
+Local embedding stays on the device. Qdrant and cloud-provider credentials stay backend-only in the operating-system credential vault. Before the first cloud ingestion, the UI explains that document chunks—and later search queries—will leave the device. Embedding profiles are immutable fingerprints of the exact model, revision, dimensions and query/document transforms; changing any of those creates a new profile and requires re-embedding.
 
 ## How command execution is gated
 
@@ -164,16 +189,19 @@ When web access is disabled, VTerminal withholds the model's fetch tooling and r
 
 ## Keyboard
 
-| Key | Action |
-|---|---|
-| ⌘T / ⌘W | New / close tab |
-| ⌘1…9 | Jump to tab |
-| ⌘K | Command palette |
-| ⌘I | AI command suggestion |
-| ⌘J | Toggle AI panel |
-| ⌘F | Search terminal |
-| ⌘, | Settings |
-| ⌘= / ⌘- / ⌘0 | Font size |
+| macOS | Windows | Action |
+|---|---|---|
+| ⌘T / ⌘W | Ctrl+Shift+T / Ctrl+Shift+W | New / close tab |
+| ⌘1…9 | Ctrl+Shift+1…9 | Jump to tab |
+| ⌘K | Ctrl+Shift+K | Command palette |
+| ⌘I | Ctrl+Shift+I | AI command suggestion |
+| ⌘J | Ctrl+Shift+J | Toggle AI panel |
+| ⌘F | Ctrl+Shift+F | Search terminal |
+| ⌘, | Ctrl+Shift+, | Settings |
+| ⌘= / ⌘- / ⌘0 | Ctrl+Shift+= / - / 0 | Font size |
+
+Terminal copy and paste on Windows are `Ctrl+Shift+C` / `Ctrl+Shift+V`; plain
+`Ctrl+C` remains the shell interrupt.
 
 ## Architecture
 
@@ -182,7 +210,7 @@ When web access is disabled, VTerminal withholds the model's fetch tooling and r
 - A single `Provider` trait covering in-process llama.cpp (feature `local-llm`), Anthropic, OpenAI, Mistral, and any user-configured OpenAI-compatible server
 - A curated model catalog carrying each model's tier, legal reasoning-effort rungs, and RAM floor
 - Prompts rendered from each GGUF's own Jinja chat template, so native tool-calling and thinking modes work per model family
-- Backend-only credentials in macOS Keychain; settings store contains presence flags, not secret values
+- Backend-only credentials in macOS Keychain or Windows Credential Manager; settings store contains presence flags, not secret values
 - SQLite (WAL, versioned migrations) for history, transcripts, local knowledge metadata, canonical vectors and rebuildable sqlite-vec indexes
 - One asynchronous Knowledge service for hybrid local retrieval, profile-aware Qdrant search, persistent ingestion jobs and deterministic rank fusion
 

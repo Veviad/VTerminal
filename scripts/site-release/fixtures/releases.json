@@ -28,6 +28,8 @@
         { "name": "VTerminal_0.3.0-beta.2_aarch64.dmg", "browser_download_url": "https://github.com/Veviad/VTerminal/releases/download/v0.3.0-beta.2/VTerminal_0.3.0-beta.2_aarch64.dmg", "size": 12750000, "download_count": 4, "state": "uploaded" },
         { "name": "VTerminal.app.tar.gz", "browser_download_url": "https://github.com/Veviad/VTerminal/releases/download/v0.3.0-beta.2/VTerminal.app.tar.gz", "size": 10000000, "download_count": 3, "state": "uploaded" },
         { "name": "VTerminal.app.tar.gz.sig", "browser_download_url": "https://github.com/Veviad/VTerminal/releases/download/v0.3.0-beta.2/VTerminal.app.tar.gz.sig", "size": 344, "download_count": 91, "state": "uploaded" },
+        { "name": "VTerminal_0.3.0-beta.2_x64-setup.exe", "browser_download_url": "https://github.com/Veviad/VTerminal/releases/download/v0.3.0-beta.2/VTerminal_0.3.0-beta.2_x64-setup.exe", "size": 18750000, "download_count": 0, "state": "uploaded" },
+        { "name": "VTerminal_0.3.0-beta.2_x64-setup.exe.sig", "browser_download_url": "https://github.com/Veviad/VTerminal/releases/download/v0.3.0-beta.2/VTerminal_0.3.0-beta.2_x64-setup.exe.sig", "size": 344, "download_count": 0, "state": "uploaded" },
         { "name": "latest.json", "browser_download_url": "https://github.com/Veviad/VTerminal/releases/download/v0.3.0-beta.2/latest.json", "size": 800, "download_count": 92, "state": "uploaded" },
         { "name": "SHA256SUMS.txt", "browser_download_url": "https://github.com/Veviad/VTerminal/releases/download/v0.3.0-beta.2/SHA256SUMS.txt", "size": 200, "download_count": 93, "state": "uploaded" }
       ]

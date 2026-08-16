@@ -8,6 +8,7 @@ import { ModelRow } from "./ModelRow";
 import { RemoteServersSection } from "./RemoteServersSection";
 import { VisionSection } from "./VisionSection";
 import { S } from "../../lib/strings";
+import { AccelerationStatus } from "./AccelerationStatus";
 
 /** Order providers so the on-device options lead — that is the default path.
  *  Typed to the BUILT-IN providers only: a remote server is grouped by server,
@@ -42,6 +43,7 @@ export function ModelsSettings() {
     <div className="space-y-8">
       <CredentialStoreBanner />
       <LoadErrorBanner />
+      <AccelerationBanner />
       {PROVIDER_ORDER.map((provider) => {
         const entries = catalog.filter((m) => m.provider === provider);
         if (entries.length === 0) return null;
@@ -60,6 +62,13 @@ export function ModelsSettings() {
       <RemoteServersSection />
     </div>
   );
+}
+
+function AccelerationBanner() {
+  const acceleration = useAppStore((s) => s.localAcceleration);
+  const modelState = useAppStore((s) => s.modelState);
+  if (!acceleration || modelState !== "ready") return null;
+  return <AccelerationStatus label="Chat inference" acceleration={acceleration} />;
 }
 
 /// Only affects on-device downloads, so it lives in that section rather than
@@ -103,7 +112,7 @@ export function CredentialStoreBanner() {
   if (status === "ready") return null;
   return (
     <p className="rounded-lg bg-error-subtle px-3 py-2 text-[11px] leading-relaxed text-error">
-      macOS Keychain is unavailable. Credential use is blocked until Keychain access is restored.
+      The operating-system credential vault is unavailable. Credential use is blocked until access is restored.
     </p>
   );
 }

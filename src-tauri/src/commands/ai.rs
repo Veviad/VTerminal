@@ -688,7 +688,7 @@ pub async fn agent_start(
 
     let shell = crate::commands::settings::read_string(&app, "shell_path")
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "/bin/zsh".into());
+        .unwrap_or_else(|| crate::commands::settings::default_shell().into());
 
     // THE agent-facing half of the experimental gate, and the only one that matters:
     // an empty list means `tools()` never adds `search_docs`, so the capability is

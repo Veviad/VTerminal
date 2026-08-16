@@ -13,6 +13,9 @@ dist-ssr
 # Cargo.lock IS committed: VTerminal is an application, not a library.
 src-tauri/target
 src-tauri/gen/schemas
+src-tauri/binaries/vterminal-docs-x86_64-pc-windows-msvc.exe
+src-tauri/binaries/llama-backends/*.dll
+src-tauri/binaries/llama-runtime/*.dll
 
 # Release bundles, in case a build is ever pointed at the source tree
 *.app

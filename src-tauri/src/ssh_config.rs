@@ -208,7 +208,10 @@ pub fn scan(ssh_dir: &Path) -> Result<Vec<ParsedHost>, String> {
 /// supported and are simply not matched.
 fn expand_include(pattern: &str, ssh_dir: &Path) -> Vec<PathBuf> {
     let expanded = if let Some(rest) = pattern.strip_prefix("~/") {
-        match dirs::home_dir() {
+        // Derive home from the scanned .ssh directory. On Windows this may be
+        // a \\wsl.localhost path; using dirs::home_dir() would silently switch
+        // an Include back to the Windows host profile.
+        match ssh_dir.parent() {
             Some(home) => home.join(rest),
             None => return vec![],
         }

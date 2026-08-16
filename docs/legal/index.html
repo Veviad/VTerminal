@@ -308,7 +308,7 @@
           <div class="legal-section">
             <h3>The VTerminal application is not this website</h3>
             <p>
-              VTerminal runs on your own Mac. Its default model performs inference
+              VTerminal runs on your own Mac or Windows PC. Its default model performs inference
               locally, in the application's own process, and no terminal content,
               command or file is sent anywhere in that configuration. If you
               choose a cloud model and enter your own API key, your prompts go
@@ -319,7 +319,7 @@
             <p>
               Knowledge can index documents with an on-device embedding model,
               in which case the document text and search queries remain on your
-              Mac. If you deliberately choose OpenAI or Mistral embeddings, the
+              device. If you deliberately choose OpenAI or Mistral embeddings, the
               extracted document chunks—and later search queries—are sent
               directly to that provider after an in-app disclosure. Anthropic is
               not used for embeddings. If you connect Qdrant, VTerminal sends
@@ -331,7 +331,7 @@
             <p>
               Provider credentials, Hugging Face tokens, remote-model tokens and
               Qdrant keys are handled by the Rust backend and stored in macOS
-              Keychain. The frontend receives only presence information, not the
+              Keychain or Windows Credential Manager. The frontend receives only presence information, not the
               credential value. A keyed non-loopback connection uses HTTPS by
               default; allowing cleartext HTTP is an explicit advanced choice.
             </p>

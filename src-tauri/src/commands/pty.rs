@@ -5,9 +5,9 @@ use crate::commands::settings;
 use crate::commands::shell_integration;
 use crate::pty::{session, PtyEvent, PtyManager};
 
-/// `shell` is a per-tab override; it falls back to the `shell_path` setting and
-/// then to /bin/zsh. `cwd` is validated by `session::resolve_cwd` — a stale or
-/// deleted directory falls back to $HOME rather than failing the spawn.
+/// On macOS, `shell` is a per-tab override and cwd is host-validated. On
+/// Windows the backend is fixed to the default WSL2 distro and Bash; cwd is a
+/// Linux path passed as a separate `wsl.exe --cd` argument.
 #[tauri::command]
 pub fn pty_spawn(
     app: tauri::AppHandle<Wry>,
@@ -24,9 +24,17 @@ pub fn pty_spawn(
         .filter(|s| !s.trim().is_empty())
         .or_else(|| settings::read_string(&app, "shell_path"));
     let integration_enabled = settings::read_bool(&app, "shell_integration_enabled", true);
+    #[cfg(not(target_os = "windows"))]
     let zdotdir = if integration_enabled {
-        shell_integration::ensure_zdotdir(&app).ok()
+        Some(shell_integration::ensure_zdotdir(&app)?)
     } else {
+        None
+    };
+    #[cfg(target_os = "windows")]
+    let zdotdir = {
+        if integration_enabled {
+            shell_integration::ensure_wsl_bash_integration()?;
+        }
         None
     };
 
@@ -41,6 +49,7 @@ pub fn pty_spawn(
             cwd,
             shell_path,
             zdotdir,
+            integration_enabled,
         },
         on_data,
         on_event.clone(),

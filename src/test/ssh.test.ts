@@ -3,6 +3,7 @@ import {
   buildRemoteScript,
   buildSshCommand,
   describeSshTarget,
+  isWslIdentityPath,
   quotePath,
   shQuote,
   sshTarget,
@@ -245,5 +246,14 @@ describe("validateSshHost", () => {
 
   it("catches an over-long command in the form", () => {
     expect(errorsFor({ post_connect: "x".repeat(5000) })).toContain("command");
+  });
+});
+
+describe("Windows WSL identity paths", () => {
+  it("accepts Linux paths and rejects host paths or traversal", () => {
+    expect(isWslIdentityPath("~/.ssh/id_ed25519")).toBe(true);
+    expect(isWslIdentityPath("/home/casey/.ssh/work key")).toBe(true);
+    expect(isWslIdentityPath("C:\\Users\\casey\\.ssh\\id_ed25519")).toBe(false);
+    expect(isWslIdentityPath("/home/casey/../root/key")).toBe(false);
   });
 });
