@@ -16,6 +16,7 @@ import type {
   Session,
   VisionCatalogEntry,
 } from "../lib/types";
+import type { EvidenceRecordingPolicy } from "../lib/runbooks";
 import {
   normalizeKnowledgeBucketRef,
   sameKnowledgeBucket,
@@ -439,6 +440,10 @@ export interface AppState {
   docsEnabled: boolean;
   /** Experimental Runbooks capability mirror. Enforcement lives in Rust. */
   runbooksEnabled: boolean;
+  /** Retention FLOOR for runbook terminal output. Preflight may raise a single
+   *  run above it; `runbooks_start` re-clamps, so this mirror only shapes the
+   *  choices offered and never decides what is actually kept. */
+  runbooksOutputRecording: EvidenceRecordingPolicy;
   /** The bucket list, refreshed from Rust. Global rather than per-session: a bucket
    *  exists once and is attached by reference. */
   docBuckets: DocBucket[];
@@ -1216,6 +1221,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   autoUpdateEnabled: false,
   docsEnabled: false,
   runbooksEnabled: false,
+  runbooksOutputRecording: "runbook",
   docBuckets: [],
   knowledgeBuckets: [],
   docsIndexing: {},

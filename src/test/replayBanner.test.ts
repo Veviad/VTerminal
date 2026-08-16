@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { replayBanner } from "../lib/replayBanner";
+import { replayBanner, stripReplayBanners } from "../lib/replayBanner";
 
 /** The banner is ANSI-wrapped; compare on the visible text. */
 function text(banner: string): string {
@@ -90,5 +90,57 @@ describe("replayBanner", () => {
     expect(text(replayBanner({ kind: "reopened", when: "not a date" }, 80))).toContain(
       "reopened from earlier",
     );
+  });
+});
+
+describe("stripReplayBanners", () => {
+  const prompt = "maholick@CFWS-0225 ~ %\r\n";
+
+  it("removes a banner the app wrote, so it is never captured", () => {
+    const captured = `${prompt}${replayBanner({ kind: "restored", when }, 80)}${prompt}`;
+    const out = stripReplayBanners(captured);
+    expect(out).not.toContain("restored");
+    expect(out).toBe(`${prompt}\r\n${prompt}`);
+  });
+
+  it("removes EVERY stacked banner, which is the reported bug", () => {
+    // Restoring a tab without typing anything used to append one separator per
+    // restore, each stamped from a different moment — "2m ago" above "1h ago"
+    // above "just now" — reading as though the tab came back out of order.
+    let captured = prompt;
+    for (const kind of ["restored", "reopened", "restored"] as const) {
+      captured += replayBanner({ kind, when }, 80) + prompt;
+    }
+    const out = stripReplayBanners(captured);
+    expect(out).not.toMatch(/restored|reopened/);
+    expect(out.match(/CFWS-0225/g)).toHaveLength(4);
+  });
+
+  it("matches what the SERIALIZER emits, not the bytes we wrote", () => {
+    // xterm's serializer rebuilds SGR from cell attributes, so the exact
+    // `\x1b[0m\x1b[2m` prefix written by replayBanner does not come back. A
+    // strip keyed on those bytes would silently stop working.
+    const reserialized =
+      "\x1b[0;2m\x1b[2m──────────\x1b[m\x1b[2m restored 3h ago · new shell \x1b[m\x1b[2m──────────\x1b[0m\r\n";
+    expect(stripReplayBanners(reserialized)).toBe("");
+  });
+
+  it("keeps the operator's own rule-drawn output", () => {
+    // A ─-ruled heading is ordinary output and losing it would be data loss, so
+    // both the rule shape AND one of the two leads are required to match.
+    const mine = "────── my own section ──────\r\n";
+    const restarted = 'echo "restored the service"\r\n';
+    const kept = `${mine}${restarted}`;
+    expect(stripReplayBanners(kept)).toBe(kept);
+  });
+
+  it("leaves payloads with no banner untouched and cheap", () => {
+    const plain = `${prompt}total 0\r\n`;
+    expect(stripReplayBanners(plain)).toBe(plain);
+  });
+
+  it("survives a banner truncated at a narrow width", () => {
+    const narrow = replayBanner({ kind: "restored", when }, 20);
+    expect(stripReplayBanners(`${prompt}${narrow}`)).toBe(`${prompt}\r\n`);
   });
 });

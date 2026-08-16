@@ -12,6 +12,8 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
+use super::state::EvidenceCaptureMode;
+
 pub const API_VERSION: &str = "runbooks.veviad.com/v1alpha1";
 pub const KIND: &str = "Runbook";
 pub const MAX_DEFINITION_BYTES: usize = 1024 * 1024;
@@ -20,6 +22,11 @@ pub const MAX_MARKDOWN_CHARS: usize = 16_384;
 pub const MAX_INPUT_STRING_CHARS: usize = 4_096;
 pub const MAX_STEPS: usize = 256;
 pub const RUNBOOK_ENV_PREFIX: &str = "VRUN_";
+/// Bounded because every probe is an approval-gated command in the operator's
+/// own terminal, and because they all render into one model prompt.
+pub const MAX_GOAL_CHECKS: usize = 8;
+pub const MAX_DISCOVERY_PROBES: usize = 6;
+pub const MAX_CONTEXT_INPUTS: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -55,7 +62,31 @@ pub struct Spec {
     pub declared_capabilities: DeclaredCapabilities,
     #[serde(default)]
     pub defaults: Defaults,
+    /// Absent unless the package asks for a specific retention level. It MUST
+    /// stay `skip_serializing_if`: canonical JSON is hashed into every source
+    /// registration and every persisted run, and an always-emitted `"audit":
+    /// null` would change `canonical_sha256` for every definition that already
+    /// exists — which `verify_snapshot_bytes` treats as a corrupt run rather
+    /// than a stale one, and no refresh can repair that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit: Option<AuditSettings>,
+    /// Target facts gathered once, before the first step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<SpecContext>,
     pub steps: Vec<Step>,
+}
+
+/// What a package asks the operator to keep as an audit record.
+///
+/// This is a request, never a grant. The operator's Settings → Runbooks policy
+/// supplies the floor, and a package that asks for less than the floor gets the
+/// floor anyway — see `EvidenceRecordingPolicy::floor`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_output: Option<EvidenceCaptureMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -133,14 +164,130 @@ pub enum Privilege {
 pub struct Defaults {
     #[serde(default)]
     pub on_failure: FailurePolicy,
+    /// Applied to every step that declares none of its own. A step's block
+    /// replaces this wholesale rather than merging field by field, so one
+    /// glance at a step tells you its bounds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constraints: Option<Constraints>,
 }
 
 impl Default for Defaults {
     fn default() -> Self {
         Self {
             on_failure: FailurePolicy::Pause,
+            constraints: None,
         }
     }
+}
+
+/// What a step must achieve, and how the ENGINE decides it did.
+///
+/// Without this an agent phase's only input is prose, and the only thing that
+/// decides whether the goal was reached is the model's own `phase_complete`.
+/// `checks` are ordinary shell probes the engine runs and grades itself, so the
+/// model's summary becomes narration rather than the verdict.
+///
+/// They are not a stronger executor: like every other visible-terminal command
+/// they are `shell_observed`, not attested. What changes is who decides.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct Goal {
+    /// Prose for the model: what "done" means, in the author's words.
+    pub intent: String,
+    /// Deterministic probes. The goal is met only if every one of them exits
+    /// with a code it declares.
+    pub checks: Vec<GoalCheck>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalCheck {
+    pub command: String,
+    /// Same `VRUN_<NAME>` → input-id mapping a shell action uses; values are
+    /// never interpolated into the command text.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    /// Exit codes that mean this probe passed.
+    pub expect: Vec<i32>,
+}
+
+/// Per-step bounds on what an agent phase may do.
+///
+/// Every field NARROWS. `spec.declaredCapabilities` is preflight disclosure the
+/// engine never reads; these are enforced in `run_command` before an approval
+/// card is drawn, so a refusal costs the model a round instead of costing the
+/// operator a click on something that cannot run.
+///
+/// The command scans are best-effort in exactly the way the agent panel's are:
+/// they cannot see through a script the model wrote in an earlier step, a shell
+/// alias, or `python -c`. They are not a sandbox and must never be sold as one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct Constraints {
+    /// Proposals this phase may make, refusals included. Exhausting it pauses
+    /// the step for the operator rather than failing the run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_commands: Option<u32>,
+    /// Wall clock for the whole phase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_seconds: Option<u32>,
+    /// Model rounds. May only LOWER the operator's `agent_max_iterations`
+    /// setting — a definition cannot raise someone else's limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_rounds: Option<u32>,
+    /// `false` refuses a proposal that looks networked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<bool>,
+    /// `none` refuses a proposal that escalates privilege.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privilege: Option<Privilege>,
+}
+
+/// What a step's agent phase is allowed to know.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct StepContext {
+    /// Input ids whose resolved VALUES are rendered into the prompt. An
+    /// explicit list, mirroring a shell action's `env`: nothing about a run
+    /// reaches the model implicitly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<String>,
+    /// Include earlier steps' ids, statuses and bounded summaries.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub prior_steps: bool,
+}
+
+/// Facts gathered about the target once per run, before the first step.
+///
+/// This is what makes a distribution-agnostic runbook possible: the model can
+/// read `/etc/os-release` and which package manager exists instead of guessing
+/// between `ufw` and `firewalld`. Probes are ordinary approval-gated commands —
+/// there is no exemption for a read-only one.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct SpecContext {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub discover: Vec<DiscoveryProbe>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryProbe {
+    /// Label the output is filed under in the prompt.
+    pub name: String,
+    pub command: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -160,11 +307,24 @@ pub struct Step {
     pub title: String,
     #[serde(default = "default_required")]
     pub required: bool,
-    pub check: CheckAction,
+    /// Absent when `goal.checks` supplies the check phase instead. Every new
+    /// field here MUST keep `skip_serializing_if`: canonical JSON is hashed
+    /// into every registration and every persisted run, and a field that
+    /// serializes when unset changes `canonical_sha256` for definitions that
+    /// already exist — which `verify_snapshot_bytes` reads as corruption
+    /// rather than staleness, and no refresh repairs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<CheckAction>,
     #[serde(default)]
     pub apply: Option<ApplyAction>,
     #[serde(default)]
     pub verify: Option<VerifyAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<Goal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constraints: Option<Constraints>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<StepContext>,
     #[serde(default)]
     pub on_failure: Option<FailurePolicy>,
 }
@@ -337,18 +497,35 @@ impl VerifyAction {
 impl RunbookDefinition {
     pub fn uses_unavailable_executor(&self) -> bool {
         self.spec.steps.iter().any(|step| {
-            step.check.availability() == ExecutorAvailability::FollowOnAdapter
-                || step.apply.as_ref().is_some_and(|action| {
-                    action.availability() == ExecutorAvailability::FollowOnAdapter
-                })
-                || step.verify.as_ref().is_some_and(|action| {
-                    action.availability() == ExecutorAvailability::FollowOnAdapter
-                })
+            step.check.as_ref().is_some_and(|action| {
+                action.availability() == ExecutorAvailability::FollowOnAdapter
+            }) || step.apply.as_ref().is_some_and(|action| {
+                action.availability() == ExecutorAvailability::FollowOnAdapter
+            }) || step.verify.as_ref().is_some_and(|action| {
+                action.availability() == ExecutorAvailability::FollowOnAdapter
+            })
         })
     }
 
     pub fn effective_failure_policy(&self, step: &Step) -> FailurePolicy {
         step.on_failure.unwrap_or(self.spec.defaults.on_failure)
+    }
+
+    /// The retention this package asks for, if any. The operator's policy still
+    /// decides the floor; this only ever raises a run above `tail`.
+    pub fn declared_record_output(&self) -> Option<EvidenceCaptureMode> {
+        self.spec.audit.and_then(|audit| audit.record_output)
+    }
+
+    /// Whether any phase hands work to the model. Discovery exists only to fill
+    /// an agent prompt, so a definition without one should not spend the
+    /// operator's approvals gathering facts nothing will read.
+    pub fn uses_agent_action(&self) -> bool {
+        self.spec.steps.iter().any(|step| {
+            matches!(step.check, Some(CheckAction::Agent { .. }))
+                || matches!(step.apply, Some(ApplyAction::Agent { .. }))
+                || matches!(step.verify, Some(VerifyAction::Agent { .. }))
+        })
     }
 
     /// Resolve provided values over definition defaults and validate the exact data
@@ -470,14 +647,28 @@ impl RunbookDefinition {
             }
             validate_single_line_text(&step.title, &format!("{path}.title"), 160, &mut errors);
 
-            validate_check(&step.check, &format!("{path}.check"), self, &mut errors);
+            if let Some(goal) = &step.goal {
+                validate_goal(goal, &format!("{path}.goal"), self, &mut errors);
+            }
+            if let Some(check) = &step.check {
+                validate_check(check, &format!("{path}.check"), self, &mut errors);
+            } else if step.goal.is_none() {
+                error(
+                    &mut errors,
+                    format!("{path}.check"),
+                    "is required unless the step declares goal.checks",
+                );
+            }
             if let Some(apply) = &step.apply {
                 validate_apply(apply, &format!("{path}.apply"), self, &mut errors);
-                if step.verify.is_none() {
+                // A goal supplies the verify phase, so an apply paired with one
+                // needs no separate `verify:` block. The rule itself is
+                // unchanged: an apply is never complete without verification.
+                if step.verify.is_none() && step.goal.is_none() {
                     error(
                         &mut errors,
                         format!("{path}.verify"),
-                        "is required when apply is present",
+                        "is required when apply is present, unless the step declares goal.checks",
                     );
                 }
             } else if step.verify.is_some() {
@@ -490,6 +681,19 @@ impl RunbookDefinition {
             if let Some(verify) = &step.verify {
                 validate_verify(verify, &format!("{path}.verify"), self, &mut errors);
             }
+            if let Some(constraints) = &step.constraints {
+                validate_constraints(constraints, &format!("{path}.constraints"), &mut errors);
+            }
+            if let Some(context) = &step.context {
+                validate_step_context(context, &format!("{path}.context"), self, &mut errors);
+            }
+        }
+
+        if let Some(defaults) = &self.spec.defaults.constraints {
+            validate_constraints(defaults, "spec.defaults.constraints", &mut errors);
+        }
+        if let Some(context) = &self.spec.context {
+            validate_spec_context(context, "spec.context", self, &mut errors);
         }
 
         if errors.is_empty() {
@@ -784,28 +988,47 @@ fn validate_shell(
     definition: &RunbookDefinition,
     errors: &mut Vec<ValidationError>,
 ) {
-    let field = format!("{path}.with.command");
-    if action.command.trim().is_empty() {
+    validate_shell_command(
+        &action.command,
+        &action.env,
+        &format!("{path}.with"),
+        definition,
+        errors,
+    );
+}
+
+/// The single-line command rules, shared by shell actions, goal checks and
+/// discovery probes. `field_root` is where the caller's YAML actually puts
+/// `command`/`env`, so an error path always names a key the author can find.
+fn validate_shell_command(
+    command: &str,
+    env: &BTreeMap<String, String>,
+    field_root: &str,
+    definition: &RunbookDefinition,
+    errors: &mut Vec<ValidationError>,
+) {
+    let field = format!("{field_root}.command");
+    if command.trim().is_empty() {
         error(errors, &field, "must not be empty");
     }
-    if action.command.chars().count() > MAX_SHELL_COMMAND_CHARS {
+    if command.chars().count() > MAX_SHELL_COMMAND_CHARS {
         error(
             errors,
             &field,
             format!("must be {MAX_SHELL_COMMAND_CHARS} characters or fewer"),
         );
     }
-    if action.command.contains('\n') || action.command.contains('\r') {
+    if command.contains('\n') || command.contains('\r') {
         error(errors, &field, "must contain exactly one line");
     }
-    if action.command.chars().any(is_unsafe_single_line_character) {
+    if command.chars().any(is_unsafe_single_line_character) {
         error(
             errors,
             &field,
             "must not contain control, bidi, zero-width or other format characters",
         );
     }
-    if action.command.contains("<<") {
+    if command.contains("<<") {
         error(
             errors,
             &field,
@@ -813,8 +1036,8 @@ fn validate_shell(
         );
     }
 
-    for (name, input_id) in &action.env {
-        let env_path = format!("{path}.with.env.{name}");
+    for (name, input_id) in env {
+        let env_path = format!("{field_root}.env.{name}");
         if !is_valid_env_name(name) {
             error(errors, &env_path, "must be a valid POSIX environment name");
         } else if !name.starts_with(RUNBOOK_ENV_PREFIX) || name.len() == RUNBOOK_ENV_PREFIX.len() {
@@ -831,6 +1054,109 @@ fn validate_shell(
                 format!("references unknown input {input_id:?}"),
             );
         }
+    }
+}
+
+fn validate_goal(
+    goal: &Goal,
+    path: &str,
+    definition: &RunbookDefinition,
+    errors: &mut Vec<ValidationError>,
+) {
+    validate_markdown_required(&goal.intent, &format!("{path}.intent"), errors);
+    if goal.checks.is_empty() {
+        error(
+            errors,
+            format!("{path}.checks"),
+            "must contain at least one check; a goal with nothing to verify is prose",
+        );
+    } else if goal.checks.len() > MAX_GOAL_CHECKS {
+        error(
+            errors,
+            format!("{path}.checks"),
+            format!("must contain no more than {MAX_GOAL_CHECKS} checks"),
+        );
+    }
+    for (index, check) in goal.checks.iter().enumerate() {
+        let check_path = format!("{path}.checks[{index}]");
+        validate_shell_command(&check.command, &check.env, &check_path, definition, errors);
+        validate_exit_codes(&check.expect, &format!("{check_path}.expect"), errors);
+    }
+}
+
+fn validate_constraints(constraints: &Constraints, path: &str, errors: &mut Vec<ValidationError>) {
+    for (value, field) in [
+        (constraints.max_commands, "maxCommands"),
+        (constraints.max_seconds, "maxSeconds"),
+        (constraints.max_rounds, "maxRounds"),
+    ] {
+        if value == Some(0) {
+            error(
+                errors,
+                format!("{path}.{field}"),
+                "must be at least 1; use a step without an agent action to allow nothing",
+            );
+        }
+    }
+}
+
+fn validate_step_context(
+    context: &StepContext,
+    path: &str,
+    definition: &RunbookDefinition,
+    errors: &mut Vec<ValidationError>,
+) {
+    if context.inputs.len() > MAX_CONTEXT_INPUTS {
+        error(
+            errors,
+            format!("{path}.inputs"),
+            format!("must reference no more than {MAX_CONTEXT_INPUTS} inputs"),
+        );
+    }
+    let mut seen = HashSet::new();
+    for (index, input_id) in context.inputs.iter().enumerate() {
+        let field = format!("{path}.inputs[{index}]");
+        if !definition.spec.inputs.contains_key(input_id) {
+            error(
+                errors,
+                &field,
+                format!("references unknown input {input_id:?}"),
+            );
+        }
+        if !seen.insert(input_id) {
+            error(errors, field, format!("duplicate input {input_id:?}"));
+        }
+    }
+}
+
+fn validate_spec_context(
+    context: &SpecContext,
+    path: &str,
+    definition: &RunbookDefinition,
+    errors: &mut Vec<ValidationError>,
+) {
+    if context.discover.len() > MAX_DISCOVERY_PROBES {
+        error(
+            errors,
+            format!("{path}.discover"),
+            format!("must contain no more than {MAX_DISCOVERY_PROBES} probes"),
+        );
+    }
+    let mut seen = HashSet::new();
+    for (index, probe) in context.discover.iter().enumerate() {
+        let probe_path = format!("{path}.discover[{index}]");
+        // The input-identifier rule, not the stable-ID one: a probe name is a
+        // label the prompt files output under, not a durable report key, and
+        // `os_release` should be spellable the way the file is.
+        validate_input_identifier(&probe.name, &format!("{probe_path}.name"), errors);
+        if !seen.insert(&probe.name) {
+            error(
+                errors,
+                format!("{probe_path}.name"),
+                "duplicate discovery name",
+            );
+        }
+        validate_shell_command(&probe.command, &probe.env, &probe_path, definition, errors);
     }
 }
 
@@ -1432,6 +1758,135 @@ spec:
         );
         let error = parse_and_validate(&missing_apply).unwrap_err().to_string();
         assert!(error.contains("cannot be present without apply"), "{error}");
+    }
+
+    /// A goal-directed step: no `check:` and no `verify:`, both supplied by
+    /// `goal.checks`, with an agent apply between them.
+    const GOAL: &str = r#"
+apiVersion: runbooks.veviad.com/v1alpha1
+kind: Runbook
+metadata:
+  id: linux-host-hardening
+  version: 1.0.0
+  title: Harden a Linux host
+spec:
+  target:
+    kind: active-terminal
+  inputs:
+    dockerChannel:
+      type: string
+      default: stable
+  context:
+    discover:
+      - name: os_release
+        command: "cat /etc/os-release"
+      - name: package_manager
+        command: "command -v apt-get dnf pacman zypper apk"
+  steps:
+    - id: docker-running
+      title: Docker daemon is running
+      goal:
+        intent: |
+          Docker Engine is installed from the distribution's own repository.
+        checks:
+          - command: "command -v docker"
+            expect: [0]
+          - command: "systemctl is-active --quiet docker"
+            expect: [0]
+      constraints:
+        maxCommands: 12
+        maxSeconds: 900
+        privilege: root
+      context:
+        inputs: [dockerChannel]
+        priorSteps: true
+      apply:
+        uses: agent
+        instructions: |
+          Install Docker Engine for THIS distribution.
+"#;
+
+    #[test]
+    fn a_goal_supplies_both_the_check_and_the_verify_phase() {
+        let definition = parse_and_validate(GOAL).unwrap();
+        let step = &definition.spec.steps[0];
+        assert!(step.check.is_none());
+        assert!(step.verify.is_none());
+        assert!(step.apply.is_some());
+        let goal = step.goal.as_ref().unwrap();
+        assert_eq!(goal.checks.len(), 2);
+        assert_eq!(goal.checks[0].expect, vec![0]);
+        assert_eq!(step.constraints.unwrap().privilege, Some(Privilege::Root));
+        assert_eq!(
+            step.context.as_ref().unwrap().inputs,
+            vec!["dockerChannel".to_string()]
+        );
+        assert_eq!(definition.spec.context.unwrap().discover.len(), 2);
+    }
+
+    #[test]
+    fn a_step_must_get_its_check_phase_from_somewhere() {
+        // The `apply` ⟺ `verify` rule is unchanged in substance: an apply is
+        // never complete without verification. A goal is simply another way to
+        // express it, so removing BOTH is still an error.
+        let no_source = GOAL.replace(
+            "      goal:\n        intent: |\n          Docker Engine is installed from the distribution's own repository.\n        checks:\n          - command: \"command -v docker\"\n            expect: [0]\n          - command: \"systemctl is-active --quiet docker\"\n            expect: [0]\n",
+            "",
+        );
+        let error = parse_and_validate(&no_source).unwrap_err().to_string();
+        assert!(
+            error.contains("unless the step declares goal.checks"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_goal_without_a_verifiable_condition_is_rejected() {
+        let empty = GOAL.replace(
+            "        checks:\n          - command: \"command -v docker\"\n            expect: [0]\n          - command: \"systemctl is-active --quiet docker\"\n            expect: [0]\n",
+            "        checks: []\n",
+        );
+        let error = parse_and_validate(&empty).unwrap_err().to_string();
+        assert!(error.contains("at least one check"), "{error}");
+    }
+
+    #[test]
+    fn goal_checks_are_held_to_the_same_command_rules_as_a_shell_action() {
+        for invalid in ["command -v docker <<EOF", "one\\ntwo"] {
+            let source = GOAL.replace("command -v docker", invalid);
+            assert!(parse_and_validate(&source).is_err(), "accepted {invalid:?}");
+        }
+        let out_of_range = GOAL.replace(
+            "expect: [0]\n          - command",
+            "expect: [300]\n          - command",
+        );
+        let error = parse_and_validate(&out_of_range).unwrap_err().to_string();
+        assert!(error.contains("outside 0..=255"), "{error}");
+        // An error path has to name a key the author can actually find. Goal
+        // checks have no `with:` wrapper, so the shell action's path would lie.
+        let empty_command = GOAL.replace("\"command -v docker\"", "\"\"");
+        let error = parse_and_validate(&empty_command).unwrap_err().to_string();
+        assert!(error.contains("goal.checks[0].command"), "{error}");
+    }
+
+    #[test]
+    fn goal_constraints_and_context_are_closed_and_checked() {
+        let unknown_field = GOAL.replace("        maxCommands: 12\n", "        maxTokens: 12\n");
+        assert!(parse_and_validate(&unknown_field).is_err());
+
+        let zero = GOAL.replace("maxCommands: 12", "maxCommands: 0");
+        let error = parse_and_validate(&zero).unwrap_err().to_string();
+        assert!(error.contains("must be at least 1"), "{error}");
+
+        let unknown_input = GOAL.replace("inputs: [dockerChannel]", "inputs: [notAnInput]");
+        let error = parse_and_validate(&unknown_input).unwrap_err().to_string();
+        assert!(error.contains("unknown input"), "{error}");
+
+        let duplicate_probe = GOAL.replace("name: package_manager", "name: os_release");
+        let error = parse_and_validate(&duplicate_probe)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("duplicate discovery name"), "{error}");
     }
 
     #[test]

@@ -45,11 +45,12 @@ use crate::runbooks::runtime::{
 };
 use crate::runbooks::state::{
     ApprovalDecision, ApprovalStatus, AttemptStatus, EvidenceAvailability, EvidenceCaptureMode,
-    PauseDecision, RunStatus, RunbookPhase, StepStatus, TargetBinding, VerificationAssurance,
-    Waiver,
+    EvidenceRecordingPolicy, PauseDecision, RunStatus, RunbookPhase, StepStatus, TargetBinding,
+    VerificationAssurance, Waiver,
 };
 
 const RUNBOOKS_SETTING: &str = "runbooks_enabled";
+const RECORDING_POLICY_SETTING: &str = "runbooks_output_recording";
 const MAIN_DATABASE_FILE: &str = "veviad-shell.db";
 const MAX_ID_BYTES: usize = 256;
 const MAX_TARGET_FIELD_BYTES: usize = 4_096;
@@ -704,6 +705,22 @@ pub struct RunbookExportResult {
     pub files: Vec<String>,
 }
 
+/// One recorded artifact, read back for review.
+///
+/// `available: false` is a normal answer, not an error: an artifact can be
+/// deleted, resized or altered on disk after the run, and the report already
+/// carries an availability of its own. `bytes` is what the run RECORDED, so the
+/// UI can say how much is missing rather than silently showing nothing.
+#[derive(Debug, Clone, Serialize)]
+pub struct RunbookEvidenceContent {
+    pub evidence_id: String,
+    pub available: bool,
+    pub text: String,
+    pub bytes: u64,
+    pub redacted: bool,
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RunbookEvidenceCleanup {
     pub expected: u32,
@@ -726,6 +743,30 @@ fn gate(app: &tauri::AppHandle<Wry>) -> Result<(), String> {
     } else {
         Err("runbooks are switched off — enable them in Settings → Runbooks".into())
     }
+}
+
+/// The operator's retention floor. An unreadable or unrecognised stored value
+/// falls back to the default rather than erroring: this decides how much of a
+/// run is KEPT, and refusing to start a run over a malformed preference would
+/// be a worse outcome than recording the documented default amount.
+fn recording_policy(app: &tauri::AppHandle<Wry>) -> EvidenceRecordingPolicy {
+    crate::commands::settings::read_string(app, RECORDING_POLICY_SETTING)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_default()
+}
+
+/// The capture mode a run actually gets.
+///
+/// The webview picks a mode in preflight, but the operator's policy is the
+/// floor and it is applied HERE, not in the picker: clamping only frontend-side
+/// would leave the audit level settable by a stale or modified webview, which
+/// is the same threat model `gate()` exists for. A request may only be raised.
+fn resolved_evidence_mode(
+    requested: EvidenceCaptureMode,
+    policy: EvidenceRecordingPolicy,
+    declared: Option<EvidenceCaptureMode>,
+) -> EvidenceCaptureMode {
+    requested.at_least(policy.floor(declared))
 }
 
 #[tauri::command]
@@ -894,6 +935,67 @@ pub fn runbooks_draft_validate(
     let stored = db::get_runbook_draft(&connection, &draft_id)?
         .ok_or_else(|| format!("unknown runbook draft: {draft_id}"))?;
     Ok(validate_draft_preview(&stored.draft.document))
+}
+
+/// Author a draft with the active model. Returns the document WITHOUT storing
+/// it: the frontend passes it to `runbooks_draft_create`, so a generated
+/// runbook enters the wizard by exactly the path a hand-written one does and
+/// there is no persistence, no publish and no run that is special-cased for AI.
+///
+/// Non-streaming, like `ai_name_session`: a partial JSON object is not
+/// something the operator can be shown, so there is nothing to stream. It does
+/// register with `AiState`, which is what makes `ai_cancel` work on it.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn runbooks_ai_generate(
+    app: tauri::AppHandle<Wry>,
+    ai_state: State<'_, crate::agent::AiState>,
+    request_id: String,
+    requirements: String,
+    terminal_context: Option<String>,
+) -> Result<RunbookDraftDocument, String> {
+    use crate::runbooks::authoring::{MAX_CONTEXT_CHARS, MAX_REQUIREMENTS_CHARS};
+
+    gate(&app)?;
+    // Byte budgets over the char limits the authoring module trims to: this is
+    // the IPC boundary refusing an absurd payload, not the shaping step.
+    validate_small_text(
+        &requirements,
+        "runbook requirements",
+        MAX_REQUIREMENTS_CHARS * 4,
+        true,
+    )?;
+    if let Some(context) = terminal_context.as_deref() {
+        validate_small_text(context, "terminal context", MAX_CONTEXT_CHARS * 4, false)?;
+    }
+
+    // Resolved BEFORE the await, matching `runbooks_resume`: the model must be
+    // the one selected when the operator pressed Generate.
+    let model = crate::commands::ai::active_model(&app);
+    let resolved = crate::commands::ai::resolve_provider_for_model(&app, model).await?;
+
+    let cancel = ai_state.register(&request_id);
+    let authored = crate::runbooks::authoring::author_draft(
+        resolved.provider.as_ref(),
+        &requirements,
+        terminal_context.as_deref(),
+        resolved.effort,
+        cancel,
+        // The same gate publishing uses, so a document that would be refused at
+        // save time comes back with that refusal as an editable issue instead.
+        &|document| validate_draft_preview(document).issues,
+    )
+    .await;
+    ai_state.finish(&request_id);
+
+    let authored = authored?;
+    if !authored.issues.is_empty() {
+        // Not an error: the wizard shows these against an editable document.
+        log::info!(
+            "generated runbook has {} unresolved issue(s) after one repair round",
+            authored.issues.len()
+        );
+    }
+    Ok(authored.document)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -1087,6 +1189,12 @@ pub fn runbooks_start(
         "runbook inputs",
     )?;
 
+    let evidence_mode = resolved_evidence_mode(
+        request.evidence_mode,
+        recording_policy(&app),
+        package.definition.declared_record_output(),
+    );
+
     let active_model = crate::commands::ai::active_model(&app);
     let config = engine_config(&app, active_model);
     // Fail before creating durable active state if a background connection to
@@ -1103,7 +1211,7 @@ pub fn runbooks_start(
         canonical_sha256: package.snapshot.canonical_sha256.clone(),
         target: request.target_context.clone(),
         inputs: Value::Object(resolved.clone().into_iter().collect()),
-        evidence_mode: request.evidence_mode,
+        evidence_mode,
         app_version: env!("CARGO_PKG_VERSION").into(),
         model: Some(active_model.id.into()),
         steps: package
@@ -1130,7 +1238,7 @@ pub fn runbooks_start(
         definition_snapshot: package.snapshot,
         target: request.target_context,
         inputs: resolved,
-        evidence_mode: request.evidence_mode,
+        evidence_mode,
         app_version: creation.app_version,
         model: creation.model,
         created_at: record.created_at,
@@ -1815,6 +1923,55 @@ pub fn runbooks_report(
         .ok_or_else(|| format!("report for run {run_id} is not ready"))
 }
 
+/// Read one recorded artifact back so the operator can review it in the app.
+///
+/// Until this existed a `full` run wrote redacted artifacts that nothing could
+/// open: the report showed `mode · bytes · available` and `runbooks_export`
+/// only copied files to a folder. Evidence that cannot be read is not proof.
+///
+/// The stored bytes are already redacted and capped, so this neither redacts
+/// nor truncates again — it re-verifies the recorded digest and hands back what
+/// was persisted, or reports that nothing trustworthy remains.
+#[tauri::command(rename_all = "snake_case")]
+pub fn runbooks_evidence_read(
+    app: tauri::AppHandle<Wry>,
+    db_state: State<'_, DbState>,
+    command_state: State<'_, Arc<RunbookCommandState>>,
+    run_id: String,
+    evidence_id: String,
+) -> Result<RunbookEvidenceContent, String> {
+    gate(&app)?;
+    validate_identifier(&run_id, "run id")?;
+    validate_identifier(&evidence_id, "evidence id")?;
+    let evidence = {
+        let connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
+        db::find_evidence(&connection, &run_id, &evidence_id)?
+            .ok_or_else(|| format!("evidence {evidence_id} does not belong to run {run_id}"))?
+    };
+    let Some(bytes) = db::read_complete_evidence_artifact(&command_state.app_data_dir, &evidence)?
+    else {
+        return Ok(RunbookEvidenceContent {
+            evidence_id,
+            available: false,
+            text: String::new(),
+            bytes: evidence.bytes,
+            redacted: evidence.redacted,
+            truncated: evidence.truncated,
+        });
+    };
+    Ok(RunbookEvidenceContent {
+        evidence_id,
+        available: true,
+        // Terminal output is not guaranteed valid UTF-8 and the artifact is
+        // stored verbatim, so a lossy decode is the honest read: refusing the
+        // whole artifact over one stray byte would hide the rest of the proof.
+        text: String::from_utf8_lossy(&bytes).into_owned(),
+        bytes: evidence.bytes,
+        redacted: evidence.redacted,
+        truncated: evidence.truncated,
+    })
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub fn runbooks_export(
     app: tauri::AppHandle<Wry>,
@@ -1940,7 +2097,7 @@ fn spawn_engine(
 fn runbook_requires_model_provider(definition: &RunbookDefinition, config: &EngineConfig) -> bool {
     config.summarize_with_model
         || definition.spec.steps.iter().any(|step| {
-            matches!(&step.check, CheckAction::Agent { .. })
+            matches!(&step.check, Some(CheckAction::Agent { .. }))
                 || step
                     .apply
                     .as_ref()
@@ -2273,7 +2430,9 @@ fn pending_manual_view(run: &RunRecord) -> Result<Option<PendingManualView>, Str
         step.apply.as_ref(),
         step.verify.as_ref(),
     ) {
-        (RunbookPhase::Check, CheckAction::Manual { instructions }, _, _) => Some(instructions),
+        (RunbookPhase::Check, Some(CheckAction::Manual { instructions }), _, _) => {
+            Some(instructions)
+        }
         (RunbookPhase::Apply, _, Some(ApplyAction::Manual { instructions }), _) => {
             Some(instructions)
         }
@@ -4220,6 +4379,50 @@ fn now() -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_stale_webview_cannot_record_less_than_the_operator_allows() {
+        use EvidenceCaptureMode::{Full, None as NoCapture, Tail};
+        use EvidenceRecordingPolicy as Policy;
+
+        // The preflight picker will not offer a below-floor mode, but the
+        // request arrives over IPC and is not trusted. Every downgrade attempt
+        // is silently raised rather than rejected: the operator asked for at
+        // least this much evidence, and failing the run would keep none of it.
+        for requested in [NoCapture, Tail, Full] {
+            assert_eq!(resolved_evidence_mode(requested, Policy::All, None), Full);
+            assert_eq!(
+                resolved_evidence_mode(requested, Policy::All, Some(NoCapture)),
+                Full,
+                "a package cannot opt out of an operator's record-everything policy",
+            );
+        }
+
+        // Raising a single run above the floor stays available.
+        assert_eq!(
+            resolved_evidence_mode(Full, Policy::None, None),
+            Full,
+            "`none` is off by default, not recording forbidden",
+        );
+        assert_eq!(
+            resolved_evidence_mode(NoCapture, Policy::None, None),
+            NoCapture
+        );
+
+        // `runbook` defers to the package, and to tail when it asks for nothing.
+        assert_eq!(
+            resolved_evidence_mode(NoCapture, Policy::Runbook, None),
+            Tail
+        );
+        assert_eq!(
+            resolved_evidence_mode(NoCapture, Policy::Runbook, Some(Full)),
+            Full,
+        );
+        assert_eq!(
+            resolved_evidence_mode(Full, Policy::Runbook, Some(NoCapture)),
+            Full,
+        );
+    }
+
     struct TempRoot(PathBuf);
 
     impl TempRoot {
@@ -4590,7 +4793,7 @@ spec:
             );
             assert!(package.definition.spec.steps.iter().all(|step| matches!(
                 &step.check,
-                CheckAction::Shell { .. }
+                Some(CheckAction::Shell { .. })
             ) && step.apply.is_none()
                 && step.verify.is_none()));
             assert_eq!(
@@ -4804,6 +5007,8 @@ spec:
                 compliant_exit_codes: vec![0],
                 noncompliant_exit_codes: vec![1],
             },
+            apply: None,
+            verify: None,
         });
         let preview = validate_draft_preview(&document);
         assert!(preview.issues.iter().any(|issue| issue.path == "document"));

@@ -1,0 +1,23 @@
+apiVersion: runbooks.veviad.com/v1alpha1
+kind: Runbook
+metadata:
+  id: invalid-goal-without-conditions
+  version: 1.0.0
+  title: Goal without conditions fixture
+spec:
+  target:
+    kind: active-terminal
+  steps:
+    - id: firewall-enabled
+      title: Host firewall is enabled
+      goal:
+        # A goal exists so the ENGINE can decide whether the step succeeded. An
+        # empty check list hands that decision back to the model while still
+        # looking, in the YAML, like something is being verified.
+        intent: |
+          Inbound traffic is denied by default.
+        checks: []
+      apply:
+        uses: agent
+        instructions: |
+          Enable the distribution's firewall with a default-deny inbound policy.

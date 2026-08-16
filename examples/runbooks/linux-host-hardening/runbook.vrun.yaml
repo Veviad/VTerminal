@@ -1,0 +1,173 @@
+apiVersion: runbooks.veviad.com/v1alpha1
+kind: Runbook
+
+metadata:
+  id: linux-host-hardening
+  version: 1.0.0
+  title: Linux host hardening baseline
+  description: |
+    Bring a Linux server to a baseline: a default-deny firewall, Docker Engine
+    from the distribution's own repository, and SSH that accepts neither root
+    logins nor passwords.
+
+    Each step states a **goal** and the exact conditions that prove it. The
+    model chooses the commands for *this* distribution; the engine runs the
+    conditions itself and decides whether the goal was met. Every command is
+    approved individually in the visible terminal.
+  tags: [linux, security, hardening, docker, ssh]
+
+spec:
+  target:
+    kind: active-terminal
+
+  inputs:
+    sshdConfig:
+      type: path
+      description: Absolute path to the OpenSSH server configuration.
+      default: /etc/ssh/sshd_config
+
+  declaredCapabilities:
+    network: true
+    privilege: root
+    writes: [/etc/ssh/sshd_config]
+
+  # A hardening run is the kind of change someone asks about six months later.
+  # Keep the full redacted output unless the operator's policy says otherwise;
+  # Settings → Runbooks can only raise this, never lower it.
+  audit:
+    recordOutput: full
+
+  defaults:
+    onFailure: pause
+    constraints:
+      maxCommands: 15
+      maxSeconds: 900
+
+  # Gathered once, before the first step, each with its own approval. This is
+  # what lets one runbook serve Debian, RHEL and Arch: the model reads what is
+  # actually here instead of guessing between ufw and firewalld.
+  context:
+    discover:
+      - name: os_release
+        command: "cat /etc/os-release"
+      - name: package_manager
+        command: "command -v apt-get dnf yum pacman zypper apk"
+      - name: firewall_tooling
+        command: "command -v ufw firewall-cmd nft iptables"
+      - name: init_system
+        command: "ps -p 1 -o comm="
+
+  steps:
+    - id: firewall-default-deny
+      title: Inbound traffic is denied by default
+      required: true
+      goal:
+        intent: |
+          The host has an active firewall whose default policy for inbound
+          traffic is deny, using whichever tool this distribution ships. SSH
+          must remain reachable — locking yourself out of the terminal you are
+          working in is a failure, not a hardening.
+        checks:
+          - command: "ufw status 2>/dev/null | grep -q '^Status: active' || firewall-cmd --state 2>/dev/null | grep -q '^running$' || nft list ruleset 2>/dev/null | grep -q 'policy drop'"
+            expect: [0]
+      constraints:
+        privilege: root
+      context:
+        priorSteps: true
+      apply:
+        uses: agent
+        instructions: |
+          Enable this distribution's own firewall with a default-deny inbound
+          policy, and allow SSH before enabling it.
+
+          Do not install a second firewall if one is already present. Prefer
+          the tool the distribution ships and the target already has.
+
+    - id: docker-engine-running
+      title: Docker Engine is installed and running
+      required: true
+      goal:
+        intent: |
+          Docker Engine is installed from the distribution's own repository and
+          its daemon is running and enabled at boot. A convenience script piped
+          from the internet is not an acceptable installation path here.
+        checks:
+          - command: "command -v docker"
+            expect: [0]
+          - command: "docker info >/dev/null 2>&1"
+            expect: [0]
+      constraints:
+        privilege: root
+      context:
+        inputs: []
+        priorSteps: true
+      apply:
+        uses: agent
+        instructions: |
+          Install Docker Engine using this distribution's package manager and
+          its official repository for this distribution, then make sure the
+          daemon is running and enabled at boot.
+
+          Add no third-party repository beyond Docker's own. If the target
+          already has a working Docker, change nothing.
+
+    - id: ssh-root-login-disabled
+      title: Direct root SSH login is disabled
+      required: true
+      goal:
+        intent: |
+          The running OpenSSH configuration refuses direct root login. Another
+          account must already be able to administer the host, or disabling
+          root leaves nobody who can.
+        checks:
+          - command: "sshd -T -f \"$VRUN_SSHD_CONFIG\" 2>/dev/null | grep -q '^permitrootlogin no$'"
+            env:
+              VRUN_SSHD_CONFIG: sshdConfig
+            expect: [0]
+      constraints:
+        # Nothing about editing a local config file needs the network, and a
+        # step that cannot reach out cannot fetch a configuration from one.
+        network: false
+        privilege: root
+        maxCommands: 8
+      context:
+        inputs: [sshdConfig]
+        priorSteps: true
+      apply:
+        uses: agent
+        instructions: |
+          Make the smallest change that disables direct root SSH login at the
+          path given in the step's inputs.
+
+          Keep a recoverable backup, validate the configuration before
+          reloading, and confirm a working non-root administrative path exists
+          first.
+
+    - id: ssh-password-authentication-disabled
+      title: SSH password authentication is disabled
+      required: true
+      goal:
+        intent: |
+          The running OpenSSH configuration accepts keys only. A working
+          key-based login must already exist for an administrator, or this
+          locks everyone out.
+        checks:
+          - command: "sshd -T -f \"$VRUN_SSHD_CONFIG\" 2>/dev/null | grep -q '^passwordauthentication no$'"
+            env:
+              VRUN_SSHD_CONFIG: sshdConfig
+            expect: [0]
+      constraints:
+        network: false
+        privilege: root
+        maxCommands: 8
+      context:
+        inputs: [sshdConfig]
+        priorSteps: true
+      apply:
+        uses: agent
+        instructions: |
+          Disable SSH password authentication with the smallest safe change.
+
+          Confirm that at least one administrative account has a working
+          authorized key before proposing the change, validate the
+          configuration, then reload.

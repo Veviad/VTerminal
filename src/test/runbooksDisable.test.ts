@@ -70,6 +70,7 @@ function settings(runbooksEnabled: boolean, overrides: Partial<Settings> = {}): 
     auto_update_enabled: false,
     docs_enabled: false,
     runbooks_enabled: runbooksEnabled,
+    runbooks_output_recording: "runbook",
     log_level: "info",
     ...overrides,
   };

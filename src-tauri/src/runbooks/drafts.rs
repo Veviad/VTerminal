@@ -1,13 +1,19 @@
-//! Typed, resumable authoring documents for the assessment-only Runbook wizard.
+//! Typed, resumable authoring documents for the Runbook wizard.
+//!
+//! This is a deliberately NARROWER shape than [`RunbookDefinition`]: shell and
+//! manual actions only, no agent phases, no goals, no Ansible. The wizard and
+//! the AI author both write this type, and `deny_unknown_fields` on every
+//! struct is what stops a generated document inventing structure the engine
+//! would then have to interpret.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
 use super::definition::{
-    CheckAction, CheckOutcomes, DeclaredCapabilities, Defaults, FailurePolicy, InputDefinition,
-    InputType, Metadata, Privilege, RunbookDefinition, ShellAction, Spec, Step, Target, TargetKind,
-    ValidationError, API_VERSION, KIND,
+    ApplyAction, CheckAction, CheckOutcomes, DeclaredCapabilities, Defaults, FailurePolicy,
+    InputDefinition, InputType, Metadata, Privilege, RunbookDefinition, ShellAction, Spec, Step,
+    Target, TargetKind, ValidationError, VerifyAction, API_VERSION, KIND,
 };
 
 pub const MAX_DRAFT_JSON_BYTES: usize = 512 * 1024;
@@ -37,6 +43,11 @@ pub struct RunbookDraftDocument {
     pub privilege: Privilege,
     #[serde(default)]
     pub default_on_failure: FailurePolicy,
+    /// Absolute POSIX paths this runbook may write to, disclosed in preflight.
+    /// Empty for a pure assessment; a remediating runbook is expected to name
+    /// what it touches.
+    #[serde(default)]
+    pub writes: Vec<String>,
     #[serde(default)]
     pub inputs: Vec<DraftInput>,
     #[serde(default)]
@@ -55,6 +66,7 @@ impl Default for RunbookDraftDocument {
             network: false,
             privilege: Privilege::None,
             default_on_failure: FailurePolicy::Continue,
+            writes: Vec::new(),
             inputs: Vec::new(),
             steps: Vec::new(),
         }
@@ -86,7 +98,16 @@ pub struct DraftStep {
     pub required: bool,
     #[serde(default)]
     pub on_failure: Option<FailurePolicy>,
+    /// Decides whether the step's work is needed at all.
     pub check: DraftCheck,
+    /// Remediation. Absent for an assessment-only step.
+    #[serde(default)]
+    pub apply: Option<DraftApply>,
+    /// Proof the remediation worked. The definition validator REQUIRES this
+    /// whenever `apply` is present, so the two travel together — see
+    /// `remediation_requires_a_verify_phase`.
+    #[serde(default)]
+    pub verify: Option<DraftVerify>,
 }
 
 fn required_by_default() -> bool {
@@ -104,6 +125,42 @@ pub enum DraftCheck {
         compliant_exit_codes: Vec<i32>,
         #[serde(default = "noncompliant_default", rename = "noncompliantExitCodes")]
         noncompliant_exit_codes: Vec<i32>,
+    },
+    Manual {
+        instructions: String,
+    },
+}
+
+/// Remediation. Mirrors [`ApplyAction`] rather than sharing one action type
+/// with the other phases: each phase names its exit codes differently
+/// (`successExitCodes` here, `passExitCodes` on verify, a compliant/
+/// noncompliant PAIR on check), so a shared type would have to make all three
+/// optional and lose the distinction the engine grades on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DraftApply {
+    Shell {
+        command: String,
+        #[serde(default)]
+        env: BTreeMap<String, String>,
+        #[serde(default = "compliant_default", rename = "successExitCodes")]
+        success_exit_codes: Vec<i32>,
+    },
+    Manual {
+        instructions: String,
+    },
+}
+
+/// Proof that an apply worked.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DraftVerify {
+    Shell {
+        command: String,
+        #[serde(default)]
+        env: BTreeMap<String, String>,
+        #[serde(default = "compliant_default", rename = "passExitCodes")]
+        pass_exit_codes: Vec<i32>,
     },
     Manual {
         instructions: String,
@@ -247,7 +304,7 @@ fn build_definition(document: &RunbookDraftDocument) -> RunbookDefinition {
         id: step.id.clone(),
         title: step.title.clone(),
         required: step.required,
-        check: match &step.check {
+        check: Some(match &step.check {
             DraftCheck::Shell {
                 command,
                 env,
@@ -266,9 +323,44 @@ fn build_definition(document: &RunbookDraftDocument) -> RunbookDefinition {
             DraftCheck::Manual { instructions } => CheckAction::Manual {
                 instructions: instructions.clone(),
             },
-        },
-        apply: None,
-        verify: None,
+        }),
+        apply: step.apply.as_ref().map(|apply| match apply {
+            DraftApply::Shell {
+                command,
+                env,
+                success_exit_codes,
+            } => ApplyAction::Shell {
+                action: ShellAction {
+                    command: command.clone(),
+                    env: env.clone(),
+                },
+                success_exit_codes: success_exit_codes.clone(),
+            },
+            DraftApply::Manual { instructions } => ApplyAction::Manual {
+                instructions: instructions.clone(),
+            },
+        }),
+        verify: step.verify.as_ref().map(|verify| match verify {
+            DraftVerify::Shell {
+                command,
+                env,
+                pass_exit_codes,
+            } => VerifyAction::Shell {
+                action: ShellAction {
+                    command: command.clone(),
+                    env: env.clone(),
+                },
+                pass_exit_codes: pass_exit_codes.clone(),
+            },
+            DraftVerify::Manual { instructions } => VerifyAction::Manual {
+                instructions: instructions.clone(),
+            },
+        }),
+        // The wizard authors assessments only: no agent action, so nothing for
+        // a goal to direct and no bounds to place on it.
+        goal: None,
+        constraints: None,
+        context: None,
         on_failure: step.on_failure,
     }));
     RunbookDefinition {
@@ -289,11 +381,16 @@ fn build_definition(document: &RunbookDraftDocument) -> RunbookDefinition {
             declared_capabilities: DeclaredCapabilities {
                 network: document.network,
                 privilege: document.privilege,
-                writes: Vec::new(),
+                writes: document.writes.clone(),
             },
             defaults: Defaults {
                 on_failure: document.default_on_failure,
+                constraints: None,
             },
+            // The wizard authors assessments and never asks for a retention
+            // level; the operator's Settings → Runbooks policy decides.
+            audit: None,
+            context: None,
             steps,
         },
     }
@@ -317,7 +414,7 @@ fn platform_guard(platform: DraftPlatform) -> Option<Step> {
         id: id.into(),
         title: title.into(),
         required: true,
-        check: CheckAction::Shell {
+        check: Some(CheckAction::Shell {
             action: ShellAction {
                 command: command.into(),
                 env: BTreeMap::new(),
@@ -326,9 +423,12 @@ fn platform_guard(platform: DraftPlatform) -> Option<Step> {
                 compliant_exit_codes: vec![0],
                 noncompliant_exit_codes: vec![1],
             },
-        },
+        }),
         apply: None,
         verify: None,
+        goal: None,
+        constraints: None,
+        context: None,
         on_failure: Some(FailurePolicy::Stop),
     })
 }
@@ -339,13 +439,39 @@ fn generate_readme(document: &RunbookDraftDocument) -> String {
         DraftPlatform::Linux => "Linux",
         DraftPlatform::Any => "any active terminal target",
     };
-    format!(
-        "# {}\n\n{}\n\nVersion: `{}`  \nTarget: {}  \nGenerated by the VTerminal assessment builder.\n",
-        document.title,
-        if document.description.trim().is_empty() { "Assessment-only VTerminal Runbook." } else { document.description.trim() },
-        document.version,
-        platform,
-    )
+    // A remediating runbook must not be described as an assessment: this README
+    // ships inside the published package and is the first thing a reviewer
+    // reads before running it on their own machine.
+    let remediating = document.steps.iter().any(|step| step.apply.is_some());
+    let summary = if !document.description.trim().is_empty() {
+        document.description.trim()
+    } else if remediating {
+        "VTerminal Runbook. Checks each step and remediates the ones that need it."
+    } else {
+        "Assessment-only VTerminal Runbook."
+    };
+    let mut readme = format!(
+        "# {}\n\n{}\n\nVersion: `{}`  \nTarget: {}  \nGenerated by the VTerminal runbook builder.\n",
+        document.title, summary, document.version, platform,
+    );
+    if remediating {
+        readme.push_str(
+            "\n## Changes this Runbook can make\n\nSteps below carry an apply phase, so this Runbook does not only report — it\nchanges the target. Each change is verified afterwards, and every command is\napproved in the terminal before it runs.\n",
+        );
+        if !document.writes.is_empty() {
+            readme.push_str("\nDeclared writes:\n\n");
+            for path in &document.writes {
+                readme.push_str(&format!("- `{path}`\n"));
+            }
+        }
+        if document.privilege == Privilege::Root {
+            readme.push_str("\nRequires root.\n");
+        }
+        if document.network {
+            readme.push_str("\nRequires network access.\n");
+        }
+    }
+    readme
 }
 
 #[cfg(test)]
@@ -363,6 +489,7 @@ mod tests {
             network: false,
             privilege: Privilege::None,
             default_on_failure: FailurePolicy::Continue,
+            writes: Vec::new(),
             inputs: vec![DraftInput {
                 id: "minimumFreeSpaceGb".into(),
                 input_type: InputType::Integer,
@@ -385,6 +512,8 @@ mod tests {
                     compliant_exit_codes: vec![0],
                     noncompliant_exit_codes: vec![1],
                 },
+                apply: None,
+                verify: None,
             }],
         }
     }
@@ -485,6 +614,8 @@ mod tests {
             check: DraftCheck::Manual {
                 instructions: "Confirm the workstation is ready.".into(),
             },
+            apply: None,
+            verify: None,
         });
         let preview = preview(&document);
         assert!(preview.issues.is_empty(), "{:?}", preview.issues);
@@ -493,8 +624,158 @@ mod tests {
         assert_eq!(definition.spec.inputs.len(), 5);
         assert!(matches!(
             definition.spec.steps[2].check,
-            CheckAction::Manual { .. }
+            Some(CheckAction::Manual { .. })
         ));
         assert!(!definition.uses_unavailable_executor());
+    }
+
+    /// The whole point of the apply/verify pair: a runbook that can repeat the
+    /// work, not merely report that it is missing.
+    #[test]
+    fn remediation_round_trips_to_importable_yaml_with_declared_writes() {
+        let mut document = valid_document();
+        document.platform = DraftPlatform::Any;
+        document.network = true;
+        document.privilege = Privilege::Root;
+        document.writes = vec!["/etc/nginx".into(), "/opt/homebrew".into()];
+        document.steps[0] = DraftStep {
+            id: "nginx-installed".into(),
+            title: "nginx is installed".into(),
+            required: true,
+            on_failure: None,
+            check: DraftCheck::Shell {
+                command: "command -v nginx".into(),
+                env: BTreeMap::new(),
+                compliant_exit_codes: vec![0],
+                noncompliant_exit_codes: vec![1],
+            },
+            apply: Some(DraftApply::Shell {
+                command: "brew install nginx".into(),
+                env: BTreeMap::new(),
+                success_exit_codes: vec![0],
+            }),
+            verify: Some(DraftVerify::Shell {
+                command: "command -v nginx".into(),
+                env: BTreeMap::new(),
+                pass_exit_codes: vec![0],
+            }),
+        };
+
+        let json = document_json(&document).unwrap();
+        assert!(json.contains("successExitCodes"));
+        assert!(json.contains("passExitCodes"));
+        assert_eq!(decode_document(&json).unwrap(), document);
+
+        let preview = preview(&document);
+        assert!(preview.issues.is_empty(), "{:?}", preview.issues);
+        let definition = preview.definition.unwrap();
+        assert_eq!(
+            definition.spec.declared_capabilities.writes,
+            vec!["/etc/nginx".to_string(), "/opt/homebrew".to_string()],
+            "declared writes must survive into preflight disclosure"
+        );
+        assert!(matches!(
+            definition.spec.steps[0].apply,
+            Some(ApplyAction::Shell { .. })
+        ));
+        assert!(matches!(
+            definition.spec.steps[0].verify,
+            Some(VerifyAction::Shell { .. })
+        ));
+        // The round trip is the real assertion: the published package is YAML,
+        // and a shape that only survives in memory is not authored.
+        super::super::definition::parse_and_validate(&preview.source_yaml.unwrap()).unwrap();
+
+        let readme = preview.readme.unwrap();
+        assert!(
+            readme.contains("/etc/nginx") && readme.contains("Requires root"),
+            "a remediating package must disclose what it changes: {readme}"
+        );
+        assert!(
+            !readme.contains("Assessment-only"),
+            "a remediating runbook must not describe itself as an assessment"
+        );
+    }
+
+    /// `definition.rs` refuses an apply with nothing to prove it worked, so the
+    /// wizard and the AI author must always emit the pair. Pinned because the
+    /// error is reported against the MISSING field's path, which is what the
+    /// wizard's `focusIssue` navigates to.
+    #[test]
+    fn remediation_requires_a_verify_phase() {
+        let mut document = valid_document();
+        document.steps[0].apply = Some(DraftApply::Shell {
+            command: "brew install nginx".into(),
+            env: BTreeMap::new(),
+            success_exit_codes: vec![0],
+        });
+        let preview = preview(&document);
+        assert!(preview.definition.is_none());
+        assert!(
+            preview
+                .issues
+                .iter()
+                .any(|issue| issue.path == "spec.steps[1].verify"),
+            "{:?}",
+            preview.issues
+        );
+    }
+
+    /// Writing a config file is the obvious use for a heredoc and the validator
+    /// rejects it, so this is the likeliest way generated remediation fails.
+    /// `printf` on one line is the supported form.
+    #[test]
+    fn heredoc_remediation_is_rejected_but_single_line_printf_is_not() {
+        let mut document = valid_document();
+        document.writes = vec!["/etc/nginx/nginx.conf".into()];
+        document.steps[0].apply = Some(DraftApply::Shell {
+            command: "cat > /etc/nginx/nginx.conf <<EOF".into(),
+            env: BTreeMap::new(),
+            success_exit_codes: vec![0],
+        });
+        document.steps[0].verify = Some(DraftVerify::Shell {
+            command: "nginx -t".into(),
+            env: BTreeMap::new(),
+            pass_exit_codes: vec![0],
+        });
+        let rejected = preview(&document);
+        assert!(rejected
+            .issues
+            .iter()
+            .any(|issue| issue.path == "spec.steps[1].apply.with.command"
+                && issue.message.contains("heredoc")));
+
+        document.steps[0].apply = Some(DraftApply::Shell {
+            command: "printf 'worker_processes auto;\\n' > /etc/nginx/nginx.conf".into(),
+            env: BTreeMap::new(),
+            success_exit_codes: vec![0],
+        });
+        let accepted = preview(&document);
+        assert!(accepted.issues.is_empty(), "{:?}", accepted.issues);
+    }
+
+    /// Drafts are stored as a JSON blob, so widening the type is only safe if
+    /// documents written before `apply`/`verify`/`writes` existed still decode.
+    /// This is the `serde(default)` promise, and it replaces a DB migration.
+    #[test]
+    fn drafts_stored_before_remediation_existed_still_decode() {
+        let legacy = r#"{
+            "definitionId": "legacy-health",
+            "version": "1.0.0",
+            "title": "Legacy Health",
+            "platform": "macos13",
+            "steps": [
+                {
+                    "id": "free-space",
+                    "title": "Free space is available",
+                    "check": { "kind": "shell", "command": "true" }
+                }
+            ]
+        }"#;
+        let document = decode_document(legacy).unwrap();
+        assert!(document.writes.is_empty());
+        assert_eq!(document.steps[0].apply, None);
+        assert_eq!(document.steps[0].verify, None);
+        assert!(preview(&document).issues.is_empty());
     }
 }

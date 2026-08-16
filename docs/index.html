@@ -1020,7 +1020,7 @@
                 <span>03</span>
                 <div>
                   <strong>Verify</strong>
-                  <small>Prove the end state separately</small>
+                  <small>Prove the end state, engine-graded</small>
                 </div>
               </li>
               <li>
@@ -1067,7 +1067,22 @@
                 Completed, exceptional, failed and cancelled runs produce a
                 canonical <code>report.json</code>. Human-readable
                 <code>report.md</code> is derived from it, with approvals,
-                deviations, comments and captured evidence.
+                deviations, comments and captured evidence. Where a step kept a
+                full artifact, you can open it from the report.
+              </p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-robot" /></svg>
+              </span>
+              <h3>State the Goal, Not the Commands</h3>
+              <p>
+                A step can declare what must be <em>true</em> and the exact
+                conditions that prove it. The model picks commands for the
+                distribution it actually finds; the engine runs those conditions
+                and decides. Per-step bounds cap commands, time and rounds, and
+                can refuse network access or privilege escalation.
+                <a href="runbooks/#goals">Read how goal-directed steps work</a>.
               </p>
             </article>
           </div>

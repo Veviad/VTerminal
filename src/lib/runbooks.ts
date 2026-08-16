@@ -15,6 +15,12 @@ import { prefixCommandEnvironment } from "./ptyExecShell";
 export type RunbookSourceState = "valid" | "invalid" | "missing";
 export type RunbookSourceKind = "user" | "builtin";
 export type EvidenceMode = "none" | "tail" | "full";
+/** Ordered least- to most-retaining; the preflight picker renders this order. */
+export const EVIDENCE_MODES: readonly EvidenceMode[] = ["none", "tail", "full"];
+/** Operator policy from Settings → Runbooks. Deliberately a different set of
+ * spellings from `EvidenceMode`: `runbook` is not a capture mode and both
+ * SQLite columns would reject it. */
+export type EvidenceRecordingPolicy = "none" | "runbook" | "all";
 export type OnFailure = "pause" | "stop" | "continue";
 export type RunbookActionKind = "shell" | "agent" | "manual" | "ansible.playbook";
 export type RunbookDraftPlatform = "macos13" | "linux" | "any";
@@ -38,12 +44,36 @@ export type RunbookDraftCheck =
     }
   | { kind: "manual"; instructions: string };
 
+/** Remediation. Its exit codes mean "the work succeeded", not "compliant". */
+export type RunbookDraftApply =
+  | {
+      kind: "shell";
+      command: string;
+      env: Record<string, string>;
+      successExitCodes: number[];
+    }
+  | { kind: "manual"; instructions: string };
+
+/** Proof the remediation worked. Required whenever `apply` is present. */
+export type RunbookDraftVerify =
+  | {
+      kind: "shell";
+      command: string;
+      env: Record<string, string>;
+      passExitCodes: number[];
+    }
+  | { kind: "manual"; instructions: string };
+
 export interface RunbookDraftStep {
   id: string;
   title: string;
   required: boolean;
   onFailure: OnFailure | null;
   check: RunbookDraftCheck;
+  /** Null for an assessment-only step. */
+  apply: RunbookDraftApply | null;
+  /** The backend REJECTS an apply without one, so the two move together. */
+  verify: RunbookDraftVerify | null;
 }
 
 export interface RunbookDraftDocument {
@@ -56,6 +86,8 @@ export interface RunbookDraftDocument {
   network: boolean;
   privilege: "none" | "root";
   defaultOnFailure: OnFailure;
+  /** Absolute paths the runbook may write to, disclosed in preflight. */
+  writes: string[];
   inputs: RunbookDraftInput[];
   steps: RunbookDraftStep[];
 }
@@ -182,14 +214,48 @@ export interface AnsibleAction {
 
 export type RunbookAction = ShellAction | AgentAction | ManualAction | AnsibleAction;
 
+/** What a step must achieve, and the conditions the ENGINE runs to decide it
+ * did. A model's own summary is narration; these exit codes are the verdict. */
+export interface RunbookGoal {
+  intent: string;
+  checks: { command: string; env?: Record<string, string>; expect: number[] }[];
+}
+
+/** Per-step bounds on an agent phase. Every field narrows; nothing here can
+ * widen what the operator already allows. Best-effort in the same way the agent
+ * panel's command checks are — not a sandbox. */
+export interface RunbookConstraints {
+  maxCommands?: number | null;
+  maxSeconds?: number | null;
+  maxRounds?: number | null;
+  network?: boolean | null;
+  privilege?: "none" | "root" | null;
+}
+
+/** What a step's agent phase is allowed to know. Nothing is implicit. */
+export interface RunbookStepContext {
+  inputs?: string[];
+  priorSteps?: boolean;
+}
+
+export interface RunbookDiscoveryProbe {
+  name: string;
+  command: string;
+  env?: Record<string, string>;
+}
+
 export interface RunbookStepDefinition {
   id: string;
   title: string;
   description?: string | null;
   required: boolean;
-  check: RunbookAction;
+  /** Absent when `goal.checks` supplies the check phase instead. */
+  check?: RunbookAction | null;
   apply?: RunbookAction | null;
   verify?: RunbookAction | null;
+  goal?: RunbookGoal | null;
+  constraints?: RunbookConstraints | null;
+  context?: RunbookStepContext | null;
   onFailure?: OnFailure;
   on_failure?: OnFailure;
 }
@@ -205,6 +271,12 @@ export interface RunbookDefinition {
     declaredCapabilities?: RunbookCapabilities;
     declared_capabilities?: RunbookCapabilities;
     defaults?: { onFailure?: OnFailure; on_failure?: OnFailure };
+    /** What the package asks the operator to keep. A request, not a grant:
+     * Settings → Runbooks supplies the floor and can only raise this. */
+    audit?: { recordOutput?: EvidenceMode | null } | null;
+    /** Target facts gathered once, before the first step, and shown to every
+     * agent phase in the run. */
+    context?: { discover?: RunbookDiscoveryProbe[] } | null;
     steps: RunbookStepDefinition[];
   };
   source_id?: string;
@@ -418,6 +490,18 @@ export interface RunbookReportEvidence {
   relative_path: string | null;
   bytes: number;
   sha256: string;
+  redacted: boolean;
+  truncated: boolean;
+}
+
+/** One recorded artifact read back for review. `available: false` is a normal
+ * answer — the file can be deleted or altered after the run, and the digest is
+ * re-verified on every read, so what is shown is always what was recorded. */
+export interface RunbookEvidenceContent {
+  evidence_id: string;
+  available: boolean;
+  text: string;
+  bytes: number;
   redacted: boolean;
   truncated: boolean;
 }
@@ -837,6 +921,25 @@ export const runbooksDraftSave = (
 export const runbooksDraftValidate = (draftId: string) =>
   invoke<RunbookDraftPreview>("runbooks_draft_validate", { draft_id: draftId });
 
+/**
+ * Author a draft with the active model. Collected, not streamed: a partial JSON
+ * object is nothing the operator can be shown.
+ *
+ * Nothing is stored — the caller passes the result to `runbooksDraftCreate`, so
+ * a generated runbook enters the wizard by the same path a hand-written one
+ * does. Cancel with the shared `aiCancel(requestId)`.
+ */
+export const runbooksAiGenerate = (
+  requestId: string,
+  requirements: string,
+  terminalContext: string | null,
+) =>
+  invoke<RunbookDraftDocument>("runbooks_ai_generate", {
+    request_id: requestId,
+    requirements,
+    terminal_context: terminalContext,
+  });
+
 export const runbooksDraftPublish = (draftId: string, expectedRevision: number) =>
   invoke<RunbookSourceWire>("runbooks_draft_publish", {
     draft_id: draftId,
@@ -1007,6 +1110,12 @@ export const runbooksHistory = () =>
 export const runbooksReport = (runId: string) =>
   invoke<RunbookReportWire>("runbooks_report", { run_id: runId }).then(normalizeRunbookReport);
 
+export const runbooksEvidenceRead = (runId: string, evidenceId: string) =>
+  invoke<RunbookEvidenceContent>("runbooks_evidence_read", {
+    run_id: runId,
+    evidence_id: evidenceId,
+  });
+
 export const runbooksExport = (runId: string, destination: string) =>
   invoke<RunbookExportResult>("runbooks_export", { run_id: runId, destination });
 
@@ -1048,6 +1157,49 @@ export function definitionApiVersion(definition: RunbookDefinition): string {
 
 export function definitionCapabilities(definition: RunbookDefinition): RunbookCapabilities {
   return definition.spec.declaredCapabilities ?? definition.spec.declared_capabilities ?? {};
+}
+
+/** Mirrors `EvidenceCaptureMode::retention_rank`. Declaration order in the
+ * union is a wire detail, so the ranking is written out rather than derived. */
+const EVIDENCE_RETENTION_RANK: Record<EvidenceMode, number> = { none: 0, tail: 1, full: 2 };
+
+/** Mirrors `EvidenceRecordingPolicy::floor`.
+ *
+ * `runbooks_start` applies the same clamp server-side and is what actually
+ * enforces the policy — this copy only decides which choices preflight offers,
+ * so the operator is never shown a mode the backend would silently override. */
+export function evidenceFloor(
+  policy: EvidenceRecordingPolicy,
+  declared: EvidenceMode | null | undefined,
+): EvidenceMode {
+  if (policy === "all") return "full";
+  if (policy === "none") return "none";
+  return declared ?? "tail";
+}
+
+/** Mirrors `EvidenceCaptureMode::at_least`: raise to the floor, never lower. */
+export function atLeastEvidence(requested: EvidenceMode, floor: EvidenceMode): EvidenceMode {
+  return EVIDENCE_RETENTION_RANK[requested] >= EVIDENCE_RETENTION_RANK[floor] ? requested : floor;
+}
+
+/** The modes an operator may still choose for one run under `floor`. */
+export function evidenceModesAtOrAbove(floor: EvidenceMode): EvidenceMode[] {
+  return EVIDENCE_MODES.filter((mode) => EVIDENCE_RETENTION_RANK[mode] >= EVIDENCE_RETENTION_RANK[floor]);
+}
+
+export function definitionRecordOutput(definition: RunbookDefinition): EvidenceMode | null {
+  return definition.spec.audit?.recordOutput ?? null;
+}
+
+/** Bytes of terminal output to harvest for one attempt.
+ *
+ * Mirrors `OUTPUT_TAIL_BYTES` / `FULL_EVIDENCE_BYTES` in Rust's redact.rs. Zero
+ * for `none` is the point: Rust discards that output anyway, so harvesting it
+ * only moves bytes the operator declined to keep across the IPC boundary. An
+ * unknown mode is treated as `tail`, which is also the run row's SQL default. */
+export function evidenceTailLimit(mode: EvidenceMode | null | undefined): number {
+  if (mode === "none") return 0;
+  return mode === "full" ? 1_048_576 : 8_192;
 }
 
 export function defaultRunbookInputs(

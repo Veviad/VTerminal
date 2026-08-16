@@ -1360,10 +1360,28 @@ pub fn transition_run(
     next: RunStatus,
     pause_reason: Option<&str>,
 ) -> Result<RunRecord, String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    transition_run_tx(&tx, run_id, expected, next, pause_reason)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    get_run(conn, run_id)?.ok_or_else(|| "transitioned run disappeared".into())
+}
+
+/// The run-status half of a transition, inside a caller-owned transaction.
+///
+/// Split out so a status change can be committed together with the approval row
+/// that causes it. A reader on another connection must never observe
+/// `waiting_approval` with no pending approval, or `running` with one: the
+/// runbook panel drives its whole approval UI off exactly that pair.
+fn transition_run_tx(
+    tx: &Transaction<'_>,
+    run_id: &str,
+    expected: RunStatus,
+    next: RunStatus,
+    pause_reason: Option<&str>,
+) -> Result<(), String> {
     if !expected.can_transition_to(next) {
         return Err(format!("invalid run transition: {expected} -> {next}"));
     }
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
     let actual: String = tx
         .query_row(
             "SELECT status FROM runbook_runs WHERE id = ?1",
@@ -1395,7 +1413,7 @@ pub fn transition_run(
     )
     .map_err(|e| format!("transition run: {e}"))?;
     append_event_tx(
-        &tx,
+        tx,
         run_id,
         "run_status_changed",
         None,
@@ -1403,8 +1421,7 @@ pub fn transition_run(
         &serde_json::json!({"from":expected,"to":next,"reason":pause_reason}),
         &timestamp,
     )?;
-    tx.commit().map_err(|e| e.to_string())?;
-    get_run(conn, run_id)?.ok_or_else(|| "transitioned run disappeared".into())
+    Ok(())
 }
 
 pub fn list_steps(conn: &Connection, run_id: &str) -> Result<Vec<StepRecord>, String> {
@@ -2253,10 +2270,40 @@ pub fn request_approval(
     conn: &mut Connection,
     input: &ApprovalIntent,
 ) -> Result<ApprovalRecord, String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    request_approval_tx(&tx, input)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    get_approval(conn, &input.id)?.ok_or_else(|| "approval disappeared".into())
+}
+
+/// Record a pending approval and move the run to `waiting_approval` in ONE
+/// transaction.
+///
+/// Two commits let a reader on the command-side connection observe the run as
+/// `running` while a pending approval already exists — the runbook panel reads
+/// that pair as "no approval to show" and sits on a spinner while the engine
+/// waits for a click that has nowhere to be made.
+pub fn request_approval_awaiting(
+    conn: &mut Connection,
+    input: &ApprovalIntent,
+) -> Result<ApprovalRecord, String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    request_approval_tx(&tx, input)?;
+    transition_run_tx(
+        &tx,
+        &input.run_id,
+        RunStatus::Running,
+        RunStatus::WaitingApproval,
+        None,
+    )?;
+    tx.commit().map_err(|e| e.to_string())?;
+    get_approval(conn, &input.id)?.ok_or_else(|| "approval disappeared".into())
+}
+
+fn request_approval_tx(tx: &Transaction<'_>, input: &ApprovalIntent) -> Result<(), String> {
     // Native v1 never auto-dispatches into an existing interactive shell. Even
     // a textually read-only check needs the operator's prompt/session trust
     // attestation, so every phase legitimately reaches this durable gate.
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
     let timestamp = now();
     let count = tx
         .execute(
@@ -2296,7 +2343,7 @@ pub fn request_approval(
     )
     .map_err(|e| format!("record runbook approval: {e}"))?;
     append_event_tx(
-        &tx,
+        tx,
         &input.run_id,
         "approval_requested",
         Some(&input.step_id),
@@ -2304,8 +2351,7 @@ pub fn request_approval(
         &serde_json::json!({"approval_id":input.id,"phase":input.phase}),
         &timestamp,
     )?;
-    tx.commit().map_err(|e| e.to_string())?;
-    get_approval(conn, &input.id)?.ok_or_else(|| "approval disappeared".into())
+    Ok(())
 }
 
 pub fn decide_approval(
@@ -2316,10 +2362,57 @@ pub fn decide_approval(
     reason: Option<&str>,
     executed_command: Option<&str>,
 ) -> Result<ApprovalRecord, String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    decide_approval_tx(&tx, approval_id, decision, actor, reason, executed_command)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    get_approval(conn, approval_id)?.ok_or_else(|| "approval disappeared".into())
+}
+
+/// Approve an approval and resume the run in ONE transaction.
+///
+/// The mirror of `request_approval_awaiting`. Two commits let a reader see the
+/// run still `waiting_approval` with the approval already decided, i.e. a state
+/// that says "waiting for a click" with nothing to click — which is what the
+/// panel used to report as "Runbook approval state is missing."
+pub fn approve_and_resume(
+    conn: &mut Connection,
+    run_id: &str,
+    approval_id: &str,
+    actor: &str,
+    reason: Option<&str>,
+    executed_command: Option<&str>,
+) -> Result<ApprovalRecord, String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    decide_approval_tx(
+        &tx,
+        approval_id,
+        ApprovalDecision::Approve,
+        actor,
+        reason,
+        executed_command,
+    )?;
+    transition_run_tx(
+        &tx,
+        run_id,
+        RunStatus::WaitingApproval,
+        RunStatus::Running,
+        None,
+    )?;
+    tx.commit().map_err(|e| e.to_string())?;
+    get_approval(conn, approval_id)?.ok_or_else(|| "approval disappeared".into())
+}
+
+fn decide_approval_tx(
+    tx: &Transaction<'_>,
+    approval_id: &str,
+    decision: ApprovalDecision,
+    actor: &str,
+    reason: Option<&str>,
+    executed_command: Option<&str>,
+) -> Result<(), String> {
     if actor.trim().is_empty() {
         return Err("approval actor is required".into());
     }
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
     let (attempt_id, run_id, step_id, proposed): (String, String, String, Option<String>) = tx
         .query_row(
             "SELECT attempt_id,run_id,step_id,proposed_command FROM runbook_approvals
@@ -2377,7 +2470,7 @@ pub fn decide_approval(
     )
     .map_err(|e| e.to_string())?;
     append_event_tx(
-        &tx,
+        tx,
         &run_id,
         "approval_decided",
         Some(&step_id),
@@ -2385,8 +2478,7 @@ pub fn decide_approval(
         &serde_json::json!({"approval_id":approval_id,"decision":decision,"edited":edited}),
         &timestamp,
     )?;
-    tx.commit().map_err(|e| e.to_string())?;
-    get_approval(conn, approval_id)?.ok_or_else(|| "approval disappeared".into())
+    Ok(())
 }
 
 /// Settle every pending gate before a run is cancelled. In-flight commands are
@@ -2524,6 +2616,38 @@ pub fn ensure_evidence_budget(
     run_id: &str,
     additional_bytes: u64,
 ) -> Result<(), String> {
+    match evidence_budget_headroom(conn, run_id, additional_bytes)? {
+        EvidenceBudget::Available => Ok(()),
+        EvidenceBudget::ItemsExhausted => Err(format!(
+            "run reached the {MAX_REPORT_EVIDENCE_ITEMS}-item evidence audit limit"
+        )),
+        EvidenceBudget::BytesExhausted => Err(format!(
+            "runbook evidence exceeds the {MAX_REPORT_EVIDENCE_BYTES}-byte aggregate audit limit"
+        )),
+    }
+}
+
+/// Why a run can no longer keep full artifacts, or that it still can.
+///
+/// Separate from `ensure_evidence_budget` because the two callers want opposite
+/// things from the same measurement. A reservation must fail closed — writing
+/// past the cap is not an option. But an ATTEMPT that merely wanted a full
+/// artifact should not die because the run is out of budget: the command
+/// already ran in the operator's terminal, and turning "we kept less evidence
+/// than you asked for" into a failed step loses the step's result as well as
+/// its output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceBudget {
+    Available,
+    ItemsExhausted,
+    BytesExhausted,
+}
+
+pub fn evidence_budget_headroom(
+    conn: &Connection,
+    run_id: &str,
+    additional_bytes: u64,
+) -> Result<EvidenceBudget, String> {
     let (count, bytes): (i64, i64) = conn
         .query_row(
             "SELECT COUNT(*),COALESCE(SUM(bytes),0) FROM runbook_evidence WHERE run_id=?1",
@@ -2534,19 +2658,15 @@ pub fn ensure_evidence_budget(
     let count = usize::try_from(count).map_err(|_| "runbook evidence count is invalid")?;
     let bytes = u64::try_from(bytes).map_err(|_| "runbook evidence byte count is invalid")?;
     if count >= MAX_REPORT_EVIDENCE_ITEMS {
-        return Err(format!(
-            "run reached the {MAX_REPORT_EVIDENCE_ITEMS}-item evidence audit limit"
-        ));
+        return Ok(EvidenceBudget::ItemsExhausted);
     }
     if bytes
         .checked_add(additional_bytes)
         .is_none_or(|total| total > MAX_REPORT_EVIDENCE_BYTES)
     {
-        return Err(format!(
-            "runbook evidence exceeds the {MAX_REPORT_EVIDENCE_BYTES}-byte aggregate audit limit"
-        ));
+        return Ok(EvidenceBudget::BytesExhausted);
     }
-    Ok(())
+    Ok(EvidenceBudget::Available)
 }
 
 /// Reserve the final evidence identity, size, digest and confined path before
@@ -3087,6 +3207,87 @@ fn evidence_artifact_matches(path: &Path, evidence: &EvidenceRecord) -> Result<b
         .read_to_end(&mut bytes)
         .map_err(|error| format!("read evidence artifact for recovery: {error}"))?;
     Ok(bytes.len() as u64 == evidence.bytes && sha256_hex(&bytes) == evidence.sha256)
+}
+
+/// Read one complete evidence artifact back for in-app review.
+///
+/// The digest is re-verified on every read rather than trusted from the row.
+/// The whole point of this artifact is to be shown as proof of what a step did,
+/// so returning bytes that no longer match what was recorded would be worse
+/// than returning nothing: the operator cannot tell the difference by looking.
+/// `Ok(None)` means there is nothing trustworthy to show — absent, resized,
+/// symlinked, or altered — and is deliberately not distinguished further, since
+/// each case is reported to the operator the same way.
+///
+/// Confinement is `confined_pending_evidence_paths`, the same helper recovery
+/// uses, so a traversal or symlinked path is rejected identically on both.
+pub fn read_complete_evidence_artifact(
+    evidence_root: &Path,
+    evidence: &EvidenceRecord,
+) -> Result<Option<Vec<u8>>, String> {
+    if evidence.availability != EvidenceAvailability::Complete {
+        return Ok(None);
+    }
+    let Some((_parent, final_path, _staging)) =
+        confined_pending_evidence_paths(evidence_root, evidence)?
+    else {
+        return Ok(None);
+    };
+    let metadata = match fs::symlink_metadata(&final_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("inspect evidence artifact: {error}")),
+    };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() != evidence.bytes
+        || evidence.bytes > FULL_EVIDENCE_BYTES as u64
+    {
+        return Ok(None);
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = match options.open(&final_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("open evidence artifact: {error}")),
+    };
+    let opened_metadata = file
+        .metadata()
+        .map_err(|error| format!("inspect opened evidence artifact: {error}"))?;
+    if !opened_metadata.is_file() || opened_metadata.len() != evidence.bytes {
+        return Ok(None);
+    }
+    // Read one byte past the recorded size so a file that GREW between the
+    // metadata check and the read is caught by the length comparison below
+    // rather than silently truncated into a plausible-looking artifact.
+    let read_limit = evidence
+        .bytes
+        .checked_add(1)
+        .ok_or("evidence byte count is too large")?;
+    let mut bytes = Vec::with_capacity(evidence.bytes as usize);
+    file.take(read_limit)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("read evidence artifact: {error}"))?;
+    if bytes.len() as u64 != evidence.bytes || sha256_hex(&bytes) != evidence.sha256 {
+        return Ok(None);
+    }
+    Ok(Some(bytes))
+}
+
+pub fn find_evidence(
+    conn: &Connection,
+    run_id: &str,
+    evidence_id: &str,
+) -> Result<Option<EvidenceRecord>, String> {
+    Ok(list_evidence(conn, run_id)?
+        .into_iter()
+        .find(|item| item.id == evidence_id))
 }
 
 fn sync_directory(path: &Path) -> Result<(), String> {
@@ -5740,6 +5941,284 @@ mod tests {
         assert_eq!(list_evidence(&conn, &run.id).unwrap().len(), 1);
         remove_evidence_reservation(&conn, &reservation.id, &run.id, &attempt.id).unwrap();
         assert!(list_evidence(&conn, &run.id).unwrap().is_empty());
+    }
+
+    /// A root holding one complete artifact at the canonical relative path.
+    fn evidence_fixture(label: &str, contents: &[u8]) -> (PathBuf, EvidenceRecord) {
+        let root =
+            std::env::temp_dir().join(format!("runbook-evidence-{label}-{}", uuid::Uuid::new_v4()));
+        let directory = root.join("runbooks").join("run-1");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("attempt-1.log"), contents).unwrap();
+        (
+            root,
+            EvidenceRecord {
+                id: "evidence-1".into(),
+                attempt_id: "attempt-1".into(),
+                run_id: "run-1".into(),
+                mode: EvidenceCaptureMode::Full,
+                availability: EvidenceAvailability::Complete,
+                relative_path: Some("runbooks/run-1/attempt-1.log".into()),
+                bytes: contents.len() as u64,
+                sha256: sha256_hex(contents),
+                redacted: false,
+                truncated: false,
+                created_at: now(),
+            },
+        )
+    }
+
+    /// Set a run up to the point where a check phase is about to ask for
+    /// approval: running, step one checking, one intent attempt.
+    fn run_awaiting_first_approval(conn: &mut Connection, session: &str) -> (RunRecord, String) {
+        let run = create_run(conn, &creation(session)).unwrap();
+        transition_run(conn, &run.id, RunStatus::Created, RunStatus::Ready, None).unwrap();
+        transition_run(conn, &run.id, RunStatus::Ready, RunStatus::Running, None).unwrap();
+        transition_step(
+            conn,
+            &run.id,
+            "one",
+            StepStatus::Pending,
+            StepStatus::Checking,
+            StepUpdate::default(),
+        )
+        .unwrap();
+        let attempt = create_attempt_intent(
+            conn,
+            &AttemptIntent {
+                run_id: run.id.clone(),
+                step_id: "one".into(),
+                phase: RunbookPhase::Check,
+                executor: "shell".into(),
+                proposed_command: Some("check".into()),
+            },
+        )
+        .unwrap();
+        (run, attempt.id)
+    }
+
+    fn approval_intent(run_id: &str, attempt_id: &str, id: &str) -> ApprovalIntent {
+        ApprovalIntent {
+            id: id.into(),
+            attempt_id: attempt_id.into(),
+            run_id: run_id.into(),
+            step_id: "one".into(),
+            phase: RunbookPhase::Check,
+            proposed_command: Some("check".into()),
+            read_only: false,
+            network: false,
+            privileged: false,
+            opaque: true,
+        }
+    }
+
+    /// A reader must never see a run that is waiting on an approval that does
+    /// not exist, or running with one that does.
+    ///
+    /// The engine holds its own connection, so anything it commits in two steps
+    /// is observable in between by `runbooks_get`. Rollback is the property
+    /// that proves these are one transaction: make the second half fail and the
+    /// first half must be gone too.
+    #[test]
+    fn an_approval_and_its_run_status_move_together() {
+        let mut conn = db();
+        let (run, attempt_id) = run_awaiting_first_approval(&mut conn, "approval-atomicity");
+
+        request_approval_awaiting(&mut conn, &approval_intent(&run.id, &attempt_id, "a-1"))
+            .unwrap();
+        assert_eq!(
+            get_run(&conn, &run.id).unwrap().unwrap().status,
+            RunStatus::WaitingApproval
+        );
+        assert_eq!(
+            get_approval(&conn, "a-1").unwrap().unwrap().status,
+            ApprovalStatus::Pending
+        );
+
+        approve_and_resume(&mut conn, &run.id, "a-1", "operator", None, None).unwrap();
+        assert_eq!(
+            get_run(&conn, &run.id).unwrap().unwrap().status,
+            RunStatus::Running
+        );
+        assert_eq!(
+            get_approval(&conn, "a-1").unwrap().unwrap().status,
+            ApprovalStatus::Approved
+        );
+    }
+
+    #[test]
+    fn a_failed_run_transition_takes_the_approval_row_with_it() {
+        let mut conn = db();
+        let (run, attempt_id) = run_awaiting_first_approval(&mut conn, "approval-rollback");
+
+        // Both attempts while the run is still `running` — `create_attempt_intent`
+        // requires that. `agent` executor for the second because the
+        // one-in-flight unique index excludes it.
+        let second = create_attempt_intent(
+            &mut conn,
+            &AttemptIntent {
+                run_id: run.id.clone(),
+                step_id: "one".into(),
+                phase: RunbookPhase::Check,
+                executor: "agent".into(),
+                proposed_command: Some("check again".into()),
+            },
+        )
+        .expect("an agent attempt may coexist with the in-flight shell attempt");
+
+        request_approval_awaiting(&mut conn, &approval_intent(&run.id, &attempt_id, "a-1"))
+            .unwrap();
+
+        // The approval half SUCCEEDS (that attempt is still `intent`) and only
+        // the status half fails, because the run is now `waiting_approval`.
+        let error =
+            request_approval_awaiting(&mut conn, &approval_intent(&run.id, &second.id, "a-2"))
+                .expect_err("the run is not running, so the status half must fail");
+        assert!(error.contains("expected running"), "{error}");
+        assert!(
+            get_approval(&conn, "a-2").unwrap().is_none(),
+            "the approval row must not survive a failed run transition",
+        );
+        assert_eq!(
+            get_run(&conn, &run.id).unwrap().unwrap().status,
+            RunStatus::WaitingApproval
+        );
+    }
+
+    #[test]
+    fn an_exhausted_evidence_budget_is_reported_rather_than_thrown() {
+        // The reservation path must still fail closed, but an attempt that only
+        // WANTED a full artifact has to be able to carry on with a tail: the
+        // command already ran in the operator's terminal, and a retry-heavy run
+        // reaches the aggregate cap legitimately.
+        let mut conn = db();
+        let (run, attempt, _) = pending_full_evidence(&mut conn, "budget-headroom", b"captured");
+
+        assert_eq!(
+            evidence_budget_headroom(&conn, &run.id, 1024).unwrap(),
+            EvidenceBudget::Available
+        );
+
+        // Fill the run exactly to its aggregate cap. Raw insert because
+        // `reserve_evidence` caps a single row at the 1 MiB per-artifact limit,
+        // and the point here is the run-wide total. The fixture already holds
+        // one small row, so the remainder is measured rather than assumed.
+        let held: i64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(bytes),0) FROM runbook_evidence WHERE run_id=?1",
+                [&run.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO runbook_evidence
+             (id,attempt_id,run_id,mode,availability,relative_path,bytes,sha256,redacted,truncated,created_at)
+             VALUES ('bulk',?1,?2,'full','complete',NULL,?3,'digest',0,0,?4)",
+            rusqlite::params![
+                attempt.id,
+                run.id,
+                MAX_REPORT_EVIDENCE_BYTES as i64 - held,
+                now()
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            evidence_budget_headroom(&conn, &run.id, 1).unwrap(),
+            EvidenceBudget::BytesExhausted
+        );
+        // Zero further bytes still fits, so the boundary is "would exceed",
+        // not "has reached".
+        assert_eq!(
+            evidence_budget_headroom(&conn, &run.id, 0).unwrap(),
+            EvidenceBudget::Available
+        );
+        assert!(ensure_evidence_budget(&conn, &run.id, 1).is_err());
+    }
+
+    #[test]
+    fn a_recorded_artifact_reads_back_only_while_it_still_matches() {
+        let (root, evidence) = evidence_fixture("readback", b"permitrootlogin no\n");
+        assert_eq!(
+            read_complete_evidence_artifact(&root, &evidence).unwrap(),
+            Some(b"permitrootlogin no\n".to_vec()),
+        );
+
+        // Altered on disk. The row still says complete, so trusting it would
+        // present someone else's bytes as this step's proof.
+        fs::write(
+            root.join("runbooks/run-1/attempt-1.log"),
+            b"permitrootlogin yes",
+        )
+        .unwrap();
+        assert_eq!(
+            read_complete_evidence_artifact(&root, &evidence).unwrap(),
+            None
+        );
+
+        // Truncated to a prefix: same leading bytes, wrong length and digest.
+        fs::write(
+            root.join("runbooks/run-1/attempt-1.log"),
+            b"permitrootlogin no",
+        )
+        .unwrap();
+        assert_eq!(
+            read_complete_evidence_artifact(&root, &evidence).unwrap(),
+            None
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_unavailable_or_missing_artifact_reads_as_nothing_rather_than_erroring() {
+        let (root, complete) = evidence_fixture("unavailable", b"output");
+
+        let mut pending = complete.clone();
+        pending.availability = EvidenceAvailability::Pending;
+        assert_eq!(
+            read_complete_evidence_artifact(&root, &pending).unwrap(),
+            None
+        );
+        let mut missing = complete.clone();
+        missing.availability = EvidenceAvailability::Missing;
+        assert_eq!(
+            read_complete_evidence_artifact(&root, &missing).unwrap(),
+            None
+        );
+
+        fs::remove_file(root.join("runbooks/run-1/attempt-1.log")).unwrap();
+        assert_eq!(
+            read_complete_evidence_artifact(&root, &complete).unwrap(),
+            None
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_or_escaping_artifact_is_never_read() {
+        let (root, evidence) = evidence_fixture("confinement", b"output");
+        let secret = root.join("private-key");
+        fs::write(&secret, b"-----BEGIN PRIVATE KEY-----").unwrap();
+
+        // Swapped for a symlink pointing at a file outside the run directory.
+        let artifact = root.join("runbooks/run-1/attempt-1.log");
+        fs::remove_file(&artifact).unwrap();
+        std::os::unix::fs::symlink(&secret, &artifact).unwrap();
+        assert_eq!(
+            read_complete_evidence_artifact(&root, &evidence).unwrap(),
+            None
+        );
+
+        // A traversal in the stored path is refused by the shared confinement
+        // helper before any file is opened.
+        let mut escaping = evidence.clone();
+        escaping.relative_path = Some("runbooks/run-1/../../private-key".into());
+        assert!(read_complete_evidence_artifact(&root, &escaping).is_err());
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

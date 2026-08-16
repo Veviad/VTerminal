@@ -18,6 +18,7 @@ import {
   type RunbookReport,
   type RunbookReportChecklistItem,
 } from "../../lib/runbooks";
+import { RunbookEvidenceViewer } from "./RunbookEvidenceViewer";
 import { useRunbooks } from "../../hooks/useRunbooks";
 import { useRunbookStore } from "../../stores/runbookStore";
 import {
@@ -127,7 +128,12 @@ export function RunbookReportViewer({
         </h3>
         <div className="space-y-2">
           {report.checklist.map((item, index) => (
-            <ReportStep key={item.step_id} item={item} index={index} />
+            <ReportStep
+              key={item.step_id}
+              item={item}
+              index={index}
+              runId={report.run_id}
+            />
           ))}
         </div>
       </section>
@@ -197,7 +203,15 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
-function ReportStep({ item, index }: { item: RunbookReportChecklistItem; index: number }) {
+function ReportStep({
+  item,
+  index,
+  runId,
+}: {
+  item: RunbookReportChecklistItem;
+  index: number;
+  runId: string;
+}) {
   const [expanded, setExpanded] = useState(false);
   const checked = item.checked || isCheckedStepState(item.state);
   return (
@@ -233,12 +247,7 @@ function ReportStep({ item, index }: { item: RunbookReportChecklistItem; index: 
           {item.evidence.length > 0 && (
             <div className="space-y-1">
               {item.evidence.map((evidence) => (
-                <p
-                  key={evidence.id}
-                  className={`text-[9px] ${evidence.availability === "complete" ? "text-text-muted" : "text-warning"}`}
-                >
-                  Evidence · {evidence.mode} · {evidence.bytes} bytes · {evidence.availability === "complete" ? "available" : `unavailable (${evidence.availability})`}
-                </p>
+                <RunbookEvidenceViewer key={evidence.id} runId={runId} evidence={evidence} />
               ))}
             </div>
           )}

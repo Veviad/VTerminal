@@ -100,6 +100,7 @@ describe("runbooks API", () => {
       network: false,
       privilege: "none" as const,
       defaultOnFailure: "continue" as const,
+      writes: [],
       inputs: [],
       steps: [],
     };

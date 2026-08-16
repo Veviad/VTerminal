@@ -57,7 +57,7 @@
       <section class="guide-hero" aria-labelledby="guide-title">
         <div class="guide-hero-inner">
             <span class="guide-status"
-            >Updated in 0.2.6 · Experimental · Disabled by default</span
+            >Available in 0.2.8 · Experimental · Disabled by default</span
             >
           <h1 id="guide-title">Reusable Runbooks</h1>
           <p class="guide-hero-copy">
@@ -85,10 +85,12 @@
           <ol>
             <li><a href="#getting-started">Getting started</a></li>
             <li><a href="#new-runbook-wizard">New runbook wizard</a></li>
+            <li><a href="#ai-authoring">Generate with AI</a></li>
             <li><a href="#included-examples">Included examples</a></li>
             <li><a href="#package-format">Package format</a></li>
             <li><a href="#export-and-reuse">Export &amp; reuse</a></li>
             <li><a href="#lifecycle">Lifecycle</a></li>
+            <li><a href="#goals">Goal-directed steps</a></li>
             <li><a href="#actions">Actions &amp; approvals</a></li>
             <li><a href="#reports">Evidence &amp; reports</a></li>
             <li><a href="#ansible">Ansible status</a></li>
@@ -133,8 +135,8 @@
                 <div>
                   <strong>Review the preflight</strong>
                   Choose the terminal, confirm its observed target, enter only
-                  non-secret inputs, review declared capabilities, and select an
-                  evidence mode.
+                  non-secret inputs, review declared capabilities, and confirm
+                  how much output this run keeps.
                 </div>
               </li>
               <li>
@@ -171,12 +173,13 @@
             aria-labelledby="new-runbook-wizard-title"
           >
             <p class="eyebrow">Create Without YAML</p>
-            <h2 id="new-runbook-wizard-title">Build an Assessment in VTerminal</h2>
+            <h2 id="new-runbook-wizard-title">Build a Runbook in VTerminal</h2>
             <p>
-              Choose <strong>New</strong> in the Library to open the deterministic,
-              offline assessment builder. Drafts autosave in app-managed storage
-              and remain resumable across restarts. They cannot be run until the
-              final package passes the same strict validation as an import.
+              Choose <strong>New</strong> in the Library to open the
+              deterministic, offline builder. Drafts autosave in app-managed
+              storage and remain resumable across restarts. They cannot be run
+              until the final package passes the same strict validation as an
+              import.
             </p>
             <ol class="guide-steps">
               <li>
@@ -184,7 +187,8 @@
                 <div>
                   <strong>Basics</strong>
                   Set the stable ID, semantic version, title, description, tags,
-                  failure policy, and declared network or root capability.
+                  failure policy, declared network or root capability, and the
+                  absolute paths the runbook writes to.
                 </div>
               </li>
               <li>
@@ -198,10 +202,12 @@
               <li>
                 <span>03</span>
                 <div>
-                  <strong>Checks</strong>
+                  <strong>Steps</strong>
                   Order shell or manual checks. Shell inputs use explicit
                   <code>VRUN_*</code> environment mappings and
-                  compliant/non-compliant exit codes.
+                  compliant/non-compliant exit codes. Tick
+                  <strong>Remediate when this check fails</strong> to add an
+                  apply that fixes it and a verify that proves it worked.
                 </div>
               </li>
               <li>
@@ -214,12 +220,15 @@
               </li>
             </ol>
             <div class="guide-callout">
-              <strong>Assessment-only by design.</strong>
+              <strong>Apply and verify travel together.</strong>
               <p>
-                The wizard generates no apply, verify, agent, Ansible, or write
-                actions. macOS 13+ and Linux choices add a locked stopping target
-                guard; Any adds no guard and requires portable commands. Export a
-                published package for advanced YAML authoring.
+                A step that changes something must prove it worked, so the two
+                phases are added and removed as a pair — a runbook with an apply
+                and no verify is rejected at publish time. The wizard still
+                generates no agent, goal, or Ansible actions: those change who
+                decides whether a step succeeded, so they are read as YAML before
+                they run. macOS 13+ and Linux choices add a locked stopping target
+                guard; Any adds no guard and requires portable commands.
               </p>
             </div>
             <p>
@@ -229,6 +238,65 @@
               republishing. Discarding a published draft detaches wizard editing
               but leaves the published source and historical snapshots intact.
             </p>
+          </section>
+
+          <section
+            class="guide-section"
+            id="ai-authoring"
+            aria-labelledby="ai-authoring-title"
+          >
+            <p class="eyebrow">New in 0.2.8</p>
+            <h2 id="ai-authoring-title">Turn What You Just Did Into a Runbook</h2>
+            <p>
+              <strong>New → Generate with AI</strong> authors a draft from a
+              plain-language requirement and, optionally, the terminal session
+              where you already did the work by hand. Install and configure
+              something once, attach that tab, and the model turns the commands
+              you ran into steps: what you ran becomes the
+              <code>apply</code>, and the way you would tell it already happened
+              becomes the <code>check</code> and the <code>verify</code>.
+            </p>
+            <ol class="guide-steps">
+              <li>
+                <span>01</span>
+                <div>
+                  <strong>Describe it</strong>
+                  Say what the runbook should do. Requirements alone are enough —
+                  the terminal is optional context, not a requirement.
+                </div>
+              </li>
+              <li>
+                <span>02</span>
+                <div>
+                  <strong>Choose what you share</strong>
+                  Pick the session, untick any command you do not want to send,
+                  and edit the assembled transcript directly. That box is the
+                  payload, verbatim.
+                </div>
+              </li>
+              <li>
+                <span>03</span>
+                <div>
+                  <strong>Review before saving</strong>
+                  The result opens on Review as an ordinary draft, validated,
+                  with every field editable. Nothing reaches the Library until
+                  you publish it.
+                </div>
+              </li>
+            </ol>
+            <div class="guide-callout">
+              <strong>Generated commands earn no extra trust.</strong>
+              <p>
+                The model writes a draft, never a running command: each line is
+                still approved in your terminal when the runbook runs. Output is
+                constrained to shell and manual actions by the draft format
+                itself, and every generated document passes the same validation
+                and secret scan as a hand-written one — a credential echoed out
+                of a transcript is refused, not published. Attaching a terminal
+                is unavailable when terminal context is switched off in
+                Settings → AI, and for any tab that has run a Runbook.
+              </p>
+            </div>
           </section>
 
           <section
@@ -524,6 +592,104 @@ spec:
 
           <section
             class="guide-section"
+            id="goals"
+            aria-labelledby="goals-title"
+          >
+            <p class="eyebrow">Adaptive Remediation</p>
+            <h2 id="goals-title">State the Goal, Not the Commands</h2>
+            <p>
+              Installing Docker is <code>apt-get</code> on Debian,
+              <code>dnf</code> on RHEL and <code>pacman</code> on Arch. A fixed
+              command list needs one runbook per distribution. Handing the whole
+              job to a model swaps that for a worse problem: the model decides
+              both what to do and whether it worked.
+            </p>
+            <p>
+              A goal splits those apart. You state what must be true and the
+              exact conditions that prove it. The model picks the commands. The
+              engine runs the conditions and decides.
+            </p>
+
+            <pre class="guide-code"><code>- id: docker-running
+  title: Docker Engine is installed and running
+  goal:
+    intent: |
+      Docker Engine is installed from the distribution's own
+      repository and its daemon is running and enabled at boot.
+    checks:
+      - command: "command -v docker"
+        expect: [0]
+      - command: "docker info &gt;/dev/null 2&gt;&amp;1"
+        expect: [0]
+  constraints:
+    maxCommands: 12
+    privilege: root
+  apply:
+    uses: agent
+    instructions: |
+      Install Docker Engine using this distribution's package manager.</code></pre>
+
+            <p>
+              There is no <code>check</code> and no <code>verify</code>: the
+              goal serves as both, so one condition is written once instead of
+              twice. Goal conditions are ordinary commands in your visible
+              terminal and carry the same <code>shell_observed</code> assurance
+              as any other. Nothing claims a more trustworthy executor — what
+              changed is who reads the result.
+            </p>
+
+            <div class="guide-grid">
+              <article class="guide-card">
+                <h3>Discover the target first</h3>
+                <p>
+                  <code>spec.context.discover</code> runs a few probes once,
+                  before the first step, each individually approved. Their
+                  output is shown to every model phase as
+                  <strong>data, never instructions</strong>, so one runbook can
+                  serve Debian, RHEL and Arch.
+                </p>
+              </article>
+              <article class="guide-card">
+                <h3>Bounds that narrow</h3>
+                <p>
+                  <code>constraints</code> cap commands, wall clock and model
+                  rounds, and can refuse network access or privilege
+                  escalation. Every field narrows; none can widen what you
+                  already allow.
+                </p>
+              </article>
+              <article class="guide-card">
+                <h3>Refused before the card</h3>
+                <p>
+                  A proposal that breaks a bound is refused before an approval
+                  card is drawn, so it costs the model a round rather than
+                  costing you a click. The refusal returns to the model, which
+                  can then try something allowed.
+                </p>
+              </article>
+              <article class="guide-card">
+                <h3>Nothing implicit</h3>
+                <p>
+                  <code>context.inputs</code> names which input values the model
+                  may see and <code>context.priorSteps</code> whether it learns
+                  what earlier steps did. Both are opt-in per step.
+                </p>
+              </article>
+            </div>
+
+            <div class="guide-callout">
+              <strong>Best-effort bounds, not a sandbox.</strong>
+              <p>
+                They read command text. They cannot see through a script the
+                model wrote in an earlier step, an alias in your dotfiles, or
+                <code>python -c</code>. They narrow what a careless model does;
+                they do not contain a hostile one.
+              </p>
+            </div>
+          </section>
+
+          <section
+            class="guide-section"
             id="actions"
             aria-labelledby="actions-title"
           >
@@ -541,8 +707,12 @@ spec:
               <article class="guide-card">
                 <h3><code>agent</code></h3>
                 <p>
-                  Gives bounded Markdown instructions to the current model. Each
-                  mutation it proposes receives its own approval.
+                  Gives bounded Markdown instructions to the current model, plus
+                  whatever the step's <a href="#goals">goal and context</a>
+                  allow it to know. Each command it proposes receives its own
+                  approval, and the model phase itself is approved separately —
+                  that card names the goal and the enforced bounds before the
+                  model has them.
                 </p>
               </article>
               <article class="guide-card">
@@ -568,51 +738,37 @@ spec:
                 including checks and verification. Apply always requires it.
               </li>
               <li>
-                Model phases are opaque and require an approval of their own,
-                separate from shell approvals.
+                Model phases are opaque and must be approved one step at a
+                time.
               </li>
               <li>
-                <em>Approve every later step unseen</em> arms run-level
-                auto-approve. The step in front of you is approved with the
-                command shown, including your edit. Every later approval in that
-                run is then granted automatically with the command the runbook
-                proposed, and is never displayed to you first — including
-                <code>apply</code> phases and networked, privileged, opaque and
-                configured-model approvals. Nothing is excluded.
+                If you prefer, use <em>Acknowledge and approve all remaining
+                steps</em> in live mode to continue through later approvals. It
+                waits for each approved command to finish before the next
+                approval appears, so a step that takes minutes is normal. It
+                stops at the first operator pause, manual step, finished run or
+                invalid command, and <em>Stop auto-approve</em> ends it at any
+                point.
               </li>
               <li>
-                Auto-approve stops, and tells you why, when you press
-                <em>Stop auto-approve</em>, when you approve or decline a step by
-                hand, when the run needs an operator decision or a manual step,
-                when the run finishes or is cancelled, when the bound terminal is
-                no longer the visible one or does not settle at a quiet prompt,
-                or when a proposed command fails validation. It never stops
-                silently.
+                <em>Abort run</em> stops an active run and returns you to the
+                Library. It cannot prove the process stopped or undo a change
+                already made; the active step is reported unknown.
               </li>
               <li>
-                Each automatically granted approval is recorded as
-                pre-authorized, stating that the command was not individually
-                displayed. That wording appears in the report's approvals table
-                under <strong>Basis</strong>, and phase deviations are still
-                recorded for networked, privileged and opaque steps.
-              </li>
-              <li>
-                Auto-approve is scoped to one run and is never persisted or
-                inherited. It is different from the agent panel’s
-                <em>Auto all</em> setting, which can never settle a runbook
-                approval.
+                This flow is different from the agent panel’s
+                <em>Auto all</em> setting and can only advance runbook
+                approvals.
               </li>
               <li>
                 On-device models are reported as local; cloud and configured
                 remote providers are additionally reported as networked.
               </li>
               <li>
-                Each approval shows the immutable target and the exact command.
-                Approving is your acknowledgement that the visible row is a POSIX
-                prompt on the intended host/container; there is no separate
-                attestation checkbox. That session's shell, functions, aliases
-                and <code>PATH</code> sit inside the target you bound and are not
-                independently verified.
+                Each approval shows the immutable target and asks you to attest
+                that the visible row is a POSIX prompt on the intended
+                host/container, and that its shell, functions, aliases and
+                <code>PATH</code> are trusted.
               </li>
               <li>
                 A run binds to one terminal and observed local/SSH/container
@@ -667,7 +823,11 @@ spec:
               </article>
               <article class="guide-card">
                 <h3><code>full</code></h3>
-                <p>Keep a redacted artifact capped at 1 MiB per attempt.</p>
+                <p>
+                  Keep the tail plus a redacted artifact capped at 1 MiB per
+                  attempt, readable from the report with
+                  <strong>View recorded output</strong>.
+                </p>
               </article>
               <article class="guide-card">
                 <h3>Export report</h3>
@@ -676,6 +836,29 @@ spec:
                   folder you choose. This is not a reusable package export.
                 </p>
               </article>
+            </div>
+
+            <p>
+              <strong>Settings → Runbooks → Record terminal output</strong> sets
+              the floor: <em>Never</em>, <em>As the runbook asks</em> (the
+              default, honouring <code>spec.audit.recordOutput</code>), or
+              <em>Always, in full</em>. Preflight offers only levels at or above
+              it, so a single run can be raised but never lowered, and the clamp
+              is applied in Rust rather than in the picker.
+            </p>
+
+            <div class="guide-callout">
+              <strong>What a recording is and is not.</strong>
+              <p>
+                Redaction catches recognisable credential shapes, not every
+                secret. Capture reads what the terminal still holds in
+                scrollback, so a chatty command yields an honest tail rather
+                than a complete transcript, and truncation is marked. An
+                artifact's digest is re-verified on every read: one altered
+                since the run is reported unreadable rather than shown.
+                Recorded output is kept until you delete the run, and report
+                evidence is never sent to a model to improve prose.
+              </p>
             </div>
 
             <p>

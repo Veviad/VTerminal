@@ -18,7 +18,7 @@ import { trackSession } from "../lib/sessionPersistence";
 import { archiveOnClose } from "../lib/sessionArchive";
 import { trackArchiveMutation } from "../lib/archiveWriteTracker";
 import { forgetRunbookTerminal } from "../lib/runbookTerminalPrivacy";
-import { replayBanner } from "../lib/replayBanner";
+import { replayBanner, stripReplayBanners } from "../lib/replayBanner";
 import { nextOrdinal, shortenCommand } from "../lib/sessionTitle";
 import { cancelNaming } from "../lib/sessionNaming";
 import { isUpdateExitBarrier, useUpdateStore } from "../stores/updateStore";
@@ -383,7 +383,13 @@ export function useSessions() {
       if (snap.scrollback_lines > 0) {
         try {
           const stored = await api.workspaceScrollback(snap.session_id);
-          if (stored) replay = stored + restoreBanner(snap, extra.dims?.cols ?? 80, ws.crashed);
+          // Strip BEFORE appending, never after: the fresh banner is the one
+          // that belongs. Captures are already clean, so this is for blobs
+          // written before that was true — without it a tab restored a dozen
+          // times shows those dozen separators one final time.
+          if (stored)
+            replay =
+              stripReplayBanners(stored) + restoreBanner(snap, extra.dims?.cols ?? 80, ws.crashed);
         } catch (err) {
           console.warn(`scrollback fetch failed (${snap.session_id}):`, err);
         }

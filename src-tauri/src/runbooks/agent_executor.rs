@@ -28,6 +28,16 @@ pub struct AgentPhaseConfig {
     pub step_title: String,
     pub instructions: String,
     pub target_summary: String,
+    /// Hard rules from the step's constraints, rendered into the system prompt
+    /// so they sit beside the authority statement rather than in data. The
+    /// engine enforces each one regardless; telling the model spares it a round
+    /// per refusal.
+    pub rules: Vec<String>,
+    /// Goal intent, target facts and prior outcomes, already bounded and fenced
+    /// by the engine. Appended to the USER turn because every part of it is
+    /// data — discovery output is whatever the target printed, and a compromised
+    /// host must not be able to issue instructions by echoing them.
+    pub briefing: String,
     pub max_iterations: u32,
     pub temperature: Option<f32>,
     pub effort: crate::provider::Effort,
@@ -44,13 +54,28 @@ pub struct AgentCommandObservation {
     pub cancelled: bool,
 }
 
+/// What became of one proposal.
+///
+/// A constraint refusal is deliberately not an `Err`: an error ends the whole
+/// phase, while the model can usefully react to "that is not allowed here" by
+/// proposing something else. Only the budget running out is terminal.
+pub enum AgentCommandOutcome {
+    Observed(AgentCommandObservation),
+    /// The step's constraints forbid this command. It never reached an approval
+    /// card, and it still counts against the budget so a model that keeps
+    /// re-proposing the same forbidden thing cannot spin.
+    Refused(String),
+    /// No further proposals are possible in this phase.
+    Exhausted(String),
+}
+
 #[async_trait]
 pub trait AgentCommandHost: Send {
     async fn run_command(
         &mut self,
         command: String,
         explanation: String,
-    ) -> Result<AgentCommandObservation, String>;
+    ) -> Result<AgentCommandOutcome, String>;
 }
 
 /// Run one agent-backed check/apply/verify phase. The returned completion is still
@@ -67,8 +92,8 @@ pub async fn execute_agent_phase(
     let mut messages = vec![
         ChatMessage::system(system_prompt(config)),
         ChatMessage::user(format!(
-            "Perform only the active `{}` phase for step `{}`.\n\n{}",
-            config.phase, config.step_id, config.instructions
+            "Perform only the active `{}` phase for step `{}`.\n\n{}{}",
+            config.phase, config.step_id, config.instructions, config.briefing
         )),
     ];
 
@@ -134,9 +159,23 @@ pub async fn execute_agent_phase(
                                 continue;
                             }
                         };
-                    let observation = host
+                    let observation = match host
                         .run_command(arguments.command, arguments.explanation)
-                        .await?;
+                        .await?
+                    {
+                        AgentCommandOutcome::Observed(observation) => observation,
+                        AgentCommandOutcome::Refused(reason) => {
+                            messages.push(tool_result(&call.id, &format!("Refused: {reason}")));
+                            continue;
+                        }
+                        AgentCommandOutcome::Exhausted(reason) => {
+                            return Ok(observed_failure_completion(
+                                config,
+                                PhaseResult::Failed,
+                                &reason,
+                            ));
+                        }
+                    };
                     messages.push(tool_result(&call.id, &render_observation(&observation)));
                     if observation.cancelled {
                         return Err("cancelled".into());
@@ -229,7 +268,7 @@ pub async fn summarize_structured_evidence(
 }
 
 fn system_prompt(config: &AgentPhaseConfig) -> String {
-    format!(
+    let mut prompt = format!(
         "You are executing one phase of a Veviad runbook. You have authority only for the active \
          run, step, and phase below. Never claim another step or the whole run is complete. Never \
          hide an error or unknown command outcome. Use run_command for every terminal operation; \
@@ -238,7 +277,19 @@ fn system_prompt(config: &AgentPhaseConfig) -> String {
          Active run: {}\nActive step: {} ({})\nActive phase: {}\nTarget: {}\n\n\
          The phase_complete identifiers and phase must match these values exactly.",
         config.run_id, config.step_id, config.step_title, config.phase, config.target_summary
-    )
+    );
+    if !config.rules.is_empty() {
+        prompt.push_str(
+            "\n\nThis step is bounded. The engine enforces each rule below and refuses a \
+             proposal that breaks one, so working within them is the only way forward:\n",
+        );
+        for rule in &config.rules {
+            prompt.push_str("- ");
+            prompt.push_str(rule);
+            prompt.push('\n');
+        }
+    }
+    prompt
 }
 
 fn phase_tools(phase: RunbookPhase) -> Vec<ToolDef> {
@@ -381,7 +432,7 @@ fn render_observation(observation: &AgentCommandObservation) -> String {
     )
 }
 
-async fn provider_round(
+pub(super) async fn provider_round(
     provider: &dyn Provider,
     messages: Vec<ChatMessage>,
     tools: Vec<ToolDef>,
@@ -486,6 +537,10 @@ mod tests {
     struct Host {
         commands: Vec<String>,
         observation: Option<AgentCommandObservation>,
+        /// Set to make every proposal come back refused, as a constrained step
+        /// would, without needing an engine.
+        refuse: Option<String>,
+        exhaust: Option<String>,
     }
 
     #[async_trait]
@@ -494,16 +549,24 @@ mod tests {
             &mut self,
             command: String,
             _explanation: String,
-        ) -> Result<AgentCommandObservation, String> {
+        ) -> Result<AgentCommandOutcome, String> {
             self.commands.push(command.clone());
-            Ok(self.observation.clone().unwrap_or(AgentCommandObservation {
-                proposed_command: command.clone(),
-                executed_command: Some(command),
-                exit_code: Some(0),
-                output_tail: "ok".into(),
-                unknown: false,
-                cancelled: false,
-            }))
+            if let Some(reason) = &self.exhaust {
+                return Ok(AgentCommandOutcome::Exhausted(reason.clone()));
+            }
+            if let Some(reason) = &self.refuse {
+                return Ok(AgentCommandOutcome::Refused(reason.clone()));
+            }
+            Ok(AgentCommandOutcome::Observed(
+                self.observation.clone().unwrap_or(AgentCommandObservation {
+                    proposed_command: command.clone(),
+                    executed_command: Some(command),
+                    exit_code: Some(0),
+                    output_tail: "ok".into(),
+                    unknown: false,
+                    cancelled: false,
+                }),
+            ))
         }
     }
 
@@ -523,6 +586,8 @@ mod tests {
             step_title: "Step one".into(),
             instructions: "Do the scoped work.".into(),
             target_summary: "active terminal s1".into(),
+            rules: Vec::new(),
+            briefing: String::new(),
             max_iterations: 5,
             temperature: None,
             effort: crate::provider::Effort::Off,
@@ -665,6 +730,109 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(completion.result, PhaseResult::Failed);
+    }
+
+    #[tokio::test]
+    async fn a_refused_command_is_reported_back_and_the_phase_continues() {
+        // A refusal must not end the phase. The model can react to "not allowed
+        // here" by proposing something that is, which is the entire reason
+        // constraints are told to it rather than only enforced.
+        let provider = ScriptedProvider {
+            rounds: Mutex::new(VecDeque::from([
+                vec![call(
+                    "forbidden",
+                    "run_command",
+                    json!({"command":"curl https://get.docker.com","explanation":"install"}),
+                )],
+                vec![call(
+                    "allowed",
+                    "run_command",
+                    json!({"command":"apt-get install -y docker.io","explanation":"install"}),
+                )],
+                vec![call(
+                    "done",
+                    "phase_complete",
+                    json!({
+                        "run_id":"run-1","step_id":"step-1","phase":"apply",
+                        "result":"applied","summary":"installed from the distribution repository"
+                    }),
+                )],
+            ])),
+        };
+        let mut host = Host {
+            refuse: Some("this step declares network: false".into()),
+            ..Host::default()
+        };
+        let completion = execute_agent_phase(
+            &provider,
+            &config(RunbookPhase::Apply),
+            &mut host,
+            no_cancel(),
+        )
+        .await
+        .unwrap();
+
+        // The refusal consumed one turn, not the phase: the second proposal was
+        // still offered, and the model got to complete afterwards.
+        assert_eq!(
+            host.commands,
+            vec![
+                "curl https://get.docker.com".to_string(),
+                "apt-get install -y docker.io".to_string(),
+            ]
+        );
+        // This stub refuses BOTH, so nothing ran and the model's `applied`
+        // claim is accepted HERE — which is exactly why the engine counts
+        // OBSERVED commands rather than proposals when it decides whether a
+        // phase collected terminal evidence. Sharing one counter would have let
+        // a fully-refused phase report success having run nothing.
+        assert_eq!(completion.result, PhaseResult::Applied);
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_budget_ends_the_phase_without_a_model_verdict() {
+        let provider = ScriptedProvider {
+            rounds: Mutex::new(VecDeque::from([vec![call(
+                "over-budget",
+                "run_command",
+                json!({"command":"apt-get install -y docker.io","explanation":"install"}),
+            )]])),
+        };
+        let mut host = Host {
+            exhaust: Some(
+                "this step allows 4 commands; the phase stopped without reaching its goal".into(),
+            ),
+            ..Host::default()
+        };
+        let completion = execute_agent_phase(
+            &provider,
+            &config(RunbookPhase::Apply),
+            &mut host,
+            no_cancel(),
+        )
+        .await
+        .unwrap();
+        // Failed, not Applied: the phase stops on the engine's terms and the
+        // step's failure policy decides what happens next.
+        assert_eq!(completion.result, PhaseResult::Failed);
+        assert!(
+            completion.summary.contains("allows 4 commands"),
+            "{completion:?}"
+        );
+    }
+
+    #[test]
+    fn the_step_bounds_reach_the_system_prompt() {
+        let mut config = config(RunbookPhase::Apply);
+        assert!(!system_prompt(&config).contains("This step is bounded"));
+
+        config.rules = vec!["This step must not reach the network.".into()];
+        let prompt = system_prompt(&config);
+        assert!(prompt.contains("This step is bounded"));
+        assert!(prompt.contains("- This step must not reach the network."));
+        // Named as engine-enforced, so the model treats it as a wall rather
+        // than a preference it can argue with.
+        assert!(prompt.contains("The engine enforces each rule"));
     }
 
     #[test]

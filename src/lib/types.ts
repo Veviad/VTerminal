@@ -813,6 +813,13 @@ export interface Settings {
   /** Reusable Runbooks, EXPERIMENTAL and off by default. Rust gates every
    *  runbook command; this value is not merely a visibility preference. */
   runbooks_enabled: boolean;
+  /** How much terminal output a runbook run keeps as an audit record. This is a
+   *  FLOOR: preflight may raise a single run above it and can never drop below
+   *  it, and `runbooks_start` re-applies the clamp so a stale frontend cannot
+   *  lower the audit level. `runbook` defers to the package's own request.
+   *  Spelled out rather than imported: this file is deliberately import-free.
+   *  `EvidenceRecordingPolicy` in lib/runbooks.ts is the same union. */
+  runbooks_output_recording: "none" | "runbook" | "all";
   log_level: string;
 }
 
@@ -1204,6 +1211,9 @@ export interface SettingsPatch {
   auto_update_enabled: boolean;
   docs_enabled: boolean;
   runbooks_enabled: boolean;
+  // Loose on the patch side, as `cursor_style` is: Rust parses and rejects an
+  // unknown value rather than trusting the caller's type.
+  runbooks_output_recording: string;
   log_level: string;
 }
 

@@ -10,6 +10,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { BlockTracker, type BlockTrackerCallbacks } from "./osc133";
 import { sanitizeExternalWebUrl } from "./externalUrl";
 import { matchesReserved } from "./keymap";
+import { stripReplayBanners } from "./replayBanner";
 import { resolveXtermTheme } from "./xtermTheme";
 import "@xterm/xterm/css/xterm.css";
 
@@ -227,6 +228,10 @@ export const MAX_SNAPSHOT_CHARS = 262_144;
  *    and bracketed paste in a terminal with no application to consume them.
  *  - `excludeAltBuffer`: quitting mid-vim must restore the shell scrollback that
  *    was UNDERNEATH the TUI, not a frozen editor screen.
+ *
+ * Replay banners are stripped here so that every consumer — workspace restore
+ * and the archive alike — stores terminal output and nothing the app itself
+ * drew. See `stripReplayBanners`.
  */
 export function serializeSession(
   sessionId: string,
@@ -236,11 +241,13 @@ export function serializeSession(
   if (!entry || entry.disposed || maxLines <= 0) return null;
 
   const attempt = (n: number) =>
-    entry.serialize.serialize({
-      scrollback: n,
-      excludeModes: true,
-      excludeAltBuffer: true,
-    });
+    stripReplayBanners(
+      entry.serialize.serialize({
+        scrollback: n,
+        excludeModes: true,
+        excludeAltBuffer: true,
+      }),
+    );
 
   // Step down rather than truncate: cutting a string of escape sequences
   // mid-sequence would replay as garbage.
