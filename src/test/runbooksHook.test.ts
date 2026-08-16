@@ -969,7 +969,7 @@ describe("useRunbooks recovery and deletion", () => {
       "printf edited",
       "acknowledged",
     );
-    expect(useRunbookStore.getState().autoApproveRuns["run-auto"]).toBeDefined();
+    expect(useRunbookStore.getState().hasAutoApproveRun("run-auto")).toBe(true);
 
     // The run has moved on; the next approval arrives only as an event.
     await act(async () => {
@@ -1023,7 +1023,7 @@ describe("useRunbooks recovery and deletion", () => {
     });
 
     expect(mocks.respondApproval).not.toHaveBeenCalled();
-    expect(useRunbookStore.getState().autoApproveRuns["run-hidden"]).toBeUndefined();
+    expect(useRunbookStore.getState().hasAutoApproveRun("run-hidden")).toBe(false);
     expect(useRunbookStore.getState().error).toContain("bound terminal");
   });
 
@@ -1043,7 +1043,7 @@ describe("useRunbooks recovery and deletion", () => {
     });
 
     expect(mocks.respondApproval).not.toHaveBeenCalled();
-    expect(useRunbookStore.getState().autoApproveRuns["run-noisy"]).toBeUndefined();
+    expect(useRunbookStore.getState().hasAutoApproveRun("run-noisy")).toBe(false);
     expect(useRunbookStore.getState().error).toContain("quiet shell prompt");
   });
 
@@ -1064,7 +1064,7 @@ describe("useRunbooks recovery and deletion", () => {
       } as never);
     });
 
-    expect(useRunbookStore.getState().autoApproveRuns["run-pause"]).toBeUndefined();
+    expect(useRunbookStore.getState().hasAutoApproveRun("run-pause")).toBe(false);
     expect(useRunbookStore.getState().error).toContain("operator decision");
   });
 
@@ -1085,7 +1085,7 @@ describe("useRunbooks recovery and deletion", () => {
       );
     });
 
-    expect(useRunbookStore.getState().autoApproveRuns["run-manual"]).toBeUndefined();
+    expect(useRunbookStore.getState().hasAutoApproveRun("run-manual")).toBe(false);
   });
 
   it("does not arm auto-approve when the visible approval is refused", async () => {
@@ -1100,7 +1100,7 @@ describe("useRunbooks recovery and deletion", () => {
       await result.current.approveAllPendingSteps("run-refuse", "printf one");
     });
 
-    expect(useRunbookStore.getState().autoApproveRuns["run-refuse"]).toBeUndefined();
+    expect(useRunbookStore.getState().hasAutoApproveRun("run-refuse")).toBe(false);
     expect(useRunbookStore.getState().error).toContain("approval");
     expect(useRunbookStore.getState().busyAction).toBeNull();
   });

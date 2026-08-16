@@ -82,7 +82,7 @@ let definitionRequestSequence = 0;
 let libraryRequestSequence = 0;
 let sourceSelectionSequence = 0;
 function getRunById(runId: string): RunbookRun | null {
-  return useRunbookStore.getState().runsById[runId] ?? null;
+  return useRunbookStore.getState().getRunById(runId);
 }
 
 /** Disarms run-level auto-approve and explains why. The reason is the operator's
@@ -90,13 +90,13 @@ function getRunById(runId: string): RunbookRun | null {
  *  later, vaguer message. */
 function disarmAutoApprove(runId: string, reason: string | null): void {
   const store = useRunbookStore.getState();
-  const wasArmed = store.autoApproveRuns[runId] !== undefined;
+  const wasArmed = store.hasAutoApproveRun(runId);
   store.setAutoApprove(runId, false);
   if (wasArmed && reason) store.setError(reason);
 }
 
 function isAutoApproveArmed(runId: string): boolean {
-  return useRunbookStore.getState().autoApproveRuns[runId] !== undefined;
+  return useRunbookStore.getState().hasAutoApproveRun(runId);
 }
 
 function invalidCommandText(command: string): boolean {
@@ -241,7 +241,7 @@ async function autoApproveArmedApproval(
   // approval can arrive twice. Responding twice makes Rust answer "approval is
   // already approved", which would disarm a perfectly healthy run. The record
   // lives in the store so it is scoped to the run and cleared when it ends.
-  const armed = useRunbookStore.getState().autoApproveRuns[runId];
+  const armed = useRunbookStore.getState().getAutoApproveRunState(runId);
   if (armed?.grantedApprovalIds.includes(event.approval_id)) return;
   useRunbookStore.getState().noteAutoApproved(runId, event.approval_id);
 

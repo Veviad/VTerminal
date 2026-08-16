@@ -21,12 +21,17 @@ export interface RunbookStoreState {
   /** Durable live-run registry. `activeRun` is only the run selected in the UI. */
   runsById: Record<string, RunbookRun>;
   activeRun: RunbookRun | null;
+  getRunById(runId: string): RunbookRun | null;
   /** Runs whose remaining approvals the operator pre-authorized. Per run,
    *  frontend-only, never persisted and never inherited by another run — the
    *  same stance as `aiStreams[id].permissionMode` in appStore. Deliberately
    *  NOT the agent's permission mode: `RunbookApprovalState` is kept separate
    *  in Rust so agent `Auto all` can never settle a runbook gate. */
-  autoApproveRuns: Record<string, RunbookAutoApproveState>;
+  autoApproveRuns: Map<string, RunbookAutoApproveState>;
+  hasAutoApproveRun(runId: string): boolean;
+  getAutoApproveRunState(
+    runId: string,
+  ): RunbookAutoApproveState | undefined;
   history: RunbookHistoryEntry[];
   selectedHistoryRunId: string | null;
   report: RunbookReport | null;
@@ -78,7 +83,7 @@ interface RunbookStoreData {
    *  same stance as `aiStreams[id].permissionMode` in appStore. Deliberately
    *  NOT the agent's permission mode: `RunbookApprovalState` is kept separate
    *  in Rust so agent `Auto all` can never settle a runbook gate. */
-  autoApproveRuns: Record<string, RunbookAutoApproveState>;
+  autoApproveRuns: Map<string, RunbookAutoApproveState>;
   history: RunbookHistoryEntry[];
   selectedHistoryRunId: string | null;
   report: RunbookReport | null;
@@ -107,7 +112,7 @@ const emptyState = (): RunbookStoreData => ({
   definition: null,
   runsById: {},
   activeRun: null,
-  autoApproveRuns: {},
+  autoApproveRuns: new Map(),
   history: [],
   selectedHistoryRunId: null,
   report: null,
@@ -153,6 +158,14 @@ export const useRunbookStore = create<RunbookStoreState>((set) => ({
   selectSource: (selectedSourceId) =>
     set({ selectedSourceId, definition: null, error: null, notice: null }),
   setDefinition: (definition) => set({ definition }),
+  getRunById: (runId) => {
+    const state = useRunbookStore.getState();
+    const activeRun = state.activeRun;
+    return (
+      Object.values(state.runsById).find((item) => item.run_id === runId) ??
+      (activeRun?.run_id === runId ? activeRun : null)
+    );
+  },
   setActiveRun: (activeRun) =>
     set((state) => {
       if (!activeRun) return { activeRun: null };
@@ -288,33 +301,35 @@ export const useRunbookStore = create<RunbookStoreState>((set) => ({
     };
     set({ [field[key]]: loading } as Partial<RunbookStoreState>);
   },
+  hasAutoApproveRun: (runId) =>
+    useRunbookStore.getState().autoApproveRuns.has(runId),
+  getAutoApproveRunState: (runId) =>
+    useRunbookStore.getState().autoApproveRuns.get(runId),
   setAutoApprove: (runId, on) =>
     set((state) => {
       if (!on) {
-        if (!(runId in state.autoApproveRuns)) return {};
-        const next = { ...state.autoApproveRuns };
-        delete next[runId];
+        if (!state.autoApproveRuns.has(runId)) return {};
+        const next = new Map(state.autoApproveRuns);
+        next.delete(runId);
         return { autoApproveRuns: next };
       }
-      if (state.autoApproveRuns[runId]) return {};
+      if (state.autoApproveRuns.has(runId)) return {};
       return {
-        autoApproveRuns: {
-          ...state.autoApproveRuns,
-          [runId]: { grantedApprovalIds: [] },
-        },
+        autoApproveRuns: new Map(state.autoApproveRuns).set(runId, {
+          grantedApprovalIds: [],
+        }),
       };
     }),
   noteAutoApproved: (runId, approvalId) =>
     set((state) => {
-      const current = state.autoApproveRuns[runId];
+      const current = state.autoApproveRuns.get(runId);
       if (!current || current.grantedApprovalIds.includes(approvalId)) return {};
+      const next = new Map(state.autoApproveRuns);
+      next.set(runId, {
+        grantedApprovalIds: [...current.grantedApprovalIds, approvalId],
+      });
       return {
-        autoApproveRuns: {
-          ...state.autoApproveRuns,
-          [runId]: {
-            grantedApprovalIds: [...current.grantedApprovalIds, approvalId],
-          },
-        },
+        autoApproveRuns: next,
       };
     }),
   setBusyAction: (busyAction) => set({ busyAction }),

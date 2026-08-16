@@ -43,9 +43,7 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
   // Select a primitive: zustand compares with Object.is, so returning the map
   // itself would re-render on every unrelated run's change.
   const autoApproving = useRunbookStore((state) =>
-    state.activeRun
-      ? state.autoApproveRuns[state.activeRun.run_id] !== undefined
-      : false,
+    state.activeRun ? state.hasAutoApproveRun(state.activeRun.run_id) : false,
   );
   const {
     cancel,
