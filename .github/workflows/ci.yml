@@ -221,16 +221,22 @@ jobs:
 
       - name: Clippy (local-llm, Vulkan and CPU backends)
         working-directory: src-tauri
+        env:
+          CMAKE_BUILD_PARALLEL_LEVEL: 1
         run: cargo clippy --all-targets --locked --features local-llm -- -D warnings
 
       - name: Test (local-llm)
         working-directory: src-tauri
+        env:
+          CMAKE_BUILD_PARALLEL_LEVEL: 1
         run: cargo test --locked --features local-llm
 
       # Exercise the exact one-installer CPU+Vulkan payload used by releases,
       # not just the feature-off preview. The script rejects mixed/stale llama
       # build outputs and an incomplete runtime/backend DLL set before bundling.
       - name: NSIS smoke bundle (local-llm, Vulkan + CPU fallback)
+        env:
+          CMAKE_BUILD_PARALLEL_LEVEL: 1
         run: |
           ./scripts/build-windows.ps1
           $installer = Get-ChildItem src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis -Filter '*setup.exe'
