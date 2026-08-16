@@ -32,7 +32,9 @@ import {
 
 function AnsibleHostOutcomes({ value }: { value: unknown }) {
   if (!value || typeof value !== "object" || !("hosts" in value)) return null;
-  const hosts = (value as { hosts?: Record<string, Record<string, number>> }).hosts;
+  const hosts = (value as {
+    hosts?: Record<string, Partial<Record<"ok" | "changed" | "failed" | "unreachable" | "skipped", number>>>;
+  }).hosts;
   if (!hosts || typeof hosts !== "object") return null;
   return (
     <div className="mt-2 overflow-x-auto rounded border border-border-subtle">

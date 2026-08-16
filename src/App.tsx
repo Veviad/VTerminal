@@ -162,13 +162,17 @@ function PrerequisiteQuitFallback() {
     void listen<{ token: number }>(APP_QUIT_EVENT, (event) => {
       void api
         .appQuitForce(event.payload.token, "Windows prerequisites are unavailable")
-        .catch((error) => console.warn("could not finish prerequisite-screen quit:", error));
+        .catch((error) => {
+          console.warn("could not finish prerequisite-screen quit:", error);
+        });
     })
       .then((stop) => {
         if (disposed) stop();
         else unlisten = stop;
       })
-      .catch((error) => console.warn("could not install prerequisite-screen quit hook:", error));
+      .catch((error) => {
+        console.warn("could not install prerequisite-screen quit hook:", error);
+      });
     return () => {
       disposed = true;
       unlisten?.();
