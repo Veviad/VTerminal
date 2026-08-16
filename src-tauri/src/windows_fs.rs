@@ -162,7 +162,11 @@ fn protected_components(path: &Path) -> Result<(PathBuf, PathBuf, Vec<OsString>)
 
     let mut components = lexical.components();
     let prefix = match components.next() {
-        Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_)) => prefix,
+        Some(Component::Prefix(prefix))
+            if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)) =>
+        {
+            prefix
+        }
         _ => return Err("protected Windows paths must use an absolute local drive path".into()),
     };
     let root_component = match components.next() {
@@ -1479,7 +1483,7 @@ fn rename_relative(
         .and_then(|bytes| u32::try_from(bytes).ok())
         .ok_or("managed Windows destination filename is too long")?;
     let header = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
-    let buffer_bytes = header
+    let buffer_bytes = std::mem::size_of::<FILE_RENAME_INFO>()
         .checked_add(name_bytes as usize)
         .ok_or("managed Windows rename buffer is too large")?;
     let mut buffer = vec![0usize; buffer_bytes.div_ceil(std::mem::size_of::<usize>())];
@@ -1495,6 +1499,11 @@ fn rename_relative(
             std::ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
             name.len(),
         );
+        *buffer
+            .as_mut_ptr()
+            .cast::<u8>()
+            .add(header + name_bytes as usize)
+            .cast::<u16>() = 0;
     }
     // SAFETY: `source_file` and destination root remain live and `info` points
     // to a fully initialized rename buffer of `buffer_bytes` bytes.
