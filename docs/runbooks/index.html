@@ -725,8 +725,13 @@ spec:
               <article class="guide-card">
                 <h3><code>ansible.playbook</code></h3>
                 <p>
-                  Reserved and validated, but runtime-unavailable in native v1.
-                  It never falls back to generic shell execution.
+                  Native v1 recognizes and validates the format, but refuses
+                  runtime execution today. It never falls back to a generic shell
+                  execution. The planned follow-on adapter will require a
+                  user-installed <code>ansible-runner</code>, bind approval to
+                  exact project and inventory digests, retain structured
+                  per-host outcomes, keep check mode preview-only, and still
+                  require verification.
                 </p>
               </article>
             </div>

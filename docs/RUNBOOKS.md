@@ -228,7 +228,7 @@ Each phase is one action:
 | `shell` | One inline command. No control characters, newlines, heredocs or here-strings; 4,096 characters maximum. |
 | `agent` | Bounded Markdown instructions for the configured model. It proposes commands; each one is approved separately in the same visible terminal. |
 | `manual` | Asks you for an outcome, a required comment and an optional evidence note. |
-| `ansible.playbook` | Parsed and validated, but **not runnable** until the dedicated adapter ships. It never falls back to a shell command. |
+| `ansible.playbook` | Native v1 recognizes and validates `ansible.playbook`, but it refuses runtime execution today so there is no silent shell fallback. The planned adapter will use a user-installed `ansible-runner` as an explicit local controller, bind approval to exact project/inventory digests, retain structured per-host outcomes, keep check mode preview-only, and still require verification. |
 
 A shell check declares disjoint compliant and non-compliant exit codes; any
 other code is an execution error, not a non-compliance.
