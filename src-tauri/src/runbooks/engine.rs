@@ -1451,6 +1451,8 @@ impl<'a> EngineRunner<'a> {
             network: class.network,
             privileged: class.privileged,
             opaque: class.opaque,
+            project_digest: None,
+            inventory_digest: None,
         };
 
         let (executed_command, approval_id) = if request.requires_approval() {
@@ -2447,6 +2449,8 @@ impl<'a> EngineRunner<'a> {
             network: self.context.config.model_networked,
             privileged: false,
             opaque: true,
+            project_digest: None,
+            inventory_digest: None,
         };
         match self
             .await_approval(index, &attempt_id, request, false)
@@ -3432,9 +3436,8 @@ fn sync_evidence_directory(path: &Path) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn remove_staging_evidence_file(path: &Path) -> Result<(), String> {
-    crate::windows_fs::remove_file_no_reparse(path).map_err(|error| {
-        format!("delete evidence staging artifact: {error}")
-    })?;
+    crate::windows_fs::remove_file_no_reparse(path)
+        .map_err(|error| format!("delete evidence staging artifact: {error}"))?;
     Ok(())
 }
 

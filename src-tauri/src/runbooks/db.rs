@@ -95,7 +95,7 @@ pub fn migrate_v6(conn: &Connection) -> Result<(), String> {
             WHERE status IN ('created','ready','running','waiting_approval',
                              'waiting_operator','paused');
 
-        CREATE TABLE runbook_steps (
+    CREATE TABLE runbook_steps (
             run_id             TEXT NOT NULL REFERENCES runbook_runs(id) ON DELETE CASCADE,
             step_id            TEXT NOT NULL,
             sort_order         INTEGER NOT NULL,
@@ -465,7 +465,7 @@ fn repair_v6_runbook_steps_assurance(conn: &Connection) -> Result<(), String> {
             changed            INTEGER NOT NULL DEFAULT 0 CHECK(changed IN (0,1)),
             assurance          TEXT CHECK(assurance IS NULL OR assurance IN
                                    ('deterministic_shell','shell_observed','agent_assisted',
-                                    'operator_attested')),
+                                    'ansible_runner','operator_attested')),
             summary            TEXT,
             operator_comment   TEXT,
             waiver_actor       TEXT,
@@ -6049,6 +6049,8 @@ mod tests {
             network: false,
             privileged: false,
             opaque: true,
+            project_digest: None,
+            inventory_digest: None,
         }
     }
 

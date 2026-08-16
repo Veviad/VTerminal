@@ -410,7 +410,7 @@ mod tests {
         let first = version(&conn);
         super::run(&conn).unwrap();
         assert_eq!(version(&conn), first);
-        assert_eq!(first, 9);
+        assert_eq!(first, 10);
     }
 
     /// The migration chain is append-only, so this asserts the shape a v4
@@ -498,7 +498,7 @@ mod tests {
         )
         .unwrap();
         super::run(&conn).unwrap();
-        assert_eq!(version(&conn), 9);
+        assert_eq!(version(&conn), 10);
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM command_history", [], |r| r.get(0))
             .unwrap();
@@ -523,7 +523,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 9);
+        assert_eq!(version(&conn), 10);
         let migrated: (String, i64, Option<i64>, String, String) = conn
             .query_row(
                 "SELECT source_kind, hidden, builtin_order, created_at, updated_at
@@ -564,7 +564,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 9);
+        assert_eq!(version(&conn), 10);
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(runbook_drafts)")
             .unwrap()
@@ -598,7 +598,7 @@ mod tests {
         super::run(&conn).unwrap();
 
         // Upgrades run the whole chain, so this lands on the current head.
-        assert_eq!(version(&conn), 9);
+        assert_eq!(version(&conn), 10);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()
@@ -644,7 +644,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 9);
+        assert_eq!(version(&conn), 10);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()
