@@ -222,18 +222,14 @@ jobs:
       - name: Clippy (local-llm, Vulkan and CPU backends)
         working-directory: src-tauri
         env:
-          CARGO_BUILD_JOBS: 1
           CARGO_TARGET_DIR: D:\t
-          CMAKE_BUILD_PARALLEL_LEVEL: 1
           CMAKE_GENERATOR: Ninja
         run: cargo clippy --all-targets --locked --features local-llm -- -D warnings
 
       - name: Test (local-llm)
         working-directory: src-tauri
         env:
-          CARGO_BUILD_JOBS: 1
           CARGO_TARGET_DIR: D:\t
-          CMAKE_BUILD_PARALLEL_LEVEL: 1
           CMAKE_GENERATOR: Ninja
         run: cargo test --locked --features local-llm
 
@@ -242,9 +238,7 @@ jobs:
       # build outputs and an incomplete runtime/backend DLL set before bundling.
       - name: NSIS smoke bundle (local-llm, Vulkan + CPU fallback)
         env:
-          CARGO_BUILD_JOBS: 1
           CARGO_TARGET_DIR: D:\t
-          CMAKE_BUILD_PARALLEL_LEVEL: 1
           CMAKE_GENERATOR: Ninja
         run: |
           ./scripts/build-windows.ps1
