@@ -80,7 +80,7 @@ impl FlowControl {
         self.cond.notify_all();
     }
 
-    #[cfg(any(not(target_os = "windows"), test))]
+    #[cfg(not(target_os = "windows"))]
     pub fn is_shutdown(&self) -> bool {
         self.shutdown.load(Ordering::Relaxed)
     }
