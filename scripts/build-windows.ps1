@@ -6,7 +6,14 @@ $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
 $target = "x86_64-pc-windows-msvc"
 $manifest = Join-Path $repo "src-tauri\Cargo.toml"
-$release = Join-Path $repo "src-tauri\target\$target\release"
+$targetRoot = if ([string]::IsNullOrWhiteSpace($env:CARGO_TARGET_DIR)) {
+  Join-Path $repo "src-tauri\target"
+} elseif ([IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) {
+  $env:CARGO_TARGET_DIR
+} else {
+  Join-Path $repo $env:CARGO_TARGET_DIR
+}
+$release = Join-Path $targetRoot "$target\release"
 $sidecarDestination = Join-Path $repo "src-tauri\binaries\vterminal-docs-$target.exe"
 $runtimeDestination = Join-Path $repo "src-tauri\binaries\llama-runtime"
 $backendDestination = Join-Path $repo "src-tauri\binaries\llama-backends"

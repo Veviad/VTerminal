@@ -223,6 +223,7 @@ jobs:
         working-directory: src-tauri
         env:
           CARGO_BUILD_JOBS: 1
+          CARGO_TARGET_DIR: D:\t
           CMAKE_BUILD_PARALLEL_LEVEL: 1
           CMAKE_GENERATOR: Ninja
         run: cargo clippy --all-targets --locked --features local-llm -- -D warnings
@@ -231,6 +232,7 @@ jobs:
         working-directory: src-tauri
         env:
           CARGO_BUILD_JOBS: 1
+          CARGO_TARGET_DIR: D:\t
           CMAKE_BUILD_PARALLEL_LEVEL: 1
           CMAKE_GENERATOR: Ninja
         run: cargo test --locked --features local-llm
@@ -241,11 +243,12 @@ jobs:
       - name: NSIS smoke bundle (local-llm, Vulkan + CPU fallback)
         env:
           CARGO_BUILD_JOBS: 1
+          CARGO_TARGET_DIR: D:\t
           CMAKE_BUILD_PARALLEL_LEVEL: 1
           CMAKE_GENERATOR: Ninja
         run: |
           ./scripts/build-windows.ps1
-          $installer = Get-ChildItem src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis -Filter '*setup.exe'
+          $installer = Get-ChildItem "$env:CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/bundle/nsis" -Filter '*setup.exe'
           if ($installer.Count -ne 1) { throw "Expected one NSIS installer, found $($installer.Count)." }
 
   policy:
