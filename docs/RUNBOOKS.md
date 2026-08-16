@@ -232,7 +232,9 @@ Each phase is one action:
 
 An Ansible action references files beneath the package's `ansible/` directory.
 The active terminal must be local because `ansible-runner` is the controller;
-its inventory may target remote hosts. Input mappings become JSON extra vars:
+its inventory may target remote hosts. On Windows, install `ansible-runner`
+inside the default WSL distro; VTerminal discovers it there and translates the
+package paths to Linux paths. Input mappings become JSON extra vars:
 
 ```yaml
 apply:

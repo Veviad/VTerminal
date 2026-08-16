@@ -1439,6 +1439,14 @@ impl<'a> EngineRunner<'a> {
             inventory_digest,
         };
 
+        let package_root_shell = ansible_shell_path(&self.spec.package_root)?;
+        let project_root_shell = ansible_shell_path(&project_root)?;
+        let inventory_shell = inventory_path
+            .as_deref()
+            .map(ansible_shell_path)
+            .transpose()?;
+        let playbook_shell = playbook.to_string_lossy().replace('\\', "/");
+
         let artifact_root =
             std::env::temp_dir().join(format!("vterminal-ansible-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&artifact_root).map_err(|error| {
@@ -1447,17 +1455,24 @@ impl<'a> EngineRunner<'a> {
                 artifact_root.display()
             )
         })?;
+        let artifact_root_shell = match ansible_shell_path(&artifact_root) {
+            Ok(path) => path,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&artifact_root);
+                return Err(error);
+            }
+        };
         let mut command = format!(
             "{} run {} --project-dir {} --playbook {} --artifact-dir {} -j",
-            quote_shell_argument(&runner.to_string_lossy()),
-            quote_shell_argument(&self.spec.package_root.to_string_lossy()),
-            quote_shell_argument(&project_root.to_string_lossy()),
-            quote_shell_argument(&playbook.to_string_lossy()),
-            quote_shell_argument(&artifact_root.to_string_lossy()),
+            quote_shell_argument(&runner),
+            quote_shell_argument(&package_root_shell),
+            quote_shell_argument(&project_root_shell),
+            quote_shell_argument(&playbook_shell),
+            quote_shell_argument(&artifact_root_shell),
         );
-        if let Some(inventory) = &inventory_path {
+        if let Some(inventory) = &inventory_shell {
             command.push_str(" --inventory ");
-            command.push_str(&quote_shell_argument(&inventory.to_string_lossy()));
+            command.push_str(&quote_shell_argument(inventory));
         }
         if let Some(limit) = &action.limit {
             command.push_str(" --limit ");
@@ -3852,7 +3867,8 @@ fn quote_shell_argument(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-fn find_ansible_runner() -> Result<PathBuf, String> {
+#[cfg(not(target_os = "windows"))]
+fn find_ansible_runner() -> Result<String, String> {
     let mut candidates = std::env::var_os("PATH")
         .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
         .unwrap_or_default();
@@ -3865,18 +3881,69 @@ fn find_ansible_runner() -> Result<PathBuf, String> {
     for directory in candidates {
         let candidate = directory.join("ansible-runner");
         if candidate.is_file() {
-            return candidate.canonicalize().map_err(|error| {
-                format!(
-                    "resolve installed ansible-runner {}: {error}",
-                    candidate.display()
-                )
-            });
+            return candidate
+                .canonicalize()
+                .map(|path| path.to_string_lossy().into_owned())
+                .map_err(|error| {
+                    format!(
+                        "resolve installed ansible-runner {}: {error}",
+                        candidate.display()
+                    )
+                });
         }
     }
     Err(
         "ansible.playbook requires a user-installed ansible-runner available on PATH or in a standard user binary directory"
             .into(),
     )
+}
+
+#[cfg(target_os = "windows")]
+fn find_ansible_runner() -> Result<String, String> {
+    let output = std::process::Command::new("wsl.exe")
+        .args(["--exec", "/bin/sh", "-lc", "command -v ansible-runner"])
+        .output()
+        .map_err(|error| format!("query ansible-runner in the default WSL distro: {error}"))?;
+    if !output.status.success() {
+        return Err(
+            "ansible.playbook requires a user-installed ansible-runner in the default WSL distro"
+                .into(),
+        );
+    }
+    parse_wsl_absolute_path(&output.stdout, "ansible-runner in the default WSL distro")
+}
+
+#[cfg(not(target_os = "windows"))]
+fn ansible_shell_path(path: &Path) -> Result<String, String> {
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[cfg(target_os = "windows")]
+fn ansible_shell_path(path: &Path) -> Result<String, String> {
+    let output = std::process::Command::new("wsl.exe")
+        .args(["--exec", "/usr/bin/wslpath", "-a", "--"])
+        .arg(path)
+        .output()
+        .map_err(|error| format!("translate {} for WSL: {error}", path.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "translate {} for WSL: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    parse_wsl_absolute_path(&output.stdout, &format!("WSL path for {}", path.display()))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn parse_wsl_absolute_path(output: &[u8], description: &str) -> Result<String, String> {
+    let value = std::str::from_utf8(output)
+        .map_err(|_| format!("{description} was not valid UTF-8"))?
+        .trim();
+    if !value.starts_with('/') || value.lines().count() != 1 {
+        return Err(format!("{description} was not one absolute Linux path"));
+    }
+    Ok(value.to_string())
 }
 
 #[cfg(target_os = "windows")]
@@ -5246,6 +5313,64 @@ spec:
     #[test]
     fn ansible_shell_arguments_preserve_single_quotes() {
         assert_eq!(quote_shell_argument("O'Brien"), "'O'\\''Brien'");
+    }
+
+    #[test]
+    fn ansible_project_digest_is_deterministic_and_content_sensitive() {
+        let base =
+            std::env::temp_dir().join(format!("vterminal-ansible-digest-{}", uuid::Uuid::new_v4()));
+        let first = base.join("first");
+        let second = base.join("second");
+        std::fs::create_dir_all(first.join("roles/web/tasks")).unwrap();
+        std::fs::create_dir_all(second.join("roles/web/tasks")).unwrap();
+        std::fs::write(first.join("site.yml"), b"- hosts: all\n").unwrap();
+        std::fs::write(first.join("roles/web/tasks/main.yml"), b"- debug: msg=ok\n").unwrap();
+        std::fs::write(
+            second.join("roles/web/tasks/main.yml"),
+            b"- debug: msg=ok\n",
+        )
+        .unwrap();
+        std::fs::write(second.join("site.yml"), b"- hosts: all\n").unwrap();
+
+        let first_digest = digest_ansible_project(&first).unwrap();
+        assert_eq!(first_digest, digest_ansible_project(&first).unwrap());
+        assert_eq!(first_digest, digest_ansible_project(&second).unwrap());
+
+        std::fs::write(
+            second.join("site.yml"),
+            b"- hosts: all\n  gather_facts: false\n",
+        )
+        .unwrap();
+        assert_ne!(first_digest, digest_ansible_project(&second).unwrap());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ansible_project_digest_rejects_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir().join(format!(
+            "vterminal-ansible-digest-link-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("site.yml"), b"- hosts: all\n").unwrap();
+        symlink(base.join("site.yml"), base.join("linked.yml")).unwrap();
+        assert!(digest_ansible_project(&base)
+            .unwrap_err()
+            .contains("symbolic link"));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn wsl_path_output_must_be_one_absolute_linux_path() {
+        assert_eq!(
+            parse_wsl_absolute_path(b"/mnt/c/Runbooks/My Project\r\n", "test").unwrap(),
+            "/mnt/c/Runbooks/My Project"
+        );
+        assert!(parse_wsl_absolute_path(b"relative/path\n", "test").is_err());
+        assert!(parse_wsl_absolute_path(b"/first\n/second\n", "test").is_err());
     }
 
     #[cfg(unix)]

@@ -1954,7 +1954,7 @@ spec:
     }
 
     #[test]
-    fn ansible_is_recognized_but_not_native() {
+    fn ansible_is_recognized_as_a_native_executor() {
         let source = VALID.replace(
             "uses: agent\n        instructions: |\n          Make the smallest safe change and validate sshd configuration.",
             "uses: ansible.playbook\n        with:\n          playbook: ansible/site.yml",

@@ -93,7 +93,7 @@
             <li><a href="#goals">Goal-directed steps</a></li>
             <li><a href="#actions">Actions &amp; approvals</a></li>
             <li><a href="#reports">Evidence &amp; reports</a></li>
-            <li><a href="#ansible">Ansible status</a></li>
+            <li><a href="#ansible">Ansible Runner</a></li>
           </ol>
         </nav>
 
@@ -902,7 +902,9 @@ spec:
               run with <code>--check --diff</code>, while a successful apply must
               still pass verification. Start the run from a local terminal: the
               inventory may target remote hosts, but Runner itself is always the
-              local controller.
+              local controller. On Windows, install Runner inside the default
+              WSL distro; VTerminal discovers it there and translates package
+              paths to Linux paths automatically.
             </p>
 
             <div class="guide-links">

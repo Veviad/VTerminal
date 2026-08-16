@@ -209,6 +209,8 @@ fn require_local_ntfs_handle(root: &File) -> Result<u32, String> {
     }
 
     let mut final_name = vec![0u16; 32_768];
+    // SAFETY: `root` owns a valid handle and `final_name` exposes its full,
+    // writable allocation with the exact capacity passed to Win32.
     let length = unsafe {
         GetFinalPathNameByHandleW(
             root.as_raw_handle(),
@@ -236,12 +238,15 @@ fn require_local_ntfs_handle(root: &File) -> Result<u32, String> {
         .ok_or("the pinned Windows handle reported an invalid volume GUID path")?;
     let mut volume_root = final_name[..root_end].to_vec();
     volume_root.push(0);
+    // SAFETY: `volume_root` is a NUL-terminated UTF-16 volume GUID path.
     if unsafe { GetDriveTypeW(volume_root.as_ptr()) } != DRIVE_FIXED {
         return Err("Windows Runbook paths must be on a local fixed drive".into());
     }
 
     let mut filesystem = vec![0u16; 64];
     let mut volume_serial = 0u32;
+    // SAFETY: `root` remains open and every optional output is either null or
+    // points to initialized writable storage of the advertised size.
     let ok = unsafe {
         GetVolumeInformationByHandleW(
             root.as_raw_handle(),
@@ -305,6 +310,8 @@ fn nt_open_child(
     };
     let mut io_status = IO_STATUS_BLOCK::default();
     let mut raw_file = std::ptr::null_mut();
+    // SAFETY: all pointer-backed NT structures borrow live local buffers for
+    // this call, the parent handle is valid, and the returned handle is checked.
     let status = unsafe {
         NtCreateFile(
             &mut raw_file,
@@ -326,6 +333,8 @@ fn nt_open_child(
     if status < 0 {
         return Err(NtOpenError(status));
     }
+    // SAFETY: successful `NtCreateFile` returns one owned, non-null handle;
+    // transferring it to `File` gives that handle exactly one closer.
     Ok(unsafe { File::from_raw_handle(raw_file) })
 }
 
@@ -380,6 +389,29 @@ fn inspect_pinned_handle(
         ));
     }
     Ok((current, directory))
+}
+
+fn open_existing_verified_child(
+    parent: &File,
+    name: &OsStr,
+    expected: ExpectedKind,
+    access: u32,
+    volume: u32,
+    display_path: &Path,
+    action: &str,
+) -> Result<(File, bool), String> {
+    let child = nt_open_child(
+        parent,
+        name,
+        expected,
+        access,
+        FILE_OPEN,
+        false,
+        std::ptr::null(),
+    )
+    .map_err(|error| nt_error(action, display_path, error))?;
+    let (_, is_directory) = inspect_pinned_handle(&child, expected, volume, display_path)?;
+    Ok((child, is_directory))
 }
 
 fn pin_path_with_access(
@@ -456,6 +488,8 @@ pub fn open_no_reparse(path: &Path, directory: bool) -> Result<File, String> {
 
 pub fn identity(file: &File) -> Result<FileIdentity, String> {
     let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `file` owns a valid handle and `info` is writable for the full
+    // `BY_HANDLE_FILE_INFORMATION` value Win32 initializes.
     let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) };
     if ok == 0 {
         return Err(format!(
@@ -561,6 +595,8 @@ impl OwnedSid {
 
     fn current_user() -> Result<Self, String> {
         let mut token = std::ptr::null_mut();
+        // SAFETY: the pseudo-handle is always valid for the current process and
+        // `token` is writable; success is checked before the handle is used.
         if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
             return Err(format!(
                 "open the current Windows process token: {}",
@@ -569,6 +605,8 @@ impl OwnedSid {
         }
         let result = (|| {
             let mut required = 0u32;
+            // SAFETY: a null buffer with length zero is the documented sizing
+            // call; `required` is a valid writable output.
             unsafe {
                 GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut required);
             }
@@ -580,6 +618,8 @@ impl OwnedSid {
             }
             let words = (required as usize).div_ceil(std::mem::size_of::<usize>());
             let mut token_buffer = vec![0usize; words];
+            // SAFETY: `token_buffer` has at least `required` aligned writable
+            // bytes and the token handle remains valid through this closure.
             if unsafe {
                 GetTokenInformation(
                     token,
@@ -595,13 +635,19 @@ impl OwnedSid {
                     std::io::Error::last_os_error()
                 ));
             }
+            // SAFETY: the successful call above initialized at least
+            // `required >= size_of::<TOKEN_USER>()` bytes in this aligned buffer.
             let token_user = unsafe { &*(token_buffer.as_ptr().cast::<TOKEN_USER>()) };
+            // SAFETY: `token_user.User.Sid` points into the still-live token
+            // buffer populated by `GetTokenInformation`.
             let sid_length = unsafe { GetLengthSid(token_user.User.Sid) };
             if sid_length == 0 {
                 return Err("the current Windows token contains an invalid user SID".into());
             }
             let sid_words = (sid_length as usize).div_ceil(std::mem::size_of::<usize>());
             let mut sid = vec![0usize; sid_words];
+            // SAFETY: the source SID was validated for `sid_length` bytes and
+            // `sid` provides an aligned destination allocation of that size.
             if unsafe { CopySid(sid_length, sid.as_mut_ptr().cast(), token_user.User.Sid) } == 0 {
                 return Err(format!(
                     "copy the current Windows user SID: {}",
@@ -610,6 +656,8 @@ impl OwnedSid {
             }
             Ok(Self(sid))
         })();
+        // SAFETY: `token` is the owned handle returned by `OpenProcessToken`
+        // and this is its single unconditional close.
         unsafe {
             CloseHandle(token);
         }
@@ -620,6 +668,8 @@ impl OwnedSid {
         let words = (SECURITY_MAX_SID_SIZE as usize).div_ceil(std::mem::size_of::<usize>());
         let mut sid = vec![0usize; words];
         let mut size = SECURITY_MAX_SID_SIZE;
+        // SAFETY: `sid` is an aligned writable allocation of `size` bytes and
+        // the optional domain SID is intentionally null for LocalSystem.
         if unsafe {
             CreateWellKnownSid(
                 WinLocalSystemSid,
@@ -656,6 +706,8 @@ impl TrustedAcls {
         ) {
             Ok(acl) => acl,
             Err(error) => {
+                // SAFETY: `file_acl` was allocated by `SetEntriesInAclW` and
+                // ownership has not yet moved into `TrustedAcls`.
                 unsafe {
                     LocalFree(file_acl.cast());
                 }
@@ -675,6 +727,8 @@ impl TrustedAcls {
         } else {
             self.file_acl
         };
+        // SAFETY: `file` is live and `acl` is owned by `self`, which outlives
+        // this call; all unused security-info pointers are null.
         let status = unsafe {
             SetSecurityInfo(
                 file.as_raw_handle(),
@@ -698,6 +752,8 @@ impl TrustedAcls {
 
     fn creation_descriptor(&self, directory: bool) -> Result<SECURITY_DESCRIPTOR, String> {
         let mut descriptor = SECURITY_DESCRIPTOR::default();
+        // SAFETY: `descriptor` is writable and the revision is the documented
+        // `SECURITY_DESCRIPTOR_REVISION` value.
         if unsafe {
             InitializeSecurityDescriptor(
                 std::ptr::addr_of_mut!(descriptor).cast(),
@@ -715,6 +771,8 @@ impl TrustedAcls {
         } else {
             self.file_acl
         };
+        // SAFETY: `descriptor` is initialized and `acl` remains owned by
+        // `self`; the API only records the pointer for this immediate use.
         if unsafe {
             SetSecurityDescriptorDacl(std::ptr::addr_of_mut!(descriptor).cast(), 1, acl, 0)
         } == 0
@@ -724,6 +782,8 @@ impl TrustedAcls {
                 std::io::Error::last_os_error()
             ));
         }
+        // SAFETY: `descriptor` was initialized above and both control masks
+        // use the documented `SE_DACL_PROTECTED` bit.
         if unsafe {
             SetSecurityDescriptorControl(
                 std::ptr::addr_of_mut!(descriptor).cast(),
@@ -743,6 +803,8 @@ impl TrustedAcls {
     fn current_user_owns(&self, file: &File) -> Result<bool, String> {
         let mut owner = std::ptr::null_mut();
         let mut descriptor = std::ptr::null_mut();
+        // SAFETY: `file` is live, all requested outputs are writable, and
+        // omitted security components are represented by null pointers.
         let status = unsafe {
             GetSecurityInfo(
                 file.as_raw_handle(),
@@ -761,9 +823,13 @@ impl TrustedAcls {
                 std::io::Error::from_raw_os_error(status as i32)
             ));
         }
+        // SAFETY: on successful `GetSecurityInfo`, a non-null owner points
+        // inside the returned descriptor, while `current_user` owns a valid SID.
         let matches =
             !owner.is_null() && unsafe { EqualSid(owner, self.current_user.as_ptr()) } != 0;
         if !descriptor.is_null() {
+            // SAFETY: Win32 allocated this descriptor for the successful call;
+            // it is freed once after all embedded pointers are no longer used.
             unsafe {
                 LocalFree(descriptor.cast());
             }
@@ -774,6 +840,8 @@ impl TrustedAcls {
 
 impl Drop for TrustedAcls {
     fn drop(&mut self) {
+        // SAFETY: both ACL pointers were allocated by `SetEntriesInAclW`, are
+        // uniquely owned by this value, and are released exactly once here.
         unsafe {
             LocalFree(self.file_acl.cast());
             LocalFree(self.directory_acl.cast());
@@ -808,6 +876,8 @@ fn build_acl(
         },
     ];
     let mut acl = std::ptr::null_mut();
+    // SAFETY: `entries` and both SID allocations remain live for the call, and
+    // `acl` is a writable output whose ownership is transferred on success.
     let status = unsafe {
         SetEntriesInAclW(
             entries.len() as u32,
@@ -925,6 +995,8 @@ fn directory_entries(directory: &File) -> Result<Vec<(OsString, bool)>, String> 
     loop {
         buffer.fill(0);
         let mut io_status = IO_STATUS_BLOCK::default();
+        // SAFETY: `directory` is a pinned live directory handle and `buffer`
+        // is aligned, writable, and exactly `BUFFER_BYTES` long.
         let status = unsafe {
             NtQueryDirectoryFile(
                 directory.as_raw_handle(),
@@ -963,6 +1035,8 @@ fn directory_entries(directory: &File) -> Result<Vec<(OsString, bool)>, String> 
             if offset.checked_add(header).is_none_or(|end| end > returned) {
                 return Err("the pinned Windows directory returned a malformed entry".into());
             }
+            // SAFETY: the bounds check above proves the fixed header is inside
+            // the initialized result buffer, which is aligned for this struct.
             let info = unsafe {
                 &*(buffer
                     .as_ptr()
@@ -979,6 +1053,8 @@ fn directory_entries(directory: &File) -> Result<Vec<(OsString, bool)>, String> 
             {
                 return Err("the pinned Windows directory returned a malformed name".into());
             }
+            // SAFETY: the validated byte count is even and its complete range
+            // lies inside the live directory-query buffer.
             let name = OsString::from_wide(unsafe {
                 std::slice::from_raw_parts(
                     std::ptr::addr_of!(info.FileName).cast::<u16>(),
@@ -1008,6 +1084,8 @@ fn directory_entries(directory: &File) -> Result<Vec<(OsString, bool)>, String> 
 fn mark_delete(file: &File, path: &Path) -> Result<(), String> {
     let info = FILE_DISPOSITION_INFO { DeleteFile: true };
     let info_size = std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32;
+    // SAFETY: `file` is live and `info` is a correctly typed immutable buffer
+    // whose exact size is supplied to Win32.
     let ok = unsafe {
         SetFileInformationByHandle(
             file.as_raw_handle(),
@@ -1075,17 +1153,15 @@ pub fn collect_tree_no_reparse(
         } else {
             ACL_ACCESS | GENERIC_READ
         };
-        let child = nt_open_child(
+        let (child, is_directory) = open_existing_verified_child(
             &frame.directory,
             &name,
             kind,
             access,
-            FILE_OPEN,
-            false,
-            std::ptr::null(),
-        )
-        .map_err(|error| nt_error("collect managed Windows directory child", &path, error))?;
-        let (_, is_directory) = inspect_pinned_handle(&child, kind, root.identity.volume, &path)?;
+            root.identity.volume,
+            &path,
+            "collect managed Windows directory child",
+        )?;
         entries.push((relative.clone(), is_directory));
         if is_directory {
             let child_entries = directory_entries(&child)?;
@@ -1220,17 +1296,15 @@ fn harden_tree_without_reparse(
         } else {
             ACL_ACCESS
         };
-        let child = nt_open_child(
+        let (child, is_directory) = open_existing_verified_child(
             &frame.directory,
             &name,
             kind,
             access,
-            FILE_OPEN,
-            false,
-            std::ptr::null(),
-        )
-        .map_err(|error| nt_error("open Windows ACL migration child", &child_path, error))?;
-        let (_, is_directory) = inspect_pinned_handle(&child, kind, volume, &child_path)?;
+            volume,
+            &child_path,
+            "open Windows ACL migration child",
+        )?;
         acls.apply(&child, is_directory)?;
         if is_directory {
             let entries = directory_entries(&child)?;
@@ -1408,6 +1482,8 @@ fn rename_relative(
         .ok_or("managed Windows rename buffer is too large")?;
     let mut buffer = vec![0usize; buffer_bytes.div_ceil(std::mem::size_of::<usize>())];
     let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    // SAFETY: the aligned allocation includes the fixed header plus exactly
+    // `name_bytes`; every written field and copied UTF-16 unit is in bounds.
     unsafe {
         (*info).Anonymous.ReplaceIfExists = replace;
         (*info).RootDirectory = destination_parent.handle.as_raw_handle();
@@ -1418,6 +1494,8 @@ fn rename_relative(
             name.len(),
         );
     }
+    // SAFETY: `source_file` and destination root remain live and `info` points
+    // to a fully initialized rename buffer of `buffer_bytes` bytes.
     let ok = unsafe {
         SetFileInformationByHandle(
             source_file.as_raw_handle(),
@@ -1456,6 +1534,8 @@ pub fn promote_new_directory(source: &Path, destination: &Path) -> Result<(), St
 pub fn broadcast_environment_change() {
     let environment: Vec<u16> = "Environment".encode_utf16().chain(Some(0)).collect();
     let mut result = 0usize;
+    // SAFETY: `environment` is NUL-terminated and remains live for the
+    // synchronous timeout call; `result` is a writable output.
     unsafe {
         SendMessageTimeoutW(
             HWND_BROADCAST,
