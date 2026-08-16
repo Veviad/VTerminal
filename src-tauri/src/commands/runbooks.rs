@@ -2351,14 +2351,24 @@ fn confined_evidence_file(
             "{relative}: evidence artifact is not a regular file; retained"
         ));
     }
-    let canonical = fs::canonicalize(&candidate)
-        .map_err(|error| format!("{relative}: cannot resolve artifact: {error}"))?;
-    if !canonical.starts_with(canonical_root) {
-        return Err(format!(
-            "{relative}: resolved artifact escapes protected app data; retained"
-        ));
+    #[cfg(target_os = "windows")]
+    {
+        // The root and every component were validated without reparses above,
+        // and deletion pins the same path again. Avoid comparing drive syntax
+        // with the `\\?\` syntax Windows canonicalization may return.
+        Ok(Some(candidate))
     }
-    Ok(Some(canonical))
+    #[cfg(not(target_os = "windows"))]
+    {
+        let canonical = fs::canonicalize(&candidate)
+            .map_err(|error| format!("{relative}: cannot resolve artifact: {error}"))?;
+        if !canonical.starts_with(canonical_root) {
+            return Err(format!(
+                "{relative}: resolved artifact escapes protected app data; retained"
+            ));
+        }
+        Ok(Some(canonical))
+    }
 }
 
 #[cfg(target_os = "windows")]
