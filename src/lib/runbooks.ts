@@ -209,7 +209,12 @@ export interface ManualAction {
 
 export interface AnsibleAction {
   uses: "ansible.playbook";
-  with?: { playbook?: string; inventory?: string };
+  with: {
+    playbook: string;
+    inventory?: string | null;
+    limit?: string | null;
+    inputVars?: Record<string, string>;
+  };
 }
 
 export type RunbookAction = ShellAction | AgentAction | ManualAction | AnsibleAction;
@@ -316,7 +321,8 @@ export type Assurance =
   | "deterministic_shell"
   | "shell_observed"
   | "agent_assisted"
-  | "operator_attested";
+  | "operator_attested"
+  | "ansible_runner";
 
 export interface RunbookAttempt {
   attempt_id: string;
@@ -342,6 +348,7 @@ export interface RunbookAttempt {
   output_redacted?: boolean;
   duration_ms?: number | null;
   error?: string | null;
+  structured_outcomes?: unknown | null;
   started_at: string;
   finished_at?: string | null;
 }
@@ -376,6 +383,8 @@ export interface RunbookApprovalRequest {
   explanation: string;
   classification: RunbookCommandClassification;
   requested_at?: string;
+  project_digest?: string | null;
+  inventory_digest?: string | null;
 }
 
 export type RunbookDecisionKind = "retry" | "skip" | "waive" | "stop";
@@ -554,6 +563,8 @@ export interface RunbookReport {
     privileged: boolean;
     opaque: boolean;
     edited: boolean;
+    project_digest: string | null;
+    inventory_digest: string | null;
   }>;
   deviations: Array<{
     step_id: string;
@@ -612,6 +623,7 @@ export interface RunbookReportWire {
       output_redacted: boolean;
       output_truncated: boolean;
       error: string | null;
+      structured_outcomes?: unknown | null;
       intent_at: string;
       result_at: string | null;
     }>;
@@ -625,6 +637,8 @@ export interface RunbookReportWire {
       network: boolean;
       privileged: boolean;
       opaque: boolean;
+      project_digest?: string | null;
+      inventory_digest?: string | null;
       actor: string | null;
       reason: string | null;
       requested_at: string;
@@ -799,6 +813,8 @@ type RunbookWireEvent =
       network: boolean;
       privileged: boolean;
       opaque: boolean;
+      project_digest?: string | null;
+      inventory_digest?: string | null;
     }
   | {
       type: "RunInTerminal";
@@ -861,6 +877,8 @@ function normalizeRunbookEvent(event: RunbookWireEvent): RunbookEvent {
           privileged: event.privileged,
           opaque: event.opaque,
         },
+        project_digest: event.project_digest ?? null,
+        inventory_digest: event.inventory_digest ?? null,
       };
     case "RunInTerminal":
       return { ...event, timeout_ms: event.timeout_secs * 1_000 };
@@ -1276,6 +1294,7 @@ export function normalizeRunbookReport(report: RunbookReportWire): RunbookReport
         output_truncated: attempt.output_truncated,
         duration_ms: attempt.duration_ms,
         error: attempt.error,
+        structured_outcomes: attempt.structured_outcomes,
         started_at: attempt.intent_at,
         finished_at: attempt.result_at,
       })),
@@ -1297,6 +1316,8 @@ export function normalizeRunbookReport(report: RunbookReportWire): RunbookReport
         privileged: approval.privileged,
         opaque: approval.opaque,
         edited: approval.edited,
+        project_digest: approval.project_digest ?? null,
+        inventory_digest: approval.inventory_digest ?? null,
       })),
     ),
     deviations: report.checklist.flatMap((step) =>

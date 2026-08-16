@@ -96,6 +96,16 @@ export function RunbookApprovalCard({
           !classification.opaque && <Tag tone="neutral">read-only</Tag>}
       </div>
 
+      {approval.project_digest && (
+        <div className="space-y-1 rounded border border-border-subtle bg-bg-primary px-2 py-2 text-[9px] text-text-muted">
+          <p>Approval is bound to these exact Ansible inputs:</p>
+          <code className="block break-all text-text-secondary">Project {approval.project_digest}</code>
+          {approval.inventory_digest && (
+            <code className="block break-all text-text-secondary">Inventory {approval.inventory_digest}</code>
+          )}
+        </div>
+      )}
+
       {phaseDeviation && (
         <p className="flex items-start gap-1.5 rounded border border-warning/30 bg-warning/10 px-2 py-1.5 text-[10px] leading-relaxed text-warning">
           <AlertTriangle size={10} className="mt-0.5 shrink-0" />

@@ -464,46 +464,36 @@ impl VerifyAction {
 #[serde(rename_all = "snake_case")]
 pub enum ExecutorAvailability {
     Native,
-    FollowOnAdapter,
 }
 
 impl CheckAction {
     pub fn availability(&self) -> ExecutorAvailability {
-        match self {
-            Self::AnsiblePlaybook { .. } => ExecutorAvailability::FollowOnAdapter,
-            _ => ExecutorAvailability::Native,
-        }
+        ExecutorAvailability::Native
     }
 }
 
 impl ApplyAction {
     pub fn availability(&self) -> ExecutorAvailability {
-        match self {
-            Self::AnsiblePlaybook { .. } => ExecutorAvailability::FollowOnAdapter,
-            _ => ExecutorAvailability::Native,
-        }
+        ExecutorAvailability::Native
     }
 }
 
 impl VerifyAction {
     pub fn availability(&self) -> ExecutorAvailability {
-        match self {
-            Self::AnsiblePlaybook { .. } => ExecutorAvailability::FollowOnAdapter,
-            _ => ExecutorAvailability::Native,
-        }
+        ExecutorAvailability::Native
     }
 }
 
 impl RunbookDefinition {
     pub fn uses_unavailable_executor(&self) -> bool {
+        false
+    }
+
+    pub fn uses_ansible_executor(&self) -> bool {
         self.spec.steps.iter().any(|step| {
-            step.check.as_ref().is_some_and(|action| {
-                action.availability() == ExecutorAvailability::FollowOnAdapter
-            }) || step.apply.as_ref().is_some_and(|action| {
-                action.availability() == ExecutorAvailability::FollowOnAdapter
-            }) || step.verify.as_ref().is_some_and(|action| {
-                action.availability() == ExecutorAvailability::FollowOnAdapter
-            })
+            matches!(step.check, Some(CheckAction::AnsiblePlaybook { .. }))
+                || matches!(step.apply, Some(ApplyAction::AnsiblePlaybook { .. }))
+                || matches!(step.verify, Some(VerifyAction::AnsiblePlaybook { .. }))
         })
     }
 
@@ -1970,7 +1960,7 @@ spec:
             "uses: ansible.playbook\n        with:\n          playbook: ansible/site.yml",
         );
         let definition = parse_and_validate(&source).unwrap();
-        assert!(definition.uses_unavailable_executor());
+        assert!(!definition.uses_unavailable_executor());
     }
 
     #[test]

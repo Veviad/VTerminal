@@ -308,8 +308,8 @@ impl PinnedPackageRoot {
 }
 
 /// Resolve a package-relative file without ever following a symlink or leaving the
-/// canonical package root. Kept public for the future Ansible adapter; native v1
-/// does not read package scripts.
+/// canonical package root. The Ansible adapter resolves every referenced file
+/// through this boundary before computing approval digests.
 pub fn resolve_package_file(
     canonical_root: &Path,
     relative: &str,
@@ -553,8 +553,14 @@ fn validate_ansible_reference(
     root: &Path,
     action: &AnsiblePlaybookAction,
 ) -> Result<(), PackageError> {
+    if !Path::new(&action.playbook).starts_with(ANSIBLE_DIRECTORY) {
+        return Err(PackageError::InvalidReference(action.playbook.clone()));
+    }
     resolve_package_file(root, &action.playbook)?;
     if let Some(inventory) = &action.inventory {
+        if !Path::new(inventory).starts_with(ANSIBLE_DIRECTORY) {
+            return Err(PackageError::InvalidReference(inventory.clone()));
+        }
         resolve_package_file(root, inventory)?;
     }
     Ok(())
@@ -752,7 +758,7 @@ spec:
         )
         .unwrap();
         let loaded = load_package(&package.0).unwrap();
-        assert!(loaded.definition.uses_unavailable_executor());
+        assert!(!loaded.definition.uses_unavailable_executor());
     }
 
     #[test]

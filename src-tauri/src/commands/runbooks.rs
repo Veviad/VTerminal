@@ -708,6 +708,7 @@ pub struct RunbookAttemptView {
     pub output_redacted: bool,
     pub duration_ms: Option<u64>,
     pub error: Option<String>,
+    pub structured_outcomes: Option<Value>,
     pub started_at: String,
     pub finished_at: Option<String>,
 }
@@ -1316,6 +1317,7 @@ pub fn runbooks_start(
         run_id: record.id.clone(),
         definition: package.definition,
         definition_snapshot: package.snapshot,
+        package_root: package.root,
         target: request.target_context,
         inputs: resolved,
         evidence_mode: request.evidence_mode,
@@ -1369,7 +1371,7 @@ pub fn runbooks_resume(
     let active_model = crate::commands::ai::active_model(&app);
     let resume_app_version = env!("CARGO_PKG_VERSION");
     let resume_model = active_model.id;
-    let (record, definition, inputs, view) = {
+    let (record, definition, inputs, package_root, view) = {
         let mut connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
         let stored = db::get_run(&connection, &run_id)?
             .ok_or_else(|| format!("unknown runbook run: {run_id}"))?;
@@ -1391,6 +1393,26 @@ pub fn runbooks_resume(
             );
         }
         reject_sensitive_value(&stored.inputs, "stored runbook inputs")?;
+        let package_root = if definition.uses_ansible_executor() {
+            let source_id = stored
+                .source_id
+                .as_deref()
+                .ok_or("resuming an Ansible run requires its registered package source")?;
+            let source = db::get_source(&connection, source_id)?
+                .ok_or("the Ansible runbook package source no longer exists")?;
+            let package = load_and_check_package(Path::new(&source.package_path))?;
+            if package.snapshot.source_sha256 != stored.source_sha256
+                || package.snapshot.canonical_sha256 != stored.canonical_sha256
+            {
+                return Err(
+                    "the Ansible runbook package changed; the interrupted run cannot be resumed"
+                        .into(),
+                );
+            }
+            package.root
+        } else {
+            PathBuf::new()
+        };
         let record = db::rebind_interrupted_run(
             &mut connection,
             &run_id,
@@ -1400,7 +1422,7 @@ pub fn runbooks_resume(
             Some(resume_model),
         )?;
         let view = run_view(&connection, &record)?;
-        (record, definition, inputs, view)
+        (record, definition, inputs, package_root, view)
     };
     let config = engine_config(&app, active_model);
     let spec = EngineRunSpec {
@@ -1412,6 +1434,7 @@ pub fn runbooks_resume(
             source_sha256: record.source_sha256,
             canonical_sha256: record.canonical_sha256,
         },
+        package_root,
         target: target_context,
         inputs,
         evidence_mode: record.evidence_mode,
@@ -2520,6 +2543,7 @@ fn attempt_view(attempt: &AttemptRecord) -> RunbookAttemptView {
         output_redacted: attempt.output_redacted,
         duration_ms: attempt.duration_ms,
         error: attempt.error.clone(),
+        structured_outcomes: attempt.structured_outcomes.clone(),
         started_at: attempt
             .started_at
             .clone()

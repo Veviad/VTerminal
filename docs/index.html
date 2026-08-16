@@ -1109,9 +1109,10 @@
             <strong>Native v1 is intentionally bounded.</strong>
             Enable it in <strong>Settings → Runbooks</strong>. Inputs are
             non-secret, the interactive shell remains inside the trust boundary,
-            and <code>ansible.playbook</code> is recognized but cannot execute
-            until the dedicated Ansible Runner adapter ships. Check mode stays
-            preview-only and verification is still required.
+            and <code>ansible.playbook</code> runs through a user-installed
+            <code>ansible-runner</code> with digest-bound approval and structured
+            per-host outcomes. Check and verify stay preview-only, and apply
+            still requires verification.
           </div>
         </div>
       </section>

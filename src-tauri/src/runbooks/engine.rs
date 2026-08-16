@@ -9,8 +9,10 @@
 use async_trait::async_trait;
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
+use std::fs;
 // Both traits are in play: `io::Write` syncs evidence artifacts to disk,
 // `fmt::Write` builds the agent briefing string.
 use std::fmt::Write as _;
@@ -27,11 +29,11 @@ use super::agent_executor::{
     AgentCommandOutcome, AgentPhaseConfig,
 };
 use super::definition::{
-    ApplyAction, CheckAction, CheckOutcomes, Constraints, FailurePolicy, Goal, Privilege,
-    RunbookDefinition, ShellAction, Step, VerifyAction, MAX_SHELL_COMMAND_CHARS,
+    AnsiblePlaybookAction, ApplyAction, CheckAction, CheckOutcomes, Constraints, FailurePolicy,
+    Goal, Privilege, RunbookDefinition, ShellAction, Step, VerifyAction, MAX_SHELL_COMMAND_CHARS,
     RUNBOOK_ENV_PREFIX,
 };
-use super::package::DefinitionSnapshot;
+use super::package::{resolve_package_file, DefinitionSnapshot};
 use super::redact::{sanitize_evidence, sanitize_output_tail};
 use super::report::{
     status_from_checklist, ReportApproval, ReportAttempt, ReportChecklistItem, ReportDefinition,
@@ -115,6 +117,7 @@ pub struct EngineRunSpec {
     pub run_id: String,
     pub definition: RunbookDefinition,
     pub definition_snapshot: DefinitionSnapshot,
+    pub package_root: PathBuf,
     pub target: TargetBinding,
     pub inputs: BTreeMap<String, Value>,
     pub evidence_mode: EvidenceCaptureMode,
@@ -393,6 +396,7 @@ enum PhaseActionRef<'a> {
     ShellCheck(&'a ShellAction, &'a CheckOutcomes),
     ShellApply(&'a ShellAction, &'a [i32]),
     ShellVerify(&'a ShellAction, &'a [i32]),
+    Ansible(&'a AnsiblePlaybookAction),
     Agent(&'a str),
     Manual(&'a str),
     /// The step's `goal.checks`, standing in for an absent `check:` or
@@ -401,6 +405,28 @@ enum PhaseActionRef<'a> {
     /// byte-identical.
     Goal(&'a Goal),
     Unavailable(&'static str),
+}
+
+#[derive(Debug, Clone)]
+struct AnsibleApprovalBinding {
+    project_root: PathBuf,
+    project_digest: String,
+    inventory_path: Option<PathBuf>,
+    inventory_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct AnsibleHostOutcome {
+    ok: u64,
+    changed: u64,
+    failed: u64,
+    unreachable: u64,
+    skipped: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct AnsibleOutcomes {
+    hosts: BTreeMap<String, AnsibleHostOutcome>,
 }
 
 impl<'a> EngineRunner<'a> {
@@ -448,10 +474,6 @@ impl<'a> EngineRunner<'a> {
     }
 
     async fn execute_mode(&mut self, mode: EngineStartMode) -> Result<RunbookReport, String> {
-        if self.spec.definition.uses_unavailable_executor() {
-            // Definitions containing ansible are valid and previewable. They fail
-            // only when that exact phase is reached; there is never a shell fallback.
-        }
         match mode {
             EngineStartMode::New => {
                 let step_ids = self
@@ -768,6 +790,8 @@ impl<'a> EngineRunner<'a> {
                     network: approval.network,
                     privileged: approval.privileged,
                     opaque: approval.opaque,
+                    project_digest: approval.project_digest.clone(),
+                    inventory_digest: approval.inventory_digest.clone(),
                     actor: approval.actor.clone(),
                     reason: approval.reason.clone(),
                     requested_at: approval.requested_at.clone(),
@@ -837,9 +861,7 @@ impl<'a> EngineRunner<'a> {
             }
             (Some(CheckAction::Agent { instructions }), _) => PhaseActionRef::Agent(instructions),
             (Some(CheckAction::Manual { instructions }), _) => PhaseActionRef::Manual(instructions),
-            (Some(CheckAction::AnsiblePlaybook { .. }), _) => {
-                PhaseActionRef::Unavailable("ansible.playbook adapter is not available in v1")
-            }
+            (Some(CheckAction::AnsiblePlaybook { action }), _) => PhaseActionRef::Ansible(action),
             // An explicit `check:` always wins; the goal only stands in when
             // the author wrote none. Validation guarantees one of the two.
             (None, Some(goal)) => PhaseActionRef::Goal(goal),
@@ -895,9 +917,7 @@ impl<'a> EngineRunner<'a> {
             } => PhaseActionRef::ShellApply(action, success_exit_codes),
             ApplyAction::Agent { instructions } => PhaseActionRef::Agent(instructions),
             ApplyAction::Manual { instructions } => PhaseActionRef::Manual(instructions),
-            ApplyAction::AnsiblePlaybook { .. } => {
-                PhaseActionRef::Unavailable("ansible.playbook adapter is not available in v1")
-            }
+            ApplyAction::AnsiblePlaybook { action } => PhaseActionRef::Ansible(action),
         };
         let applied = self
             .run_phase(index, step, RunbookPhase::Apply, apply_action)
@@ -935,9 +955,7 @@ impl<'a> EngineRunner<'a> {
             (Some(VerifyAction::Manual { instructions }), _) => {
                 PhaseActionRef::Manual(instructions)
             }
-            (Some(VerifyAction::AnsiblePlaybook { .. }), _) => {
-                PhaseActionRef::Unavailable("ansible.playbook adapter is not available in v1")
-            }
+            (Some(VerifyAction::AnsiblePlaybook { action }), _) => PhaseActionRef::Ansible(action),
         };
         let verified = self
             .run_phase(index, step, RunbookPhase::Verify, verify_action)
@@ -1029,6 +1047,9 @@ impl<'a> EngineRunner<'a> {
                     },
                 )
                 .await
+            }
+            PhaseActionRef::Ansible(action) => {
+                self.execute_ansible(index, step, phase, action).await
             }
             PhaseActionRef::Agent(instructions) => {
                 self.execute_agent(index, step, phase, instructions).await
@@ -1377,6 +1398,183 @@ impl<'a> EngineRunner<'a> {
         }
     }
 
+    async fn execute_ansible(
+        &mut self,
+        index: usize,
+        step: &Step,
+        phase: RunbookPhase,
+        action: &AnsiblePlaybookAction,
+    ) -> Result<PhaseRun, String> {
+        if self.spec.target.remote_kind.is_some() {
+            return Ok(PhaseRun::Completed {
+                completion: failed_completion(
+                    &self.spec.run_id,
+                    &step.id,
+                    phase,
+                    "ansible-runner is a local controller and cannot start inside an already-remote terminal",
+                ),
+                operator_comment: None,
+            });
+        }
+        let runner = find_ansible_runner()?;
+        let playbook_path = resolve_package_file(&self.spec.package_root, &action.playbook)
+            .map_err(|error| error.to_string())?;
+        let project_root = self.spec.package_root.join("ansible");
+        let playbook = playbook_path
+            .strip_prefix(&project_root)
+            .map_err(|_| "Ansible playbook must be beneath the package ansible directory")?;
+        let inventory_path = action
+            .inventory
+            .as_deref()
+            .map(|path| resolve_package_file(&self.spec.package_root, path))
+            .transpose()
+            .map_err(|error| error.to_string())?;
+
+        let project_digest = digest_ansible_project(&project_root)?;
+        let inventory_digest = inventory_path.as_deref().map(digest_file).transpose()?;
+        let binding = AnsibleApprovalBinding {
+            project_root: project_root.clone(),
+            project_digest,
+            inventory_path: inventory_path.clone(),
+            inventory_digest,
+        };
+
+        let artifact_root =
+            std::env::temp_dir().join(format!("vterminal-ansible-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&artifact_root).map_err(|error| {
+            format!(
+                "create temporary Ansible artifact directory {}: {error}",
+                artifact_root.display()
+            )
+        })?;
+        let mut command = format!(
+            "{} run {} --project-dir {} --playbook {} --artifact-dir {} -j",
+            quote_shell_argument(&runner.to_string_lossy()),
+            quote_shell_argument(&self.spec.package_root.to_string_lossy()),
+            quote_shell_argument(&project_root.to_string_lossy()),
+            quote_shell_argument(&playbook.to_string_lossy()),
+            quote_shell_argument(&artifact_root.to_string_lossy()),
+        );
+        if let Some(inventory) = &inventory_path {
+            command.push_str(" --inventory ");
+            command.push_str(&quote_shell_argument(&inventory.to_string_lossy()));
+        }
+        if let Some(limit) = &action.limit {
+            command.push_str(" --limit ");
+            command.push_str(&quote_shell_argument(limit));
+        }
+
+        let mut extra_vars = serde_json::Map::new();
+        for (name, input_id) in &action.input_vars {
+            let value = self.spec.inputs.get(input_id).ok_or_else(|| {
+                format!("Ansible variable {name} references unresolved input {input_id}")
+            })?;
+            extra_vars.insert(name.clone(), value.clone());
+        }
+        let mut cmdline = if matches!(phase, RunbookPhase::Check | RunbookPhase::Verify) {
+            "--check --diff".to_string()
+        } else {
+            String::new()
+        };
+        if !extra_vars.is_empty() {
+            if !cmdline.is_empty() {
+                cmdline.push(' ');
+            }
+            cmdline.push_str("--extra-vars ");
+            cmdline.push_str(&quote_shell_argument(
+                &serde_json::to_string(&Value::Object(extra_vars))
+                    .map_err(|error| format!("serialize Ansible variables: {error}"))?,
+            ));
+        }
+        if !cmdline.is_empty() {
+            command.push_str(" --cmdline ");
+            command.push_str(&quote_shell_argument(&cmdline));
+        }
+
+        let dispatch = self
+            .execute_command_bound(
+                index,
+                step,
+                phase,
+                &command,
+                HashMap::new(),
+                "ansible-runner",
+                "Run the package Ansible playbook with the approved project and inventory digests",
+                &[0],
+                Some(binding),
+            )
+            .await;
+        if let Err(error) = fs::remove_dir_all(&artifact_root) {
+            self.checklist[index].unresolved_risks.push(format!(
+                "temporary Ansible artifacts could not be removed from {}: {error}",
+                artifact_root.display()
+            ));
+        }
+        let dispatch = dispatch?;
+        match dispatch {
+            CommandDispatch::Cancelled => Ok(PhaseRun::Cancelled),
+            CommandDispatch::Paused(reason) => Ok(PhaseRun::Paused(reason)),
+            CommandDispatch::Observed(observed) => {
+                let outcomes = parse_ansible_outcomes(&observed.output_tail);
+                let totals = outcomes.totals();
+                let (result, summary) =
+                    if observed.exit_code.is_none() {
+                        (
+                            PhaseResult::Unknown,
+                            observed
+                                .error
+                                .unwrap_or_else(|| "ansible-runner outcome is unknown".into()),
+                        )
+                    } else if observed.exit_code != Some(0)
+                        || totals.failed > 0
+                        || totals.unreachable > 0
+                    {
+                        (
+                            PhaseResult::Failed,
+                            format!(
+                                "ansible-runner failed across {} hosts (failed {}, unreachable {})",
+                                outcomes.hosts.len(),
+                                totals.failed,
+                                totals.unreachable
+                            ),
+                        )
+                    } else if outcomes.hosts.is_empty() {
+                        (
+                            PhaseResult::Unknown,
+                            "ansible-runner returned no structured per-host outcomes".into(),
+                        )
+                    } else {
+                        let result = match phase {
+                            RunbookPhase::Check if totals.changed > 0 => PhaseResult::Noncompliant,
+                            RunbookPhase::Check => PhaseResult::Compliant,
+                            RunbookPhase::Apply => PhaseResult::Applied,
+                            RunbookPhase::Verify if totals.changed > 0 => PhaseResult::Failed,
+                            RunbookPhase::Verify => PhaseResult::Verified,
+                        };
+                        (
+                            result,
+                            format!(
+                            "ansible-runner completed on {} hosts (ok {}, changed {}, skipped {})",
+                            outcomes.hosts.len(), totals.ok, totals.changed, totals.skipped
+                        ),
+                        )
+                    };
+                Ok(PhaseRun::Completed {
+                    completion: PhaseCompletion {
+                        run_id: self.spec.run_id.clone(),
+                        step_id: step.id.clone(),
+                        phase,
+                        result,
+                        assurance: (phase == RunbookPhase::Verify)
+                            .then_some(VerificationAssurance::AnsibleRunner),
+                        summary,
+                    },
+                    operator_comment: None,
+                })
+            }
+        }
+    }
+
     fn resolve_environment(&self, action: &ShellAction) -> Result<HashMap<String, String>, String> {
         self.resolve_environment_map(&action.env)
     }
@@ -1421,6 +1619,32 @@ impl<'a> EngineRunner<'a> {
         explanation: &str,
         accepted_exit_codes: &[i32],
     ) -> Result<CommandDispatch, String> {
+        self.execute_command_bound(
+            index,
+            step,
+            phase,
+            proposed_command,
+            environment,
+            executor,
+            explanation,
+            accepted_exit_codes,
+            None,
+        )
+        .await
+    }
+
+    async fn execute_command_bound(
+        &mut self,
+        index: usize,
+        step: &Step,
+        phase: RunbookPhase,
+        proposed_command: &str,
+        environment: HashMap<String, String>,
+        executor: &str,
+        explanation: &str,
+        accepted_exit_codes: &[i32],
+        ansible_binding: Option<AnsibleApprovalBinding>,
+    ) -> Result<CommandDispatch, String> {
         let semantic_command = command_with_runbook_environment(proposed_command, &environment)?;
         let proposed_command = command_with_terminal_guards(&semantic_command)?;
         validate_runtime_command(&proposed_command)?;
@@ -1451,13 +1675,17 @@ impl<'a> EngineRunner<'a> {
             network: class.network,
             privileged: class.privileged,
             opaque: class.opaque,
-            project_digest: None,
-            inventory_digest: None,
+            project_digest: ansible_binding
+                .as_ref()
+                .map(|binding| binding.project_digest.clone()),
+            inventory_digest: ansible_binding
+                .as_ref()
+                .and_then(|binding| binding.inventory_digest.clone()),
         };
 
         let (executed_command, approval_id) = if request.requires_approval() {
             match self
-                .await_approval(index, &attempt_id, request, true)
+                .await_approval(index, &attempt_id, request, ansible_binding.is_none())
                 .await?
             {
                 ApprovalGate::Approved(resolved) => (
@@ -1474,6 +1702,35 @@ impl<'a> EngineRunner<'a> {
             (proposed_command, None)
         };
         validate_runtime_command(&executed_command)?;
+
+        if let Some(binding) = &ansible_binding {
+            let current_project = digest_ansible_project(&binding.project_root)?;
+            let current_inventory = binding
+                .inventory_path
+                .as_deref()
+                .map(digest_file)
+                .transpose()?;
+            if current_project != binding.project_digest
+                || current_inventory != binding.inventory_digest
+            {
+                self.finish_attempt(
+                    index,
+                    &attempt_id,
+                    AttemptStatus::Unknown,
+                    None,
+                    None,
+                    None,
+                    0,
+                    0,
+                    false,
+                    Some("Ansible project or inventory changed after approval"),
+                )?;
+                return Ok(CommandDispatch::Paused(
+                    "Ansible project or inventory changed after approval; command was not dispatched"
+                        .into(),
+                ));
+            }
+        }
 
         // Approval binds a command to the target observed at request time. Check
         // again immediately before dispatch so a changed SSH/container context
@@ -1581,7 +1838,10 @@ impl<'a> EngineRunner<'a> {
             Some(_) => AttemptStatus::Failed,
             None => AttemptStatus::Unknown,
         };
-        self.finish_attempt(
+        let structured_outcomes = ansible_binding
+            .as_ref()
+            .and_then(|_| parse_ansible_outcomes(&observed.output_tail).as_value());
+        self.finish_attempt_with_outcomes(
             index,
             &attempt_id,
             status,
@@ -1591,6 +1851,7 @@ impl<'a> EngineRunner<'a> {
             observed.output_observed_bytes,
             observed.output_captured_bytes,
             observed.output_truncated,
+            structured_outcomes,
             observed.error.as_deref(),
         )?;
         Ok(CommandDispatch::Observed(observed))
@@ -1620,6 +1881,8 @@ impl<'a> EngineRunner<'a> {
             network: request.network,
             privileged: request.privileged,
             opaque: request.opaque,
+            project_digest: request.project_digest.clone(),
+            inventory_digest: request.inventory_digest.clone(),
             actor: None,
             reason: None,
             requested_at,
@@ -1637,6 +1900,8 @@ impl<'a> EngineRunner<'a> {
             network: request.network,
             privileged: request.privileged,
             opaque: request.opaque,
+            project_digest: request.project_digest.clone(),
+            inventory_digest: request.inventory_digest.clone(),
         });
 
         let response = tokio::select! {
@@ -1935,6 +2200,35 @@ impl<'a> EngineRunner<'a> {
         source_truncated: bool,
         error: Option<&str>,
     ) -> Result<(), String> {
+        self.finish_attempt_with_outcomes(
+            _index,
+            attempt_id,
+            status,
+            exit_code,
+            duration_ms,
+            output,
+            output_observed_bytes,
+            output_captured_bytes,
+            source_truncated,
+            None,
+            error,
+        )
+    }
+
+    fn finish_attempt_with_outcomes(
+        &mut self,
+        _index: usize,
+        attempt_id: &str,
+        status: AttemptStatus,
+        exit_code: Option<i32>,
+        duration_ms: Option<u64>,
+        output: Option<&str>,
+        output_observed_bytes: u64,
+        output_captured_bytes: u64,
+        source_truncated: bool,
+        structured_outcomes: Option<Value>,
+        error: Option<&str>,
+    ) -> Result<(), String> {
         // Terminal bridge errors cross the same persistence/export boundary as
         // command output. Redact and cap them once before either SQLite or the
         // in-memory canonical report can observe the string.
@@ -2047,7 +2341,7 @@ impl<'a> EngineRunner<'a> {
                     output_captured_bytes,
                     source_truncated,
                     error: cleaned_error.as_deref(),
-                    structured_outcomes: None,
+                    structured_outcomes: structured_outcomes.clone(),
                 },
             )?;
             // Tail evidence is fully represented inside SQLite, so record its
@@ -2102,7 +2396,7 @@ impl<'a> EngineRunner<'a> {
             attempt.status = status;
             attempt.exit_code = exit_code;
             attempt.duration_ms = duration_ms;
-            attempt.structured_outcomes = None;
+            attempt.structured_outcomes = structured_outcomes;
             attempt.output_tail = attempt_output.as_ref().map(|value| value.text.clone());
             attempt.output_observed_bytes = output_observed_bytes;
             attempt.output_captured_bytes = output_captured_bytes;
@@ -3409,6 +3703,182 @@ impl<'a> EngineRunner<'a> {
     }
 }
 
+impl AnsibleOutcomes {
+    fn totals(&self) -> AnsibleHostOutcome {
+        self.hosts
+            .values()
+            .fold(AnsibleHostOutcome::default(), |mut total, host| {
+                total.ok += host.ok;
+                total.changed += host.changed;
+                total.failed += host.failed;
+                total.unreachable += host.unreachable;
+                total.skipped += host.skipped;
+                total
+            })
+    }
+
+    fn as_value(&self) -> Option<Value> {
+        (!self.hosts.is_empty()).then(|| json!({ "hosts": self.hosts, "totals": self.totals() }))
+    }
+}
+
+fn parse_ansible_outcomes(output: &str) -> AnsibleOutcomes {
+    let mut outcomes = AnsibleOutcomes::default();
+    for line in output.lines() {
+        let Some(start) = line.find('{') else {
+            continue;
+        };
+        let Ok(event) = serde_json::from_str::<Value>(&line[start..]) else {
+            continue;
+        };
+        let Some(event_name) = event.get("event").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(data) = event.get("event_data") else {
+            continue;
+        };
+        if event_name == "playbook_on_stats" {
+            outcomes.hosts.clear();
+            for (field, outcome_field) in [
+                ("ok", "ok"),
+                ("changed", "changed"),
+                ("failures", "failed"),
+                ("dark", "unreachable"),
+                ("skipped", "skipped"),
+            ] {
+                let Some(values) = data.get(field).and_then(Value::as_object) else {
+                    continue;
+                };
+                for (host, count) in values {
+                    let count = count.as_u64().unwrap_or(0);
+                    let host_outcome = outcomes.hosts.entry(host.clone()).or_default();
+                    match outcome_field {
+                        "ok" => host_outcome.ok = count,
+                        "changed" => host_outcome.changed = count,
+                        "failed" => host_outcome.failed = count,
+                        "unreachable" => host_outcome.unreachable = count,
+                        "skipped" => host_outcome.skipped = count,
+                        _ => {}
+                    }
+                }
+            }
+            if let Some(processed) = data.get("processed").and_then(Value::as_object) {
+                for host in processed.keys() {
+                    outcomes.hosts.entry(host.clone()).or_default();
+                }
+            }
+            continue;
+        }
+        let Some(host) = data.get("host").and_then(Value::as_str) else {
+            continue;
+        };
+        let host_outcome = outcomes.hosts.entry(host.to_string()).or_default();
+        match event_name {
+            "runner_on_ok" => {
+                host_outcome.ok += 1;
+                if data
+                    .get("res")
+                    .and_then(|result| result.get("changed"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    host_outcome.changed += 1;
+                }
+            }
+            "runner_on_failed" => host_outcome.failed += 1,
+            "runner_on_unreachable" => host_outcome.unreachable += 1,
+            "runner_on_skipped" => host_outcome.skipped += 1,
+            _ => {}
+        }
+    }
+    outcomes
+}
+
+fn digest_file(path: &Path) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    Ok(format!("sha256:{}", hex_digest(Sha256::digest(bytes))))
+}
+
+fn digest_ansible_project(root: &Path) -> Result<String, String> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(directory) = pending.pop() {
+        let entries = fs::read_dir(&directory)
+            .map_err(|error| format!("read Ansible project {}: {error}", directory.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| format!("read Ansible project entry: {error}"))?;
+            let file_type = entry
+                .file_type()
+                .map_err(|error| format!("inspect {}: {error}", entry.path().display()))?;
+            if file_type.is_symlink() {
+                return Err(format!(
+                    "Ansible project contains a symbolic link: {}",
+                    entry.path().display()
+                ));
+            }
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            } else if file_type.is_file() {
+                files.push(entry.path());
+            }
+        }
+    }
+    files.sort();
+    let mut digest = Sha256::new();
+    for path in files {
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| "Ansible project file escaped its root")?
+            .to_string_lossy();
+        let bytes = fs::read(&path)
+            .map_err(|error| format!("read Ansible project file {}: {error}", path.display()))?;
+        digest.update((relative.len() as u64).to_be_bytes());
+        digest.update(relative.as_bytes());
+        digest.update((bytes.len() as u64).to_be_bytes());
+        digest.update(bytes);
+    }
+    Ok(format!("sha256:{}", hex_digest(digest.finalize())))
+}
+
+fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
+    bytes
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn quote_shell_argument(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn find_ansible_runner() -> Result<PathBuf, String> {
+    let mut candidates = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join(".local/bin"));
+    }
+    candidates.push(PathBuf::from("/opt/homebrew/bin"));
+    candidates.push(PathBuf::from("/usr/local/bin"));
+    candidates.push(PathBuf::from("/usr/bin"));
+    for directory in candidates {
+        let candidate = directory.join("ansible-runner");
+        if candidate.is_file() {
+            return candidate.canonicalize().map_err(|error| {
+                format!(
+                    "resolve installed ansible-runner {}: {error}",
+                    candidate.display()
+                )
+            });
+        }
+    }
+    Err(
+        "ansible.playbook requires a user-installed ansible-runner available on PATH or in a standard user binary directory"
+            .into(),
+    )
+}
+
 #[cfg(target_os = "windows")]
 fn promote_evidence_file(source: &Path, destination: &Path) -> Result<(), String> {
     crate::windows_fs::promote_new_file(source, destination)
@@ -4390,6 +4860,7 @@ spec:
                 run_id,
                 definition,
                 definition_snapshot: snapshot,
+                package_root: PathBuf::new(),
                 target,
                 inputs: BTreeMap::new(),
                 evidence_mode,
@@ -4536,6 +5007,7 @@ spec:
                 run_id: uuid::Uuid::new_v4().to_string(),
                 definition,
                 definition_snapshot: snapshot,
+                package_root: PathBuf::new(),
                 target,
                 inputs: BTreeMap::new(),
                 evidence_mode: EvidenceCaptureMode::Full,
@@ -4745,6 +5217,35 @@ spec:
         assert!(wrapped.contains("/bin/sh -c 'printf '"));
         assert!(wrapped.ends_with(" < /dev/null"));
         assert!(validate_runtime_command(&wrapped).is_ok());
+    }
+
+    #[test]
+    fn ansible_stats_produce_complete_per_host_outcomes() {
+        let output = serde_json::json!({
+            "event": "playbook_on_stats",
+            "event_data": {
+                "processed": {"web-1": 1, "web-2": 1},
+                "ok": {"web-1": 4, "web-2": 3},
+                "changed": {"web-1": 1},
+                "failures": {"web-2": 1},
+                "dark": {},
+                "skipped": {"web-2": 2}
+            }
+        })
+        .to_string();
+        let outcomes = parse_ansible_outcomes(&output);
+        assert_eq!(outcomes.hosts.len(), 2);
+        assert_eq!(outcomes.hosts["web-1"].changed, 1);
+        assert_eq!(outcomes.hosts["web-2"].failed, 1);
+        assert_eq!(outcomes.hosts["web-2"].skipped, 2);
+        let totals = outcomes.totals();
+        assert_eq!(totals.ok, 7);
+        assert_eq!(totals.failed, 1);
+    }
+
+    #[test]
+    fn ansible_shell_arguments_preserve_single_quotes() {
+        assert_eq!(quote_shell_argument("O'Brien"), "'O'\\''Brien'");
     }
 
     #[cfg(unix)]

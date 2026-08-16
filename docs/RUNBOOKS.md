@@ -130,7 +130,7 @@ bundled example imports back as a normal user source, so the original stays.
 my-runbook/
 ├── runbook.vrun.yaml   required
 ├── README.md           optional
-└── ansible/            reserved for a follow-on adapter
+└── ansible/            playbooks, roles and static inventory for ansible.playbook
 ```
 
 Anything else at the root is rejected, as are symlinks, includes, remote
@@ -228,7 +228,22 @@ Each phase is one action:
 | `shell` | One inline command. No control characters, newlines, heredocs or here-strings; 4,096 characters maximum. |
 | `agent` | Bounded Markdown instructions for the configured model. It proposes commands; each one is approved separately in the same visible terminal. |
 | `manual` | Asks you for an outcome, a required comment and an optional evidence note. |
-| `ansible.playbook` | Native v1 recognizes and validates `ansible.playbook`, but it refuses runtime execution today so there is no silent shell fallback. The planned adapter will use a user-installed `ansible-runner` as an explicit local controller, bind approval to exact project/inventory digests, retain structured per-host outcomes, keep check mode preview-only, and still require verification. |
+| `ansible.playbook` | Native in 0.2.10. Uses a user-installed `ansible-runner` as the explicit local controller, binds approval to exact project/inventory digests, retains structured per-host outcomes, forces check and verify phases into preview-only check mode, and still requires verification after apply. |
+
+An Ansible action references files beneath the package's `ansible/` directory.
+The active terminal must be local because `ansible-runner` is the controller;
+its inventory may target remote hosts. Input mappings become JSON extra vars:
+
+```yaml
+apply:
+  uses: ansible.playbook
+  with:
+    playbook: ansible/site.yml
+    inventory: ansible/inventory/hosts.yml
+    limit: web
+    inputVars:
+      http_port: service_port
+```
 
 A shell check declares disjoint compliant and non-compliant exit codes; any
 other code is an execution error, not a non-compliance.
