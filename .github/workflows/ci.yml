@@ -182,6 +182,8 @@ jobs:
       # packages the same class of companion binary a preview would ship.
       - name: Stage Windows companion sidecar (feature-off)
         run: |
+          New-Item -ItemType Directory -Force src-tauri/binaries | Out-Null
+          New-Item -ItemType File -Force src-tauri/binaries/vterminal-docs-x86_64-pc-windows-msvc.exe | Out-Null
           cargo build --manifest-path src-tauri/Cargo.toml --release --locked --target x86_64-pc-windows-msvc --bin vterminal-docs
           Copy-Item src-tauri/target/x86_64-pc-windows-msvc/release/vterminal-docs.exe src-tauri/binaries/vterminal-docs-x86_64-pc-windows-msvc.exe
 
