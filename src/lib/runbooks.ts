@@ -1043,19 +1043,26 @@ export async function pollRunbookUntilTerminal(
   );
 }
 
+/** How the operator arrived at an approval. Wire literals are pinned on the Rust
+ *  side too — see `ApprovalAcknowledgement` in `commands/runbooks.rs`. */
+export type RunbookApprovalAcknowledgement =
+  | "acknowledged"
+  | "pre_authorized"
+  | "model_once";
+
 export const runbooksRespondApproval = (
   runId: string,
   approvalId: string,
   approved: boolean,
   command: string | null,
-  shellAttested: boolean,
+  acknowledgement: RunbookApprovalAcknowledgement,
 ) =>
   invoke<void>("runbooks_respond_approval", {
     run_id: runId,
     approval_id: approvalId,
     approved,
     command,
-    shell_attested: shellAttested,
+    acknowledgement,
   });
 
 export const runbooksDecide = (runId: string, decision: RunbookOperatorDecision) =>

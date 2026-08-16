@@ -1,5 +1,6 @@
 import {
   AlertTriangle,
+  FastForward,
   Network,
   Play,
   ShieldAlert,
@@ -33,7 +34,7 @@ export function RunbookApprovalCard({
     command: string | null,
     shellAttested: boolean,
   ): void;
-  onApproveAll?: () => void;
+  onApproveAll?: (command: string | null) => void;
   onCancelApproveAll?: () => void;
   autoApproving?: boolean;
 }) {
@@ -49,6 +50,9 @@ export function RunbookApprovalCard({
   const edited = command !== approval.command;
   const invalid =
     !command.trim() || command.length > 4_096 || /[\r\n\0]/.test(command);
+  // Both approve paths execute the same text, so they share one predicate. The
+  // bulk button used to be gated on `busy` alone.
+  const approveDisabled = busy || (!modelInvocation && invalid);
   const classification = approval.classification;
   const phaseDeviation =
     approval.phase !== "apply" &&
@@ -64,10 +68,7 @@ export function RunbookApprovalCard({
           <h3 className="text-[12px] font-medium text-text-primary">
             Approval required · {approval.phase}
           </h3>
-          {/* `whitespace-pre-line`: a model approval's explanation carries the
-              step's goal and its enforced bounds on their own lines, and one
-              run-on paragraph about objective, scope and refusals is not read. */}
-          <p className="mt-0.5 whitespace-pre-line text-[10px] leading-relaxed text-text-muted">
+          <p className="mt-0.5 text-[10px] leading-relaxed text-text-muted">
             {approval.explanation}
           </p>
         </div>
@@ -141,33 +142,34 @@ export function RunbookApprovalCard({
                   : "Approve when the visible terminal row is the bound target. The command is used once."}
             </span>
             <span className="block text-[9px] leading-relaxed text-text-muted">
-              This approval attests that the command runs in{" "}
-              <strong>{targetLabel}</strong> under an operator-confirmed visible
-              prompt.
+              Approving runs this in <strong>{targetLabel}</strong>. Your click
+              is bound to the terminal row visible right now; the session&apos;s
+              shell, functions, aliases and PATH are inside that target and are
+              not independently verified.
             </span>
           </label>
         </div>
       )}
 
-      <div className="flex gap-2">
-        <button
-          onClick={() => onRespond(false, null, false)}
-          disabled={busy}
-          className={`${dangerButton} flex-1`}
-        >
-          <Square size={10} /> Decline and pause
-        </button>
-
-        {autoApproving ? (
+      <div className="space-y-2">
+        <div className="flex gap-2">
           <button
-            onClick={() => onCancelApproveAll?.()}
-            disabled={!onCancelApproveAll}
+            onClick={() => onRespond(false, null, false)}
+            disabled={busy}
             className={`${dangerButton} flex-1`}
           >
-            <Square size={10} /> Stop auto-approve
+            <Square size={10} /> Decline and pause
           </button>
-        ) : (
-          <>
+
+          {autoApproving ? (
+            <button
+              onClick={() => onCancelApproveAll?.()}
+              disabled={!onCancelApproveAll}
+              className={`${dangerButton} flex-1`}
+            >
+              <Square size={10} /> Stop auto-approve
+            </button>
+          ) : (
             <button
               onClick={() => {
                 onRespond(
@@ -176,7 +178,7 @@ export function RunbookApprovalCard({
                   !modelInvocation,
                 );
               }}
-              disabled={busy || (!modelInvocation && invalid)}
+              disabled={approveDisabled}
               className={`${primaryButton} flex-1`}
             >
               <Play size={10} />{" "}
@@ -185,22 +187,33 @@ export function RunbookApprovalCard({
                 : modelInvocation
                   ? "Allow model once"
                   : edited
-                    ? "Acknowledge and approve step edit"
-                    : "Acknowledge and approve step"}
+                    ? "Approve this edited step"
+                    : "Approve this step"}
             </button>
-            {onApproveAll && (
-              <button
-                onClick={() => {
-                  onApproveAll();
-                }}
-                disabled={busy}
-                className={`${secondaryButton} flex-1`}
-                title="Acknowledge and approve the current approval and all remaining approvals in this run."
-              >
-                <Play size={10} /> Acknowledge and approve all remaining steps
-              </button>
-            )}
-          </>
+          )}
+        </div>
+
+        {!autoApproving && onApproveAll && (
+          <div className="space-y-1">
+            <button
+              onClick={() => {
+                // Carry the edit. The bulk button used to take no arguments, so
+                // a narrowed command was silently replaced by the model's
+                // original proposal and recorded as un-edited.
+                onApproveAll(modelInvocation ? null : command);
+              }}
+              disabled={approveDisabled}
+              className={`${secondaryButton} w-full`}
+            >
+              <FastForward size={10} /> Approve every later step unseen
+            </button>
+            <span className="block text-[9px] leading-relaxed text-text-muted">
+              Later steps in this run are approved without being shown to you —
+              including networked, privileged and model steps. Each one is
+              recorded in the report as approved without individual display.
+              Pauses, manual steps and a declined step end this mode.
+            </span>
+          </div>
         )}
       </div>
     </section>

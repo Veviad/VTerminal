@@ -598,6 +598,7 @@ pub struct RunbookAttemptView {
     pub output_redacted: bool,
     pub duration_ms: Option<u64>,
     pub error: Option<String>,
+    pub structured_outcomes: Option<Value>,
     pub started_at: String,
     pub finished_at: Option<String>,
 }
@@ -1428,6 +1429,62 @@ pub fn runbooks_cancel(
     Ok(())
 }
 
+/// How the operator arrived at an approval. This is a durable audit fact: it
+/// decides the wording of the reason recorded against the approval, and that
+/// wording is interpolated into the derived phase deviation.
+///
+/// Wire literals are hand-pinned rather than left to `rename_all`, because a
+/// serialized enum name IS a frontend type and `PreAuthorized` is exactly the
+/// multi-word variant that gets mangled. See `acknowledgement_wire_literals_are_pinned`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+pub enum ApprovalAcknowledgement {
+    /// The operator clicked approve on a command displayed on screen.
+    #[serde(rename = "acknowledged")]
+    Acknowledged,
+    /// Granted by run-level auto-approve; the command was never individually
+    /// displayed to anyone.
+    #[serde(rename = "pre_authorized")]
+    PreAuthorized,
+    /// A configured-model invocation allowed once. No terminal command runs.
+    #[serde(rename = "model_once")]
+    ModelOnce,
+}
+
+/// Builds the durable reason. Extracted from the command body so it can be
+/// tested: no case claims the operator vouched for the session's shell,
+/// functions, aliases or PATH, because with the attestation checkbox gone no
+/// case affirms it.
+fn approval_reason(
+    approved: bool,
+    model_invocation: bool,
+    edited: bool,
+    acknowledgement: ApprovalAcknowledgement,
+    target_basis: &str,
+) -> String {
+    if !approved {
+        return "operator declined the proposed command".to_string();
+    }
+    match (model_invocation, acknowledgement) {
+        (true, ApprovalAcknowledgement::PreAuthorized) => {
+            "operator pre-authorized this step via run-level auto-approve; the configured-model invocation was not individually displayed"
+                .to_string()
+        }
+        (true, _) => {
+            "operator acknowledged the displayed configured-model invocation and allowed it once"
+                .to_string()
+        }
+        (false, ApprovalAcknowledgement::PreAuthorized) => format!(
+            "operator pre-authorized this step via run-level auto-approve for bound target {target_basis}; the proposed command was not individually displayed"
+        ),
+        (false, _) if edited => format!(
+            "operator acknowledged the command displayed for bound target {target_basis} and approved an edited command"
+        ),
+        (false, _) => format!(
+            "operator acknowledged the proposed command displayed for bound target {target_basis} and approved it"
+        ),
+    }
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub fn runbooks_respond_approval(
     app: tauri::AppHandle<Wry>,
@@ -1437,7 +1494,7 @@ pub fn runbooks_respond_approval(
     approval_id: String,
     approved: bool,
     command: Option<String>,
-    shell_attested: bool,
+    acknowledgement: ApprovalAcknowledgement,
 ) -> Result<(), String> {
     gate(&app)?;
     validate_identifier(&run_id, "run id")?;
@@ -1467,14 +1524,20 @@ pub fn runbooks_respond_approval(
         .proposed_command
         .as_deref()
         .is_some_and(|value| value.starts_with("model://configured-agent/"));
-    if approved && !model_invocation && !shell_attested {
+    // The two checks that used to live here compared frontend-supplied claims
+    // about a fact this function already derives itself, and one of them had
+    // become a tautology once the card stopped asking for a separate
+    // attestation. This invariant can actually refuse something: a command
+    // nobody was shown cannot have been edited by an operator, which is what
+    // keeps the report's `edited` flag honest.
+    if approved && acknowledgement == ApprovalAcknowledgement::PreAuthorized && command.is_some() {
+        return Err("a pre-authorized approval cannot carry an edited command".into());
+    }
+    if approved && model_invocation != (acknowledgement == ApprovalAcknowledgement::ModelOnce) {
         return Err(
-            "shell approval requires operator attestation of the visible POSIX prompt and session shell state"
+            "a model invocation must be acknowledged as model_once, and only a model invocation may be"
                 .into(),
         );
-    }
-    if model_invocation && shell_attested {
-        return Err("model approval cannot carry a shell-prompt attestation".into());
     }
     let edited_command = if approved {
         normalize_edited_command(command, approval.proposed_command.as_deref())?
@@ -1487,21 +1550,13 @@ pub fn runbooks_respond_approval(
         (_, _, Some(cwd)) => format!("local session {} at {cwd}", target.session_id),
         _ => format!("session {}", target.session_id),
     };
-    let reason = if approved {
-        if model_invocation {
-            "operator allowed the configured model once".to_string()
-        } else if edited_command.is_some() {
-            format!(
-                "operator attested that the visible POSIX shell prompt is on bound target {target_basis}, trusted the session shell, functions, aliases, and PATH, and approved an edited command"
-            )
-        } else {
-            format!(
-                "operator attested that the visible POSIX shell prompt is on bound target {target_basis}, trusted the session shell, functions, aliases, and PATH, and approved the proposed command"
-            )
-        }
-    } else {
-        "operator declined the proposed command".to_string()
-    };
+    let reason = approval_reason(
+        approved,
+        model_invocation,
+        edited_command.is_some(),
+        acknowledgement,
+        &target_basis,
+    );
     command_state.approvals.respond(
         &approval_id,
         ApprovalResponse {
@@ -2443,6 +2498,7 @@ fn attempt_view(attempt: &AttemptRecord) -> RunbookAttemptView {
         output_redacted: attempt.output_redacted,
         duration_ms: attempt.duration_ms,
         error: attempt.error.clone(),
+        structured_outcomes: attempt.structured_outcomes.clone(),
         started_at: attempt
             .started_at
             .clone()
@@ -5073,6 +5129,94 @@ spec:
     }
 
     #[test]
+    fn acknowledgement_wire_literals_are_pinned() {
+        use serde_json::json;
+        for (wire, expected) in [
+            ("acknowledged", ApprovalAcknowledgement::Acknowledged),
+            ("pre_authorized", ApprovalAcknowledgement::PreAuthorized),
+            ("model_once", ApprovalAcknowledgement::ModelOnce),
+        ] {
+            assert_eq!(
+                serde_json::from_value::<ApprovalAcknowledgement>(json!(wire)).unwrap(),
+                expected,
+                "{wire} must stay the wire literal the frontend sends"
+            );
+        }
+        // The shapes `rename_all` or a hand-written camelCase would produce.
+        for wrong in ["PreAuthorized", "preAuthorized", "pre-authorized", "auto"] {
+            assert!(
+                serde_json::from_value::<ApprovalAcknowledgement>(json!(wrong)).is_err(),
+                "{wrong} must not deserialize"
+            );
+        }
+    }
+
+    #[test]
+    fn approval_reason_distinguishes_acknowledged_from_pre_authorized() {
+        let basis = "local session s1 at /srv/app";
+
+        let acknowledged = approval_reason(
+            true,
+            false,
+            false,
+            ApprovalAcknowledgement::Acknowledged,
+            basis,
+        );
+        assert!(acknowledged.contains("operator acknowledged"));
+        assert!(acknowledged.contains(basis));
+
+        let edited = approval_reason(
+            true,
+            false,
+            true,
+            ApprovalAcknowledgement::Acknowledged,
+            basis,
+        );
+        assert!(edited.contains("approved an edited command"));
+
+        let pre = approval_reason(
+            true,
+            false,
+            false,
+            ApprovalAcknowledgement::PreAuthorized,
+            basis,
+        );
+        assert!(pre.contains("pre-authorized"));
+        assert!(pre.contains("not individually displayed"));
+
+        let model_pre = approval_reason(
+            true,
+            true,
+            false,
+            ApprovalAcknowledgement::PreAuthorized,
+            basis,
+        );
+        assert!(model_pre.contains("configured-model invocation was not individually displayed"));
+
+        assert_eq!(
+            approval_reason(
+                false,
+                false,
+                false,
+                ApprovalAcknowledgement::Acknowledged,
+                basis
+            ),
+            "operator declined the proposed command"
+        );
+
+        // The checkbox that made this claim is gone, so nothing may keep making
+        // it. This is the guardrail for the whole rewording.
+        for reason in [acknowledged, edited, pre, model_pre] {
+            for forbidden in ["aliases", "PATH", "trusted", "attested"] {
+                assert!(
+                    !reason.contains(forbidden),
+                    "{reason:?} must not claim {forbidden}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn unchanged_approval_command_is_not_recorded_as_an_edit() {
         assert_eq!(
             normalize_edited_command(Some("echo ok".into()), Some("echo ok")).unwrap(),
@@ -5113,6 +5257,7 @@ spec:
             output_redacted: false,
             output_truncated: false,
             error: None,
+            structured_outcomes: None,
             intent_at: now(),
             started_at: Some(now()),
             result_at: None,

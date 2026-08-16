@@ -1,6 +1,5 @@
 import { create } from "zustand";
 
-import { isTerminalRunState } from "../lib/runbooks";
 import type {
   RunbookDefinition,
   RunbookEvent,
@@ -22,19 +21,17 @@ export interface RunbookStoreState {
   /** Durable live-run registry. `activeRun` is only the run selected in the UI. */
   runsById: Record<string, RunbookRun>;
   activeRun: RunbookRun | null;
-  /** Bumped by every event that names a run.
-   *
-   * A durable `runbooks_get` is a snapshot of the moment it was ISSUED, but it
-   * is applied whenever it happens to come back. Without this, a read issued
-   * before an approval existed lands after `ApprovalRequested` and erases it —
-   * the run then sits on a spinner while the engine waits for a click the
-   * operator can no longer make. Callers capture this before the request and
-   * hand it back, and a snapshot older than the newest event is dropped.
-   *
-   * A `Map` rather than a record: the key is a run id from the backend, and a
-   * plain object indexed by it is both a lint sink and reachable by
-   * `__proto__`. */
-  runRevisions: ReadonlyMap<string, number>;
+  getRunById(runId: string): RunbookRun | null;
+  /** Runs whose remaining approvals the operator pre-authorized. Per run,
+   *  frontend-only, never persisted and never inherited by another run — the
+   *  same stance as `aiStreams[id].permissionMode` in appStore. Deliberately
+   *  NOT the agent's permission mode: `RunbookApprovalState` is kept separate
+   *  in Rust so agent `Auto all` can never settle a runbook gate. */
+  autoApproveRuns: Map<string, RunbookAutoApproveState>;
+  hasAutoApproveRun(runId: string): boolean;
+  getAutoApproveRunState(
+    runId: string,
+  ): RunbookAutoApproveState | undefined;
   history: RunbookHistoryEntry[];
   selectedHistoryRunId: string | null;
   report: RunbookReport | null;
@@ -55,11 +52,7 @@ export interface RunbookStoreState {
   selectSource(sourceId: string | null): void;
   setDefinition(definition: RunbookDefinition | null): void;
   setActiveRun(run: RunbookRun | null): void;
-  /** `issuedAtRevision` makes the write conditional: pass the value
-   * `runRevisions[runId]` held when the fetch started and the snapshot is
-   * discarded if any event has landed since. Omit it for an operator-initiated
-   * read, which is authoritative by definition. */
-  upsertRun(run: RunbookRun, issuedAtRevision?: number): void;
+  upsertRun(run: RunbookRun): void;
   updateStep(step: RunbookStepRun): void;
   setHistory(history: RunbookHistoryEntry[]): void;
   deleteHistoryRun(runId: string): void;
@@ -67,6 +60,8 @@ export interface RunbookStoreState {
   setReport(report: RunbookReport | null): void;
   dispatchEvent(event: RunbookEvent): void;
   setLoading(key: LoadingKey, loading: boolean): void;
+  setAutoApprove(runId: string, on: boolean): void;
+  noteAutoApproved(runId: string, approvalId: string): void;
   setBusyAction(action: string | null): void;
   setError(error: string | null): void;
   setNotice(notice: string | null): void;
@@ -83,7 +78,12 @@ interface RunbookStoreData {
   definition: RunbookDefinition | null;
   runsById: Record<string, RunbookRun>;
   activeRun: RunbookRun | null;
-  runRevisions: ReadonlyMap<string, number>;
+  /** Runs whose remaining approvals the operator pre-authorized. Per run,
+   *  frontend-only, never persisted and never inherited by another run — the
+   *  same stance as `aiStreams[id].permissionMode` in appStore. Deliberately
+   *  NOT the agent's permission mode: `RunbookApprovalState` is kept separate
+   *  in Rust so agent `Auto all` can never settle a runbook gate. */
+  autoApproveRuns: Map<string, RunbookAutoApproveState>;
   history: RunbookHistoryEntry[];
   selectedHistoryRunId: string | null;
   report: RunbookReport | null;
@@ -97,6 +97,13 @@ interface RunbookStoreData {
   notice: string | null;
 }
 
+/** Live state of run-level auto-approve. Its presence IS the armed flag; the
+ *  ids are the approvals it has already granted, so a replayed
+ *  `ApprovalRequested` cannot be answered twice. */
+export interface RunbookAutoApproveState {
+  grantedApprovalIds: string[];
+}
+
 const emptyState = (): RunbookStoreData => ({
   workspaceOpen: false,
   view: "library",
@@ -105,7 +112,7 @@ const emptyState = (): RunbookStoreData => ({
   definition: null,
   runsById: {},
   activeRun: null,
-  runRevisions: new Map<string, number>(),
+  autoApproveRuns: new Map(),
   history: [],
   selectedHistoryRunId: null,
   report: null,
@@ -151,6 +158,14 @@ export const useRunbookStore = create<RunbookStoreState>((set) => ({
   selectSource: (selectedSourceId) =>
     set({ selectedSourceId, definition: null, error: null, notice: null }),
   setDefinition: (definition) => set({ definition }),
+  getRunById: (runId) => {
+    const state = useRunbookStore.getState();
+    const activeRun = state.activeRun;
+    return (
+      Object.values(state.runsById).find((item) => item.run_id === runId) ??
+      (activeRun?.run_id === runId ? activeRun : null)
+    );
+  },
   setActiveRun: (activeRun) =>
     set((state) => {
       if (!activeRun) return { activeRun: null };
@@ -162,18 +177,8 @@ export const useRunbookStore = create<RunbookStoreState>((set) => ({
         runsById: { ...state.runsById, [merged.run_id]: merged },
       };
     }),
-  upsertRun: (run, issuedAtRevision) =>
+  upsertRun: (run) =>
     set((state) => {
-      if (
-        issuedAtRevision !== undefined &&
-        (state.runRevisions.get(run.run_id) ?? 0) !== issuedAtRevision
-      ) {
-        // An event landed while this snapshot was in flight, so it describes a
-        // moment that has already been overtaken. Applying it would undo the
-        // event — most visibly by clearing a pending approval that has just
-        // arrived, which leaves the run spinning with nothing to approve.
-        return state;
-      }
       const current = state.runsById[run.run_id] ??
         (state.activeRun?.run_id === run.run_id ? state.activeRun : null);
       const merged = mergeRun(current, run);
@@ -223,19 +228,8 @@ export const useRunbookStore = create<RunbookStoreState>((set) => ({
           (state.activeRun?.run_id === eventRunId ? state.activeRun : null)
         : null;
 
-      // Every event for a run advances its revision, including the ones that
-      // change nothing here. A durable snapshot issued before this point is
-      // stale whatever the event said, because the row it read has moved on.
-      const runRevisions = eventRunId
-        ? new Map(state.runRevisions).set(
-            eventRunId,
-            (state.runRevisions.get(eventRunId) ?? 0) + 1,
-          )
-        : state.runRevisions;
-
       const withRun = (next: RunbookRun) => ({
         events,
-        runRevisions,
         runsById: { ...state.runsById, [next.run_id]: next },
         activeRun: state.activeRun?.run_id === next.run_id ? next : state.activeRun,
       });
@@ -244,11 +238,10 @@ export const useRunbookStore = create<RunbookStoreState>((set) => ({
         case "RunStarted":
           return {
             events,
-            runRevisions,
             error: null,
           };
         case "StepChanged": {
-          if (!run || run.run_id !== event.run_id) return { events, runRevisions };
+          if (!run || run.run_id !== event.run_id) return { events };
           return withRun({
               ...run,
               active_step_id: event.step_id,
@@ -263,7 +256,7 @@ export const useRunbookStore = create<RunbookStoreState>((set) => ({
           });
         }
         case "ApprovalRequested":
-          if (!run || run.run_id !== event.run_id) return { events, runRevisions };
+          if (!run || run.run_id !== event.run_id) return { events };
           return withRun({
               ...run,
               status: "waiting_approval",
@@ -271,9 +264,9 @@ export const useRunbookStore = create<RunbookStoreState>((set) => ({
               pending_approval: event,
           });
         case "RunInTerminal":
-          return { events, runRevisions };
+          return { events };
         case "OperatorDecisionRequired":
-          if (!run || run.run_id !== event.run_id) return { events, runRevisions };
+          if (!run || run.run_id !== event.run_id) return { events };
           return withRun({
               ...run,
               status: "waiting_operator",
@@ -282,10 +275,10 @@ export const useRunbookStore = create<RunbookStoreState>((set) => ({
               pending_manual: event.manual ?? run.pending_manual,
           });
         case "ReportReady":
-          if (!run || run.run_id !== event.run_id) return { events, runRevisions };
+          if (!run || run.run_id !== event.run_id) return { events };
           return withRun({ ...run, report_ready: true });
         case "RunFinished":
-          if (!run || run.run_id !== event.run_id) return { events, runRevisions };
+          if (!run || run.run_id !== event.run_id) return { events };
           return withRun({
               ...run,
               status: event.state,
@@ -296,7 +289,7 @@ export const useRunbookStore = create<RunbookStoreState>((set) => ({
               pending_manual: null,
           });
         case "Error":
-          return { events, runRevisions, error: event.message };
+          return { events, error: event.message };
       }
     }),
   setLoading: (key, loading) => {
@@ -308,6 +301,37 @@ export const useRunbookStore = create<RunbookStoreState>((set) => ({
     };
     set({ [field[key]]: loading } as Partial<RunbookStoreState>);
   },
+  hasAutoApproveRun: (runId) =>
+    useRunbookStore.getState().autoApproveRuns.has(runId),
+  getAutoApproveRunState: (runId) =>
+    useRunbookStore.getState().autoApproveRuns.get(runId),
+  setAutoApprove: (runId, on) =>
+    set((state) => {
+      if (!on) {
+        if (!state.autoApproveRuns.has(runId)) return {};
+        const next = new Map(state.autoApproveRuns);
+        next.delete(runId);
+        return { autoApproveRuns: next };
+      }
+      if (state.autoApproveRuns.has(runId)) return {};
+      return {
+        autoApproveRuns: new Map(state.autoApproveRuns).set(runId, {
+          grantedApprovalIds: [],
+        }),
+      };
+    }),
+  noteAutoApproved: (runId, approvalId) =>
+    set((state) => {
+      const current = state.autoApproveRuns.get(runId);
+      if (!current || current.grantedApprovalIds.includes(approvalId)) return {};
+      const next = new Map(state.autoApproveRuns);
+      next.set(runId, {
+        grantedApprovalIds: [...current.grantedApprovalIds, approvalId],
+      });
+      return {
+        autoApproveRuns: next,
+      };
+    }),
   setBusyAction: (busyAction) => set({ busyAction }),
   setError: (error) => set({ error }),
   setNotice: (notice) => set({ notice }),
@@ -356,26 +380,6 @@ function mergeRun(current: RunbookRun | null, incoming: RunbookRun): RunbookRun 
           ? current.pending_manual
           : null,
   };
-}
-
-/** Runs that are still going. Terminal runs stay in `runsById` so their report
- * remains openable, so membership there is NOT liveness. */
-export function selectLiveRunbookRuns(
-  runsById: Record<string, RunbookRun>,
-): RunbookRun[] {
-  return Object.values(runsById).filter((run) => !isTerminalRunState(run.status));
-}
-
-/** The one run allowed to occupy the header slot, or null for the neutral
- * launcher. `activeRun` is only the UI SELECTION and deliberately outlives its
- * run so the end-of-run report stays open — treating it as "a run is live" is
- * what pinned a finished run's pill to the header until the app restarted. */
-export function selectLiveRunbookRun(
-  activeRun: RunbookRun | null,
-  runsById: Record<string, RunbookRun>,
-): RunbookRun | null {
-  if (activeRun && !isTerminalRunState(activeRun.status)) return activeRun;
-  return selectLiveRunbookRuns(runsById)[0] ?? null;
 }
 
 function replaceStep(steps: RunbookStepRun[], next: RunbookStepRun): RunbookStepRun[] {

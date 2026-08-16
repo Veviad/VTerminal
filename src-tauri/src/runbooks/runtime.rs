@@ -103,6 +103,8 @@ pub struct ApprovalRequest {
     pub network: bool,
     pub privileged: bool,
     pub opaque: bool,
+    pub project_digest: Option<String>,
+    pub inventory_digest: Option<String>,
 }
 
 impl ApprovalRequest {
@@ -1345,6 +1347,8 @@ mod tests {
             network: false,
             privileged: false,
             opaque: false,
+            project_digest: None,
+            inventory_digest: None,
         };
         assert!(request.requires_approval());
         coordinator.request_approval(request).unwrap();
@@ -1410,6 +1414,8 @@ mod tests {
             network: true,
             privileged: false,
             opaque: false,
+            project_digest: None,
+            inventory_digest: None,
         };
         coordinator.request_approval(request.clone()).unwrap();
         coordinator

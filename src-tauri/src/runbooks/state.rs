@@ -265,6 +265,9 @@ string_enum! {
         // The bound PTY returned an observed exit status, without claiming the
         // parent interactive shell itself was an attested runtime.
         ShellObserved => "shell_observed",
+        /// Ansible follow-on adapter execution with explicit project and
+        /// inventory digests for per-host reconciliation.
+        AnsibleRunner => "ansible_runner",
         AgentAssisted => "agent_assisted",
         OperatorAttested => "operator_attested",
     }
@@ -457,6 +460,14 @@ mod tests {
         assert_ne!(
             VerificationAssurance::ShellObserved,
             VerificationAssurance::DeterministicShell
+        );
+        assert_eq!(
+            VerificationAssurance::AnsibleRunner.as_str(),
+            "ansible_runner"
+        );
+        assert_eq!(
+            "ansible_runner".parse::<VerificationAssurance>().unwrap(),
+            VerificationAssurance::AnsibleRunner
         );
     }
 

@@ -40,6 +40,11 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
   const run = useRunbookStore((state) => state.activeRun);
   const report = useRunbookStore((state) => state.report);
   const busyAction = useRunbookStore((state) => state.busyAction);
+  // Select a primitive: zustand compares with Object.is, so returning the map
+  // itself would re-render on every unrelated run's change.
+  const autoApproving = useRunbookStore((state) =>
+    state.activeRun ? state.hasAutoApproveRun(state.activeRun.run_id) : false,
+  );
   const {
     cancel,
     resume,
@@ -60,44 +65,23 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
     string | null
   >(null);
 
-  // LAST HOOK IN THIS COMPONENT. Everything below is guarded by early returns —
-  // no run selected, the report sub-view, the definition sub-view — so a hook
-  // placed after them is skipped on those renders and React tears the whole app
-  // down with "rendered fewer hooks than expected". This effect used to sit
-  // below two of them, which made **View report** on a finished run a
-  // guaranteed crash: that button only exists once the run is terminal.
-  const activeRunId = run?.run_id ?? null;
-  useEffect(() => {
-    setShowDefinitionReview(false);
-    setDefinitionReview(null);
-    setDefinitionReviewLoading(false);
-    setDefinitionReviewError(null);
-  }, [activeRunId]);
-
-  /** Stop the run and leave the run view.
-   *
-   * Cancelling used to strand the operator on a dead checklist. `cancel`
-   * reports failure by setting the store error rather than throwing, so the
-   * decision to navigate is made on the outcome: only a run that actually
-   * reached a terminal state gets left behind. A cancel that did not take
-   * keeps the run in front of the operator, next to its error. */
-  const abortRun = async (runId: string) => {
-    await cancel(runId);
-    const store = useRunbookStore.getState();
-    // `cancel` installs the settled run as the active one, so that is the
-    // authoritative outcome to read here.
-    const stopped = store.activeRun;
-    if (stopped?.run_id === runId && isTerminalRunState(stopped.status)) {
-      store.setView("library");
-    }
-  };
-
   const ignoreAsync = (operation?: Promise<unknown>) => {
     if (!operation || typeof operation.then !== "function") return;
     operation.catch((error) => {
       useRunbookStore.getState().setError(String(error));
     });
   };
+
+  // Every hook must sit above the early returns below. This reset used to live
+  // beside the other run-derived values, past `if (!run)` and the report view,
+  // so selecting a run or opening the report changed the hook count mid-render
+  // and React threw its "rendered more/fewer hooks" invariant.
+  useEffect(() => {
+    setShowDefinitionReview(false);
+    setDefinitionReview(null);
+    setDefinitionReviewLoading(false);
+    setDefinitionReviewError(null);
+  }, [run?.run_id]);
 
   if (!run) {
     return (
@@ -136,7 +120,6 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
   const terminal = isTerminalRunState(run.status);
   const active =
     run.steps.find((step) => step.id === run.active_step_id) ?? null;
-  const autoApproving = busyAction === `approve-all:${run.run_id}`;
   const pendingApproval = run.pending_approval;
   const pendingManual = run.pending_manual;
   const pendingOperator = run.pending_operator;
@@ -266,7 +249,7 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
                     onClick={() => {
                       if (confirmCancel) {
                         setConfirmCancel(false);
-                        ignoreAsync(abortRun(run.run_id));
+                        ignoreAsync(cancel(run.run_id));
                       } else {
                         setConfirmCancel(true);
                       }
@@ -276,14 +259,13 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
                     className={confirmCancel ? dangerButton : secondaryButton}
                   >
                     <Square size={10} />{" "}
-                    {confirmCancel ? "Confirm abort" : "Abort run"}
+                    {confirmCancel ? "Confirm cancel" : "Cancel"}
                   </button>
                   {confirmCancel && (
                     <p className="max-w-64 text-right text-[9px] leading-snug text-warning">
-                      Stops the run and returns to the Library. Sends SIGINT to
-                      an owned foreground command, but cannot prove or undo
-                      changes already made. The active step will be reported
-                      unknown.
+                      Sends SIGINT to an owned foreground command, but cannot
+                      prove or undo changes already made. The active step will
+                      be reported unknown.
                     </p>
                   )}
                 </div>
@@ -329,22 +311,21 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
             <RunbookApprovalCard
               approval={pendingApproval}
               targetLabel={describeRunbookTarget(run.target)}
-              busy={busyAction !== null}
+              busy={busyAction === `approval:${pendingApproval.approval_id}`}
               autoApproving={autoApproving}
-              onApproveAll={() => {
-                ignoreAsync(approveAllPendingSteps(run.run_id));
+              onApproveAll={(command) => {
+                ignoreAsync(approveAllPendingSteps(run.run_id, command));
               }}
               onCancelApproveAll={() => {
                 cancelApproveAll(run.run_id);
               }}
-              onRespond={(approved, command, shellAttested) => {
+              onRespond={(approved, command) => {
                 ignoreAsync(
                   respondApproval(
                     run.run_id,
                     pendingApproval.approval_id,
                     approved,
                     command,
-                    shellAttested,
                   ),
                 );
               }}

@@ -94,6 +94,8 @@ pub struct ReportAttempt {
     pub output_redacted: bool,
     pub output_truncated: bool,
     pub error: Option<String>,
+    #[serde(default)]
+    pub structured_outcomes: Option<Value>,
     pub intent_at: String,
     pub result_at: Option<String>,
 }
@@ -519,15 +521,21 @@ fn render_markdown(report: &RunbookReport, canonical_json: &str) -> String {
 
         if !step.approvals.is_empty() {
             out.push_str("\n**Approvals**\n\n");
-            out.push_str("| Status | Phase | Actor | Edited | Requested | Decided |\n");
-            out.push_str("| --- | --- | --- | --- | --- | --- |\n");
+            // `Basis` carries the reason, which is the only place a reader learns
+            // that a step was pre-authorized rather than individually displayed.
+            // The derived `phase_deviation` also embeds it, but only for non-apply
+            // phases — so without this column a bulk-approved apply step, the
+            // highest-consequence case, left no trace anywhere.
+            out.push_str("| Status | Phase | Actor | Edited | Basis | Requested | Decided |\n");
+            out.push_str("| --- | --- | --- | --- | --- | --- | --- |\n");
             for approval in &step.approvals {
                 out.push_str(&format!(
-                    "| {} | {} | {} | {} | {} | {} |\n",
+                    "| {} | {} | {} | {} | {} | {} | {} |\n",
                     approval.status.as_str(),
                     approval.phase.as_str(),
                     table(approval.actor.as_deref().unwrap_or("—")),
                     if approval.edited { "yes" } else { "no" },
+                    table(approval.reason.as_deref().unwrap_or("—")),
                     table(&approval.requested_at),
                     table(approval.decided_at.as_deref().unwrap_or("—")),
                 ));
@@ -906,6 +914,7 @@ mod tests {
             output_redacted: false,
             output_truncated: false,
             error: Some("failed > expected".into()),
+            structured_outcomes: None,
             intent_at: "2026-01-01T00:00:00Z".into(),
             result_at: Some("2026-01-01T00:00:01Z".into()),
         });
@@ -1002,6 +1011,7 @@ mod tests {
             output_redacted: false,
             output_truncated: false,
             error: None,
+            structured_outcomes: None,
             intent_at: "2026-01-01T00:00:00Z".into(),
             result_at: Some("2026-01-01T00:00:01Z".into()),
         });
@@ -1026,6 +1036,46 @@ mod tests {
         );
         invalid.status = RunStatus::CompletedWithExceptions;
         invalid.validate().unwrap();
+    }
+
+    #[test]
+    fn approvals_table_records_the_basis_of_each_approval() {
+        // An APPLY-phase approval produces no derived phase_deviation, so the
+        // reason column is the only place a report reader can see that a step
+        // was pre-authorized instead of individually displayed.
+        let mut report = report(RunStatus::Succeeded, StepStatus::RemediatedVerified);
+        report.checklist[0].approvals.push(ReportApproval {
+            id: "approval-auto".into(),
+            phase: RunbookPhase::Apply,
+            status: ApprovalStatus::Approved,
+            proposed_command: Some("systemctl restart nginx".into()),
+            executed_command: Some("systemctl restart nginx".into()),
+            read_only: false,
+            network: false,
+            privileged: true,
+            opaque: false,
+            actor: Some("operator".into()),
+            reason: Some(
+                "operator pre-authorized this step via run-level auto-approve for bound target local session s1; the proposed command was not individually displayed"
+                    .into(),
+            ),
+            requested_at: "2026-01-01T00:00:00Z".into(),
+            decided_at: Some("2026-01-01T00:00:01Z".into()),
+            edited: false,
+        });
+
+        let markdown = report.markdown().unwrap();
+        assert!(
+            markdown.contains("| Status | Phase | Actor | Edited | Basis | Requested | Decided |")
+        );
+        assert!(markdown.contains("was not individually displayed"));
+        assert!(
+            report.checklist[0]
+                .deviations
+                .iter()
+                .all(|item| item.kind != "phase_deviation"),
+            "an apply approval must not rely on a phase deviation to be visible"
+        );
     }
 
     #[test]
@@ -1066,6 +1116,7 @@ mod tests {
             output_redacted: false,
             output_truncated: false,
             error: None,
+            structured_outcomes: None,
             intent_at: "2026-01-01T00:00:00Z".into(),
             result_at: Some("2026-01-01T00:00:01Z".into()),
         });
@@ -1110,14 +1161,15 @@ mod tests {
                 exit_code: Some(0),
                 duration_ms: Some(1),
                 output_tail: None,
-                output_observed_bytes: 0,
-                output_captured_bytes: 0,
-                output_redacted: false,
-                output_truncated: false,
-                error: None,
-                intent_at: "2026-01-01T00:00:00Z".into(),
-                result_at: Some("2026-01-01T00:00:01Z".into()),
-            });
+            output_observed_bytes: 0,
+            output_captured_bytes: 0,
+            output_redacted: false,
+            output_truncated: false,
+            error: None,
+            structured_outcomes: None,
+            intent_at: "2026-01-01T00:00:00Z".into(),
+            result_at: Some("2026-01-01T00:00:01Z".into()),
+        });
         }
         assert!(report.validate().unwrap_err().contains("attempts"));
 
@@ -1134,14 +1186,15 @@ mod tests {
                 exit_code: Some(0),
                 duration_ms: Some(1),
                 output_tail: None,
-                output_observed_bytes: 0,
-                output_captured_bytes: 0,
-                output_redacted: false,
-                output_truncated: false,
-                error: None,
-                intent_at: "2026-01-01T00:00:00Z".into(),
-                result_at: Some("2026-01-01T00:00:01Z".into()),
-            });
+            output_observed_bytes: 0,
+            output_captured_bytes: 0,
+            output_redacted: false,
+            output_truncated: false,
+            error: None,
+            structured_outcomes: None,
+            intent_at: "2026-01-01T00:00:00Z".into(),
+            result_at: Some("2026-01-01T00:00:01Z".into()),
+        });
             report.checklist[0].evidence.push(ReportEvidence {
                 id: format!("evidence-{index}"),
                 attempt_id: attempt_id.clone(),

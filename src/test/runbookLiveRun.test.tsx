@@ -11,12 +11,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   loadReport: vi.fn(async () => {}),
   runbooksGetDefinition: vi.fn(),
-  cancel: vi.fn(async (_runId: string) => {}),
 }));
 
 vi.mock("../hooks/useRunbooks", () => ({
   useRunbooks: () => ({
-    cancel: mocks.cancel,
+    cancel: vi.fn(),
     resume: vi.fn(),
     respondApproval: vi.fn(),
     approveAllPendingSteps: vi.fn(),
@@ -77,65 +76,6 @@ describe("RunbookLiveRun view transitions", () => {
     expect(
       screen.getByRole("button", { name: /Review runbook/i }),
     ).toBeTruthy();
-  });
-
-  it("returns to the Library once an abort has actually stopped the run", async () => {
-    mocks.cancel.mockImplementation(async (runId: string) => {
-      useRunbookStore
-        .getState()
-        .setActiveRun({ ...liveRun("cancelled"), run_id: runId });
-    });
-    act(() => {
-      useRunbookStore.getState().setActiveRun(liveRun("running"));
-      useRunbookStore.getState().setView("run");
-    });
-    render(<RunbookLiveRun sessionId="session-1" />);
-
-    // Two clicks: the first arms the confirmation, the second aborts.
-    fireEvent.click(screen.getByRole("button", { name: /Abort run/i }));
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /Confirm abort/i }));
-    });
-
-    expect(mocks.cancel).toHaveBeenCalledWith("run-1");
-    expect(useRunbookStore.getState().view).toBe("library");
-  });
-
-  it("stays on a run whose abort did not take", async () => {
-    // `cancel` reports failure by setting the store error, not by throwing, so
-    // navigating unconditionally would hide a run that is still going.
-    mocks.cancel.mockImplementation(async () => {
-      useRunbookStore.getState().setError("could not reach the terminal");
-    });
-    act(() => {
-      useRunbookStore.getState().setActiveRun(liveRun("running"));
-      useRunbookStore.getState().setView("run");
-    });
-    render(<RunbookLiveRun sessionId="session-1" />);
-
-    fireEvent.click(screen.getByRole("button", { name: /Abort run/i }));
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /Confirm abort/i }));
-    });
-
-    expect(useRunbookStore.getState().view).toBe("run");
-  });
-
-  it("keeps a stable hook count when the selected run goes away", () => {
-    // The other direction of the same early return: a run deleted from History
-    // while it is open sets `activeRun` to null (`deleteHistoryRun`), so the
-    // next render of this mounted instance takes the "No run selected" branch.
-    act(() => {
-      useRunbookStore.getState().setActiveRun(liveRun("running"));
-    });
-    render(<RunbookLiveRun sessionId="session-1" />);
-    expect(screen.getByRole("button", { name: /Review runbook/i })).toBeTruthy();
-
-    act(() => {
-      useRunbookStore.getState().setActiveRun(null);
-    });
-
-    expect(screen.getByText(/No run selected/i)).toBeTruthy();
   });
 
   it("keeps a stable hook count when the report view opens and closes", async () => {

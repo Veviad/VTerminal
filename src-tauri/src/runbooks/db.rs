@@ -109,7 +109,7 @@ pub fn migrate_v6(conn: &Connection) -> Result<(), String> {
             changed            INTEGER NOT NULL DEFAULT 0 CHECK(changed IN (0,1)),
             assurance          TEXT CHECK(assurance IS NULL OR assurance IN
                                    ('deterministic_shell','shell_observed','agent_assisted',
-                                    'operator_attested')),
+                                    'ansible_runner','operator_attested')),
             summary            TEXT,
             operator_comment   TEXT,
             waiver_actor       TEXT,
@@ -282,6 +282,43 @@ pub fn migrate_v9(conn: &Connection) -> Result<(), String> {
     .map_err(|e| format!("migration v9 failed: {e}"))
 }
 
+/// Main-database migration v10 introduces:
+/// - Structured per-attempt outcomes in the durable attempt row.
+/// - Approval digests bound to the exact project/inventory state.
+pub fn migrate_v10(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        BEGIN;
+        ALTER TABLE runbook_attempts
+          ADD COLUMN structured_outcomes TEXT;
+        ALTER TABLE runbook_approvals
+          ADD COLUMN project_digest TEXT;
+        ALTER TABLE runbook_approvals
+          ADD COLUMN inventory_digest TEXT;
+        COMMIT;
+        "#,
+    )
+    .map_err(|e| format!("migration v10 failed: {e}"))?;
+
+    // Databases created at the legacy v6/v9 shape cannot persist
+    // ansible_runner in step assurance without this repair.
+    let steps_sql: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='runbook_steps'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("inspect runbook steps schema: {error}"))?;
+    if !steps_sql.contains("ansible_runner") {
+        repair_v6_runbook_steps_assurance(conn)?;
+    }
+
+    conn.execute_batch("INSERT INTO schema_version (version) VALUES (10);")
+        .map_err(|error| format!("record schema v10: {error}"))?;
+
+    Ok(())
+}
+
 /// Refresh the one v6 partial index whose predicate changed during the
 /// unreleased experimental cycle. Fresh databases already have this shape;
 /// existing developer/test v6 databases are repaired without altering data.
@@ -354,7 +391,7 @@ pub fn ensure_v6_runtime_indexes(conn: &Connection) -> Result<(), String> {
             |row| row.get(0),
         )
         .map_err(|error| format!("inspect runbook step schema: {error}"))?;
-    if !steps_sql.contains("shell_observed") {
+    if !steps_sql.contains("shell_observed") || !steps_sql.contains("ansible_runner") {
         repair_v6_runbook_steps_assurance(conn)?;
     }
 
@@ -1815,6 +1852,7 @@ pub struct AttemptRecord {
     pub output_captured_bytes: u64,
     pub output_redacted: bool,
     pub output_truncated: bool,
+    pub structured_outcomes: Option<Value>,
     pub error: Option<String>,
     pub intent_at: String,
     pub started_at: Option<String>,
@@ -1918,6 +1956,7 @@ pub struct AttemptResult<'a> {
     pub output_captured_bytes: u64,
     /// The visible-terminal bridge may have already tail-capped its capture.
     pub source_truncated: bool,
+    pub structured_outcomes: Option<Value>,
     pub error: Option<&'a str>,
 }
 
@@ -1973,6 +2012,14 @@ pub fn finish_attempt(
     } else {
         result.output.map(sanitize_output_tail)
     };
+    let structured_outcomes = if let Some(value) = result.structured_outcomes {
+        Some(
+            serde_json::to_string(&value)
+                .map_err(|error| format!("attempt structured_outcomes: {error}"))?,
+        )
+    } else {
+        None
+    };
     // The database is the final persistence boundary. Callers sanitize for
     // their own in-memory/UI state, but a missed or future caller must not be
     // able to store an unbounded terminal error or credential material.
@@ -2002,7 +2049,8 @@ pub fn finish_attempt(
     tx.execute(
         "UPDATE runbook_attempts SET status=?2, exit_code=?3, duration_ms=?4, output_tail=?5,
              output_observed_bytes=?6, output_captured_bytes=?7, output_redacted=?8,
-             output_truncated=?9, error=?10, result_at=?11 WHERE id=?1",
+             output_truncated=?9, structured_outcomes=?10, error=?11, result_at=?12
+             WHERE id=?1",
         params![
             attempt_id,
             result.status.as_str(),
@@ -2013,6 +2061,7 @@ pub fn finish_attempt(
             captured_bytes,
             sanitized.as_ref().is_some_and(|v| v.redacted),
             result.source_truncated || sanitized.as_ref().is_some_and(|v| v.truncated),
+            structured_outcomes.as_deref(),
             sanitized_error.as_deref(),
             timestamp,
         ],
@@ -2111,8 +2160,8 @@ pub fn get_attempt(conn: &Connection, id: &str) -> Result<Option<AttemptRecord>,
     conn.query_row(
         "SELECT id, run_id, step_id, phase, sequence, executor, status, proposed_command,
                 executed_command, exit_code, duration_ms, output_tail, output_observed_bytes,
-                output_captured_bytes, output_redacted, output_truncated, error, intent_at,
-                started_at, result_at
+                output_captured_bytes, output_redacted, output_truncated, structured_outcomes,
+                error, intent_at, started_at, result_at
          FROM runbook_attempts WHERE id=?1",
         [id],
         attempt_row,
@@ -2126,8 +2175,8 @@ pub fn list_attempts(conn: &Connection, run_id: &str) -> Result<Vec<AttemptRecor
         .prepare(
             "SELECT id, run_id, step_id, phase, sequence, executor, status, proposed_command,
                 executed_command, exit_code, duration_ms, output_tail, output_observed_bytes,
-                output_captured_bytes, output_redacted, output_truncated, error, intent_at,
-                started_at, result_at
+                output_captured_bytes, output_redacted, output_truncated, structured_outcomes,
+                error, intent_at, started_at, result_at
          FROM runbook_attempts WHERE run_id=?1 ORDER BY intent_at, sequence",
         )
         .map_err(|e| e.to_string())?;
@@ -2145,6 +2194,10 @@ fn attempt_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AttemptRecord> {
     let duration: Option<i64> = row.get(10)?;
     let observed_bytes: Option<i64> = row.get(12)?;
     let captured_bytes: Option<i64> = row.get(13)?;
+    let structured_outcomes: Option<String> = row.get(16)?;
+    let structured_outcomes = structured_outcomes
+        .map(|value| serde_json::from_str(&value).map_err(json_sql_error))
+        .transpose()?;
     Ok(AttemptRecord {
         id: row.get(0)?,
         run_id: row.get(1)?,
@@ -2166,10 +2219,11 @@ fn attempt_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AttemptRecord> {
         })?,
         output_redacted: row.get(14)?,
         output_truncated: row.get(15)?,
-        error: row.get(16)?,
-        intent_at: row.get(17)?,
-        started_at: row.get(18)?,
-        result_at: row.get(19)?,
+        structured_outcomes,
+        error: row.get(17)?,
+        intent_at: row.get(18)?,
+        started_at: row.get(19)?,
+        result_at: row.get(20)?,
     })
 }
 
@@ -2185,6 +2239,8 @@ pub struct ApprovalIntent {
     pub network: bool,
     pub privileged: bool,
     pub opaque: bool,
+    pub project_digest: Option<String>,
+    pub inventory_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2205,6 +2261,8 @@ pub struct ApprovalRecord {
     pub reason: Option<String>,
     pub requested_at: String,
     pub decided_at: Option<String>,
+    pub project_digest: Option<String>,
+    pub inventory_digest: Option<String>,
     pub edited: bool,
 }
 
@@ -2265,8 +2323,8 @@ fn request_approval_tx(tx: &Transaction<'_>, input: &ApprovalIntent) -> Result<(
     tx.execute(
         "INSERT INTO runbook_approvals
            (id,attempt_id,run_id,step_id,phase,status,proposed_command,read_only,network,
-            privileged,opaque,requested_at)
-         VALUES (?1,?2,?3,?4,?5,'pending',?6,?7,?8,?9,?10,?11)",
+            privileged,opaque,project_digest,inventory_digest,requested_at)
+         VALUES (?1,?2,?3,?4,?5,'pending',?6,?7,?8,?9,?10,?11,?12,?13)",
         params![
             input.id,
             input.attempt_id,
@@ -2278,6 +2336,8 @@ fn request_approval_tx(tx: &Transaction<'_>, input: &ApprovalIntent) -> Result<(
             input.network,
             input.privileged,
             input.opaque,
+            input.project_digest,
+            input.inventory_digest,
             timestamp
         ],
     )
@@ -2480,7 +2540,8 @@ pub fn cancel_pending_approvals_for_run(
 pub fn get_approval(conn: &Connection, id: &str) -> Result<Option<ApprovalRecord>, String> {
     conn.query_row(
         "SELECT id,attempt_id,run_id,step_id,phase,status,proposed_command,executed_command,
-                read_only,network,privileged,opaque,actor,reason,requested_at,decided_at,edited
+                read_only,network,privileged,opaque,actor,reason,requested_at,decided_at,
+                project_digest,inventory_digest,edited
          FROM runbook_approvals WHERE id=?1",
         [id],
         approval_row,
@@ -2493,7 +2554,8 @@ pub fn list_approvals(conn: &Connection, run_id: &str) -> Result<Vec<ApprovalRec
     let mut stmt = conn
         .prepare(
             "SELECT id,attempt_id,run_id,step_id,phase,status,proposed_command,executed_command,
-                read_only,network,privileged,opaque,actor,reason,requested_at,decided_at,edited
+                read_only,network,privileged,opaque,actor,reason,requested_at,decided_at,
+                project_digest,inventory_digest,edited
          FROM runbook_approvals WHERE run_id=?1 ORDER BY requested_at",
         )
         .map_err(|e| e.to_string())?;
@@ -2525,7 +2587,9 @@ fn approval_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ApprovalRecord> {
         reason: row.get(13)?,
         requested_at: row.get(14)?,
         decided_at: row.get(15)?,
-        edited: row.get(16)?,
+        project_digest: row.get(16)?,
+        inventory_digest: row.get(17)?,
+        edited: row.get(18)?,
     })
 }
 
@@ -3648,6 +3712,7 @@ fn assemble_report(
                 output_captured_bytes: attempt.output_captured_bytes,
                 output_redacted: attempt.output_redacted,
                 output_truncated: attempt.output_truncated,
+                structured_outcomes: attempt.structured_outcomes.clone(),
                 error: attempt.error.clone(),
                 intent_at: attempt.intent_at.clone(),
                 result_at: attempt.result_at.clone(),
@@ -4247,6 +4312,7 @@ mod tests {
         migrate_v6(&conn).unwrap();
         migrate_v8(&conn).unwrap();
         migrate_v9(&conn).unwrap();
+        migrate_v10(&conn).unwrap();
         conn
     }
     fn target(session: &str) -> TargetBinding {
@@ -4325,6 +4391,7 @@ mod tests {
                 output_captured_bytes: 2,
                 source_truncated: false,
                 error: None,
+                structured_outcomes: None,
             },
         )
         .unwrap();
@@ -4346,7 +4413,7 @@ mod tests {
     }
 
     #[test]
-    fn migration_is_v9_and_enforces_one_active_run_per_session() {
+    fn migration_is_v10_and_enforces_one_active_run_per_session() {
         let mut conn = db();
         let first = create_run(&mut conn, &creation("s1")).unwrap();
         assert_eq!(first.status, RunStatus::Created);
@@ -4376,7 +4443,18 @@ mod tests {
         let version: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
+        assert!(table_has_column(&conn, "runbook_attempts", "structured_outcomes").unwrap());
+        assert!(table_has_column(&conn, "runbook_approvals", "project_digest").unwrap());
+        assert!(table_has_column(&conn, "runbook_approvals", "inventory_digest").unwrap());
+        let steps_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='runbook_steps'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(steps_sql.contains("ansible_runner"));
     }
 
     #[test]
@@ -4450,6 +4528,14 @@ mod tests {
         ensure_v6_runtime_indexes(&conn).unwrap();
         assert!(table_has_column(&conn, "runbook_attempts", "output_observed_bytes").unwrap());
         assert!(table_has_column(&conn, "runbook_attempts", "output_captured_bytes").unwrap());
+        let steps_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='runbook_steps'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(steps_sql.contains("ansible_runner"));
         let counts: (i64, i64) = conn
             .query_row(
                 "SELECT output_observed_bytes,output_captured_bytes
@@ -4776,6 +4862,7 @@ mod tests {
                 output_captured_bytes: 7,
                 source_truncated: false,
                 error: Some("interrupted"),
+                structured_outcomes: None,
             },
         )
         .unwrap();
@@ -4869,6 +4956,7 @@ mod tests {
                 output_captured_bytes: 24,
                 source_truncated: false,
                 error: None,
+                structured_outcomes: None,
             },
         )
         .unwrap();
@@ -4925,6 +5013,7 @@ mod tests {
                 output_captured_bytes: 6,
                 source_truncated: false,
                 error: None,
+                structured_outcomes: None,
             },
         )
         .unwrap();
@@ -4979,6 +5068,7 @@ mod tests {
                 output_captured_bytes: 2,
                 source_truncated: false,
                 error: None,
+                structured_outcomes: None,
             },
         )
         .unwrap_err();
@@ -5235,6 +5325,7 @@ mod tests {
                 output_captured_bytes: 4,
                 source_truncated: false,
                 error: None,
+                structured_outcomes: None,
             },
         )
         .unwrap();
@@ -5440,6 +5531,7 @@ mod tests {
                 output_captured_bytes: 0,
                 source_truncated: false,
                 error: Some("terminal response was lost"),
+                structured_outcomes: None,
             },
         )
         .unwrap();
@@ -5507,6 +5599,7 @@ mod tests {
                 output_captured_bytes: 18,
                 source_truncated: false,
                 error: None,
+                structured_outcomes: None,
             },
         )
         .unwrap();
@@ -5570,6 +5663,7 @@ mod tests {
                 output_captured_bytes: 9,
                 source_truncated: false,
                 error: None,
+                structured_outcomes: None,
             },
         )
         .unwrap();
@@ -5732,6 +5826,7 @@ mod tests {
                 output_captured_bytes: 0,
                 source_truncated: false,
                 error: Some(&raw_error),
+                structured_outcomes: None,
             },
         )
         .unwrap();
@@ -5817,6 +5912,7 @@ mod tests {
                 output_captured_bytes: 2,
                 source_truncated: false,
                 error: None,
+                structured_outcomes: None,
             },
         )
         .unwrap();
@@ -6393,6 +6489,8 @@ mod tests {
                 network: true,
                 privileged: false,
                 opaque: true,
+                project_digest: Some("project-sha256:1".into()),
+                inventory_digest: Some("inventory-sha256:2".into()),
             },
         )
         .unwrap();
@@ -6418,6 +6516,7 @@ mod tests {
                 output_captured_bytes: 0,
                 source_truncated: false,
                 error: None,
+                structured_outcomes: None,
             },
         )
         .unwrap();
@@ -6517,6 +6616,7 @@ mod tests {
                 output_captured_bytes: 9,
                 source_truncated: false,
                 error: None,
+                structured_outcomes: None,
             },
         )
         .unwrap();

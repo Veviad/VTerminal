@@ -3,6 +3,23 @@ import { describe, expect, it, vi } from "vitest";
 
 import { RunbookApprovalCard } from "../components/runbooks/RunbookApprovalCard";
 
+function shellApproval(command: string) {
+  return {
+    approval_id: "approval-1",
+    run_id: "run-1",
+    step_id: "check-host",
+    phase: "check" as const,
+    command,
+    explanation: "Observe the configured check in the visible terminal.",
+    classification: {
+      read_only: false,
+      network: false,
+      privileged: false,
+      opaque: true,
+    },
+  };
+}
+
 describe("RunbookApprovalCard", () => {
   it("approves a shell approval from one explicit action with valid command", () => {
     const onRespond = vi.fn();
@@ -29,12 +46,74 @@ describe("RunbookApprovalCard", () => {
     );
 
     const command = "/usr/bin/env -i PATH=/usr/bin:/bin /bin/sh -c 'true'";
-    const approve = screen.getByRole("button", {
-      name: /acknowledge and approve step/i,
-    });
+    const approve = screen.getByRole("button", { name: /approve this step/i });
     expect(approve).toBeEnabled();
     fireEvent.click(approve);
     expect(onRespond).toHaveBeenCalledWith(true, command, true);
+  });
+
+  it("carries the operator's edit into the bulk approval", () => {
+    // The bulk button used to take no arguments, so the hook fell back to the
+    // model's original proposal and the report recorded it as un-edited.
+    const onApproveAll = vi.fn();
+    render(
+      <RunbookApprovalCard
+        approval={shellApproval("printf original")}
+        busy={false}
+        targetLabel="Local /srv/app"
+        onRespond={vi.fn()}
+        onApproveAll={onApproveAll}
+      />,
+    );
+
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "printf narrowed" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: /every later step unseen/i }),
+    );
+    expect(onApproveAll).toHaveBeenCalledWith("printf narrowed");
+  });
+
+  it("refuses a bulk approval for a command the single step would refuse", () => {
+    const onApproveAll = vi.fn();
+    render(
+      <RunbookApprovalCard
+        approval={shellApproval("printf hi")}
+        busy={false}
+        targetLabel="Local /srv/app"
+        onRespond={vi.fn()}
+        onApproveAll={onApproveAll}
+      />,
+    );
+
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "line-one\nline-two" },
+    });
+    expect(
+      screen.getByRole("button", { name: /every later step unseen/i }),
+    ).toBeDisabled();
+    // "Approve every later step unseen" shares no prefix with the primary
+    // action any more, so this query is unambiguous.
+    expect(
+      screen.getByRole("button", { name: /approve this/i }),
+    ).toBeDisabled();
+  });
+
+  it("says that later steps are approved without being displayed", () => {
+    render(
+      <RunbookApprovalCard
+        approval={shellApproval("printf hi")}
+        busy={false}
+        targetLabel="Local /srv/app"
+        onRespond={vi.fn()}
+        onApproveAll={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByText(/approved without being shown to you/i),
+    ).toBeTruthy();
   });
 
   it("requires a valid shell command before enabling approval", () => {
@@ -63,9 +142,7 @@ describe("RunbookApprovalCard", () => {
 
     const textarea = screen.getByRole("textbox");
     fireEvent.change(textarea, { target: { value: "line-one\nline-two" } });
-    const approve = screen.getByRole("button", {
-      name: /acknowledge and approve/i,
-    });
+    const approve = screen.getByRole("button", { name: /approve this/i });
     expect(approve).toBeDisabled();
     fireEvent.change(textarea, { target: { value: "" } });
     expect(approve).toBeDisabled();
@@ -97,9 +174,9 @@ describe("RunbookApprovalCard", () => {
     );
 
     fireEvent.click(
-      screen.getByRole("button", { name: /approve all remaining steps/i }),
+      screen.getByRole("button", { name: /every later step unseen/i }),
     );
-    expect(onApproveAll).toHaveBeenCalledOnce();
+    expect(onApproveAll).toHaveBeenCalledWith("printf hi");
   });
 
   it("stops bulk approval when requested", () => {
