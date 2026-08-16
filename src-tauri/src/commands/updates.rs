@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 
 use semver::Version;
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "windows")]
+use tauri::Manager;
 use tauri::{ipc::Channel, AppHandle, State, Wry};
 use tauri_plugin_updater::{Update, UpdaterExt};
 use tokio::sync::Notify;
@@ -285,6 +287,8 @@ fn validate_catalog(catalog: &ReleaseCatalog) -> Result<Version, String> {
 fn updater_target() -> Result<&'static str, String> {
     if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         Ok("darwin-aarch64")
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        Ok("windows-x86_64")
     } else {
         Err("application updates are not published for this platform".into())
     }
@@ -357,12 +361,29 @@ pub async fn update_check(
     let expected_bytes = expected_updater_bytes_for(&catalog, updater_target()?);
 
     let endpoint = manifest_url(&catalog.release.tag)?;
-    let updater = app
+    let updater_builder = app
         .updater_builder()
         .endpoints(vec![endpoint])
-        .map_err(|e| e.to_string())?
-        .build()
         .map_err(|e| e.to_string())?;
+    #[cfg(target_os = "windows")]
+    let updater_builder = {
+        let exit_app = app.clone();
+        updater_builder.on_before_exit(move || {
+            // Windows launches NSIS and terminates inside `Update::install`, so
+            // the normal frontend restart command is unreachable. Commit the
+            // already-flushed workspace and stop WSL/process activity at the
+            // plugin's final pre-exit boundary instead.
+            let db = exit_app.state::<DbState>();
+            if let Err(error) = crate::commands::workspace::commit_clean_exit(&exit_app, &db) {
+                log::error!("could not commit clean Windows update exit: {error}");
+            }
+            if let Err(error) = crate::app_exit::cleanup_processes_for_exit(&exit_app) {
+                log::error!("Windows update pre-exit cleanup failed: {error}");
+            }
+            exit_app.cleanup_before_exit();
+        })
+    };
+    let updater = updater_builder.build().map_err(|e| e.to_string())?;
     let update = tokio::time::timeout(MANIFEST_CHECK_TIMEOUT, updater.check())
         .await
         .map_err(|_| "checking the signed update manifest timed out".to_string())?
@@ -519,7 +540,10 @@ mod tests {
                 prerelease,
                 published_at: Some("2026-08-13T00:00:00Z".into()),
             },
-            updater_bytes: HashMap::from([("darwin-aarch64".into(), 1_000)]),
+            updater_bytes: HashMap::from([
+                ("darwin-aarch64".into(), 1_000),
+                ("windows-x86_64".into(), 2_000),
+            ]),
         }
     }
 

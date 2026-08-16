@@ -16,6 +16,7 @@
  */
 
 import { firstNonFlag, tokenizeCommand } from "./nesting";
+import { isWindows } from "./platform";
 import type { SshHostInput } from "./types";
 
 /** The fields that shape a command line — accepts a full `SshHost` too. */
@@ -116,6 +117,14 @@ export interface FieldError {
   message: string;
 }
 
+export function isWslIdentityPath(path: string): boolean {
+  return (
+    (path.startsWith("/") || path.startsWith("~/")) &&
+    !path.includes("\\") &&
+    !path.split("/").some((component) => component === "..")
+  );
+}
+
 /** Frontend-side validation for inline form errors. The authoritative copy of
  *  these rules lives in `commands/ssh_hosts.rs::validate` — a row can be edited
  *  in the DB or arrive from the importer, so this layer is convenience only. */
@@ -141,6 +150,14 @@ export function validateSshHost(h: SshHostInput): FieldError[] {
 
   if (h.port != null && (!Number.isInteger(h.port) || h.port < 1 || h.port > 65535)) {
     errors.push({ field: "port", message: "Port must be between 1 and 65535." });
+  }
+
+  const identity = h.identity_file?.trim();
+  if (identity && isWindows() && !isWslIdentityPath(identity)) {
+    errors.push({
+      field: "identity_file",
+      message: "Use a Linux path inside the default WSL distribution.",
+    });
   }
 
   const extra = h.extra_args?.trim();

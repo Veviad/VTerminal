@@ -2151,30 +2151,48 @@ impl<'a> EngineRunner<'a> {
                 Err(error) => return Err(format!("inspect evidence artifact path: {error}")),
             }
         }
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        #[cfg(target_os = "windows")]
+        let (created_path, staging_identity, mut file) = crate::windows_fs::create_secure_file(
+            &parent,
+            staging_path
+                .file_name()
+                .ok_or("evidence staging artifact has no filename")?,
+        )
+        .map_err(|error| format!("create evidence staging artifact: {error}"))?;
+        #[cfg(target_os = "windows")]
+        if created_path != staging_path {
+            return Err("evidence staging path changed during protected creation".into());
         }
-        let mut file = options
-            .open(&staging_path)
-            .map_err(|error| format!("create evidence staging artifact: {error}"))?;
+        #[cfg(not(target_os = "windows"))]
+        let mut file = {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+            }
+            options
+                .open(&staging_path)
+                .map_err(|error| format!("create evidence staging artifact: {error}"))?
+        };
         if let Err(error) = file.write_all(text.as_bytes()) {
-            let _ = std::fs::remove_file(&staging_path);
+            drop(file);
+            let _ = remove_staging_evidence_file(&staging_path);
             return Err(format!("write evidence staging artifact: {error}"));
         }
         if let Err(error) = file.sync_all() {
-            let _ = std::fs::remove_file(&staging_path);
+            drop(file);
+            let _ = remove_staging_evidence_file(&staging_path);
             return Err(format!("sync evidence staging artifact: {error}"));
         }
+        #[cfg(target_os = "windows")]
+        crate::windows_fs::verify_identity(&staging_path, staging_identity, false)?;
         drop(file);
-        std::fs::rename(&staging_path, &final_path)
-            .map_err(|error| format!("promote evidence staging artifact: {error}"))?;
-        std::fs::File::open(&parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| format!("sync evidence artifact directory: {error}"))?;
+        promote_evidence_file(&staging_path, &final_path).inspect_err(|_| {
+            let _ = remove_staging_evidence_file(&staging_path);
+        })?;
+        sync_evidence_directory(&parent)?;
         Ok(())
     }
 
@@ -3387,9 +3405,52 @@ impl<'a> EngineRunner<'a> {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn promote_evidence_file(source: &Path, destination: &Path) -> Result<(), String> {
+    crate::windows_fs::promote_new_file(source, destination)
+        .map_err(|error| format!("promote evidence staging artifact: {error}"))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn promote_evidence_file(source: &Path, destination: &Path) -> Result<(), String> {
+    std::fs::rename(source, destination)
+        .map_err(|error| format!("promote evidence staging artifact: {error}"))
+}
+
+#[cfg(target_os = "windows")]
+fn sync_evidence_directory(path: &Path) -> Result<(), String> {
+    crate::windows_fs::sync_directory(path)
+        .map_err(|error| format!("sync evidence artifact directory: {error}"))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn sync_evidence_directory(path: &Path) -> Result<(), String> {
+    std::fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("sync evidence artifact directory: {error}"))
+}
+
+#[cfg(target_os = "windows")]
+fn remove_staging_evidence_file(path: &Path) -> Result<(), String> {
+    crate::windows_fs::remove_file_no_reparse(path).map_err(|error| {
+        format!("delete evidence staging artifact: {error}")
+    })?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn remove_staging_evidence_file(path: &Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("delete evidence staging artifact: {error}")),
+    }
+}
+
 /// Create the protected evidence hierarchy one component at a time and reject
 /// every pre-existing symlink. `create_dir_all` would follow an attacker-made
 /// `runbooks/<run>` link before the final file's O_NOFOLLOW check could help.
+#[cfg(not(target_os = "windows"))]
 fn secure_evidence_parent(root: &Path, run_id: &str) -> Result<PathBuf, String> {
     let canonical_root =
         std::fs::canonicalize(root).map_err(|error| format!("resolve evidence root: {error}"))?;
@@ -3425,6 +3486,41 @@ fn secure_evidence_parent(root: &Path, run_id: &str) -> Result<PathBuf, String> 
         return Err("evidence directory escapes the protected root".into());
     }
     Ok(canonical_parent)
+}
+
+#[cfg(target_os = "windows")]
+fn secure_evidence_parent(root: &Path, run_id: &str) -> Result<PathBuf, String> {
+    let protected_root = crate::windows_fs::validate_local_ntfs_path(root)?;
+    if !std::fs::metadata(&protected_root)
+        .map_err(|error| format!("inspect evidence root: {error}"))?
+        .is_dir()
+    {
+        return Err("evidence root is not a directory".into());
+    }
+
+    let mut parent = protected_root;
+    for component in ["runbooks", run_id] {
+        let child = parent.join(component);
+        match std::fs::symlink_metadata(&child) {
+            Ok(_) => {
+                parent = crate::windows_fs::validate_local_ntfs_path(&child)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                parent = crate::windows_fs::create_secure_directory(
+                    &parent,
+                    std::ffi::OsStr::new(component),
+                )?;
+            }
+            Err(error) => return Err(format!("inspect evidence directory: {error}")),
+        }
+        if !std::fs::metadata(&parent)
+            .map_err(|error| format!("inspect evidence directory: {error}"))?
+            .is_dir()
+        {
+            return Err("evidence path contains a non-directory".into());
+        }
+    }
+    Ok(parent)
 }
 
 struct EngineAgentHost<'runner, 'context> {
@@ -4610,13 +4706,16 @@ spec:
         assert!(risky_class.network);
         assert!(risky_class.privileged);
 
-        let output = std::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg(&wrapped)
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        assert_eq!(String::from_utf8(output.stdout).unwrap(), "O'Brien");
+        #[cfg(unix)]
+        {
+            let output = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(&wrapped)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            assert_eq!(String::from_utf8(output.stdout).unwrap(), "O'Brien");
+        }
     }
 
     #[test]

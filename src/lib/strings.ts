@@ -1,3 +1,5 @@
+import { isWindows, shortcutGlyph } from "./platform";
+
 // All user-facing strings in one flat module so react-i18next can replace it
 // mechanically later (v1 is English-only by decision).
 export const S = {
@@ -35,11 +37,12 @@ export const S = {
   },
   empty: {
     title: "No open terminal",
-    hint: "Press ⌘T to open a terminal",
+    hint: `Press ${shortcutGlyph("T")} to open a terminal`,
+    openTerminal: "Open a terminal",
   },
   terminal: {
     exited: "process exited",
-    pressEnterToClose: "Close tab with ⌘W",
+    pressEnterToClose: `Close tab with ${shortcutGlyph("W")}`,
     notConnected: "not connected",
     reconnect: "Reconnect",
     searchPlaceholder: "Search…",
@@ -262,13 +265,13 @@ export const S = {
     loadModel: "Load",
     manageModels: "Manage models…",
     manageHosts: "Manage SSH hosts…",
-    runHint: "⌘⏎ run · ⏎ insert",
-    hostsHint: "⏎ new tab · ⌘⏎ this tab",
+    runHint: `${shortcutGlyph("Enter")} run · Enter insert`,
+    hostsHint: `Enter new tab · ${shortcutGlyph("Enter")} this tab`,
   },
   sessions: {
     title: "Past sessions",
     placeholder: "Search past sessions…",
-    reopenHint: "⏎ reopen · ⌘⏎ directory only",
+    reopenHint: `⏎ reopen · ${shortcutGlyph("Enter")} directory only`,
     loading: "Loading…",
     empty: "No past sessions yet — closing a tab archives it.",
     noResults: "No matching sessions",
@@ -345,7 +348,7 @@ export const S = {
     },
     sshHosts: {
       title: "Saved SSH hosts",
-      intro: "Connect from the command palette (⌘K) without retyping the ssh line.",
+      intro: `Connect from the command palette (${shortcutGlyph("K")}) without retyping the ssh line.`,
       empty: "No saved hosts yet.",
       // Stated up front rather than buried: there is no safe way to store a
       // password for a command that gets typed into a live terminal.
@@ -391,7 +394,7 @@ export const S = {
     },
     models: {
       onDevice: "On-device",
-      onDeviceHint: "Runs locally. Nothing leaves your Mac.",
+      onDeviceHint: "Runs locally. Nothing leaves this device.",
       cloudHint: "Needs an API key. Prompts are sent to the provider.",
       download: "Download",
       cancel: "Cancel",
@@ -409,7 +412,7 @@ export const S = {
         "This build was compiled without the on-device engine, so nothing below can be downloaded or loaded. The API models still work — add a key under Anthropic, OpenAI or Mistral.",
       noEngineTag: "Not in this build",
       apiKey: "API key",
-      apiKeyStored: "Stored in Keychain — type to replace",
+      apiKeyStored: `Stored in ${isWindows() ? "Windows Credential Manager" : "Keychain"} — type to replace`,
       hfToken: "Hugging Face token (optional)",
       hfTokenHint:
         "Raises Hugging Face download rate limits, and is the only way in if a model repo later starts requiring sign-in. Not needed for any model listed above.",
@@ -469,7 +472,9 @@ export const S = {
       cursorBlink: "Cursor blink",
       copyOnSelect: "Copy on select",
       shellPath: "Shell",
-      shellPathHint: "Leave empty for /bin/zsh",
+      shellPathHint: isWindows()
+        ? "Fixed to Bash in the default WSL2 distribution"
+        : "Leave empty for /bin/zsh",
       shellIntegration: "Shell integration (command blocks)",
       historyEnabled: "Save command history",
       historyCaptureOutput: "Capture output tails in history",
@@ -665,7 +670,7 @@ export const S = {
       version: "Version",
       build: "Build",
       description:
-        "A lean AI-powered terminal. Local models run in-process (no external daemon) with Metal acceleration; models are pulled directly from Hugging Face.",
+        `A lean AI-powered terminal. Local models run in-process (no external daemon) with ${isWindows() ? "Vulkan acceleration and CPU fallback" : "Metal acceleration"}; models are pulled directly from Hugging Face.`,
       // Labels only. The names behind them (author, publisher, copyright) are
       // build-time constants read from package.json / tauri.conf.json — see
       // vite.config.ts. Attribution is metadata, not UI copy to translate.

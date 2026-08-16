@@ -85,7 +85,14 @@ fn restrict_permissions(app_data_dir: &Path, db_path: &Path) {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(target_os = "windows")]
+fn restrict_permissions(app_data_dir: &Path, _db_path: &Path) {
+    if let Err(error) = crate::windows_fs::restrict_to_current_user(app_data_dir) {
+        log::warn!("could not restrict Windows app-data ACLs: {error}");
+    }
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
 fn restrict_permissions(_app_data_dir: &Path, _db_path: &Path) {}
 
 #[cfg(test)]

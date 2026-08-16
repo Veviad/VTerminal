@@ -2,6 +2,7 @@ import { useAppStore } from "../../stores/appStore";
 import { useSettings } from "../../hooks/useSettings";
 import * as api from "../../lib/tauri";
 import { S } from "../../lib/strings";
+import { isWindows } from "../../lib/platform";
 import { Row, Stepper, Toggle } from "../ui/Row";
 
 export function TerminalSection() {
@@ -72,11 +73,15 @@ export function TerminalSection() {
           onChange={(v) => void save({ copy_on_select: v })}
         />
 
-        <Row label={S.settings.terminal.shellPath} hint={S.settings.terminal.shellPathHint}>
+        <Row
+          label={S.settings.terminal.shellPath}
+          hint={isWindows() ? "Windows sessions use Bash in the default WSL2 distribution." : S.settings.terminal.shellPathHint}
+        >
           <input
-            defaultValue={s.shellPath ?? ""}
+            defaultValue={isWindows() ? "/bin/bash" : (s.shellPath ?? "")}
             onBlur={(e) => void save({ shell_path: e.target.value })}
-            placeholder="/bin/zsh"
+            placeholder={isWindows() ? "/bin/bash" : "/bin/zsh"}
+            disabled={isWindows()}
             className="w-48 rounded-md border border-border-subtle bg-bg-card px-2 py-1 font-mono text-[12px] text-text-primary placeholder:text-text-muted"
           />
         </Row>

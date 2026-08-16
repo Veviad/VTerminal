@@ -18,6 +18,8 @@ mod pty;
 mod restart;
 pub mod runbooks;
 mod ssh_config;
+#[cfg(target_os = "windows")]
+mod windows_fs;
 
 use tauri::Manager;
 
@@ -82,6 +84,10 @@ pub fn run() {
         )
         .setup(|app| {
             let app_data = app.path().app_data_dir()?;
+            std::fs::create_dir_all(&app_data)?;
+            #[cfg(target_os = "windows")]
+            crate::windows_fs::initialize_app_data_security(&app_data)
+                .map_err(std::io::Error::other)?;
             let credential_store = credentials::CredentialStoreState::system();
             credentials::initialize(app.handle(), &credential_store);
             app.manage(credential_store);
@@ -112,6 +118,9 @@ pub fn run() {
             ));
             #[cfg(feature = "local-llm")]
             {
+                if let Ok(resources) = app.path().resource_dir() {
+                    provider::local::configure_backend_modules(resources.join("llama-backends"));
+                }
                 // ONE permit shared by the chat host and the vision sidecar. Two
                 // resident models with a semaphore each would mean two concurrent
                 // generations and four large allocations — see `InferenceGate`.
@@ -134,9 +143,9 @@ pub fn run() {
                 log::warn!("resume knowledge ingestion jobs failed: {error}");
             }
 
-            // Regenerate the shell-integration zdotdir on every start so script
+            // Regenerate the platform shell integration on every start so script
             // upgrades take effect (versioned header check inside).
-            if let Err(e) = commands::shell_integration::ensure_zdotdir(app.handle()) {
+            if let Err(e) = commands::shell_integration::ensure_platform_integration(app.handle()) {
                 log::warn!("shell integration setup failed: {e}");
             }
             Ok(())
@@ -210,6 +219,8 @@ pub fn run() {
             commands::ssh_hosts::ssh_hosts_touch,
             commands::ssh_hosts::ssh_hosts_scan_config,
             commands::ssh_hosts::ssh_hosts_import,
+            commands::ssh_hosts::ssh_wsl_identity_root,
+            commands::ssh_hosts::ssh_wsl_path_from_host,
             // workspace / session restore
             commands::workspace::workspace_restore,
             commands::workspace::workspace_snapshot,
@@ -273,6 +284,7 @@ pub fn run() {
             commands::knowledge::knowledge_jobs_cancel,
             commands::knowledge::knowledge_jobs_retry,
             commands::knowledge_cli::knowledge_cli_install,
+            commands::knowledge_cli::knowledge_cli_status,
             commands::embedding_models::knowledge_embedding_model_download,
             commands::embedding_models::knowledge_embedding_model_cancel,
             commands::embedding_models::knowledge_embedding_model_delete,

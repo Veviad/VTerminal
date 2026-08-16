@@ -32,10 +32,11 @@ body:
     validations:
       required: true
   - type: input
-    id: macos
+    id: platform
     attributes:
-      label: macOS and hardware
-      placeholder: macOS 15.6, M1 Pro
+      label: Operating system, terminal backend, and hardware
+      description: On Windows, include the default WSL distribution and whether it is WSL2.
+      placeholder: Windows 11 24H2, Ubuntu 24.04 on WSL2, NVIDIA RTX 4070
     validations:
       required: true
   - type: dropdown

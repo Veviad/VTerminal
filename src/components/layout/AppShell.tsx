@@ -10,6 +10,7 @@ import { useAppStore } from "../../stores/appStore";
 import { useGlobalShortcuts } from "../../hooks/useGlobalShortcuts";
 import { S } from "../../lib/strings";
 import { Kbd } from "../ui/Kbd";
+import { shortcutFor } from "../../lib/keymap";
 import { RunbooksWorkspace } from "../runbooks";
 import { useRunbookStore } from "../../stores/runbookStore";
 
@@ -67,7 +68,7 @@ function EmptyState() {
       <img src="/vterminal-mark.svg" alt="" className="h-10 w-7 opacity-40" />
       <p className="text-[13px] text-text-muted">{S.empty.title}</p>
       <p className="flex items-center gap-1.5 text-[11px] text-text-muted">
-        <Kbd>⌘T</Kbd> {S.empty.hint.replace("Press ⌘T to ", "")}
+        <Kbd>{shortcutFor("new-tab")}</Kbd> {S.empty.openTerminal}
       </p>
     </div>
   );

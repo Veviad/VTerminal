@@ -11,6 +11,8 @@
     "check:e5-manifest": "node scripts/embedding-models/check-e5-manifest.mjs",
     "tauri": "tauri",
     "build:mac": "tauri build --features local-llm && ./scripts/dmg-icon.sh",
+    "build:windows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-windows.ps1",
+    "build:windows:signed": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-windows.ps1 -RequireSigning",
     "test": "vitest --run",
     "test:site-release": "node --test scripts/site-release/release-data.node-test.mjs"
   },

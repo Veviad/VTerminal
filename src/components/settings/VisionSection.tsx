@@ -14,6 +14,7 @@ import {
 import { Toggle } from "../ui/Row";
 import { S } from "../../lib/strings";
 import type { VisionCatalogEntry } from "../../lib/types";
+import { AccelerationStatus } from "./AccelerationStatus";
 
 /** The on-device OCR / image sidecar.
  *
@@ -26,6 +27,8 @@ export function VisionSection() {
   const entries = useAppStore((s) => s.visionCatalog);
   const selected = useAppStore((s) => s.visionModelId);
   const loadError = useAppStore((s) => s.visionLoadError);
+  const state = useAppStore((s) => s.visionState);
+  const acceleration = useAppStore((s) => s.visionAcceleration);
 
   // A build with no local engine answers `vision_catalog` with an empty list, so
   // the whole section disappears rather than offering something that cannot run.
@@ -40,6 +43,9 @@ export function VisionSection() {
 
       {loadError && (
         <p className="rounded-lg bg-error-subtle px-3 py-2 text-[11px] text-error">{loadError}</p>
+      )}
+      {state === "ready" && acceleration && (
+        <AccelerationStatus label="Vision inference" acceleration={acceleration} />
       )}
 
       <div className="space-y-1">

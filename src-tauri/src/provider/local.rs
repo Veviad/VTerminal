@@ -2,7 +2,7 @@
 //!
 //! All `llama_cpp_2` types stay confined to this file so upstream API drift is
 //! contained — the rest of the app only sees the `Provider` trait. Exactly one
-//! model is loaded process-wide (the `ModelHost` singleton); Metal buffers free
+//! model is loaded process-wide (the `ModelHost` singleton); accelerator buffers free
 //! when the last `Arc<LlamaModel>` drops.
 //!
 //! Prompts are built by rendering each model's own Jinja template (see
@@ -16,7 +16,7 @@
 //! async worker.
 
 use std::num::NonZeroU32;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use llama_cpp_2::context::params::{KvCacheType, LlamaContextParams};
 use llama_cpp_2::llama_backend::LlamaBackend;
@@ -37,12 +37,236 @@ use crate::models::LoadEvent;
 
 /// llama.cpp's backend is global and may only be initialized once per process.
 static BACKEND: OnceLock<Result<LlamaBackend, String>> = OnceLock::new();
+#[cfg(target_os = "windows")]
+static BACKEND_MODULES: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct LocalAcceleration {
+    pub backend: String,
+    pub device_name: Option<String>,
+    pub device_memory_bytes: Option<u64>,
+    pub fallback_reason: Option<String>,
+}
+
+impl LocalAcceleration {
+    pub(crate) fn unloaded() -> Self {
+        Self {
+            backend: "unloaded".into(),
+            device_name: None,
+            device_memory_bytes: None,
+            fallback_reason: None,
+        }
+    }
+
+    pub(crate) fn uses_gpu(&self) -> bool {
+        matches!(self.backend.as_str(), "metal" | "vulkan")
+    }
+}
+
+static ACCELERATION: OnceLock<Mutex<LocalAcceleration>> = OnceLock::new();
+
+fn set_acceleration(value: LocalAcceleration) {
+    if let Ok(mut current) = ACCELERATION
+        .get_or_init(|| Mutex::new(LocalAcceleration::unloaded()))
+        .lock()
+    {
+        *current = value;
+    }
+}
+
+pub fn acceleration_snapshot() -> serde_json::Value {
+    let current = ACCELERATION
+        .get_or_init(|| Mutex::new(LocalAcceleration::unloaded()))
+        .lock()
+        .map(|value| value.clone())
+        .unwrap_or_else(|_| LocalAcceleration::unloaded());
+    serde_json::to_value(current).unwrap_or_else(|_| serde_json::json!({ "backend": "unknown" }))
+}
+
+#[cfg(target_os = "windows")]
+pub fn configure_backend_modules(path: std::path::PathBuf) {
+    let _ = BACKEND_MODULES.set(path);
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn configure_backend_modules(_path: std::path::PathBuf) {}
 
 pub(crate) fn backend() -> Result<&'static LlamaBackend, String> {
     BACKEND
-        .get_or_init(|| LlamaBackend::init().map_err(|e| format!("llama backend init: {e}")))
+        .get_or_init(|| {
+            #[cfg(target_os = "windows")]
+            {
+                if let Some(path) = BACKEND_MODULES.get().filter(|path| path.is_dir()) {
+                    llama_cpp_2::llama_backend::load_backends_from_path(path);
+                } else {
+                    // Developer builds use the path exported by llama-cpp-sys.
+                    llama_cpp_2::llama_backend::load_backends();
+                }
+            }
+            LlamaBackend::init().map_err(|e| format!("llama backend init: {e}"))
+        })
         .as_ref()
         .map_err(Clone::clone)
+}
+
+/// Load with the best safe accelerator for this machine. Windows Vulkan is a
+/// dynamically loaded optional backend; failure or insufficient reported VRAM
+/// retries the same model with zero GPU layers so local AI remains usable.
+pub(crate) fn load_model_with_fallback(
+    path: &str,
+    label: &str,
+) -> Result<(LlamaModel, LocalAcceleration), String> {
+    let backend = backend()?;
+    #[cfg(target_os = "windows")]
+    {
+        use llama_cpp_2::{list_llama_ggml_backend_devices, LlamaBackendDeviceType};
+        let mut devices: Vec<_> = list_llama_ggml_backend_devices()
+            .into_iter()
+            .filter(|device| {
+                device.backend.eq_ignore_ascii_case("vulkan")
+                    && matches!(
+                        device.device_type,
+                        LlamaBackendDeviceType::Gpu | LlamaBackendDeviceType::IntegratedGpu
+                    )
+            })
+            .collect();
+        // Prefer a discrete device, then the one reporting the most free memory.
+        // Trying every candidate avoids falling all the way back to CPU merely
+        // because an integrated adapter was enumerated first.
+        devices.sort_by_key(|device| {
+            (
+                matches!(device.device_type, LlamaBackendDeviceType::Gpu),
+                device.memory_free,
+            )
+        });
+        let model_bytes = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+        let mut failures = Vec::new();
+        for device in devices.into_iter().rev() {
+            let device_name = if device.description.is_empty() {
+                device.name.clone()
+            } else {
+                device.description.clone()
+            };
+            // Leave at least 1 GiB and 20% of the model size free for context,
+            // driver allocations, and fragmentation. Unknown VRAM is allowed to
+            // try once, because some Vulkan drivers report zero.
+            let reserve = (model_bytes / 5).max(1_073_741_824);
+            let fits = device.memory_free == 0
+                || (device.memory_free as u64) >= model_bytes.saturating_add(reserve);
+            if !fits {
+                failures.push(format!(
+                    "Vulkan device {device_name} has insufficient free memory for {label}"
+                ));
+                continue;
+            }
+            let params = match LlamaModelParams::default().with_devices(&[device.index]) {
+                Ok(params) => params.with_n_gpu_layers(u32::MAX),
+                Err(error) => {
+                    failures.push(format!(
+                        "Vulkan device {device_name} could not be selected ({error})"
+                    ));
+                    continue;
+                }
+            };
+            match LlamaModel::load_from_file(backend, path, &params) {
+                Ok(model) => {
+                    let acceleration = LocalAcceleration {
+                        backend: "vulkan".into(),
+                        device_name: Some(device_name),
+                        device_memory_bytes: Some(device.memory_total as u64),
+                        fallback_reason: None,
+                    };
+                    set_acceleration(acceleration.clone());
+                    return Ok((model, acceleration));
+                }
+                Err(error) => failures.push(format!(
+                    "Vulkan device {device_name} could not load {label} ({error})"
+                )),
+            }
+        }
+        let fallback_reason = if failures.is_empty() {
+            "No usable Vulkan device was found; using CPU".into()
+        } else {
+            format!("{}; using CPU", failures.join("; "))
+        };
+        load_model_on_cpu(path, label, fallback_reason)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let params = LlamaModelParams::default().with_n_gpu_layers(u32::MAX);
+        let model = LlamaModel::load_from_file(backend, path, &params)
+            .map_err(|error| format!("{label} load failed: {error}"))?;
+        let acceleration = LocalAcceleration {
+            backend: if cfg!(target_os = "macos") {
+                "metal".into()
+            } else {
+                "gpu".into()
+            },
+            device_name: None,
+            device_memory_bytes: None,
+            fallback_reason: None,
+        };
+        set_acceleration(acceleration.clone());
+        Ok((model, acceleration))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn load_model_on_cpu(
+    path: &str,
+    label: &str,
+    fallback_reason: String,
+) -> Result<(LlamaModel, LocalAcceleration), String> {
+    let params = LlamaModelParams::default().with_n_gpu_layers(0);
+    let model = LlamaModel::load_from_file(backend()?, path, &params)
+        .map_err(|error| format!("{label} CPU load failed: {error}"))?;
+    let acceleration = LocalAcceleration {
+        backend: "cpu".into(),
+        device_name: None,
+        device_memory_bytes: None,
+        fallback_reason: Some(fallback_reason),
+    };
+    set_acceleration(acceleration.clone());
+    Ok((model, acceleration))
+}
+
+/// Validate allocations that happen after weight loading (KV context, vision
+/// projector, embedding context). A Vulkan model that cannot complete this
+/// host-specific initialization is discarded and reloaded entirely on CPU.
+pub(crate) fn validate_or_retry_on_cpu<T, F>(
+    path: &str,
+    label: &str,
+    model: LlamaModel,
+    acceleration: LocalAcceleration,
+    validate: F,
+) -> Result<(LlamaModel, LocalAcceleration, T), String>
+where
+    F: Fn(&LlamaModel, bool) -> Result<T, String>,
+{
+    match validate(&model, acceleration.uses_gpu()) {
+        Ok(value) => Ok((model, acceleration, value)),
+        Err(error) => {
+            #[cfg(target_os = "windows")]
+            if acceleration.uses_gpu() {
+                drop(model);
+                let reason = runtime_fallback_reason(label, &error);
+                let (cpu_model, cpu_acceleration) = load_model_on_cpu(path, label, reason)?;
+                let value = validate(&cpu_model, false).map_err(|cpu_error| {
+                    format!("{label} CPU runtime initialization failed: {cpu_error}")
+                })?;
+                return Ok((cpu_model, cpu_acceleration, value));
+            }
+
+            #[cfg(not(target_os = "windows"))]
+            let _ = (path, label);
+            Err(error)
+        }
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn runtime_fallback_reason(label: &str, error: &str) -> String {
+    format!("Vulkan loaded {label}, but its runtime allocation failed ({error}); using CPU")
 }
 
 /// Physical performance cores, the way llama.cpp picks its macOS thread count
@@ -86,7 +310,16 @@ pub struct LoadedModel {
     pub family: LocalFamily,
     pub context_len: u32,
     pub sampling: Sampling,
+    pub acceleration: LocalAcceleration,
 }
+
+type ModelParts = (
+    Arc<LlamaModel>,
+    Arc<ChatTemplate>,
+    u32,
+    Sampling,
+    LocalAcceleration,
+);
 
 /// Sampling parameters, preferring what the GGUF itself declares.
 ///
@@ -165,6 +398,7 @@ pub struct ReadyModel {
     pub family: LocalFamily,
     pub context_len: u32,
     pub sampling: Sampling,
+    pub acceleration: LocalAcceleration,
     /// Serializes generations — see `ModelHost::gate`.
     pub gate: Arc<tokio::sync::Semaphore>,
 }
@@ -214,13 +448,11 @@ impl ReadyModel {
         family: LocalFamily,
         max_context: u32,
     ) -> Result<Self, String> {
-        let backend = backend()?;
-        let params = LlamaModelParams::default().with_n_gpu_layers(u32::MAX);
-        let model = LlamaModel::load_from_file(backend, path, &params)
-            .map_err(|e| format!("model load failed: {e}"))?;
+        let (model, acceleration) = load_model_with_fallback(path, "model")?;
         let template = load_template(&model)?;
         let sampling = Sampling::from_metadata(&model);
         let context_len = max_context.min(model.n_ctx_train()).max(512);
+        let (model, acceleration) = prepare_chat_model(path, model, acceleration, context_len)?;
         Ok(Self {
             model_id: path.to_string(),
             model: Arc::new(model),
@@ -228,6 +460,7 @@ impl ReadyModel {
             family,
             context_len,
             sampling,
+            acceleration,
             gate: Arc::new(tokio::sync::Semaphore::new(1)),
         })
     }
@@ -279,6 +512,15 @@ impl ModelHost {
         }
     }
 
+    pub async fn acceleration_snapshot(&self) -> serde_json::Value {
+        let acceleration = match &*self.inner.lock().await {
+            HostSlot::Ready(model) => model.acceleration.clone(),
+            HostSlot::Empty | HostSlot::Loading { .. } => LocalAcceleration::unloaded(),
+        };
+        serde_json::to_value(acceleration)
+            .unwrap_or_else(|_| serde_json::json!({ "backend": "unknown" }))
+    }
+
     pub async fn unload(&self) {
         self.generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -302,7 +544,7 @@ impl ModelHost {
                 return Err("a model is already loading".into());
             }
             let generation = self.generation.load(std::sync::atomic::Ordering::SeqCst);
-            // Drop any previous model first; Metal buffers free once in-flight
+            // Drop any previous model first; accelerator buffers free once in-flight
             // streams finish with their Arc clones.
             *slot = HostSlot::Loading {
                 model_id: model_id.clone(),
@@ -315,23 +557,25 @@ impl ModelHost {
             name: "loading".into(),
         });
 
-        // mmap + Metal allocation is blocking work. Unlike mistral.rs, an
+        // mmap + accelerator allocation is blocking work. Unlike mistral.rs, an
         // unsupported architecture comes back as an Err rather than a panic, so
         // there is no unwind to catch here.
-        let build = tokio::task::spawn_blocking(
-            move || -> Result<(Arc<LlamaModel>, Arc<ChatTemplate>, u32, Sampling), String> {
-                let backend = backend()?;
-                // Offload every layer to Metal; llama.cpp clamps to what exists.
-                let params = LlamaModelParams::default().with_n_gpu_layers(u32::MAX);
-                let model = LlamaModel::load_from_file(backend, &gguf_path, &params)
-                    .map_err(|e| format!("model load failed: {e}"))?;
-                let template = load_template(&model)?;
-                let sampling = Sampling::from_metadata(&model);
-                // Never promise more context than the model was trained for.
-                let context_len = max_context.min(model.n_ctx_train()).max(512);
-                Ok((Arc::new(model), Arc::new(template), context_len, sampling))
-            },
-        )
+        let build = tokio::task::spawn_blocking(move || -> Result<ModelParts, String> {
+            let (model, acceleration) = load_model_with_fallback(&gguf_path, "model")?;
+            let template = load_template(&model)?;
+            let sampling = Sampling::from_metadata(&model);
+            // Never promise more context than the model was trained for.
+            let context_len = max_context.min(model.n_ctx_train()).max(512);
+            let (model, acceleration) =
+                prepare_chat_model(&gguf_path, model, acceleration, context_len)?;
+            Ok((
+                Arc::new(model),
+                Arc::new(template),
+                context_len,
+                sampling,
+                acceleration,
+            ))
+        })
         .await
         .map_err(|e| format!("model load task failed: {e}"))?;
 
@@ -347,7 +591,7 @@ impl ModelHost {
             return Err(message);
         }
         match build {
-            Ok((model, template, context_len, sampling)) => {
+            Ok((model, template, context_len, sampling, acceleration)) => {
                 *slot = HostSlot::Ready(LoadedModel {
                     model_id,
                     model,
@@ -355,6 +599,7 @@ impl ModelHost {
                     family,
                     context_len,
                     sampling,
+                    acceleration,
                 });
                 let _ = on_event.send(LoadEvent::Ready { context_len });
                 Ok(())
@@ -378,6 +623,7 @@ impl ModelHost {
                 family: m.family,
                 context_len: m.context_len,
                 sampling: m.sampling,
+                acceleration: m.acceleration.clone(),
                 gate: Arc::clone(&self.gate),
             }),
             _ => Err(ProviderError::NoModel),
@@ -926,6 +1172,56 @@ struct Params {
     thinking_prefilled: bool,
 }
 
+fn chat_context_params(n_ctx: u32) -> LlamaContextParams {
+    let threads = perf_cores();
+    let n_batch: u32 = 512;
+    LlamaContextParams::default()
+        .with_n_ctx(NonZeroU32::new(n_ctx.max(512)))
+        .with_n_batch(n_batch)
+        .with_n_ubatch(n_batch)
+        .with_n_threads(threads)
+        .with_n_threads_batch(threads)
+        // Quantized KV halves the cache (an 8B model at 32k ctx is ~4.5 GiB at
+        // F16) for negligible quality cost — llama-server's most-used memory
+        // flag. This is the difference between a second model fitting and not.
+        .with_type_k(KvCacheType::Q8_0)
+        .with_type_v(KvCacheType::Q8_0)
+        // llama.cpp defaults this to true, which allocates sliding-window
+        // layers at full n_ctx anyway. Gemma 4 declares a 512-token window, so
+        // leaving it on wastes most of its KV.
+        .with_swa_full(false)
+}
+
+fn prepare_chat_model(
+    path: &str,
+    model: LlamaModel,
+    acceleration: LocalAcceleration,
+    context_len: u32,
+) -> Result<(LlamaModel, LocalAcceleration), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let (model, acceleration, ()) =
+            validate_or_retry_on_cpu(path, "model", model, acceleration, |model, _| {
+                validate_chat_context(model, context_len)
+            })?;
+        Ok((model, acceleration))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (path, context_len);
+        Ok((model, acceleration))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn validate_chat_context(model: &LlamaModel, n_ctx: u32) -> Result<(), String> {
+    let context = model
+        .new_context(backend()?, chat_context_params(n_ctx))
+        .map_err(|error| format!("context creation failed: {error}"))?;
+    drop(context);
+    Ok(())
+}
+
 fn generate(
     model: &LlamaModel,
     prompt: &str,
@@ -960,25 +1256,9 @@ fn generate(
         )));
     }
 
-    let threads = perf_cores();
     let n_batch: u32 = 512;
-    let ctx_params = LlamaContextParams::default()
-        .with_n_ctx(NonZeroU32::new(n_ctx))
-        .with_n_batch(n_batch)
-        .with_n_ubatch(n_batch)
-        .with_n_threads(threads)
-        .with_n_threads_batch(threads)
-        // Quantized KV halves the cache (an 8B model at 32k ctx is ~4.5 GiB at
-        // F16) for negligible quality cost — llama-server's most-used memory
-        // flag. This is the difference between a second model fitting and not.
-        .with_type_k(KvCacheType::Q8_0)
-        .with_type_v(KvCacheType::Q8_0)
-        // llama.cpp defaults this to true, which allocates sliding-window
-        // layers at full n_ctx anyway. Gemma 4 declares a 512-token window, so
-        // leaving it on wastes most of its KV.
-        .with_swa_full(false);
     let mut ctx = model
-        .new_context(backend, ctx_params)
+        .new_context(backend, chat_context_params(n_ctx))
         .map_err(|e| ProviderError::Inference(format!("context creation failed: {e}")))?;
 
     // Prefill, chunked so a long prompt cannot overflow the batch. Only the
@@ -1397,5 +1677,19 @@ mod tests {
     fn thinking_allowance_scales_with_effort() {
         assert_eq!(thinking_allowance(Effort::Off), 0);
         assert!(thinking_allowance(Effort::Max) > thinking_allowance(Effort::Low));
+    }
+
+    #[test]
+    fn runtime_fallback_status_explains_the_cpu_retry() {
+        assert_eq!(
+            runtime_fallback_reason("vision model", "projector allocation failed"),
+            "Vulkan loaded vision model, but its runtime allocation failed (projector allocation failed); using CPU"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_host_never_reports_another_hosts_accelerator() {
+        let host = ModelHost::default();
+        assert_eq!(host.acceleration_snapshot().await["backend"], "unloaded");
     }
 }
