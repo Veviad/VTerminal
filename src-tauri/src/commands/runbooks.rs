@@ -20,6 +20,7 @@ use tauri::{Manager, State, Wry};
 
 use crate::database::DbState;
 use crate::pty::PtyManager;
+use crate::runbooks::authoring;
 use crate::runbooks::db::{
     self, ApprovalRecord, AttemptRecord, RunCreation, RunRecord, SourceKind, SourceRegistration,
     SourceRegistrationInput, StepRecord, StepSeed,
@@ -813,6 +814,16 @@ pub struct RunbookExportResult {
     pub files: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct RunbookEvidenceContent {
+    pub evidence_id: String,
+    pub available: bool,
+    pub text: String,
+    pub bytes: u64,
+    pub redacted: bool,
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RunbookEvidenceCleanup {
     pub expected: u32,
@@ -1018,6 +1029,59 @@ pub fn runbooks_draft_validate(
     let stored = db::get_runbook_draft(&connection, &draft_id)?
         .ok_or_else(|| format!("unknown runbook draft: {draft_id}"))?;
     Ok(validate_draft_preview(&stored.draft.document))
+}
+
+/// Author a draft with the active model. Returns the document WITHOUT storing
+/// it: the frontend passes it to `runbooks_draft_create`, so a generated
+/// runbook enters the wizard by exactly the path a hand-written one does and
+/// there is no persistence, no publish and no run that is special-cased for AI.
+///
+/// Non-streaming, like `ai_name_session`: a partial JSON object is not
+/// something the operator can be shown, so there is nothing to stream. It does
+/// register with `AiState`, which is what makes `ai_cancel` work on it.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn runbooks_ai_generate(
+    app: tauri::AppHandle<Wry>,
+    ai_state: State<'_, crate::agent::AiState>,
+    request_id: String,
+    requirements: String,
+    terminal_context: Option<String>,
+) -> Result<RunbookDraftDocument, String> {
+    use crate::runbooks::authoring::{MAX_CONTEXT_CHARS, MAX_REQUIREMENTS_CHARS};
+
+    gate(&app)?;
+    validate_small_text(
+        &requirements,
+        "runbook requirements",
+        MAX_REQUIREMENTS_CHARS * 4,
+        true,
+    )?;
+    if let Some(context) = terminal_context.as_deref() {
+        validate_small_text(context, "terminal context", MAX_CONTEXT_CHARS * 4, false)?;
+    }
+
+    let model = crate::commands::ai::active_model(&app);
+    let resolved = crate::commands::ai::resolve_provider_for_model(&app, model).await?;
+    let cancel = ai_state.register(&request_id);
+    let authored = authoring::author_draft(
+        resolved.provider.as_ref(),
+        &requirements,
+        terminal_context.as_deref(),
+        resolved.effort,
+        cancel,
+        &|document| validate_draft_preview(document).issues,
+    )
+    .await;
+    ai_state.finish(&request_id);
+
+    let authored = authored?;
+    if !authored.issues.is_empty() {
+        log::info!(
+            "generated runbook has {} unresolved issue(s) after one repair round",
+            authored.issues.len()
+        );
+    }
+    Ok(authored.document)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -1885,6 +1949,44 @@ pub fn runbooks_report(
         .ok_or_else(|| format!("report for run {run_id} is not ready"))
 }
 
+/// Read one recorded artifact back so the operator can review it in the app.
+#[tauri::command(rename_all = "snake_case")]
+pub fn runbooks_evidence_read(
+    app: tauri::AppHandle<Wry>,
+    db_state: State<'_, DbState>,
+    command_state: State<'_, Arc<RunbookCommandState>>,
+    run_id: String,
+    evidence_id: String,
+) -> Result<RunbookEvidenceContent, String> {
+    gate(&app)?;
+    validate_identifier(&run_id, "run id")?;
+    validate_identifier(&evidence_id, "evidence id")?;
+    let evidence = {
+        let connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
+        db::find_evidence(&connection, &run_id, &evidence_id)?
+            .ok_or_else(|| format!("evidence {evidence_id} does not belong to run {run_id}"))?
+    };
+    let Some(bytes) = db::read_complete_evidence_artifact(&command_state.app_data_dir, &evidence)?
+    else {
+        return Ok(RunbookEvidenceContent {
+            evidence_id,
+            available: false,
+            text: String::new(),
+            bytes: evidence.bytes,
+            redacted: evidence.redacted,
+            truncated: evidence.truncated,
+        });
+    };
+    Ok(RunbookEvidenceContent {
+        evidence_id,
+        available: true,
+        text: String::from_utf8_lossy(&bytes).into_owned(),
+        bytes: evidence.bytes,
+        redacted: evidence.redacted,
+        truncated: evidence.truncated,
+    })
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub fn runbooks_export(
     app: tauri::AppHandle<Wry>,
@@ -2010,7 +2112,7 @@ fn spawn_engine(
 fn runbook_requires_model_provider(definition: &RunbookDefinition, config: &EngineConfig) -> bool {
     config.summarize_with_model
         || definition.spec.steps.iter().any(|step| {
-            matches!(&step.check, CheckAction::Agent { .. })
+            matches!(&step.check, Some(CheckAction::Agent { .. }))
                 || step
                     .apply
                     .as_ref()
@@ -2102,19 +2204,21 @@ fn cleanup_evidence_artifacts(
         errors: Vec::new(),
         complete: false,
     };
-    let root = match {
+    #[allow(unused_mut)]
+    let root = {
         #[cfg(not(target_os = "windows"))]
-        { fs::canonicalize(app_data_dir) }
+        let root = fs::canonicalize(app_data_dir);
         #[cfg(target_os = "windows")]
-        { crate::windows_fs::validate_local_ntfs_path(app_data_dir) }
-    } {
-        Ok(root) => root,
-        Err(error) => {
-            push_cleanup_error(
-                &mut outcome.errors,
-                format!("cannot resolve protected app data: {error}"),
-            );
-            return outcome;
+        let root = crate::windows_fs::validate_local_ntfs_path(app_data_dir);
+        match root {
+            Ok(root) => root,
+            Err(error) => {
+                push_cleanup_error(
+                    &mut outcome.errors,
+                    format!("cannot resolve protected app data: {error}"),
+                );
+                return outcome;
+            }
         }
     };
     let expected_directory = PathBuf::from("runbooks").join(run_id);
@@ -2348,7 +2452,9 @@ fn pending_manual_view(run: &RunRecord) -> Result<Option<PendingManualView>, Str
         step.apply.as_ref(),
         step.verify.as_ref(),
     ) {
-        (RunbookPhase::Check, CheckAction::Manual { instructions }, _, _) => Some(instructions),
+        (RunbookPhase::Check, Some(CheckAction::Manual { instructions }), _, _) => {
+            Some(instructions)
+        }
         (RunbookPhase::Apply, _, Some(ApplyAction::Manual { instructions }), _) => {
             Some(instructions)
         }
@@ -4792,7 +4898,7 @@ spec:
             );
             assert!(package.definition.spec.steps.iter().all(|step| matches!(
                 &step.check,
-                CheckAction::Shell { .. }
+                Some(CheckAction::Shell { .. })
             ) && step.apply.is_none()
                 && step.verify.is_none()));
             assert_eq!(
@@ -5000,6 +5106,8 @@ spec:
             title: "Inspect".into(),
             required: true,
             on_failure: None,
+            apply: None,
+            verify: None,
             check: crate::runbooks::drafts::DraftCheck::Shell {
                 command: "curl -u operator:credential https://example.invalid".into(),
                 env: BTreeMap::new(),
@@ -5165,6 +5273,7 @@ spec:
             output_captured_bytes: 0,
             output_redacted: false,
             output_truncated: false,
+            structured_outcomes: None,
             error: None,
             intent_at: now(),
             started_at: Some(now()),

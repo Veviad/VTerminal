@@ -1161,15 +1161,15 @@ mod tests {
                 exit_code: Some(0),
                 duration_ms: Some(1),
                 output_tail: None,
-            output_observed_bytes: 0,
-            output_captured_bytes: 0,
-            output_redacted: false,
-            output_truncated: false,
-            error: None,
-            structured_outcomes: None,
-            intent_at: "2026-01-01T00:00:00Z".into(),
-            result_at: Some("2026-01-01T00:00:01Z".into()),
-        });
+                output_observed_bytes: 0,
+                output_captured_bytes: 0,
+                output_redacted: false,
+                output_truncated: false,
+                error: None,
+                structured_outcomes: None,
+                intent_at: "2026-01-01T00:00:00Z".into(),
+                result_at: Some("2026-01-01T00:00:01Z".into()),
+            });
         }
         assert!(report.validate().unwrap_err().contains("attempts"));
 
@@ -1186,15 +1186,15 @@ mod tests {
                 exit_code: Some(0),
                 duration_ms: Some(1),
                 output_tail: None,
-            output_observed_bytes: 0,
-            output_captured_bytes: 0,
-            output_redacted: false,
-            output_truncated: false,
-            error: None,
-            structured_outcomes: None,
-            intent_at: "2026-01-01T00:00:00Z".into(),
-            result_at: Some("2026-01-01T00:00:01Z".into()),
-        });
+                output_observed_bytes: 0,
+                output_captured_bytes: 0,
+                output_redacted: false,
+                output_truncated: false,
+                error: None,
+                structured_outcomes: None,
+                intent_at: "2026-01-01T00:00:00Z".into(),
+                result_at: Some("2026-01-01T00:00:01Z".into()),
+            });
             report.checklist[0].evidence.push(ReportEvidence {
                 id: format!("evidence-{index}"),
                 attempt_id: attempt_id.clone(),

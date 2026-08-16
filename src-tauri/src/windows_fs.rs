@@ -38,10 +38,10 @@ use windows_sys::Win32::Storage::FileSystem::{
     FileRenameInfo, GetDriveTypeW, GetFileInformationByHandle, GetFinalPathNameByHandleW,
     GetVolumeInformationByHandleW, SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, DELETE,
     FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED,
-    FILE_DISPOSITION_INFO, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FILE_TRAVERSE, READ_CONTROL, SYNCHRONIZE, VOLUME_NAME_GUID, WRITE_DAC,
+    FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, READ_CONTROL, SYNCHRONIZE, VOLUME_NAME_GUID,
+    WRITE_DAC,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::System::WindowsProgramming::DRIVE_FIXED;
@@ -1006,9 +1006,7 @@ fn directory_entries(directory: &File) -> Result<Vec<(OsString, bool)>, String> 
 }
 
 fn mark_delete(file: &File, path: &Path) -> Result<(), String> {
-    let info = FILE_DISPOSITION_INFO {
-        DeleteFile: 1,
-    };
+    let info = FILE_DISPOSITION_INFO { DeleteFile: 1 };
     let info_size = std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32;
     let ok = unsafe {
         SetFileInformationByHandle(
@@ -1104,7 +1102,8 @@ pub fn collect_tree_no_reparse(
         }
     }
     entries.sort_by(|(left, _), (right, _)| {
-        left.components().count()
+        left.components()
+            .count()
             .cmp(&right.components().count())
             .then_with(|| left.cmp(right))
     });
@@ -1166,7 +1165,12 @@ pub fn remove_empty_directory_no_reparse(path: &Path) -> Result<Option<bool>, St
         }
         Err(error) => return Err(nt_error("open managed Windows directory", &path, error)),
     };
-    inspect_pinned_handle(&directory, ExpectedKind::Directory, parent.identity.volume, &path)?;
+    inspect_pinned_handle(
+        &directory,
+        ExpectedKind::Directory,
+        parent.identity.volume,
+        &path,
+    )?;
     if !directory_entries(&directory)?.is_empty() {
         return Ok(Some(false));
     }
