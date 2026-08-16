@@ -47,6 +47,7 @@ pub async fn run_command(
         command_builder
     };
     #[cfg(target_os = "windows")]
+    #[allow(unused_mut)]
     let mut cmd = {
         let _ = shell;
         // A unique inherited tag lets cancellation and normal completion find

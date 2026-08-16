@@ -35,13 +35,13 @@ use windows_sys::Win32::Security::{
     SECURITY_DESCRIPTOR, SECURITY_MAX_SID_SIZE, SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    FileRenameInfo, GetDriveTypeW, GetFileInformationByHandle, GetFinalPathNameByHandleW,
-    GetVolumeInformationByHandleW, SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, DELETE,
-    FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, READ_CONTROL, SYNCHRONIZE, VOLUME_NAME_GUID,
-    WRITE_DAC,
+    FileDispositionInfo, FileRenameInfo, GetDriveTypeW, GetFileInformationByHandle,
+    GetFinalPathNameByHandleW, GetVolumeInformationByHandleW, SetFileInformationByHandle,
+    BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY,
+    FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED,
+    FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FILE_TRAVERSE, READ_CONTROL, SYNCHRONIZE, VOLUME_NAME_GUID, WRITE_DAC,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::System::WindowsProgramming::DRIVE_FIXED;
@@ -1006,7 +1006,7 @@ fn directory_entries(directory: &File) -> Result<Vec<(OsString, bool)>, String> 
 }
 
 fn mark_delete(file: &File, path: &Path) -> Result<(), String> {
-    let info = FILE_DISPOSITION_INFO { DeleteFile: 1 };
+    let info = FILE_DISPOSITION_INFO { DeleteFile: true };
     let info_size = std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32;
     let ok = unsafe {
         SetFileInformationByHandle(
