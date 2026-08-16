@@ -14,9 +14,9 @@ use std::collections::BTreeMap;
 use std::fs;
 #[cfg(not(target_os = "windows"))]
 use std::fs::OpenOptions;
-use std::io::{Read, Write};
 #[cfg(not(target_os = "windows"))]
 use std::io::Seek;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::ipc::Channel;
