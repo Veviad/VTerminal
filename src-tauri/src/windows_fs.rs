@@ -14,9 +14,10 @@ use std::path::{Component, Path, PathBuf, Prefix};
 
 use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{
-    FileIdBothDirectoryInformation, NtCreateFile, NtQueryDirectoryFile, FILE_CREATE,
-    FILE_DIRECTORY_FILE, FILE_ID_BOTH_DIR_INFORMATION, FILE_NON_DIRECTORY_FILE, FILE_OPEN,
-    FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT, FILE_WRITE_THROUGH,
+    FileIdBothDirectoryInformation, FileRenameInformation, NtCreateFile, NtQueryDirectoryFile,
+    NtSetInformationFile, FILE_CREATE, FILE_DIRECTORY_FILE, FILE_ID_BOTH_DIR_INFORMATION,
+    FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_RENAME_INFORMATION,
+    FILE_SYNCHRONOUS_IO_NONALERT, FILE_WRITE_THROUGH,
 };
 use windows_sys::Win32::Foundation::{
     CloseHandle, LocalFree, ERROR_SUCCESS, GENERIC_READ, GENERIC_WRITE, OBJ_CASE_INSENSITIVE,
@@ -35,13 +36,12 @@ use windows_sys::Win32::Security::{
     SECURITY_DESCRIPTOR, SECURITY_MAX_SID_SIZE, SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    FileDispositionInfo, FileRenameInfo, GetDriveTypeW, GetFileInformationByHandle,
-    GetFinalPathNameByHandleW, GetVolumeInformationByHandleW, SetFileInformationByHandle,
-    BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY,
-    FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED,
-    FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FILE_TRAVERSE, READ_CONTROL, SYNCHRONIZE, VOLUME_NAME_GUID, WRITE_DAC,
+    FileDispositionInfo, GetDriveTypeW, GetFileInformationByHandle, GetFinalPathNameByHandleW,
+    GetVolumeInformationByHandleW, SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, DELETE,
+    FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, FILE_TRAVERSE, READ_CONTROL, SYNCHRONIZE, VOLUME_NAME_GUID, WRITE_DAC,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::System::WindowsProgramming::DRIVE_FIXED;
@@ -1482,12 +1482,12 @@ fn rename_relative(
         .checked_mul(std::mem::size_of::<u16>())
         .and_then(|bytes| u32::try_from(bytes).ok())
         .ok_or("managed Windows destination filename is too long")?;
-    let header = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
-    let buffer_bytes = std::mem::size_of::<FILE_RENAME_INFO>()
+    let header = std::mem::offset_of!(FILE_RENAME_INFORMATION, FileName);
+    let buffer_bytes = std::mem::size_of::<FILE_RENAME_INFORMATION>()
         .checked_add(name_bytes as usize)
         .ok_or("managed Windows rename buffer is too large")?;
     let mut buffer = vec![0usize; buffer_bytes.div_ceil(std::mem::size_of::<usize>())];
-    let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
     // SAFETY: the aligned allocation includes the fixed header plus exactly
     // `name_bytes`; every written field and copied UTF-16 unit is in bounds.
     unsafe {
@@ -1505,20 +1505,22 @@ fn rename_relative(
             .add(header + name_bytes as usize)
             .cast::<u16>() = 0;
     }
-    // SAFETY: `source_file` and destination root remain live and `info` points
-    // to a fully initialized rename buffer of `buffer_bytes` bytes.
-    let ok = unsafe {
-        SetFileInformationByHandle(
+    let mut io_status = IO_STATUS_BLOCK::default();
+    // SAFETY: `source_file` and destination root remain live, `io_status` is a
+    // writable result, and `info` points to a fully initialized rename buffer.
+    let status = unsafe {
+        NtSetInformationFile(
             source_file.as_raw_handle(),
-            FileRenameInfo,
+            &mut io_status,
             info.cast(),
             buffer_bytes as u32,
+            FileRenameInformation,
         )
     };
-    if ok == 0 {
+    if status < 0 {
         return Err(format!(
-            "atomically rename the managed Windows file: {}",
-            std::io::Error::last_os_error()
+            "atomically rename the managed Windows file: NTSTATUS {:#010x}",
+            status as u32
         ));
     }
     source_parent
