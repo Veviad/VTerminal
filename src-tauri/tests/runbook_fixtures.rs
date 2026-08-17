@@ -1,13 +1,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use vterminal_lib::runbooks::definition::{
     parse_and_validate, DefinitionError, MAX_SHELL_COMMAND_CHARS,
 };
-use vterminal_lib::runbooks::package::{
-    load_package, resolve_package_file, PackageError, DEFINITION_FILE,
-};
+#[cfg(unix)]
+use vterminal_lib::runbooks::package::resolve_package_file;
+use vterminal_lib::runbooks::package::{load_package, PackageError, DEFINITION_FILE};
 
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
