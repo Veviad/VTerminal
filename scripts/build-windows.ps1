@@ -16,9 +16,13 @@ Push-Location $repo
 try {
   npm ci
   rustup target add $target
+  # Tauri validates externalBin from this package's build script before Cargo
+  # can produce vterminal-docs.exe. The target-named path is gitignored; create
+  # a placeholder for validation and replace it with the linked sidecar below.
+  New-Item -ItemType Directory -Force -Path (Split-Path $sidecarDestination) | Out-Null
+  New-Item -ItemType File -Force -Path $sidecarDestination | Out-Null
   cargo build --manifest-path $manifest --release --locked --features local-llm --target $target --bin vterminal --bin vterminal-docs
 
-  New-Item -ItemType Directory -Force -Path (Split-Path $sidecarDestination) | Out-Null
   Copy-Item -Force (Join-Path $release "vterminal-docs.exe") $sidecarDestination
 
   New-Item -ItemType Directory -Force -Path $backendDestination | Out-Null
