@@ -315,7 +315,7 @@ pub fn spawn(
     // the user's default distro. `--cd` and the command are separate argv
     // values so restored Linux paths never become shell source text.
     #[cfg(target_os = "windows")]
-    let mut cmd = {
+    let cmd = {
         let mut command = CommandBuilder::new("wsl.exe");
         let (cwd, fell_back) = resolve_wsl_cwd(params.cwd.as_deref());
         if fell_back {

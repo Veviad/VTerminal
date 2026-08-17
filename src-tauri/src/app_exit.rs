@@ -185,7 +185,7 @@ fn spawn_watchdog(app: AppHandle<Wry>, token: u64) {
     });
 }
 
-fn request_process_exit(app: &AppHandle<Wry>, token: u64) {
+fn request_process_exit(app: &AppHandle<Wry>, _token: u64) {
     app.exit(0);
 
     // `AppHandle::exit` normally produces ExitRequested followed by Exit. If
@@ -198,7 +198,7 @@ fn request_process_exit(app: &AppHandle<Wry>, token: u64) {
             tokio::time::sleep(HARD_EXIT_GRACE).await;
             if hard_exit_app
                 .state::<AppExitCoordinator>()
-                .is_exiting(token)
+                .is_exiting(_token)
             {
                 unsafe { libc::_exit(0) };
             }

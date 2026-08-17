@@ -47,7 +47,7 @@ pub async fn run_command(
         command_builder
     };
     #[cfg(target_os = "windows")]
-    let mut cmd = {
+    let cmd = {
         let _ = shell;
         // A unique inherited tag lets cancellation and normal completion find
         // descendants which detached from wsl.exe (for example via nohup).

@@ -11,8 +11,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::fs::{self, OpenOptions};
-use std::io::{Read, Seek, Write};
+use std::fs;
+#[cfg(not(target_os = "windows"))]
+use std::fs::OpenOptions;
+#[cfg(target_vendor = "apple")]
+use std::io::Seek;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::ipc::Channel;
