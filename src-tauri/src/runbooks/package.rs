@@ -14,7 +14,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
-use std::fs::{self, File, OpenOptions};
+#[cfg(any(not(target_os = "windows"), test))]
+use std::fs::OpenOptions;
+use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
