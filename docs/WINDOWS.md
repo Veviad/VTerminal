@@ -178,5 +178,8 @@ and local-inference configurations. It produces one feature-off NSIS smoke
 bundle with only the companion sidecar and common installer resources, followed
 by the production-shaped local-inference NSIS smoke containing both CPU and
 Vulkan backends.
+Windows local-inference builds require CMake's Ninja generator in addition to
+the MSVC toolchain and Vulkan SDK; `scripts/build-windows.ps1` verifies Ninja
+and selects it explicitly before Cargo configures llama.cpp.
 The hardware and WSL lifecycle checks above remain release acceptance tests
 because hosted CI cannot represent the required driver and clean-VM matrix.

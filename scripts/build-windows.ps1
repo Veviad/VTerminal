@@ -14,6 +14,11 @@ $requiredRuntimeDlls = @("llama.dll", "ggml.dll", "ggml-base.dll")
 
 Push-Location $repo
 try {
+  # llama.cpp's nested Vulkan shader generator is unreliable with CMake's
+  # Visual Studio/MSBuild generator (MSB8066 / missing VCEnd label). Ninja uses
+  # the same MSVC compiler while avoiding that generated batch-file path.
+  Get-Command ninja -ErrorAction Stop | Out-Null
+  $env:CMAKE_GENERATOR = "Ninja"
   npm ci
   rustup target add $target
   # Tauri validates externalBin from this package's build script before Cargo

@@ -242,7 +242,9 @@ jobs:
           choco install vulkan-sdk -y --no-progress
           $sdk = [Environment]::GetEnvironmentVariable('VULKAN_SDK', 'Machine')
           if ([string]::IsNullOrWhiteSpace($sdk)) { throw 'Vulkan SDK installation did not set VULKAN_SDK.' }
+          Get-Command ninja -ErrorAction Stop | Out-Null
           "VULKAN_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CMAKE_GENERATOR=Ninja" | Out-File -FilePath $env:GITHUB_ENV -Append
           "$sdk\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append
           cargo install artifact-signing-cli --locked
 
