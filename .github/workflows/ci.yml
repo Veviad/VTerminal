@@ -170,9 +170,17 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           Set-Content -Path dist/index.html -Value '<!doctype html><title>ci stub</title>'
 
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        working-directory: src-tauri
+        run: cargo test --locked
+
       # The feature-off bundle has exactly one native sidecar and no llama/GGML
-      # resource DLLs. Build its release profile here so the NSIS smoke below
-      # packages the same class of companion binary a preview would ship.
+      # resource DLLs. Build its release profile after the faster source gates
+      # so target-only errors fail before an expensive optimized build.
       - name: Stage Windows companion sidecar (feature-off)
         run: |
           # Tauri validates externalBin while the package build script runs,
@@ -183,14 +191,6 @@ jobs:
           New-Item -ItemType File -Force src-tauri/binaries/vterminal-docs-x86_64-pc-windows-msvc.exe | Out-Null
           cargo build --manifest-path src-tauri/Cargo.toml --release --locked --target x86_64-pc-windows-msvc --bin vterminal-docs
           Copy-Item src-tauri/target/x86_64-pc-windows-msvc/release/vterminal-docs.exe src-tauri/binaries/vterminal-docs-x86_64-pc-windows-msvc.exe
-
-      - name: Clippy
-        working-directory: src-tauri
-        run: cargo clippy --all-targets --locked -- -D warnings
-
-      - name: Test
-        working-directory: src-tauri
-        run: cargo test --locked
 
       # Bundle without the local-llm feature or DLL resource overlay. This
       # compiles the real NSIS hooks, including their absent-runtime path, and
