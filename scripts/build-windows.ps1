@@ -67,7 +67,11 @@ try {
   foreach ($name in $requiredRuntimeDlls) {
     $source = Join-Path (Join-Path $selectedBuild "bin") $name
     Copy-Item -LiteralPath $source -Destination (Join-Path $runtimeDestination $name) -Force
-    Copy-Item -LiteralPath $source -Destination (Join-Path $release $name) -Force
+    $releaseDll = Join-Path $release $name
+    # Cargo may hard-link this profile-level DLL to the selected build output.
+    # Remove that destination first so PowerShell does not reject a self-copy.
+    Remove-Item -LiteralPath $releaseDll -Force -ErrorAction SilentlyContinue
+    Copy-Item -LiteralPath $source -Destination $releaseDll -Force
   }
 
   $selectedBackends = Join-Path $selectedBuild "backends"
