@@ -80,6 +80,7 @@ impl FlowControl {
         self.cond.notify_all();
     }
 
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub fn is_shutdown(&self) -> bool {
         self.shutdown.load(Ordering::Relaxed)
     }
@@ -107,7 +108,9 @@ pub struct SpawnParams {
     pub cols: u16,
     pub rows: u16,
     pub cwd: Option<String>,
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub shell_path: Option<String>,
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub zdotdir: Option<std::path::PathBuf>,
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub integration_enabled: bool,
@@ -120,6 +123,7 @@ pub struct SpawnParams {
 ///
 /// Note the shape: `Option::or_else` fires only on `None`, so `Some(bad_path)`
 /// must be filtered out explicitly before the fallback can apply.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub fn resolve_cwd(requested: Option<String>) -> Option<std::path::PathBuf> {
     let requested = requested.filter(|s| !s.trim().is_empty());
     if let Some(path) = requested {

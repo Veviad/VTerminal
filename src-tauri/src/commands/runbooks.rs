@@ -418,7 +418,7 @@ fn restrict_builtin_directory(path: &Path) -> Result<(), String> {
 fn sync_directory(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        return crate::windows_fs::sync_directory(path);
+        crate::windows_fs::sync_directory(path)
     }
     #[cfg(not(target_os = "windows"))]
     OpenOptions::new()
@@ -2248,9 +2248,9 @@ fn cleanup_evidence_artifacts(
                 // the confirmed run. Hashes protect export integrity, but a
                 // crash may leave a partial staging/final file; mismatch must
                 // not make explicit history deletion impossible.
-                Ok(Some(path)) => match fs::remove_file(&path) {
-                    Ok(()) => removed_any = true,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Ok(Some(path)) => match remove_confined_evidence_file(&path) {
+                    Ok(true) => removed_any = true,
+                    Ok(false) => {}
                     Err(error) => {
                         artifact_error = true;
                         push_cleanup_error(
@@ -2273,6 +2273,19 @@ fn cleanup_evidence_artifacts(
     // Never recurse. An empty, ordinary per-run directory can be removed; any
     // untracked content is retained and reported for explicit operator review.
     let run_directory = root.join(&expected_directory);
+    #[cfg(target_os = "windows")]
+    match crate::windows_fs::remove_empty_directory_no_reparse(&run_directory) {
+        Ok(None | Some(true)) => {}
+        Ok(Some(false)) => push_cleanup_error(
+            &mut outcome.errors,
+            "evidence run directory contains untracked content; retained".into(),
+        ),
+        Err(error) => push_cleanup_error(
+            &mut outcome.errors,
+            format!("cannot remove the empty evidence run directory: {error}"),
+        ),
+    }
+    #[cfg(not(target_os = "windows"))]
     match fs::symlink_metadata(&run_directory) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => push_cleanup_error(
@@ -2311,6 +2324,20 @@ fn cleanup_evidence_artifacts(
     outcome
 }
 
+#[cfg(target_os = "windows")]
+fn remove_confined_evidence_file(path: &Path) -> Result<bool, String> {
+    crate::windows_fs::remove_file_no_reparse(path)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn remove_confined_evidence_file(path: &Path) -> Result<bool, String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 fn confined_evidence_file(
     canonical_root: &Path,
     expected_directory: &Path,
@@ -2339,12 +2366,19 @@ fn confined_evidence_file(
             Err(error) => {
                 return Err(format!("{relative}: cannot inspect artifact path: {error}"));
             }
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(format!(
-                    "{relative}: symlinked evidence paths are never deleted"
-                ));
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    return Err(format!(
+                        "{relative}: symlinked evidence paths are never deleted"
+                    ));
+                }
+                #[cfg(target_os = "windows")]
+                if crate::windows_fs::is_reparse(&metadata) {
+                    return Err(format!(
+                        "{relative}: reparse-point evidence paths are never deleted"
+                    ));
+                }
             }
-            Ok(_) => {}
         }
     }
     let metadata = fs::symlink_metadata(&candidate)
@@ -2354,6 +2388,10 @@ fn confined_evidence_file(
             "{relative}: evidence artifact is not a regular file; retained"
         ));
     }
+    #[cfg(target_os = "windows")]
+    let canonical = crate::windows_fs::validate_local_ntfs_path(&candidate)
+        .map_err(|error| format!("{relative}: cannot resolve artifact: {error}"))?;
+    #[cfg(not(target_os = "windows"))]
     let canonical = fs::canonicalize(&candidate)
         .map_err(|error| format!("{relative}: cannot resolve artifact: {error}"))?;
     if !canonical.starts_with(canonical_root) {
@@ -3010,7 +3048,7 @@ fn export_runbook_package_path(
     bundle_name: &str,
 ) -> Result<RunbookExportResult, String> {
     let destination = canonical_export_directory(destination)?;
-    let output_dir = destination.join(&bundle_name);
+    let output_dir = destination.join(bundle_name);
     match fs::symlink_metadata(&output_dir) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Ok(_) => {
@@ -3195,6 +3233,29 @@ fn package_manifest(
     Ok(manifest)
 }
 
+#[cfg(target_os = "windows")]
+fn collect_package_entries(package_root: &Path) -> Result<Vec<(PathBuf, bool)>, String> {
+    let entries = crate::windows_fs::collect_tree_no_reparse(package_root, MAX_PACKAGE_ENTRIES)?;
+    let mut folded_paths = std::collections::HashSet::new();
+    for (relative, _) in &entries {
+        for component in relative.components() {
+            let Component::Normal(component) = component else {
+                return Err("runbook package contains an unsafe path component".into());
+            };
+            let component = component
+                .to_str()
+                .ok_or("runbook package paths must be UTF-8")?;
+            validate_export_component(component, "runbook package path component")?;
+        }
+        let folded = relative.to_string_lossy().to_ascii_lowercase();
+        if !folded_paths.insert(folded) {
+            return Err("runbook package paths collide after portable normalization".into());
+        }
+    }
+    Ok(entries)
+}
+
+#[cfg(not(target_os = "windows"))]
 fn collect_package_entries(package_root: &Path) -> Result<Vec<(PathBuf, bool)>, String> {
     let root_metadata = fs::symlink_metadata(package_root)
         .map_err(|error| format!("inspect runbook package root: {error}"))?;
@@ -3223,22 +3284,12 @@ fn collect_package_entries(package_root: &Path) -> Result<Vec<(PathBuf, bool)>, 
                     path.display()
                 ));
             }
-            #[cfg(target_os = "windows")]
-            if crate::windows_fs::is_reparse(&metadata) {
-                return Err(format!(
-                    "reparse points are not allowed in runbook packages: {}",
-                    path.display()
-                ));
-            }
             if !metadata.is_file() && !metadata.is_dir() {
                 return Err(format!(
                     "unsupported special file in runbook package: {}",
                     path.display()
                 ));
             }
-            #[cfg(target_os = "windows")]
-            let resolved = crate::windows_fs::validate_local_ntfs_path(&path)?;
-            #[cfg(not(target_os = "windows"))]
             let resolved = fs::canonicalize(&path)
                 .map_err(|error| format!("resolve runbook package entry: {error}"))?;
             if !resolved.starts_with(package_root) {

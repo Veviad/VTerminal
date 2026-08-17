@@ -127,6 +127,7 @@ impl From<&str> for Secret {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum VaultError {
     Unavailable,
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     Cancelled,
     Denied,
     Item,
