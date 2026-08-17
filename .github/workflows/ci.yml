@@ -170,6 +170,13 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           Set-Content -Path dist/index.html -Value '<!doctype html><title>ci stub</title>'
 
+      # Tauri validates externalBin from the package build script even for
+      # Clippy/tests, before Cargo can build this package's sidecar target.
+      - name: Bootstrap Windows companion path
+        run: |
+          New-Item -ItemType Directory -Force src-tauri/binaries | Out-Null
+          New-Item -ItemType File -Force src-tauri/binaries/vterminal-docs-x86_64-pc-windows-msvc.exe | Out-Null
+
       - name: Clippy
         working-directory: src-tauri
         run: cargo clippy --all-targets --locked -- -D warnings
@@ -183,12 +190,8 @@ jobs:
       # so target-only errors fail before an expensive optimized build.
       - name: Stage Windows companion sidecar (feature-off)
         run: |
-          # Tauri validates externalBin while the package build script runs,
-          # before Cargo can produce this package's sidecar binary. Bootstrap
-          # that cycle with an ignored target-named placeholder, then replace
-          # it with the successfully linked executable below.
-          New-Item -ItemType Directory -Force src-tauri/binaries | Out-Null
-          New-Item -ItemType File -Force src-tauri/binaries/vterminal-docs-x86_64-pc-windows-msvc.exe | Out-Null
+          # Replace the ignored bootstrap placeholder with the successfully
+          # linked companion before either installer smoke runs.
           cargo build --manifest-path src-tauri/Cargo.toml --release --locked --target x86_64-pc-windows-msvc --bin vterminal-docs
           Copy-Item src-tauri/target/x86_64-pc-windows-msvc/release/vterminal-docs.exe src-tauri/binaries/vterminal-docs-x86_64-pc-windows-msvc.exe
 
