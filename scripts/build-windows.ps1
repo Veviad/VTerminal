@@ -6,7 +6,15 @@ $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
 $target = "x86_64-pc-windows-msvc"
 $manifest = Join-Path $repo "src-tauri\Cargo.toml"
-$release = Join-Path $repo "src-tauri\target\$target\release"
+if ([string]::IsNullOrWhiteSpace($env:CARGO_TARGET_DIR)) {
+  $localAppData = [Environment]::GetFolderPath('LocalApplicationData')
+  if ([string]::IsNullOrWhiteSpace($localAppData)) {
+    throw "Cannot resolve a short per-user Cargo target directory."
+  }
+  $env:CARGO_TARGET_DIR = Join-Path $localAppData "VTerminal\build-target"
+}
+$cargoTarget = [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)
+$release = Join-Path $cargoTarget "$target\release"
 $sidecarDestination = Join-Path $repo "src-tauri\binaries\vterminal-docs-$target.exe"
 $runtimeDestination = Join-Path $repo "src-tauri\binaries\llama-runtime"
 $backendDestination = Join-Path $repo "src-tauri\binaries\llama-backends"
@@ -16,7 +24,9 @@ Push-Location $repo
 try {
   # llama.cpp's nested Vulkan shader generator is unreliable with CMake's
   # Visual Studio/MSBuild generator (MSB8066 / missing VCEnd label). Ninja uses
-  # the same MSVC compiler while avoiding that generated batch-file path.
+  # the same MSVC compiler while avoiding that generated batch-file path. Its
+  # nested build is also deep enough to exceed Win32's object-path limit when
+  # Cargo uses a target directory below a normally sized source checkout.
   Get-Command ninja -ErrorAction Stop | Out-Null
   $env:CMAKE_GENERATOR = "Ninja"
   npm ci
