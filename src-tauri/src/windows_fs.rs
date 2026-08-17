@@ -162,7 +162,11 @@ fn protected_components(path: &Path) -> Result<(PathBuf, PathBuf, Vec<OsString>)
 
     let mut components = lexical.components();
     let prefix = match components.next() {
-        Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_)) => prefix,
+        Some(Component::Prefix(prefix))
+            if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)) =>
+        {
+            prefix
+        }
         _ => return Err("protected Windows paths must use an absolute local drive path".into()),
     };
     let root_component = match components.next() {
@@ -1402,8 +1406,11 @@ fn rename_relative(
         .checked_mul(std::mem::size_of::<u16>())
         .and_then(|bytes| u32::try_from(bytes).ok())
         .ok_or("managed Windows destination filename is too long")?;
-    let header = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
-    let buffer_bytes = header
+    // SetFileInformationByHandle requires at least sizeof(FILE_RENAME_INFO)
+    // plus the variable filename bytes. Using only offset_of(FileName) makes
+    // the x64 buffer four bytes too short after the structure's tail padding
+    // and Windows rejects an otherwise valid handle-relative rename with 87.
+    let buffer_bytes = std::mem::size_of::<FILE_RENAME_INFO>()
         .checked_add(name_bytes as usize)
         .ok_or("managed Windows rename buffer is too large")?;
     let mut buffer = vec![0usize; buffer_bytes.div_ceil(std::mem::size_of::<usize>())];
@@ -1570,6 +1577,7 @@ mod tests {
     fn rejects_unc_drive_relative_and_nested_leaf_names() {
         assert!(rejects_prefix(Path::new(r"\\server\share\report")));
         assert!(absolute_lexical(Path::new(r"C:report")).is_err());
+        assert!(protected_components(Path::new(r"\\?\C:\Users\Example\report.json")).is_ok());
         assert!(checked_leaf(OsStr::new("report.json")).is_ok());
         assert!(checked_leaf(OsStr::new(r"evidence\report.log")).is_err());
         assert!(checked_leaf(OsStr::new("report.json:stream")).is_err());
