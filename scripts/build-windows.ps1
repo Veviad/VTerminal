@@ -22,8 +22,11 @@ $requiredRuntimeDlls = @("llama.dll", "ggml.dll", "ggml-base.dll")
 Push-Location $repo
 try {
   npm ci
+  if ($LASTEXITCODE -ne 0) { throw "npm ci failed with exit code $LASTEXITCODE." }
   rustup target add $target
+  if ($LASTEXITCODE -ne 0) { throw "rustup target add failed with exit code $LASTEXITCODE." }
   cargo build --manifest-path $manifest --release --locked --features local-llm --target $target --bin vterminal --bin vterminal-docs
+  if ($LASTEXITCODE -ne 0) { throw "cargo build failed with exit code $LASTEXITCODE." }
 
   New-Item -ItemType Directory -Force -Path (Split-Path $sidecarDestination) | Out-Null
   Copy-Item -Force (Join-Path $release "vterminal-docs.exe") $sidecarDestination
@@ -105,7 +108,11 @@ try {
     }
   }
 
-  npm run tauri build -- --target $target --bundles nsis --features local-llm --config src-tauri/tauri.updater.conf.json,src-tauri/tauri.windows.conf.json,src-tauri/tauri.windows.local-llm.conf.json
+  npm run tauri build -- --target $target --bundles nsis --features local-llm `
+    --config src-tauri/tauri.updater.conf.json `
+    --config src-tauri/tauri.windows.conf.json `
+    --config src-tauri/tauri.windows.local-llm.conf.json
+  if ($LASTEXITCODE -ne 0) { throw "tauri build failed with exit code $LASTEXITCODE." }
 }
 finally {
   Pop-Location
