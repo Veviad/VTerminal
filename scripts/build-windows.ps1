@@ -7,11 +7,13 @@ $repo = Split-Path -Parent $PSScriptRoot
 $target = "x86_64-pc-windows-msvc"
 $manifest = Join-Path $repo "src-tauri\Cargo.toml"
 if ([string]::IsNullOrWhiteSpace($env:CARGO_TARGET_DIR)) {
-  $localAppData = [Environment]::GetFolderPath('LocalApplicationData')
-  if ([string]::IsNullOrWhiteSpace($localAppData)) {
-    throw "Cannot resolve a short per-user Cargo target directory."
+  $systemDrive = [Environment]::GetEnvironmentVariable('SystemDrive')
+  if ([string]::IsNullOrWhiteSpace($systemDrive)) {
+    throw "Cannot resolve the Windows system drive for the short Cargo target directory."
   }
-  $env:CARGO_TARGET_DIR = Join-Path $localAppData "VTerminal\build-target"
+  # llama.cpp's nested Vulkan shader-generator probe exceeds MSVC's effective
+  # path limit beneath a normal user profile. Keep this deliberately terse.
+  $env:CARGO_TARGET_DIR = Join-Path "$systemDrive\" "vt"
 }
 $cargoTarget = [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)
 $release = Join-Path $cargoTarget "$target\release"

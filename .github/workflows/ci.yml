@@ -217,7 +217,7 @@ jobs:
           $sdk = [Environment]::GetEnvironmentVariable('VULKAN_SDK', 'Machine')
           if ([string]::IsNullOrWhiteSpace($sdk)) { throw 'Vulkan SDK installation did not set VULKAN_SDK.' }
           Get-Command ninja -ErrorAction Stop | Out-Null
-          $shortTarget = Join-Path ([IO.Path]::GetPathRoot($env:GITHUB_WORKSPACE)) 'vterminal-target'
+          $shortTarget = Join-Path ([IO.Path]::GetPathRoot($env:GITHUB_WORKSPACE)) 't'
           "VULKAN_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append
           "CMAKE_GENERATOR=Ninja" | Out-File -FilePath $env:GITHUB_ENV -Append
           "CARGO_TARGET_DIR=$shortTarget" | Out-File -FilePath $env:GITHUB_ENV -Append

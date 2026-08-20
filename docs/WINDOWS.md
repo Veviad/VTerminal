@@ -181,7 +181,8 @@ Vulkan backends.
 Windows local-inference builds require CMake's Ninja generator in addition to
 the MSVC toolchain and Vulkan SDK; `scripts/build-windows.ps1` verifies Ninja
 and selects it explicitly before Cargo configures llama.cpp. The script also
-uses a short per-user Cargo target directory by default so llama.cpp's nested
-Vulkan shader build stays below Windows object-path limits.
+uses a drive-root Cargo target directory (`C:\vt` locally and `<workspace
+drive>:\t` in CI) so llama.cpp's nested Vulkan shader build stays below MSVC's
+effective path limit.
 The hardware and WSL lifecycle checks above remain release acceptance tests
 because hosted CI cannot represent the required driver and clean-VM matrix.
