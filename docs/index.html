@@ -7,10 +7,10 @@
     <meta name="color-scheme" content="dark" />
     <meta name="robots" content="index,follow,max-image-preview:large" />
 
-    <title>VTerminal — The Lean AI Terminal for macOS</title>
+    <title>VTerminal — The Lean AI Terminal for macOS and Windows 11</title>
     <meta
       name="description"
-      content="A lean, AI-powered terminal for macOS with command blocks, a multi-step agent, and local or Qdrant knowledge buckets. Local models run in-process via llama.cpp. Open source, GPL-3.0."
+      content="A lean, AI-powered terminal for macOS and Windows 11 with WSL2 Bash, command blocks, a multi-step agent, and in-process local models. Open source, GPL-3.0."
     />
     <link rel="canonical" href="https://vterminal.veviad.com/" />
 
@@ -19,7 +19,7 @@
     <meta property="og:locale" content="en_GB" />
     <meta
       property="og:title"
-      content="VTerminal — The Lean AI Terminal for macOS"
+      content="VTerminal — The Lean AI Terminal for macOS and Windows 11"
     />
     <meta
       property="og:description"
@@ -29,7 +29,7 @@
     <meta name="twitter:card" content="summary" />
     <meta
       name="twitter:title"
-      content="VTerminal — The Lean AI Terminal for macOS"
+      content="VTerminal — The Lean AI Terminal for macOS and Windows 11"
     />
     <meta
       name="twitter:description"
@@ -62,13 +62,13 @@
         "@type": "SoftwareApplication",
         "name": "VTerminal",
         "applicationCategory": "DeveloperApplication",
-        "operatingSystem": "macOS (Apple Silicon)",
+        "operatingSystem": "macOS (Apple Silicon), Windows 11 x64 with WSL2",
         "softwareVersion": "Latest release",
         "downloadUrl": "https://github.com/Veviad/VTerminal/releases",
         "url": "https://vterminal.veviad.com/",
         "codeRepository": "https://github.com/Veviad/VTerminal",
         "license": "https://www.gnu.org/licenses/gpl-3.0.html",
-        "description": "A lean, AI-powered terminal for macOS with command blocks, a multi-step agent, and local or Qdrant knowledge buckets. Local models run in-process via llama.cpp with Metal acceleration.",
+        "description": "A lean, AI-powered terminal for macOS and Windows 11 with WSL2 Bash, command blocks, a multi-step agent, and in-process Metal or Vulkan local models.",
         "author": {
           "@type": "Organization",
           "name": "Veviad",
@@ -229,9 +229,7 @@
         <div class="header-actions">
           <a
             class="button button-primary header-cta"
-            href="https://github.com/Veviad/VTerminal/releases"
-            data-release-href="dmg"
-            data-release-aria="download"
+            href="#download"
             >Download</a
           >
           <button
@@ -266,6 +264,14 @@
               >Download for macOS</a
             >
             <a
+              class="button button-primary"
+              href="https://github.com/Veviad/VTerminal/releases"
+              data-release-platform="windows"
+              data-release-href="windows"
+              data-release-aria="windows_download"
+              >Windows preview</a
+            >
+            <a
               class="button button-outline"
               href="https://github.com/Veviad/VTerminal"
               >View on GitHub</a
@@ -295,14 +301,14 @@
 
           <h1 id="hero-title">
             The AI Terminal That<br />
-            <em>Stays on Your Mac.</em>
+            <em>Stays on Your Machine.</em>
           </h1>
 
           <p class="hero-copy">
             Warp-style command blocks and a multi-step AI agent, without the
-            bulk. Local models run <strong>in-process</strong> with Metal
-            acceleration — no Ollama, no daemon to babysit. Cloud models sit
-            behind the same interface.
+            bulk. Local models run <strong>in-process</strong> with Metal on Mac,
+            or Vulkan with automatic CPU fallback on Windows — no Ollama and no
+            daemon to babysit. Cloud models sit behind the same interface.
           </p>
 
           <!-- Generic fallbacks keep the source page valid. The Pages release
@@ -318,15 +324,25 @@
               Download for macOS
             </a>
             <a
+              class="button button-primary"
+              href="https://github.com/Veviad/VTerminal/releases"
+              data-release-platform="windows"
+              data-release-href="windows"
+              data-release-aria="windows_download"
+            >
+              <svg class="ui-icon" aria-hidden="true"><use href="#i-download" /></svg>
+              Windows preview
+            </a>
+            <a
               class="button button-secondary"
               href="https://github.com/Veviad/VTerminal"
               >View on GitHub</a
             >
           </div>
           <p class="download-meta hero-download-meta">
-            <span data-release-text="version">Latest release</span> · Apple Silicon ·
-            <span data-release-text="dmg_size">DMG</span> ·
-            <a href="#download">Developer ID signed &amp; notarized</a>
+            <span data-release-text="version">Latest release</span> · macOS Apple
+            Silicon <span data-release-platform="windows">or Windows 11 x64 preview </span>·
+            <a href="#download">installers and requirements</a>
           </p>
           <p class="release-date">
             Published <span data-release-text="published_date">—</span>
@@ -350,7 +366,7 @@
           <ul class="hero-proof" aria-label="At a glance">
             <li>
               <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
-              <span>macOS, Apple Silicon</span>
+              <span>macOS Apple Silicon + Windows 11 x64 preview</span>
             </li>
             <li>
               <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
@@ -488,10 +504,10 @@
           </div>
 
           <div class="mock-status" aria-hidden="true">
-            <span>zsh</span>
+            <span>zsh / WSL2 Bash</span>
             <span class="mock-branch">2 tabs</span>
             <span class="mock-status-right">
-              <span><span class="mock-key">⌘K</span> commands</span>
+              <span><span class="mock-key">⌘K / Ctrl+Shift+K</span> commands</span>
               <span>on-device</span>
             </span>
           </div>
@@ -543,10 +559,10 @@
                     <h3>Your Shell, Not a Lookalike</h3>
                   </div>
                   <p class="why-item-copy">
-                    A real <code>zsh -il</code> login shell over a PTY. vim,
-                    htop, tmux and <code>ssh</code> all behave exactly as they do
-                    in Terminal.app, because they are running exactly as they do
-                    in Terminal.app.
+                    A real <code>zsh -il</code> shell on macOS or Bash in the
+                    default WSL2 distribution on Windows, each over its native
+                    PTY. vim, htop, tmux and <code>ssh</code> run in the real shell,
+                    not a reimplementation.
                   </p>
                 </div>
               </article>
@@ -566,9 +582,9 @@
                   </div>
                   <p class="why-item-copy">
                     The default model is a 9B GGUF running inside the app process
-                    via llama.cpp, Metal-accelerated. Nothing leaves the machine
-                    unless you pick a cloud model — and there is no daemon to
-                    install, start or keep updated.
+                    via llama.cpp, with Metal on Mac or Vulkan and automatic CPU
+                    fallback on Windows. Nothing leaves the machine unless you
+                    pick a cloud model — and there is no daemon to maintain.
                   </p>
                 </div>
               </article>
@@ -625,7 +641,7 @@
               </li>
               <li>
                 <span class="lifecycle-number" aria-hidden="true">02</span>
-                <span>zsh Marks It via OSC 133</span>
+                <span>The Shell Marks It via OSC 133</span>
               </li>
               <li>
                 <span class="lifecycle-number" aria-hidden="true">03</span>
@@ -643,11 +659,12 @@
               <span class="feature-icon" aria-hidden="true">
                 <svg class="ui-icon"><use href="#i-terminal" /></svg>
               </span>
-              <h3>Real zsh, Real TTY</h3>
+              <h3>Real Shell, Real TTY</h3>
               <p>
-                <code>portable-pty</code> spawning <code>zsh -il</code>, rendered
-                by xterm.js 6 with a WebGL renderer. Full TUI support, and saved
-                SSH hosts with one-click connect.
+                <code>portable-pty</code> runs <code>zsh -il</code> on macOS or
+                Bash in the default WSL2 distribution on Windows, rendered by
+                xterm.js 6 with a WebGL renderer. Full TUI support, and saved SSH
+                hosts with one-click connect.
               </p>
             </article>
             <article class="feature-card">
@@ -678,9 +695,9 @@
               </span>
               <h3>Tabs, Search, Palette</h3>
               <p>
-                Tabs with <kbd>⌘1…9</kbd>, in-terminal search, persistent command
-                history, and a <kbd>⌘K</kbd> palette for actions and model
-                switching.
+                Tabs, in-terminal search, persistent command history, and a
+                command palette for actions and model switching. Use Command on
+                macOS or <kbd>Ctrl+Shift</kbd> on Windows.
               </p>
             </article>
             <article class="feature-card">
@@ -746,7 +763,7 @@
               <span class="feature-icon" aria-hidden="true">
                 <svg class="ui-icon"><use href="#i-wand" /></svg>
               </span>
-              <h3>Suggest <kbd>⌘I</kbd></h3>
+              <h3>Suggest <kbd>⌘I / Ctrl+Shift+I</kbd></h3>
               <p>
                 Describe the goal — or type <code>#</code> at an empty prompt —
                 and get a command inserted into your prompt, ready to read before
@@ -767,7 +784,7 @@
               <span class="feature-icon" aria-hidden="true">
                 <svg class="ui-icon"><use href="#i-chat" /></svg>
               </span>
-              <h3>Ask <kbd>⌘J</kbd></h3>
+              <h3>Ask <kbd>⌘J / Ctrl+Shift+J</kbd></h3>
               <p>
                 A chat panel with your blocks, their output and your files as
                 context. Resizable, and it keeps its proportion when you resize
@@ -836,8 +853,8 @@
               <div>
                 <h3>Private by construction</h3>
                 <p>
-                  Local embeddings stay on your Mac. Qdrant keys and cloud
-                  provider keys stay in macOS Keychain and never return to the
+                  Local embeddings stay on your device. Qdrant keys and cloud
+                  provider keys stay in the operating-system credential vault and never return to the
                   frontend. Before cloud embedding, VTerminal tells you that
                   document chunks and future search queries leave the device.
                 </p>
@@ -938,10 +955,11 @@
               </span>
               <h3>Automation and advanced storage</h3>
               <p>
-                The Developer ID-signed standalone <code>vterminal-docs</code>
-                CLI installs
-                from the UI into <code>~/.local/bin</code> without editing shell
-                profiles. It shares profiles, model cache, connections, chunking
+                The signed standalone <code>vterminal-docs</code> CLI installs
+                from the UI into <code>~/.local/bin</code> on macOS. The Windows
+                installer places it in VTerminal's managed user bin directory,
+                and Settings reports or repairs that copy. It shares profiles,
+                model cache, connections, chunking
                 and job records with the app for repeatable terminal automation.
               </p>
               <ul>
@@ -1249,10 +1267,10 @@
               </div>
               <h3 class="package-card__title">On-Device</h3>
               <p class="package-card__description">
-                GGUF weights running inside the app via llama.cpp with Metal
-                acceleration. Downloads are resumable and range-checked, with
-                live progress, speed, ETA, cancel and retry directly on each
-                chat or vision model card.
+                GGUF weights running inside the app via llama.cpp with Metal on
+                macOS or Vulkan with automatic CPU fallback on Windows. Downloads
+                are resumable and range-checked, with live progress, speed, ETA,
+                cancel and retry directly on each chat or vision model card.
               </p>
               <ul>
                 <li>
@@ -1306,7 +1324,7 @@
               </ul>
               <p class="package-card__note">
                 Provider keys, Hugging Face tokens and remote-server tokens stay
-                in macOS Keychain (service <code>com.veviad.terminal</code>).
+                in macOS Keychain or Windows Credential Manager (service <code>com.veviad.terminal</code>).
                 They never round-trip to the UI or <code>settings.json</code>.
               </p>
             </article>
@@ -1382,7 +1400,8 @@
           </div>
 
           <p class="plans-note">
-            Switching models is one keystroke from the <kbd>⌘K</kbd> palette, and
+            Switching models is one keystroke from the
+            <kbd>⌘K / Ctrl+Shift+K</kbd> palette, and
             every reply keeps the name of the model that wrote it.
           </p>
         </div>
@@ -1397,17 +1416,19 @@
           <div>
             <p class="eyebrow">Download</p>
             <h2 class="section-heading" id="download-title">
-              A Disk Image. Drag It Across.
+              Native Installers. One Terminal.
             </h2>
             <p class="section-lead">
-              One disk image with on-device inference already compiled in —
-              llama.cpp and its Metal kernels ship inside the app, so there is
-              nothing to build and no daemon to install.
+              macOS ships as a Developer ID-signed and notarized disk image;
+              Windows 11 is available as an unsigned, per-user preview installer
+              for testing and is not yet considered stable. On-device
+              inference is compiled in on both, with Metal on Mac and dynamic
+              Vulkan with automatic CPU fallback on Windows.
             </p>
             <p class="metric-note">
               The project counters above are rendered from GitHub-reported release data
               when this static site is published. “Release downloads” counts the
-              disk image and signed updater archive across non-draft published
+              macOS disk image, updater archive, and Windows installer across non-draft published
               releases. It includes upgrades and is not a count of unique users
               or installations; the app sends no telemetry.
             </p>
@@ -1418,18 +1439,18 @@
                 <dd>13 Ventura or newer</dd>
               </div>
               <div class="req-row">
-                <dt>Chip</dt>
-                <dd>Apple Silicon — Intel is not built</dd>
+                <dt>Windows</dt>
+                <dd>Windows 11 x64 preview (testing), WSL2 default distribution, Bash</dd>
               </div>
               <div class="req-row">
-                <dt>Download</dt>
-                <dd><span data-release-text="dmg_size">DMG</span> disk image</dd>
+                <dt>Packages</dt>
+                <dd>Apple Silicon DMG; unsigned per-user Windows NSIS preview</dd>
               </div>
               <div class="req-row">
-                <dt>Signature</dt>
+                <dt>Signatures</dt>
                 <dd>
-                  Developer ID signed with hardened runtime, notarized by Apple,
-                  and stapled for Gatekeeper verification
+                  macOS Developer ID signed, notarized and stapled; Windows
+                  preview intentionally unsigned (verify SHA-256)
                 </dd>
               </div>
               <div class="req-row">
@@ -1448,12 +1469,40 @@
               </div>
             </dl>
 
+            <div class="download-cta" data-release-platform="windows">
+              <a
+                class="button button-primary"
+                href="https://github.com/Veviad/VTerminal/releases"
+                data-release-href="windows"
+                data-release-aria="windows_download"
+              >
+                <svg class="ui-icon" aria-hidden="true"><use href="#i-download" /></svg>
+                Download Windows 11 preview
+              </a>
+              <span class="download-meta">
+                <code data-release-text="windows_name">Windows installer</code><br />
+                <span data-release-text="windows_size">EXE</span> · x64 · per-user NSIS
+              </span>
+            </div>
+            <p class="install-note" data-release-platform="windows">
+              <strong>Preview/testing:</strong> Windows support is not yet considered
+              stable. The installer is not Authenticode signed, so Windows reports
+              an unknown publisher and SmartScreen may require
+              <strong>More info → Run anyway</strong>. Verify its published SHA-256 first.
+            </p>
+            <p class="install-note" data-release-platform="windows">
+              VTerminal checks for a working WSL2 default distribution on first launch. It
+              never installs or upgrades WSL administratively; if WSL is absent,
+              follow <a href="https://learn.microsoft.com/windows/wsl/install">Microsoft's setup guide</a>
+              and relaunch VTerminal.
+            </p>
+
             <p class="install-note">
               Prefer to build it yourself? The
               <a href="https://github.com/Veviad/VTerminal#quick-start">README</a>
-              covers local development builds. Those are separate from the
-              Developer ID-signed and notarized app distributed in the published
-              disk image.
+              covers source builds for both platforms. Local macOS builds are
+              separate from the Developer ID-signed and notarized app distributed
+              in the published disk image.
             </p>
             <p class="install-note">
               <strong>Experimental automatic updates.</strong> After installing,
@@ -1465,7 +1514,9 @@
             </p>
           </div>
 
-          <ol class="steps">
+          <div>
+            <p class="eyebrow">macOS installation</p>
+            <ol class="steps">
             <li class="step">
               <span class="step-number" aria-hidden="true">1</span>
               <div class="step-body">
@@ -1566,6 +1617,65 @@
                 </p>
               </div>
             </li>
+            </ol>
+          </div>
+        </div>
+
+        <div class="install-layout shell" data-release-platform="windows">
+          <div>
+            <p class="eyebrow">Windows 11 preview installation</p>
+            <h2 class="section-heading section-heading-wide">Preview, Per User, WSL First.</h2>
+            <p class="section-lead">
+              The NSIS installer needs no administrator rights. VTerminal uses the
+              default WSL2 distribution and interactive Bash; it does not install
+              or upgrade WSL for you.
+            </p>
+            <p class="install-note">
+              For detailed troubleshooting, build prerequisites, and the beta
+              acceptance matrix, see the
+              <a href="https://github.com/Veviad/VTerminal/blob/main/docs/WINDOWS.md">Windows guide</a>.
+            </p>
+          </div>
+          <ol class="steps">
+            <li class="step">
+              <span class="step-number" aria-hidden="true">1</span>
+              <div class="step-body">
+                <h3>Verify the Download</h3>
+                <p>
+                  Download <a href="https://github.com/Veviad/VTerminal/releases" data-release-href="checksum">SHA256SUMS.txt</a>
+                  beside the installer, then compare its published SHA-256 in PowerShell:
+                </p>
+                <div class="code-block">
+                  <code>Get-FileHash .\<span data-release-text="windows_name">VTerminal_x64-setup.exe</span> -Algorithm SHA256</code>
+                  <button class="copy-button" type="button" aria-label="Copy command" data-copy>
+                    <svg class="ui-icon" aria-hidden="true"><use href="#i-copy" /></svg>
+                  </button>
+                </div>
+              </div>
+            </li>
+            <li class="step">
+              <span class="step-number" aria-hidden="true">2</span>
+              <div class="step-body">
+                <h3>Run the Preview Installer</h3>
+                <p>
+                  Launch <code data-release-text="windows_name">VTerminal_x64-setup.exe</code>.
+                  It installs for the current user and manages only VTerminal's
+                  companion-CLI PATH entry.
+                </p>
+              </div>
+            </li>
+            <li class="step">
+              <span class="step-number" aria-hidden="true">3</span>
+              <div class="step-body">
+                <h3>Confirm WSL2 and Bash</h3>
+                <p>
+                  If first launch reports a missing prerequisite, run
+                  <code>wsl.exe --status</code> and <code>wsl.exe --list --verbose</code>.
+                  Set a WSL2 distribution as default, confirm it contains
+                  <code>/bin/bash</code>, then reopen VTerminal.
+                </p>
+              </div>
+            </li>
           </ol>
         </div>
       </section>
@@ -1579,14 +1689,14 @@
           </h2>
 
           <ul class="keys-grid">
-            <li><kbd>⌘T</kbd> <span>New tab</span></li>
-            <li><kbd>⌘W</kbd> <span>Close tab</span></li>
-            <li><kbd>⌘1…9</kbd> <span>Jump to tab</span></li>
-            <li><kbd>⌘K</kbd> <span>Command palette</span></li>
-            <li><kbd>⌘I</kbd> <span>AI suggestion</span></li>
-            <li><kbd>⌘J</kbd> <span>Toggle AI panel</span></li>
-            <li><kbd>⌘F</kbd> <span>Search terminal</span></li>
-            <li><kbd>⌘,</kbd> <span>Settings</span></li>
+            <li><kbd>⌘T / Ctrl+Shift+T</kbd> <span>New tab</span></li>
+            <li><kbd>⌘W / Ctrl+Shift+W</kbd> <span>Close tab</span></li>
+            <li><kbd>⌘1…9 / Ctrl+Shift+1…9</kbd> <span>Jump to tab</span></li>
+            <li><kbd>⌘K / Ctrl+Shift+K</kbd> <span>Command palette</span></li>
+            <li><kbd>⌘I / Ctrl+Shift+I</kbd> <span>AI suggestion</span></li>
+            <li><kbd>⌘J / Ctrl+Shift+J</kbd> <span>Toggle AI panel</span></li>
+            <li><kbd>⌘F / Ctrl+Shift+F</kbd> <span>Search terminal</span></li>
+            <li><kbd>⌘, / Ctrl+Shift+,</kbd> <span>Settings</span></li>
           </ul>
         </div>
       </section>
@@ -1612,6 +1722,14 @@
               >Download for macOS</a
             >
             <a
+              class="button button-primary"
+              href="https://github.com/Veviad/VTerminal/releases"
+              data-release-platform="windows"
+              data-release-href="windows"
+              data-release-aria="windows_download"
+              >Windows preview</a
+            >
+            <a
               class="button button-outline"
               href="https://github.com/Veviad/VTerminal"
               >View on GitHub</a
@@ -1634,7 +1752,7 @@
             <span>VTerminal</span>
           </div>
           <p>
-            A lean, AI-powered terminal for macOS, developed in the open by
+            A lean, AI-powered terminal for macOS and Windows 11, developed in the open by
             <a href="https://veviad.com">Veviad</a>.
           </p>
           <a

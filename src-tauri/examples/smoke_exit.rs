@@ -12,7 +12,10 @@
 //! `_exit` is what `lib.rs` now does on `RunEvent::Exit`, and must exit 0 with
 //! the model still resident.
 
-#[cfg(feature = "local-llm")]
+// This reproducer is specifically for AppKit's Metal teardown. Keeping its
+// libc::_exit path out of non-macOS builds also makes `--all-targets` a valid
+// Windows local-LLM CI gate.
+#[cfg(all(feature = "local-llm", target_os = "macos"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use vterminal_lib::models::catalog::LocalFamily;
     use vterminal_lib::provider::local::ReadyModel;
@@ -38,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::process::exit(0)
 }
 
-#[cfg(not(feature = "local-llm"))]
+#[cfg(not(all(feature = "local-llm", target_os = "macos")))]
 fn main() {
-    eprintln!("smoke_exit needs --features local-llm");
+    eprintln!("smoke_exit needs macOS and --features local-llm");
 }

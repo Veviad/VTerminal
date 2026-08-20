@@ -16,13 +16,16 @@ const TEXT_FIELDS = new Set([
   "tag",
   "dmg_name",
   "dmg_size",
+  "windows_name",
+  "windows_size",
   "total_downloads",
   "stars",
   "release_label",
   "published_date",
 ]);
-const HREF_FIELDS = new Set(["dmg", "release", "checksum"]);
-const ARIA_FIELDS = new Set(["download", "announcement"]);
+const HREF_FIELDS = new Set(["dmg", "windows", "release", "checksum"]);
+const ARIA_FIELDS = new Set(["download", "windows_download", "announcement"]);
+const PLATFORM_FIELDS = new Set(["windows"]);
 
 function invariant(condition, message) {
   if (!condition) throw new Error(message);
@@ -107,6 +110,12 @@ function matchingAsset(assets, name, tag) {
   return matches[0];
 }
 
+function optionalMatchingAsset(assets, name, tag) {
+  const matches = assets.filter((asset) => asset?.name === name);
+  invariant(matches.length <= 1, `Release ${tag} must contain at most one ${name} asset (found ${matches.length}).`);
+  return matches[0] ?? null;
+}
+
 function githubReleaseUrl(repository, tag) {
   return `https://github.com/${repository}/releases/tag/${encodeURIComponent(tag)}`;
 }
@@ -128,13 +137,29 @@ export function validateSelectedAssets(release, semver, repository = "Veviad/VTe
     dmg: `VTerminal_${semver.version}_aarch64.dmg`,
     updater: "VTerminal.app.tar.gz",
     signature: "VTerminal.app.tar.gz.sig",
+    windows: `VTerminal_${semver.version}_x64-setup.exe`,
+    windowsSignature: `VTerminal_${semver.version}_x64-setup.exe.sig`,
     manifest: "latest.json",
     checksums: "SHA256SUMS.txt",
   };
+  const requiredNames = Object.fromEntries(
+    Object.entries(names).filter(([key]) => key !== "windows" && key !== "windowsSignature"),
+  );
   const selected = Object.fromEntries(
-    Object.entries(names).map(([key, name]) => [key, matchingAsset(release.assets, name, semver.tag)]),
+    Object.entries(requiredNames).map(([key, name]) => [key, matchingAsset(release.assets, name, semver.tag)]),
+  );
+  selected.windows = optionalMatchingAsset(release.assets, names.windows, semver.tag);
+  selected.windowsSignature = optionalMatchingAsset(
+    release.assets,
+    names.windowsSignature,
+    semver.tag,
+  );
+  invariant(
+    Boolean(selected.windows) === Boolean(selected.windowsSignature),
+    `Release ${semver.tag} must include both ${names.windows} and ${names.windowsSignature}, or neither.`,
   );
   for (const [key, asset] of Object.entries(selected)) {
+    if (asset === null) continue;
     validateGithubUrl(
       asset.browser_download_url,
       githubAssetUrl(repository, semver.tag, names[key]),
@@ -164,7 +189,11 @@ export function aggregateApplicationDownloads(releases) {
       continue;
     }
     for (const asset of release.assets) {
-      if (!asset?.name?.endsWith(".dmg") && asset?.name !== "VTerminal.app.tar.gz") continue;
+      if (
+        !asset?.name?.endsWith(".dmg") &&
+        asset?.name !== "VTerminal.app.tar.gz" &&
+        !asset?.name?.endsWith("_x64-setup.exe")
+      ) continue;
       total += requireNonNegativeInteger(asset.download_count, `${asset.name} download_count`);
       invariant(Number.isSafeInteger(total), "Aggregate release downloads exceed JavaScript's safe integer range.");
     }
@@ -213,6 +242,20 @@ export function buildReleaseData({
   invariant(!Number.isNaN(generated.valueOf()), "Generation timestamp is invalid.");
   const { release, semver } = selectLatestRelease(releases);
   const assets = validateSelectedAssets(release, semver, repository);
+  const windowsWasPreviouslyPublished = releases.some(
+    (candidate) =>
+      candidate !== release &&
+      publishedRelease(candidate) &&
+      Array.isArray(candidate.assets) &&
+      candidate.assets.some(
+        (asset) =>
+          typeof asset?.name === "string" && asset.name.endsWith("_x64-setup.exe"),
+      ),
+  );
+  invariant(
+    Boolean(assets.windows) || !windowsWasPreviouslyPublished,
+    `Release ${semver.tag} cannot omit Windows assets after a Windows installer has been published.`,
+  );
   const repositoryView = validateRepository(repositoryData, repository);
   const semanticPrerelease = semver.prerelease.length > 0;
   invariant(
@@ -224,8 +267,12 @@ export function buildReleaseData({
   if (release.html_url !== undefined) validateGithubUrl(release.html_url, releaseUrl, "Release");
   const dmgUrl = githubAssetUrl(repository, semver.tag, assets.dmg.name);
   const checksumUrl = githubAssetUrl(repository, semver.tag, assets.checksums.name);
+  const windowsUrl = assets.windows
+    ? githubAssetUrl(repository, semver.tag, assets.windows.name)
+    : null;
   const totalDownloads = aggregateApplicationDownloads(releases);
   const dmgSize = formatBytes(assets.dmg.size);
+  const windowsSize = assets.windows ? formatBytes(assets.windows.size) : null;
   const publishedDate = formatPublishedDate(release.published_at);
   const releaseLabel = prerelease ? "Pre-release" : "Latest release";
 
@@ -246,11 +293,21 @@ export function buildReleaseData({
       bytes: assets.dmg.size,
       formatted_size: dmgSize,
     },
-    // The desktop updater downloads the signed app archive rather than the
-    // public DMG. Its exact size makes progress authoritative even when a CDN
-    // response does not expose Content-Length.
+    windows: assets.windows
+      ? {
+          name: assets.windows.name,
+          url: windowsUrl,
+          bytes: assets.windows.size,
+          formatted_size: windowsSize,
+        }
+      : null,
+    // The desktop updater downloads a different artifact from the public DMG
+    // on macOS. Publish the exact per-target payload sizes so clients can show
+    // authoritative progress and reject a truncated or oversized archive even
+    // when the CDN omits Content-Length.
     updater_bytes: {
       "darwin-aarch64": assets.updater.size,
+      ...(assets.windows ? { "windows-x86_64": assets.windows.size } : {}),
     },
     checksum_url: checksumUrl,
     repository: {
@@ -287,6 +344,7 @@ function assertKnownMarkers(html) {
     ["text", TEXT_FIELDS],
     ["href", HREF_FIELDS],
     ["aria", ARIA_FIELDS],
+    ["platform", PLATFORM_FIELDS],
   ];
   for (const [kind, supported] of markerSets) {
     const matcher = new RegExp(`data-release-${kind}="([^"]+)"`, "g");
@@ -297,11 +355,14 @@ function assertKnownMarkers(html) {
 }
 
 function markerValues(data) {
+  const windows = data.windows;
   const text = {
     version: data.release.version,
     tag: data.release.tag,
     dmg_name: data.dmg.name,
     dmg_size: data.dmg.formatted_size,
+    windows_name: windows?.name ?? "Windows installer unavailable",
+    windows_size: windows?.formatted_size ?? "Not available for this release",
     total_downloads: formatInteger(data.total_downloads),
     stars: formatInteger(data.repository.stars),
     release_label: data.release.label,
@@ -309,11 +370,15 @@ function markerValues(data) {
   };
   const href = {
     dmg: data.dmg.url,
+    windows: windows?.url ?? data.release.url,
     release: data.release.url,
     checksum: data.checksum_url,
   };
   const aria = {
     download: `Download VTerminal ${data.release.version} for macOS (Apple Silicon), ${data.dmg.formatted_size}.`,
+    windows_download: windows
+      ? `Download VTerminal ${data.release.version} Windows 11 preview (x64), ${windows.formatted_size}.`
+      : `VTerminal ${data.release.version} does not include a Windows installer.`,
     announcement: `${data.release.label} ${data.release.version}. Read the release notes.`,
   };
   return { text, href, aria };
@@ -324,6 +389,19 @@ export function renderHtml(template, data) {
   assertKnownMarkers(template);
   const values = markerValues(data);
   let html = template;
+
+  // The site source contains both platform CTAs so it remains useful when
+  // opened directly. A legacy release may predate the Windows port, though. In
+  // that case keep rendering the macOS release rather than failing Pages, and
+  // hide only elements explicitly marked as Windows-release dependent.
+  html = html.replace(
+    /<([A-Za-z][\w:-]*)([^>]*\sdata-release-platform="windows"[^>]*)>/g,
+    (tag) => {
+      const withoutMarker = tag.replace(/\sdata-release-platform="windows"/, "");
+      if (data.windows || /\shidden(?:\s|=|>)/i.test(withoutMarker)) return withoutMarker;
+      return withoutMarker.replace(/>$/, " hidden>");
+    },
+  );
 
   for (const [field, value] of Object.entries(values.text)) {
     const expectedCount = [...html.matchAll(new RegExp(`data-release-text="${escapeRegExp(field)}"`, "g"))].length;
@@ -376,7 +454,9 @@ export function renderHtml(template, data) {
         throw new Error(`Release JSON-LD is invalid: ${error.message}`);
       }
       json.softwareVersion = data.release.version;
-      json.downloadUrl = data.dmg.url;
+      json.downloadUrl = data.windows
+        ? [data.dmg.url, data.windows.url]
+        : data.dmg.url;
       json.releaseNotes = data.release.url;
       json.datePublished = data.release.published_at;
       json.fileSize = data.dmg.formatted_size;

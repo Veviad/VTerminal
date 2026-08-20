@@ -20,13 +20,27 @@ export async function refreshModels(): Promise<void> {
     // Tolerated rather than required: a build with no local engine answers with an
     // empty list, and one failure here must not blank the chat catalog.
     api.visionCatalog().catch(() => []),
-    api.visionStatus().catch(() => ({ loaded: null, state: "idle", available: false })),
+    api.visionStatus().catch(() => ({
+      loaded: null,
+      state: "idle",
+      available: false,
+      acceleration: {
+        backend: "unavailable",
+        device_name: null,
+        device_memory_bytes: null,
+        fallback_reason: null,
+      },
+    })),
   ]);
   const store = useAppStore.getState();
   store.setCatalog(catalog);
-  store.setModelStatus(status.loaded, status.state, status.available);
+  store.setModelStatus(status.loaded, status.state, status.available, status.acceleration);
   store.setVisionCatalog(visionCatalog);
-  store.setVisionStatus(visionStatus.loaded, visionStatus.state as ModelState);
+  store.setVisionStatus(
+    visionStatus.loaded,
+    visionStatus.state as ModelState,
+    visionStatus.acceleration ?? null,
+  );
 }
 
 /** Load the vision sidecar, surfacing load errors the way `loadModel` does. */

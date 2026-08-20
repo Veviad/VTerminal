@@ -21,6 +21,10 @@ pub enum PtyEvent {
     Error {
         message: String,
     },
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    Warning {
+        message: String,
+    },
 }
 
 #[derive(Debug)]

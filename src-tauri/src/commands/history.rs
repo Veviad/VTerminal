@@ -16,7 +16,8 @@ pub fn history_record(
     if !settings::read_bool(&app, "history_capture_output", true) {
         entry.output_tail = None;
     }
-    let shell = settings::read_string(&app, "shell_path").unwrap_or_else(|| "zsh".into());
+    let shell = settings::read_string(&app, "shell_path")
+        .unwrap_or_else(|| settings::default_shell().into());
     let shell_name = shell.rsplit('/').next().unwrap_or("zsh").to_string();
     let conn = db.0.lock().map_err(|_| "db poisoned")?;
     queries::insert_history(&conn, &entry, &shell_name)

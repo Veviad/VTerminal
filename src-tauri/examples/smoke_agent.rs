@@ -129,7 +129,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
     let config = run::AgentConfig {
         request_id: "smoke-agent".into(),
-        shell: "/bin/zsh".into(),
+        shell: if cfg!(target_os = "windows") {
+            "/bin/bash".into()
+        } else {
+            "/bin/zsh".into()
+        },
         cwd: Some("/tmp".into()),
         temperature: Some(0.2),
         // Off by default to keep the run fast and on-task, but every catalog
@@ -168,8 +172,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // path. The app itself always uses ExecTarget::Pty.
         exec_target: run::ExecTarget::Subprocess,
     };
+    let platform_context = if cfg!(target_os = "windows") {
+        "OS: Windows 11\nShell: /bin/bash in WSL2\nWorking directory: /tmp"
+    } else {
+        "OS: macOS\nShell: /bin/zsh\nWorking directory: /tmp"
+    };
     let system_prompt = format!(
-        "{}\n\nOS: macOS\nShell: /bin/zsh\nWorking directory: /tmp",
+        "{}\n\n{platform_context}",
         vterminal_lib::agent::prompts::AGENT
     );
     let goal = format!(

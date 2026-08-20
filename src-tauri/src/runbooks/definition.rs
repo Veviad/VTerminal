@@ -1984,6 +1984,9 @@ spec:
         }
         let actual = std::fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        // Git may materialize the checked-in artifact with CRLF on Windows;
+        // schema identity is textual content, not the checkout's EOL policy.
+        let actual = actual.replace("\r\n", "\n");
         assert_eq!(
             actual, expected,
             "run UPDATE_RUNBOOK_SCHEMA=1 cargo test checked_in_schema_is_current"

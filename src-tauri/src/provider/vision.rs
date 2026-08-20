@@ -22,7 +22,6 @@ use std::sync::Arc;
 
 use llama_cpp_2::context::params::{KvCacheType, LlamaContextParams};
 use llama_cpp_2::llama_batch::LlamaBatch;
-use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::LlamaModel;
 use llama_cpp_2::mtmd::{
     mtmd_default_marker, MtmdBitmap, MtmdContext, MtmdContextParams, MtmdInputText,
@@ -31,7 +30,9 @@ use llama_cpp_2::sampling::LlamaSampler;
 use tauri::ipc::Channel;
 
 use super::chat_template::ChatTemplate;
-use super::local::{backend, load_template, perf_cores};
+use super::local::{
+    backend, load_template, perf_cores, validate_or_retry_on_cpu, LocalAcceleration,
+};
 use super::ChatMessage;
 use crate::models::vision::{VisionArch, VisionModel};
 use crate::models::LoadEvent;
@@ -68,13 +69,20 @@ pub struct LoadedVision {
     template: Arc<ChatTemplate>,
     arch: VisionArch,
     context_len: u32,
+    acceleration: LocalAcceleration,
 }
 
 /// What the blocking half of `load` carries back across the thread boundary:
 /// the four `LoadedVision` fields that only exist once the weights are resident.
 /// `model_id` and `arch` are known before the spawn, so they stay on the async
 /// side rather than making the round trip.
-type VisionParts = (Arc<LlamaModel>, Arc<MtmdContext>, Arc<ChatTemplate>, u32);
+type VisionParts = (
+    Arc<LlamaModel>,
+    Arc<MtmdContext>,
+    Arc<ChatTemplate>,
+    u32,
+    LocalAcceleration,
+);
 
 /// Cloned out from under the host lock so a transcription never holds it.
 pub struct ReadyVision {
@@ -118,6 +126,15 @@ impl VisionHost {
         }
     }
 
+    pub async fn acceleration_snapshot(&self) -> serde_json::Value {
+        let acceleration = match &*self.inner.lock().await {
+            VisionSlot::Ready(model) => model.acceleration.clone(),
+            VisionSlot::Empty | VisionSlot::Loading { .. } => LocalAcceleration::unloaded(),
+        };
+        serde_json::to_value(acceleration)
+            .unwrap_or_else(|_| serde_json::json!({ "backend": "unknown" }))
+    }
+
     pub async fn unload(&self) {
         self.generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -151,23 +168,25 @@ impl VisionHost {
         });
 
         let build = tokio::task::spawn_blocking(move || -> Result<VisionParts, String> {
-            let backend = backend()?;
-            let params = LlamaModelParams::default().with_n_gpu_layers(u32::MAX);
-            let model = LlamaModel::load_from_file(backend, &gguf_path, &params)
-                .map_err(|e| format!("vision model load failed: {e}"))?;
+            let (model, acceleration) =
+                super::local::load_model_with_fallback(&gguf_path, "vision model")?;
             let template = load_template(&model)?;
             let context_len = MAX_SIDECAR_CTX.min(model.n_ctx_train()).max(512);
-
-            let mtmd = MtmdContext::init_from_file(&mmproj_path, &model, &mtmd_params(true)?)
-                .map_err(|e| projector_error(&e.to_string()))?;
-            if !mtmd.support_vision() {
-                return Err("this projector carries no vision encoder".into());
-            }
+            let (model, acceleration, mtmd) = validate_or_retry_on_cpu(
+                &gguf_path,
+                "vision model",
+                model,
+                acceleration,
+                |model, accelerated| {
+                    initialize_vision_runtime(model, &mmproj_path, context_len, accelerated)
+                },
+            )?;
             Ok((
                 Arc::new(model),
                 Arc::new(mtmd),
                 Arc::new(template),
                 context_len,
+                acceleration,
             ))
         })
         .await
@@ -184,7 +203,7 @@ impl VisionHost {
             return Err(message);
         }
         match build {
-            Ok((model, mtmd, template, context_len)) => {
+            Ok((model, mtmd, template, context_len, acceleration)) => {
                 *slot = VisionSlot::Ready(LoadedVision {
                     model_id: spec.id.to_string(),
                     model,
@@ -192,6 +211,7 @@ impl VisionHost {
                     template,
                     arch: spec.arch,
                     context_len,
+                    acceleration,
                 });
                 let _ = on_event.send(LoadEvent::Ready { context_len });
                 Ok(())
@@ -245,8 +265,8 @@ impl ReadyVision {
     /// Build a sidecar with no `VisionHost` and no app around it.
     ///
     /// The twin of `ReadyModel::load_standalone`, and for the same reason: the
-    /// smoke example is the only way to verify the M-RoPE arithmetic and the Metal
-    /// CLIP path, and it has no Tauri anything. `use_gpu` is a parameter here only
+    /// smoke example is the only way to verify the M-RoPE arithmetic and the
+    /// accelerated CLIP path, and it has no Tauri anything. `use_gpu` is a parameter here only
     /// so that example can offer `--cpu-clip`.
     pub fn load_standalone(
         model_path: &str,
@@ -255,17 +275,19 @@ impl ReadyVision {
         max_context: u32,
         use_gpu: bool,
     ) -> Result<Self, String> {
-        let backend = backend()?;
-        let params = LlamaModelParams::default().with_n_gpu_layers(u32::MAX);
-        let model = LlamaModel::load_from_file(backend, model_path, &params)
-            .map_err(|e| format!("vision model load failed: {e}"))?;
+        let (model, acceleration) =
+            super::local::load_model_with_fallback(model_path, "vision model")?;
         let template = load_template(&model)?;
         let context_len = max_context.min(model.n_ctx_train()).max(512);
-        let mtmd = MtmdContext::init_from_file(mmproj_path, &model, &mtmd_params(use_gpu)?)
-            .map_err(|e| projector_error(&e.to_string()))?;
-        if !mtmd.support_vision() {
-            return Err("this projector carries no vision encoder".into());
-        }
+        let (model, _acceleration, mtmd) = validate_or_retry_on_cpu(
+            model_path,
+            "vision model",
+            model,
+            acceleration,
+            |model, accelerated| {
+                initialize_vision_runtime(model, mmproj_path, context_len, use_gpu && accelerated)
+            },
+        )?;
         Ok(Self {
             model_id: format!("standalone:{model_path}"),
             model: Arc::new(model),
@@ -357,9 +379,8 @@ impl ReadyVision {
 
 fn mtmd_params(use_gpu: bool) -> Result<MtmdContextParams, String> {
     Ok(MtmdContextParams {
-        // The crate is built with the `metal` feature; forcing the CLIP graph onto
-        // CPU costs seconds per image. If a projector turns out to have Metal gaps
-        // this is the first thing to flip — the only symptom is a null context.
+        // Forcing the CLIP graph onto CPU costs seconds per image. Windows retries
+        // the entire vision runtime on CPU if its Vulkan projector cannot start.
         use_gpu,
         // The crate default is TRUE, and it writes to stderr on every single call.
         print_timings: false,
@@ -369,6 +390,43 @@ fn mtmd_params(use_gpu: bool) -> Result<MtmdContextParams, String> {
         image_min_tokens: -1,
         image_max_tokens: IMAGE_MAX_TOKENS,
     })
+}
+
+fn vision_context_params(n_ctx: u32) -> LlamaContextParams {
+    let threads = perf_cores();
+    let n_batch: u32 = 512;
+    LlamaContextParams::default()
+        .with_n_ctx(NonZeroU32::new(n_ctx.max(512)))
+        .with_n_batch(n_batch)
+        .with_n_ubatch(n_batch)
+        .with_n_threads(threads)
+        .with_n_threads_batch(threads)
+        .with_type_k(KvCacheType::Q8_0)
+        .with_type_v(KvCacheType::Q8_0)
+        .with_swa_full(false)
+}
+
+fn initialize_vision_runtime(
+    model: &LlamaModel,
+    mmproj_path: &str,
+    context_len: u32,
+    use_gpu: bool,
+) -> Result<MtmdContext, String> {
+    let mtmd = MtmdContext::init_from_file(mmproj_path, model, &mtmd_params(use_gpu)?)
+        .map_err(|error| projector_error(&error.to_string()))?;
+    if !mtmd.support_vision() {
+        return Err("this projector carries no vision encoder".into());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let context = model
+            .new_context(backend()?, vision_context_params(context_len))
+            .map_err(|error| format!("vision context creation failed: {error}"))?;
+        drop(context);
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = context_len;
+    Ok(mtmd)
 }
 
 /// Greedy decoding, NOT the model's chat sampling defaults.
@@ -397,7 +455,7 @@ fn transcription_sampler() -> LlamaSampler {
 fn projector_error(inner: &str) -> String {
     format!(
         "projector load failed ({inner}) — either this build of llama.cpp does not know this \
-         projector type, or its Metal kernels are missing"
+         projector type, or the selected accelerator cannot run it"
     )
 }
 
@@ -471,22 +529,10 @@ fn run(t: Job<'_>) -> Result<String, String> {
         ));
     }
 
-    let threads = perf_cores();
     let n_batch: u32 = 512;
-    let ctx_params = LlamaContextParams::default()
-        .with_n_ctx(NonZeroU32::new(n_ctx))
-        .with_n_batch(n_batch)
-        .with_n_ubatch(n_batch)
-        .with_n_threads(threads)
-        .with_n_threads_batch(threads)
-        // Same reasoning as the chat path: quantized KV is what makes a second
-        // resident model affordable at all.
-        .with_type_k(KvCacheType::Q8_0)
-        .with_type_v(KvCacheType::Q8_0)
-        .with_swa_full(false);
     let mut ctx = t
         .model
-        .new_context(backend, ctx_params)
+        .new_context(backend, vision_context_params(n_ctx))
         .map_err(|e| format!("vision context creation failed: {e}"))?;
 
     // One call does the whole prefill: `llama_decode` for the text chunks,
@@ -496,8 +542,8 @@ fn run(t: Job<'_>) -> Result<String, String> {
         .eval_chunks(t.mtmd, &ctx, 0, 0, n_batch as i32, true)
         .map_err(|e| {
             format!(
-                "image encoding failed ({e}) — if this build's Metal kernels do not cover \
-                 this projector, loading with use_gpu=false is the fallback"
+                "image encoding failed ({e}) — the selected inference backend could not \
+                 evaluate this projector"
             )
         })?;
     note(format!("eval_chunks -> n_past={n_past}"));
@@ -604,5 +650,11 @@ mod tests {
                 "{name}: prompt text is missing"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn an_empty_vision_host_has_its_own_unloaded_status() {
+        let host = VisionHost::with_gate(Arc::new(tokio::sync::Semaphore::new(1)));
+        assert_eq!(host.acceleration_snapshot().await["backend"], "unloaded");
     }
 }

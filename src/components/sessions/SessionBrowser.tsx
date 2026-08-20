@@ -27,6 +27,7 @@ import { reopenSession } from "../../lib/sessionReopen";
 import { metaLine, sessionLabel } from "../../lib/sessionArchiveView";
 import { useSessions } from "../../hooks/useSessions";
 import { S } from "../../lib/strings";
+import { usesAlternateAction } from "../../lib/keymap";
 import type { ArchiveSummary } from "../../lib/types";
 
 export function SessionBrowser() {
@@ -125,7 +126,7 @@ export function SessionBrowser() {
       e.preventDefault();
       const item = filtered[selected];
       // ⌘⏎ reopens the directory without replaying the old screen.
-      if (item) void reopen(item, !e.metaKey);
+      if (item) void reopen(item, !usesAlternateAction(e.nativeEvent));
     } else if (e.key === "Escape") {
       // Consume it — the window-level handler would otherwise also close the
       // next overlay in the same keypress.

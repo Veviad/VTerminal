@@ -40,23 +40,72 @@ pub async fn run_command(
 ) -> Result<ExecResult, String> {
     let started = std::time::Instant::now();
 
-    let mut cmd = tokio::process::Command::new(shell);
-    cmd.args(["-lc", command])
-        .stdin(Stdio::null())
+    #[cfg(not(target_os = "windows"))]
+    let mut cmd = {
+        let mut command_builder = tokio::process::Command::new(shell);
+        command_builder.args(["-lc", command]);
+        command_builder
+    };
+    #[cfg(target_os = "windows")]
+    let cmd = {
+        let _ = shell;
+        // A unique inherited tag lets cancellation and normal completion find
+        // descendants which detached from wsl.exe (for example via nohup).
+        // `setsid --wait` gives the captured command its own Linux session;
+        // unlike the interactive ConPTY path this command has no controlling
+        // terminal, so `--ctty` is deliberately omitted.
+        let session_tag = format!("vt-agent-{}", uuid::Uuid::new_v4());
+        let mut command_builder = tokio::process::Command::new("wsl.exe");
+        command_builder.args([
+            "--cd",
+            cwd.filter(|dir| !dir.is_empty()).unwrap_or("~"),
+            "--exec",
+            "/usr/bin/setsid",
+            "--wait",
+            "/usr/bin/env",
+            &format!("VTERMINAL_SESSION_ID={session_tag}"),
+            "/bin/bash",
+            "-lc",
+            command,
+        ]);
+        (command_builder, session_tag)
+    };
+    #[cfg(target_os = "windows")]
+    let wsl_session_tag = cmd.1;
+    #[cfg(target_os = "windows")]
+    let mut cmd = cmd.0;
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .process_group(0)
         .kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
+    #[cfg(not(target_os = "windows"))]
     if let Some(dir) = cwd.filter(|d| !d.is_empty()) {
         cmd.current_dir(dir);
     }
     let mut child = cmd.spawn().map_err(|e| format!("spawn failed: {e}"))?;
-    let pgid = child.id().map(|pid| pid as i32);
+    let process_id = child.id();
 
-    let kill_group = |pgid: Option<i32>| {
-        if let Some(pgid) = pgid {
+    let kill_tree = |process_id: Option<u32>| {
+        #[cfg(unix)]
+        if let Some(pgid) = process_id.map(|pid| pid as i32) {
             unsafe {
                 libc::killpg(pgid, libc::SIGKILL);
+            }
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(pid) = process_id {
+            if !crate::pty::session::cleanup_wsl_session(&wsl_session_tag) {
+                // taskkill can only prove termination of the host-side wsl.exe
+                // tree. It remains a last-resort aid; the post-wait tag check
+                // below is the Linux-side authority.
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/PID", &pid.to_string(), "/T", "/F"])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
             }
         }
     };
@@ -121,13 +170,13 @@ pub async fn run_command(
             },
             _ = &mut timeout => {
                 timed_out = true;
-                kill_group(pgid);
+                kill_tree(process_id);
                 break;
             }
             _ = cancel.changed() => {
                 if *cancel.borrow() {
                     cancelled = true;
-                    kill_group(pgid);
+                    kill_tree(process_id);
                     break;
                 }
             }
@@ -142,16 +191,21 @@ pub async fn run_command(
             status = child.wait() => break status.map_err(|e| format!("wait failed: {e}"))?,
             _ = &mut timeout, if !timed_out && !cancelled => {
                 timed_out = true;
-                kill_group(pgid);
+                kill_tree(process_id);
             }
             _ = cancel.changed(), if !timed_out && !cancelled => {
                 if *cancel.borrow() {
                     cancelled = true;
-                    kill_group(pgid);
+                    kill_tree(process_id);
                 }
             }
         }
     };
+
+    #[cfg(target_os = "windows")]
+    if !crate::pty::session::cleanup_wsl_session(&wsl_session_tag) {
+        return Err("could not verify cleanup of the WSL agent process tree".into());
+    }
 
     let exit_code = if timed_out || cancelled {
         status.code().unwrap_or(124)
@@ -182,7 +236,7 @@ pub async fn run_command(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use tauri::ipc::{Channel, InvokeResponseBody};

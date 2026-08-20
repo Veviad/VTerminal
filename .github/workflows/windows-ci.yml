@@ -1,0 +1,262 @@
+name: Windows validation
+
+on:
+  workflow_call:
+    inputs:
+      restore-cache:
+        description: Restore the trusted Windows verification and package caches.
+        required: true
+        type: boolean
+      save-cache:
+        description: Save each Windows cache from its single trusted main writer.
+        required: true
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  WINDOWS_VERIFY_CACHE_REV: windows-x64-cpu-vulkan-verify-v2
+  WINDOWS_PACKAGE_CACHE_REV: windows-x64-cpu-vulkan-package-v2
+  VULKAN_PACKAGE_VERSION: 1.4.350
+  VULKAN_SDK_VERSION: 1.4.350.0
+  VULKAN_SDK: C:\VulkanSDK\1.4.350.0
+  CMAKE_GENERATOR: Ninja
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  core:
+    name: Windows core / cloud-only installer
+    runs-on: windows-latest
+    timeout-minutes: 70
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Configure Windows toolchain and short target path
+        run: |
+          rustup show
+          rustup component add clippy
+          rustup target add x86_64-pc-windows-msvc
+          Get-Command ninja -ErrorAction Stop | Out-Null
+          $shortTarget = Join-Path ([IO.Path]::GetPathRoot($env:GITHUB_WORKSPACE)) 't'
+          "CARGO_TARGET_DIR=$shortTarget" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "WINDOWS_JOB_STARTED_AT=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Restore Windows Rust dependency cache
+        id: rust-cache
+        if: inputs['restore-cache']
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: ${{ env.WINDOWS_VERIFY_CACHE_REV }}
+          workspaces: src-tauri -> ../../../../t
+          env-vars: VULKAN_PACKAGE_VERSION VULKAN_SDK_VERSION VULKAN_SDK WINDOWS_VERIFY_CACHE_REV CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG CARGO_INCREMENTAL
+          cache-bin: false
+          save-if: false
+
+      - run: npm ci
+
+      - name: Managed CLI PATH script
+        run: ./scripts/windows-cli-path.tests.ps1
+
+      - name: Stub frontend assets
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Set-Content -Path dist/index.html -Value '<!doctype html><title>ci stub</title>'
+
+      # Tauri validates externalBin from this package's build script even for
+      # Clippy/tests, before Cargo can build this package's sidecar target.
+      - name: Bootstrap Windows companion path
+        run: |
+          New-Item -ItemType Directory -Force src-tauri/binaries | Out-Null
+          New-Item -ItemType File -Force src-tauri/binaries/vterminal-docs-x86_64-pc-windows-msvc.exe | Out-Null
+
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        working-directory: src-tauri
+        run: cargo test --locked
+
+      - name: Stage Windows companion sidecar (feature-off)
+        run: |
+          cargo build --manifest-path src-tauri/Cargo.toml --release --locked --target x86_64-pc-windows-msvc --bin vterminal-docs
+          Copy-Item "$env:CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/vterminal-docs.exe" src-tauri/binaries/vterminal-docs-x86_64-pc-windows-msvc.exe
+
+      - name: NSIS smoke bundle (feature-off)
+        run: |
+          $stagedLocalDlls = @(
+            Get-ChildItem src-tauri/binaries/llama-runtime,src-tauri/binaries/llama-backends -Filter '*.dll' -File -ErrorAction SilentlyContinue
+          )
+          if ($stagedLocalDlls.Count -ne 0) {
+            throw "Feature-off NSIS smoke must not stage llama/GGML DLLs: $($stagedLocalDlls.Name -join ', ')"
+          }
+          npm run tauri build -- --target x86_64-pc-windows-msvc --bundles nsis --config src-tauri/tauri.windows.conf.json
+          $bundle = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc/release/bundle/nsis'
+          $installer = @(Get-ChildItem $bundle -Filter '*setup.exe' -File)
+          if ($installer.Count -ne 1) { throw "Expected one feature-off NSIS installer, found $($installer.Count)." }
+
+      - name: Cache summary
+        if: always()
+        run: |
+          $mode = if ('${{ inputs['restore-cache'] }}' -eq 'true') { 'restore enabled' } else { 'clean build' }
+          $hit = if ('${{ steps.rust-cache.outputs.cache-hit }}') { '${{ steps.rust-cache.outputs.cache-hit }}' } else { 'not restored' }
+          $duration = if ($env:WINDOWS_JOB_STARTED_AT) {
+            $elapsed = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [long]$env:WINDOWS_JOB_STARTED_AT
+            [TimeSpan]::FromSeconds($elapsed).ToString('hh\:mm\:ss')
+          } else { 'not started' }
+          "### Windows core cache`n- Mode: $mode`n- Exact hit: $hit`n- Elapsed: $duration" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+  local-verify:
+    name: Windows local models / CPU + Vulkan verification
+    runs-on: windows-latest
+    timeout-minutes: 70
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Configure Windows toolchain and short target path
+        run: |
+          rustup show
+          rustup component add clippy
+          rustup target add x86_64-pc-windows-msvc
+          Get-Command ninja -ErrorAction Stop | Out-Null
+          $shortTarget = Join-Path ([IO.Path]::GetPathRoot($env:GITHUB_WORKSPACE)) 't'
+          "CARGO_TARGET_DIR=$shortTarget" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "WINDOWS_JOB_STARTED_AT=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Install pinned Vulkan SDK
+        run: |
+          choco install vulkan-sdk --version $env:VULKAN_PACKAGE_VERSION -y --no-progress
+          if (-not (Test-Path -LiteralPath $env:VULKAN_SDK -PathType Container)) {
+            throw "Vulkan SDK $env:VULKAN_SDK_VERSION was not installed at $env:VULKAN_SDK."
+          }
+          "$env:VULKAN_SDK\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Restore or populate Windows Rust dependency cache
+        id: rust-cache
+        if: inputs['restore-cache'] || inputs['save-cache']
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: ${{ env.WINDOWS_VERIFY_CACHE_REV }}
+          workspaces: src-tauri -> ../../../../t
+          env-vars: VULKAN_PACKAGE_VERSION VULKAN_SDK_VERSION VULKAN_SDK WINDOWS_VERIFY_CACHE_REV CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG CARGO_INCREMENTAL
+          cache-bin: false
+          save-if: ${{ inputs['save-cache'] }}
+          cache-on-failure: true
+
+      - name: Stub frontend assets
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Set-Content -Path dist/index.html -Value '<!doctype html><title>ci stub</title>'
+
+      - name: Bootstrap Windows companion path
+        run: |
+          New-Item -ItemType Directory -Force src-tauri/binaries | Out-Null
+          New-Item -ItemType File -Force src-tauri/binaries/vterminal-docs-x86_64-pc-windows-msvc.exe | Out-Null
+
+      - name: Clippy (local-llm, Vulkan and CPU backends)
+        working-directory: src-tauri
+        run: cargo clippy --all-targets --locked --features local-llm -- -D warnings
+
+      - name: Test (local-llm)
+        working-directory: src-tauri
+        run: cargo test --locked --features local-llm
+
+      - name: Cache summary
+        if: always()
+        run: |
+          $mode = if ('${{ inputs['restore-cache'] }}' -eq 'true') { 'restore enabled' } else { 'clean build' }
+          $write = if ('${{ inputs['save-cache'] }}' -eq 'true') { 'main cache writer' } else { 'restore only' }
+          $hit = if ('${{ steps.rust-cache.outputs.cache-hit }}') { '${{ steps.rust-cache.outputs.cache-hit }}' } else { 'not restored' }
+          $duration = if ($env:WINDOWS_JOB_STARTED_AT) {
+            $elapsed = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [long]$env:WINDOWS_JOB_STARTED_AT
+            [TimeSpan]::FromSeconds($elapsed).ToString('hh\:mm\:ss')
+          } else { 'not started' }
+          "### Windows local-model verification cache`n- Mode: $mode`n- Exact hit: $hit`n- Write policy: $write`n- Elapsed: $duration" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+  local-package:
+    name: Windows local models / CPU + Vulkan installer
+    runs-on: windows-latest
+    timeout-minutes: 70
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Configure Windows toolchain and short target path
+        run: |
+          rustup show
+          rustup target add x86_64-pc-windows-msvc
+          Get-Command ninja -ErrorAction Stop | Out-Null
+          $shortTarget = Join-Path ([IO.Path]::GetPathRoot($env:GITHUB_WORKSPACE)) 't'
+          "CARGO_TARGET_DIR=$shortTarget" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "WINDOWS_JOB_STARTED_AT=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Install pinned Vulkan SDK
+        run: |
+          choco install vulkan-sdk --version $env:VULKAN_PACKAGE_VERSION -y --no-progress
+          if (-not (Test-Path -LiteralPath $env:VULKAN_SDK -PathType Container)) {
+            throw "Vulkan SDK $env:VULKAN_SDK_VERSION was not installed at $env:VULKAN_SDK."
+          }
+          "$env:VULKAN_SDK\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Restore or populate Windows package cache
+        id: rust-cache
+        if: inputs['restore-cache'] || inputs['save-cache']
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: ${{ env.WINDOWS_PACKAGE_CACHE_REV }}
+          workspaces: src-tauri -> ../../../../t
+          env-vars: VULKAN_PACKAGE_VERSION VULKAN_SDK_VERSION VULKAN_SDK WINDOWS_PACKAGE_CACHE_REV CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG CARGO_INCREMENTAL
+          cache-bin: false
+          save-if: ${{ inputs['save-cache'] }}
+          cache-on-failure: true
+
+      - name: NSIS smoke bundle (local-llm, Vulkan + CPU fallback)
+        run: |
+          ./scripts/build-windows.ps1
+          $bundle = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc/release/bundle/nsis'
+          $installer = @(Get-ChildItem $bundle -Filter '*setup.exe' -File)
+          if ($installer.Count -ne 1) { throw "Expected one NSIS installer, found $($installer.Count)." }
+
+      - name: Cache summary
+        if: always()
+        run: |
+          $mode = if ('${{ inputs['restore-cache'] }}' -eq 'true') { 'restore enabled' } else { 'clean build' }
+          $write = if ('${{ inputs['save-cache'] }}' -eq 'true') { 'main cache writer' } else { 'restore only' }
+          $hit = if ('${{ steps.rust-cache.outputs.cache-hit }}') { '${{ steps.rust-cache.outputs.cache-hit }}' } else { 'not restored' }
+          $duration = if ($env:WINDOWS_JOB_STARTED_AT) {
+            $elapsed = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [long]$env:WINDOWS_JOB_STARTED_AT
+            [TimeSpan]::FromSeconds($elapsed).ToString('hh\:mm\:ss')
+          } else { 'not started' }
+          "### Windows local-model package cache`n- Mode: $mode`n- Exact hit: $hit`n- Write policy: $write`n- Elapsed: $duration" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
