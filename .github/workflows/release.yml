@@ -252,7 +252,10 @@ jobs:
           "VULKAN_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append
           "VULKAN_PACKAGE_VERSION=$env:VULKAN_PACKAGE_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
           "VULKAN_SDK_VERSION=$env:VULKAN_SDK_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "WINDOWS_BUILD_CACHE_REV=windows-x64-cpu-vulkan-v1" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "WINDOWS_PACKAGE_CACHE_REV=windows-x64-cpu-vulkan-package-v2" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CARGO_PROFILE_DEV_DEBUG=0" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CARGO_PROFILE_TEST_DEBUG=0" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CARGO_INCREMENTAL=0" | Out-File -FilePath $env:GITHUB_ENV -Append
           "CMAKE_GENERATOR=Ninja" | Out-File -FilePath $env:GITHUB_ENV -Append
           "CARGO_TARGET_DIR=$shortTarget" | Out-File -FilePath $env:GITHUB_ENV -Append
           "$sdk\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append
@@ -260,9 +263,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: ${{ env.WINDOWS_BUILD_CACHE_REV }}
+          shared-key: ${{ env.WINDOWS_PACKAGE_CACHE_REV }}
           workspaces: src-tauri -> ../../../../t
-          env-vars: VULKAN_PACKAGE_VERSION VULKAN_SDK_VERSION VULKAN_SDK WINDOWS_BUILD_CACHE_REV
+          env-vars: VULKAN_PACKAGE_VERSION VULKAN_SDK_VERSION VULKAN_SDK WINDOWS_PACKAGE_CACHE_REV CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG CARGO_INCREMENTAL
           cache-bin: false
           save-if: false
 

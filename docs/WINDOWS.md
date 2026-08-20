@@ -173,14 +173,19 @@ x64 VMs and retain the installer hashes and logs with the release candidate:
    extraction, image/vision attachment handling, external links, and display
    recovery after sleep/resume on clean Windows 11 VMs.
 
-The repository's required Windows validation runs two `windows-latest` jobs in
-parallel. The core job compiles and tests the feature-off configuration and
+The repository's required Windows validation runs three `windows-latest` jobs
+in parallel. The core job compiles and tests the feature-off configuration and
 produces an NSIS smoke bundle with only the companion sidecar and common
-installer resources. The local-model job compiles and tests CPU/Vulkan local
-inference and produces the production-shaped NSIS smoke containing both
-backends. Pull requests restore a dependency cache written only by `main`; a
-monthly scheduled workflow runs both jobs without restoring or saving a cache
-to preserve clean-build coverage.
+installer resources. The local-model verification job runs Clippy and tests
+against both CPU and Vulkan support, while the package job independently
+produces the production-shaped NSIS smoke containing both backends. Verification
+and release artifacts use separate immutable caches, each written by exactly one
+job on trusted `main` pushes; pull requests only restore them. A monthly
+scheduled workflow runs all three jobs without restoring or saving a cache to
+preserve clean-build coverage. Windows CI also disables incremental compilation
+and development/test debug information because hosted runners do not retain a
+debugging session and those artifacts substantially increase MSVC work and cache
+size.
 Windows local-inference builds require CMake's Ninja generator in addition to
 the MSVC toolchain and pinned Vulkan SDK; `scripts/build-windows.ps1` verifies
 Ninja and selects it explicitly before Cargo configures llama.cpp. The script
