@@ -180,6 +180,43 @@ jobs:
         working-directory: src-tauri
         run: cargo clippy --all-targets --locked --features local-llm -- -D warnings
 
+      # llama-cpp's core DLLs are normal PE imports. A clean native build can
+      # leave copies beside the test binary, but rust-cache deliberately does
+      # not guarantee those profile-root copies on an exact hit. Resolve the
+      # one complete ABI-matched CMake output and expose it to the Windows
+      # loader before starting any cached test executable.
+      - name: Expose local-model runtime DLLs to tests
+        run: |
+          $requiredRuntime = @('llama.dll', 'ggml.dll', 'ggml-base.dll')
+          $buildRoot = Join-Path $env:CARGO_TARGET_DIR 'debug\build'
+          $candidates = @(
+            Get-ChildItem -LiteralPath $buildRoot -Directory -Filter 'llama-cpp-sys-2-*' | ForEach-Object {
+              $output = Join-Path $_.FullName 'out'
+              $runtime = Join-Path $output 'bin'
+              $backends = Join-Path $output 'backends'
+              if ((Test-Path -LiteralPath $runtime -PathType Container) -and
+                  (Test-Path -LiteralPath $backends -PathType Container)) {
+                $missingRuntime = @(
+                  $requiredRuntime | Where-Object {
+                    -not (Test-Path -LiteralPath (Join-Path $runtime $_) -PathType Leaf)
+                  }
+                )
+                $backendDlls = @(Get-ChildItem -LiteralPath $backends -Filter '*.dll' -File)
+                $hasCpu = $null -ne ($backendDlls | Where-Object Name -Match '^ggml-cpu(?:-.+)?\.dll$')
+                $hasVulkan = $null -ne ($backendDlls | Where-Object Name -EQ 'ggml-vulkan.dll')
+                if ($missingRuntime.Count -eq 0 -and $hasCpu -and $hasVulkan) {
+                  [PSCustomObject]@{ Runtime = $runtime; Backends = $backends }
+                }
+              }
+            }
+          )
+          if ($candidates.Count -ne 1) {
+            $found = if ($candidates.Count -eq 0) { 'none' } else { $candidates.Runtime -join ', ' }
+            throw "Expected exactly one complete cached llama.cpp runtime for tests; found $found."
+          }
+          $candidates[0].Runtime | Out-File -FilePath $env:GITHUB_PATH -Append
+          $candidates[0].Backends | Out-File -FilePath $env:GITHUB_PATH -Append
+
       - name: Test (local-llm)
         working-directory: src-tauri
         run: cargo test --locked --features local-llm
