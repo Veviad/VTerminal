@@ -81,7 +81,13 @@ try {
   foreach ($name in $requiredRuntimeDlls) {
     $source = Join-Path (Join-Path $selectedBuild "bin") $name
     Copy-Item -LiteralPath $source -Destination (Join-Path $runtimeDestination $name) -Force
-    Copy-Item -LiteralPath $source -Destination (Join-Path $release $name) -Force
+    $releaseDestination = Join-Path $release $name
+    # Cargo may hard-link the selected output into the profile directory.
+    # PowerShell refuses to overwrite two names for the same file identity, so
+    # unlink the profile name first. The selected build output remains pinned
+    # and is then copied back as an independent, ABI-matched file.
+    Remove-Item -LiteralPath $releaseDestination -Force -ErrorAction SilentlyContinue
+    Copy-Item -LiteralPath $source -Destination $releaseDestination -Force
   }
 
   $selectedBackends = Join-Path $selectedBuild "backends"
