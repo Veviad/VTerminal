@@ -121,7 +121,10 @@ try {
     }
   }
 
-  npm run tauri build -- --target $target --bundles nsis --features local-llm --config src-tauri/tauri.updater.conf.json,src-tauri/tauri.windows.conf.json,src-tauri/tauri.windows.local-llm.conf.json
+  npm run tauri build -- --target $target --bundles nsis --features local-llm `
+    --config src-tauri/tauri.updater.conf.json `
+    --config src-tauri/tauri.windows.conf.json `
+    --config src-tauri/tauri.windows.local-llm.conf.json
 }
 finally {
   Pop-Location
