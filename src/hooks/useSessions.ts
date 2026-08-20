@@ -20,7 +20,6 @@ import { trackArchiveMutation } from "../lib/archiveWriteTracker";
 import { forgetRunbookTerminal } from "../lib/runbookTerminalPrivacy";
 import { replayBanner, stripReplayBanners } from "../lib/replayBanner";
 import { nextOrdinal, shortenCommand } from "../lib/sessionTitle";
-import { defaultShell, isWindows } from "../lib/platform";
 import { cancelNaming } from "../lib/sessionNaming";
 import { isUpdateExitBarrier, useUpdateStore } from "../stores/updateStore";
 import type {
@@ -86,9 +85,7 @@ export function useSessions() {
     }
     const store = useAppStore.getState();
     const sessionId = `sess-${Date.now()}-${sessionCounter++}`;
-    const shell = isWindows()
-      ? "/bin/bash"
-      : spec.shell?.trim() || store.shellPath || defaultShell();
+    const shell = spec.shell?.trim() || store.shellPath || "/bin/zsh";
 
     const session: Session = {
       id: sessionId,
@@ -280,7 +277,7 @@ export function useSessions() {
         cols: entry.term.cols,
         rows: entry.term.rows,
         cwd: spec.cwd ?? null,
-        shell,
+        shell: spec.shell ?? null,
       },
       (buf) => {
         const bytes = new Uint8Array(buf);
@@ -302,8 +299,6 @@ export function useSessions() {
           });
         } else if (event.type === "Error") {
           console.error(`PTY error (${sessionId}):`, event.message);
-        } else if (event.type === "Warning") {
-          entry.term.write(`\x1b[33m${event.message}\x1b[0m\r\n`);
         }
       },
       );

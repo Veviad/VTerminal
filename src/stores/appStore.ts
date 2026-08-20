@@ -10,7 +10,6 @@ import type {
   Effort,
   KnowledgeBucketDescriptor,
   KnowledgeBucketRef,
-  LocalAccelerationInfo,
   LocalModel,
   ModelState,
   RemoteContext,
@@ -475,12 +474,7 @@ export interface AppState {
   setVisionCatalog(entries: VisionCatalogEntry[]): void;
   visionLoadedModelId: string | null;
   visionState: ModelState;
-  visionAcceleration: LocalAccelerationInfo | null;
-  setVisionStatus(
-    loaded: string | null,
-    state: ModelState,
-    acceleration?: LocalAccelerationInfo | null,
-  ): void;
+  setVisionStatus(loaded: string | null, state: ModelState): void;
   visionLoadError: string | null;
   setVisionLoadError(message: string | null): void;
   localModels: LocalModel[];
@@ -493,14 +487,8 @@ export interface AppState {
    *  then, so treating the initial value as "missing" would flash "no on-device
    *  engine" over the model list on every local-llm launch. */
   modelAvailable: boolean | null;
-  localAcceleration: LocalAccelerationInfo | null;
   modelLoadError: string | null;
-  setModelStatus(
-    loaded: string | null,
-    state: ModelState,
-    available: boolean,
-    acceleration?: LocalAccelerationInfo,
-  ): void;
+  setModelStatus(loaded: string | null, state: ModelState, available: boolean): void;
   setModelLoadError(message: string | null): void;
   /** True only once the backend has CONFIRMED this build has no on-device
    *  engine. Every local-only affordance (download, load, select) is dead in
@@ -1270,13 +1258,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   setVisionCatalog: (entries) => set({ visionCatalog: entries }),
   visionLoadedModelId: null,
   visionState: "idle",
-  visionAcceleration: null,
-  setVisionStatus: (loaded, state, acceleration) =>
-    set({
-      visionLoadedModelId: loaded,
-      visionState: state,
-      ...(acceleration !== undefined ? { visionAcceleration: acceleration } : {}),
-    }),
+  setVisionStatus: (loaded, state) =>
+    set({ visionLoadedModelId: loaded, visionState: state }),
   visionLoadError: null,
   setVisionLoadError: (message) => set({ visionLoadError: message }),
   localModels: [],
@@ -1284,15 +1267,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   loadedModelId: null,
   modelState: "idle",
   modelAvailable: null,
-  localAcceleration: null,
   modelLoadError: null,
-  setModelStatus: (loaded, state, available, acceleration) =>
-    set({
-      loadedModelId: loaded,
-      modelState: state,
-      modelAvailable: available,
-      ...(acceleration ? { localAcceleration: acceleration } : {}),
-    }),
+  setModelStatus: (loaded, state, available) =>
+    set({ loadedModelId: loaded, modelState: state, modelAvailable: available }),
   setModelLoadError: (message) => set({ modelLoadError: message }),
   // `=== false`, never `!modelAvailable`: null means "not probed yet", and that
   // must read as "engine present" so nothing flickers as unavailable at boot.

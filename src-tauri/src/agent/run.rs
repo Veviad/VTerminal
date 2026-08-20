@@ -134,7 +134,7 @@ fn base_tools() -> Vec<ToolDef> {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "command": { "type": "string", "description": "The exact POSIX shell command line to run in the active terminal" },
+                    "command": { "type": "string", "description": "The exact zsh command line to run" },
                     "explanation": { "type": "string", "description": "One sentence: what this does and why" }
                 },
                 "required": ["command", "explanation"]

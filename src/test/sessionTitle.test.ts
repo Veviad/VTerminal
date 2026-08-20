@@ -37,7 +37,6 @@ describe("collapseHome", () => {
 
   it("collapses a path under home", () => {
     expect(collapseHome("/Users/maholick/Documents/x")).toBe("~/Documents/x");
-    expect(collapseHome("/home/maholick/Documents/x")).toBe("~/Documents/x");
   });
 
   it("leaves paths outside home alone", () => {
@@ -50,7 +49,6 @@ describe("cwdLabel", () => {
   it("names the home directory ~ rather than after the user", () => {
     // The reported bug: basename("/Users/maholick") is the username.
     expect(cwdLabel("/Users/maholick")).toBe("~");
-    expect(cwdLabel("/home/maholick")).toBe("~");
   });
 
   it("uses the leaf directory elsewhere", () => {

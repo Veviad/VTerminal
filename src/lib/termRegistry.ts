@@ -10,7 +10,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { BlockTracker, type BlockTrackerCallbacks } from "./osc133";
 import { sanitizeExternalWebUrl } from "./externalUrl";
 import { matchesReserved } from "./keymap";
-import { isWindows } from "./platform";
+import { stripReplayBanners } from "./replayBanner";
 import { resolveXtermTheme } from "./xtermTheme";
 import "@xterm/xterm/css/xterm.css";
 
@@ -72,25 +72,6 @@ export interface TermEntry {
 }
 
 const entries = new Map<string, TermEntry>();
-
-export type TerminalClipboardAction = "copy" | "paste";
-
-/** Resolve only terminal clipboard shortcuts. On Windows Ctrl+Shift+C is
- * consumed even with no selection so it can never become Ctrl+C plus a stray
- * Shift in WSL; plain Ctrl+C deliberately remains available as SIGINT. */
-export function terminalClipboardAction(
-  e: Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey" | "shiftKey" | "altKey">,
-  windows: boolean,
-  hasSelection: boolean,
-): TerminalClipboardAction | null {
-  const key = e.key.toLowerCase();
-  if (windows) {
-    if (!e.metaKey && !e.altKey && e.ctrlKey && e.shiftKey && key === "c") return "copy";
-    if (!e.metaKey && !e.altKey && e.ctrlKey && e.shiftKey && key === "v") return "paste";
-    return null;
-  }
-  return e.metaKey && key === "c" && hasSelection ? "copy" : null;
-}
 
 export function getTerm(sessionId: string): TermEntry | undefined {
   return entries.get(sessionId);
@@ -163,19 +144,11 @@ export function getOrCreateTerm(
     // Reserved app shortcuts never reach the shell; the event bubbles up to the
     // window listener in useGlobalShortcuts, which dispatches the action.
     if (matchesReserved(e)) return false;
-    // Windows follows terminal convention: Ctrl+Shift+C/V are clipboard and
-    // Ctrl+C remains the interrupt. macOS keeps Cmd+C.
-    const windows = isWindows();
-    const clipboardAction = terminalClipboardAction(e, windows, term.hasSelection());
-    if (clipboardAction === "copy") {
-      if (term.hasSelection()) {
-        void navigator.clipboard.writeText(term.getSelection());
-        term.clearSelection();
-      }
-      return false;
-    }
-    if (clipboardAction === "paste") {
-      void navigator.clipboard.readText().then((text) => term.paste(text));
+    // Cmd+C copies only when a selection exists; otherwise let it through
+    // (shells ignore it; Ctrl+C stays the interrupt).
+    if (e.metaKey && e.key.toLowerCase() === "c" && term.hasSelection()) {
+      void navigator.clipboard.writeText(term.getSelection());
+      term.clearSelection();
       return false;
     }
     // "#" at an empty shell prompt opens the AI composer instead of typing.
@@ -255,6 +228,10 @@ export const MAX_SNAPSHOT_CHARS = 262_144;
  *    and bracketed paste in a terminal with no application to consume them.
  *  - `excludeAltBuffer`: quitting mid-vim must restore the shell scrollback that
  *    was UNDERNEATH the TUI, not a frozen editor screen.
+ *
+ * Replay banners are stripped here so that every consumer — workspace restore
+ * and the archive alike — stores terminal output and nothing the app itself
+ * drew. See `stripReplayBanners`.
  */
 export function serializeSession(
   sessionId: string,
@@ -264,11 +241,13 @@ export function serializeSession(
   if (!entry || entry.disposed || maxLines <= 0) return null;
 
   const attempt = (n: number) =>
-    entry.serialize.serialize({
-      scrollback: n,
-      excludeModes: true,
-      excludeAltBuffer: true,
-    });
+    stripReplayBanners(
+      entry.serialize.serialize({
+        scrollback: n,
+        excludeModes: true,
+        excludeAltBuffer: true,
+      }),
+    );
 
   // Step down rather than truncate: cutting a string of escape sequences
   // mid-sequence would replay as garbage.

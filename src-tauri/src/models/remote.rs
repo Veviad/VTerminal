@@ -20,7 +20,7 @@
 //!    metadata a probe found, so app start (and `models_catalog`) reads settings
 //!    only. Discovery lives in `remote_probe`, behind an explicit user gesture.
 //!
-//! Tokens are stored only in the operating system credential store, keyed by this record's immutable
+//! Tokens are stored only in macOS Keychain, keyed by this record's immutable
 //! UUID. The JSON store contains presence-free metadata only.
 
 use serde::{Deserialize, Serialize};

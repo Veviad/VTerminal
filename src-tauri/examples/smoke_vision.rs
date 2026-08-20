@@ -11,7 +11,7 @@
 //!    failure surfaces as a `llama_decode` error about inconsistent sequence
 //!    positions, so the numbers print BEFORE the transcript — a mismatch is then one
 //!    line to read rather than a diagnosis from garbage output.
-//! 2. **Accelerated CLIP kernels per projector.** A projector this build cannot run comes
+//! 2. **Metal CLIP kernels per projector.** A projector this build cannot run comes
 //!    back only as a null context. `--cpu-clip` puts the fallback one flag away.
 //!
 //! Usage:

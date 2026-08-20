@@ -22,18 +22,8 @@ export interface RunbookStoreState {
   /** Durable live-run registry. `activeRun` is only the run selected in the UI. */
   runsById: Record<string, RunbookRun>;
   activeRun: RunbookRun | null;
-  /** Bumped by every event that names a run.
-   *
-   * A durable `runbooks_get` is a snapshot of the moment it was ISSUED, but it
-   * is applied whenever it happens to come back. Without this, a read issued
-   * before an approval existed lands after `ApprovalRequested` and erases it —
-   * the run then sits on a spinner while the engine waits for a click the
-   * operator can no longer make. Callers capture this before the request and
-   * hand it back, and a snapshot older than the newest event is dropped.
-   *
-   * A `Map` rather than a record: the key is a run id from the backend, and a
-   * plain object indexed by it is both a lint sink and reachable by
-   * `__proto__`. */
+  /** Incremented for every event naming a run so stale request snapshots cannot
+   * erase a newer approval or operator prompt. */
   runRevisions: ReadonlyMap<string, number>;
   getRunById(runId: string): RunbookRun | null;
   /** Runs whose remaining approvals the operator pre-authorized. Per run,
@@ -411,18 +401,18 @@ function mergeRun(current: RunbookRun | null, incoming: RunbookRun): RunbookRun 
   };
 }
 
-/** Runs that are still going. Terminal runs stay in `runsById` so their report
- * remains openable, so membership there is NOT liveness. */
+/** Runs that are still active. Terminal runs remain in `runsById` so their
+ * reports can be reopened, therefore registry membership is not liveness. */
 export function selectLiveRunbookRuns(
   runsById: Record<string, RunbookRun>,
 ): RunbookRun[] {
-  return Object.values(runsById).filter((run) => !isTerminalRunState(run.status));
+  return Object.values(runsById).filter(
+    (run) => !isTerminalRunState(run.status),
+  );
 }
 
-/** The one run allowed to occupy the header slot, or null for the neutral
- * launcher. `activeRun` is only the UI selection and deliberately outlives its
- * run so the end-of-run report stays open — treating it as "a run is live" is
- * what pinned a finished run's pill to the header until the app restarted. */
+/** The live run shown in the header, independent of the report currently
+ * selected in the workspace. */
 export function selectLiveRunbookRun(
   activeRun: RunbookRun | null,
   runsById: Record<string, RunbookRun>,

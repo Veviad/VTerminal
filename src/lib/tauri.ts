@@ -446,13 +446,6 @@ export const sshHostsTouch = (id: string) => invoke<void>("ssh_hosts_touch", { i
 export const sshHostsScanConfig = () =>
   invoke<SshConfigCandidate[]>("ssh_hosts_scan_config");
 
-/** Windows only: host-visible path to the default WSL user's ~/.ssh. */
-export const sshWslIdentityRoot = () => invoke<string | null>("ssh_wsl_identity_root");
-
-/** Convert a file selected through \\wsl.localhost into a validated Linux path. */
-export const sshWslPathFromHost = (path: string) =>
-  invoke<string>("ssh_wsl_path_from_host", { path });
-
 /** Insert the reviewed rows; returns how many were actually added. */
 export const sshHostsImport = (hosts: SshHostInput[]) =>
   invoke<number>("ssh_hosts_import", { hosts });
@@ -554,30 +547,8 @@ export const getSettings = () => invoke<Settings>("get_settings");
 export const saveSettings = (patch: Partial<SettingsPatch>) =>
   invoke<void>("save_settings", { ...patch });
 
-export interface SystemInfo {
-  total_ram_bytes: number;
-  os: string;
-  arch: string;
-  terminal_backend: "wsl_conpty" | "native_pty";
-  shell_family: "bash" | "zsh";
-  wsl_status:
-    | "ready"
-    | "missing"
-    | "wsl1"
-    | "missing_bash"
-    | "missing_tools"
-    | "error"
-    | "not_applicable";
-  wsl_distribution: string | null;
-  local_acceleration: {
-    backend: string;
-    device_name: string | null;
-    device_memory_bytes: number | null;
-    fallback_reason: string | null;
-  };
-}
-
-export const getSystemInfo = () => invoke<SystemInfo>("get_system_info");
+export const getSystemInfo = () =>
+  invoke<{ total_ram_bytes: number; os: string; arch: string }>("get_system_info");
 
 // ---------- Application updates ----------
 
@@ -987,12 +958,6 @@ export const knowledgeQdrantImportRemove = (bucket: KnowledgeBucketRef) =>
   invoke<void>("knowledge_qdrant_import_remove", { bucket });
 
 export const knowledgeCliInstall = () => invoke<string>("knowledge_cli_install");
-export interface KnowledgeCliStatus {
-  installed: boolean;
-  path_ready: boolean;
-  path: string;
-}
-export const knowledgeCliStatus = () => invoke<KnowledgeCliStatus>("knowledge_cli_status");
 
 /** Delete `docs.db` outright. The payoff of a separate database file: this cannot
  *  touch command history, saved hosts or archived transcripts. */

@@ -8,9 +8,7 @@
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-#[cfg(any(not(target_os = "windows"), test))]
-use std::fs::File;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -97,7 +95,7 @@ pub fn migrate_v6(conn: &Connection) -> Result<(), String> {
             WHERE status IN ('created','ready','running','waiting_approval',
                              'waiting_operator','paused');
 
-    CREATE TABLE runbook_steps (
+        CREATE TABLE runbook_steps (
             run_id             TEXT NOT NULL REFERENCES runbook_runs(id) ON DELETE CASCADE,
             step_id            TEXT NOT NULL,
             sort_order         INTEGER NOT NULL,
@@ -2931,7 +2929,8 @@ pub fn reconcile_pending_evidence(
                 } else if !path_exists_without_following(&final_path)?
                     && evidence_artifact_matches(&staging_path, &evidence)?
                 {
-                    promote_pending_evidence(&staging_path, &final_path)?;
+                    fs::rename(&staging_path, &final_path)
+                        .map_err(|error| format!("promote pending evidence artifact: {error}"))?;
                     sync_directory(&parent)?;
                     evidence_artifact_matches(&final_path, &evidence)?
                 } else {
@@ -3124,9 +3123,6 @@ fn confined_pending_evidence_paths(
     evidence: &EvidenceRecord,
 ) -> Result<Option<(PathBuf, PathBuf, PathBuf)>, String> {
     let staging_relative = evidence_staging_relative_path(evidence)?;
-    #[cfg(target_os = "windows")]
-    let canonical_root = crate::windows_fs::validate_local_ntfs_path(root)?;
-    #[cfg(not(target_os = "windows"))]
     let canonical_root = fs::canonicalize(root)
         .map_err(|error| format!("resolve evidence recovery root: {error}"))?;
     let root_metadata = fs::symlink_metadata(&canonical_root)
@@ -3143,13 +3139,6 @@ fn confined_pending_evidence_paths(
     if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
         return Err("evidence recovery directory is a symlink or non-directory".into());
     }
-    #[cfg(target_os = "windows")]
-    if crate::windows_fs::is_reparse(&parent_metadata) {
-        return Err("evidence recovery directory is a reparse point".into());
-    }
-    #[cfg(target_os = "windows")]
-    let canonical_parent = crate::windows_fs::validate_local_ntfs_path(&parent)?;
-    #[cfg(not(target_os = "windows"))]
     let canonical_parent = fs::canonicalize(&parent)
         .map_err(|error| format!("resolve evidence recovery directory: {error}"))?;
     if !canonical_parent.starts_with(&canonical_root) {
@@ -3191,30 +3180,17 @@ fn evidence_artifact_matches(path: &Path, evidence: &EvidenceRecord) -> Result<b
     {
         return Ok(false);
     }
-    #[cfg(target_os = "windows")]
-    if crate::windows_fs::is_reparse(&metadata) {
-        return Ok(false);
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
     }
-    #[cfg(target_os = "windows")]
-    let file = match crate::windows_fs::open_no_reparse(path, false) {
+    let file = match options.open(path) {
         Ok(file) => file,
-        Err(_) if !path.exists() => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(format!("open evidence artifact for recovery: {error}")),
-    };
-    #[cfg(not(target_os = "windows"))]
-    let file = {
-        let mut options = OpenOptions::new();
-        options.read(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NOFOLLOW);
-        }
-        match options.open(path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(format!("open evidence artifact for recovery: {error}")),
-        }
     };
     let opened_metadata = file
         .metadata()
@@ -3315,27 +3291,9 @@ pub fn find_evidence(
 }
 
 fn sync_directory(path: &Path) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        crate::windows_fs::sync_directory(path)
-            .map_err(|error| format!("sync evidence directory: {error}"))
-    }
-    #[cfg(not(target_os = "windows"))]
     File::open(path)
         .and_then(|directory| directory.sync_all())
         .map_err(|error| format!("sync evidence directory: {error}"))
-}
-
-#[cfg(target_os = "windows")]
-fn promote_pending_evidence(source: &Path, destination: &Path) -> Result<(), String> {
-    crate::windows_fs::promote_new_file(source, destination)
-        .map_err(|error| format!("promote pending evidence artifact: {error}"))
-}
-
-#[cfg(not(target_os = "windows"))]
-fn promote_pending_evidence(source: &Path, destination: &Path) -> Result<(), String> {
-    fs::rename(source, destination)
-        .map_err(|error| format!("promote pending evidence artifact: {error}"))
 }
 
 fn safe_evidence_component(value: &str) -> bool {

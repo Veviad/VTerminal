@@ -116,7 +116,7 @@ pub const VISION_CATALOG: &[VisionModel] = &[
         filename: "Qwen3-VL-4B-Instruct-Q4_K_M.gguf",
         size_bytes: 2_497_282_336,
         // F16 rather than BF16 or F32: same accuracy in practice at half of F32,
-        // and BF16 is 3MB larger for no measured benefit in supported backends.
+        // and BF16 is 3MB larger for no benefit on Metal.
         mmproj_filename: "mmproj-F16.gguf",
         mmproj_size_bytes: 836_180_640,
         min_ram_gb: 8,

@@ -184,7 +184,6 @@ jobs:
           cp "${updater[0]}" "${updater[0]}.sig" release-assets/
           cd release-assets
           shasum -a 256 *.dmg > SHA256SUMS.txt
-          echo '${{ steps.sign.outputs.signed }}' > MAC_SIGNED.txt
           cat SHA256SUMS.txt
 
       # Uploaded before the release step, so a failure there still leaves the
@@ -195,217 +194,87 @@ jobs:
           path: release-assets/
           if-no-files-found: error
 
-
-  windows:
-    name: Windows 11 (x64)
-    runs-on: windows-latest
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-
-      - name: Verify signing configuration
-        shell: pwsh
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_ARTIFACT_SIGNING_ENDPOINT: ${{ secrets.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
-          AZURE_ARTIFACT_SIGNING_ACCOUNT: ${{ secrets.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
-          AZURE_ARTIFACT_SIGNING_PROFILE: ${{ secrets.AZURE_ARTIFACT_SIGNING_PROFILE }}
-        run: |
-          $required = @(
-            $env:TAURI_SIGNING_PRIVATE_KEY,
-            $env:AZURE_CLIENT_ID,
-            $env:AZURE_CLIENT_SECRET,
-            $env:AZURE_TENANT_ID,
-            $env:AZURE_ARTIFACT_SIGNING_ENDPOINT,
-            $env:AZURE_ARTIFACT_SIGNING_ACCOUNT,
-            $env:AZURE_ARTIFACT_SIGNING_PROFILE
-          )
-          if ($required | Where-Object { [string]::IsNullOrWhiteSpace($_) }) {
-            throw 'Windows releases require the Tauri updater key and Azure Artifact Signing configuration.'
-          }
-
-      - name: Install build prerequisites
-        shell: pwsh
-        run: |
-          rustup show
-          rustup target add x86_64-pc-windows-msvc
-          choco install vulkan-sdk -y --no-progress
-          $sdk = [Environment]::GetEnvironmentVariable('VULKAN_SDK', 'Machine')
-          if ([string]::IsNullOrWhiteSpace($sdk)) { throw 'Vulkan SDK installation did not set VULKAN_SDK.' }
-          "VULKAN_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "$sdk\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append
-          cargo install artifact-signing-cli --locked
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          workspaces: src-tauri
-          key: windows-release
-          cache-on-failure: true
-
-      - name: Build signed NSIS installer
-        shell: pwsh
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_ARTIFACT_SIGNING_ENDPOINT: ${{ secrets.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
-          AZURE_ARTIFACT_SIGNING_ACCOUNT: ${{ secrets.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
-          AZURE_ARTIFACT_SIGNING_PROFILE: ${{ secrets.AZURE_ARTIFACT_SIGNING_PROFILE }}
-        run: ./scripts/build-windows.ps1 -RequireSigning
-
-      - name: Verify and collect artifacts
-        shell: pwsh
-        run: |
-          $bundle = 'src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis'
-          $installer = @(Get-ChildItem $bundle -Filter '*setup.exe' -File)
-          if ($installer.Count -ne 1) { throw "Expected one NSIS setup executable, found $($installer.Count)." }
-          $updaterSignature = "$($installer[0].FullName).sig"
-          if (-not (Test-Path $updaterSignature)) { throw 'The signed Windows updater signature is missing.' }
-          $authenticode = Get-AuthenticodeSignature $installer[0].FullName
-          if ($authenticode.Status -ne 'Valid') { throw "Installer Authenticode status is $($authenticode.Status)." }
-          New-Item -ItemType Directory -Force release-assets | Out-Null
-          Copy-Item $installer[0].FullName release-assets/
-          Copy-Item $updaterSignature release-assets/
-          $hash = Get-FileHash $installer[0].FullName -Algorithm SHA256
-          "$($hash.Hash.ToLower())  $($installer[0].Name)" | Set-Content release-assets/SHA256SUMS-WINDOWS.txt
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: vterminal-windows-x64
-          path: release-assets/
-          if-no-files-found: error
-
-  publish:
-    name: Atomic release
-    needs: [macos, windows]
-    if: github.ref_type == 'tag'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          path: artifacts
-
-      - name: Compose release and updater manifest
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+      - name: Compose release notes
+        if: github.ref_type == 'tag'
         run: |
           set -euo pipefail
-          mkdir release-assets
-          cp artifacts/vterminal-macos-aarch64/* release-assets/
-          cp artifacts/vterminal-windows-x64/* release-assets/
-          mac_signed=$(cat release-assets/MAC_SIGNED.txt)
-          rm release-assets/MAC_SIGNED.txt release-assets/SHA256SUMS-WINDOWS.txt
-          cd release-assets
-          sha256sum *.dmg *setup.exe > SHA256SUMS.txt
-          cd ..
-
           : > NOTES.md
-          if [ "$mac_signed" != true ]; then
+          if [ '${{ steps.sign.outputs.signed }}' != 'true' ]; then
             cat >> NOTES.md <<'EOF'
-          > **The macOS build is ad-hoc signed and not notarized.** If Gatekeeper
-          > blocks it, use System Settings → Privacy & Security → Open Anyway.
+          > **This build is not signed or notarized.** Gatekeeper blocks it on first
+          > launch. Either open **System Settings → Privacy & Security** and click
+          > **Open Anyway** (the button only appears for an hour after a blocked
+          > attempt), or clear the quarantine flag the browser set on the download:
+          >
+          > ```
+          > xattr -dr com.apple.quarantine /Applications/VTerminal.app
+          > ```
 
           EOF
           fi
           cat >> NOTES.md <<'EOF'
-          Windows 11 requires WSL2 with a default distribution and Bash. The
-          Windows installer, application, and companion CLI are Authenticode signed.
+          Verify your download against `SHA256SUMS.txt`:
 
-          Verify downloads with `shasum -a 256 -c SHA256SUMS.txt` on macOS or
-          `Get-FileHash .\VTerminal_*_x64-setup.exe -Algorithm SHA256` on Windows.
+          ```
+          shasum -a 256 -c SHA256SUMS.txt
+          ```
           EOF
 
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            # Never use --clobber against a public release: gh uploads assets
-            # one at a time, which would expose a mixed platform/manifest set
-            # until the last upload completed. A failed draft can be resumed,
-            # but a published tag is immutable and must be superseded by a new
-            # version instead.
-            is_draft=$(gh release view "$TAG" --json isDraft --jq .isDraft)
-            if [ "$is_draft" != true ]; then
-              echo "::error::Release $TAG is already published; refusing to clobber public assets. Publish a new tag instead."
-              exit 1
-            fi
-          else
-            create=(gh release create "$TAG" --draft --title "VTerminal $TAG" --notes "$(cat NOTES.md)" --generate-notes)
+      # `view ||` covers both flows: a tag pushed from the CLI (this creates the
+      # release) and a release drafted in the GitHub UI (this only attaches to
+      # it). Created as a draft so the notes can be edited before anyone can
+      # download — delete --draft to publish on tag instead.
+      - name: Create draft release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            # Built as a non-empty array and appended to. An empty array
+            # expanded under `set -u` is an unbound-variable error on the
+            # bash 3.2 that ships with macOS.
+            #
+            # --notes, not --notes-file: only --notes is documented to prepend
+            # to the auto-generated changelog when --generate-notes is also set.
+            create=(gh release create "$TAG"
+              --draft
+              --title "VTerminal $TAG"
+              --notes "$(cat NOTES.md)"
+              --generate-notes)
             case "$TAG" in *-*) create+=(--prerelease) ;; esac
             "${create[@]}"
           fi
+
+      - name: Generate updater manifest
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          updater=(release-assets/*.app.tar.gz)
+          [ "${#updater[@]}" -eq 1 ] || { echo "error: expected exactly one updater bundle" >&2; exit 1; }
+          signature=$(cat "${updater[0]}.sig")
           notes=$(gh release view "$TAG" --json body --jq .body)
-          mac=(release-assets/*.app.tar.gz)
-          windows=(release-assets/*setup.exe)
-          [ "${#mac[@]}" -eq 1 ] && [ "${#windows[@]}" -eq 1 ]
-          mac_signature=$(cat "${mac[0]}.sig")
-          windows_signature=$(cat "${windows[0]}.sig")
-          base="https://github.com/Veviad/VTerminal/releases/download/$TAG"
+          asset=$(basename "${updater[0]}")
+          url="https://github.com/Veviad/VTerminal/releases/download/$TAG/$asset"
           jq -n \
-            --arg version "${TAG#v}" --arg notes "$notes" \
-            --arg mac_signature "$mac_signature" --arg mac_url "$base/$(basename "${mac[0]}")" \
-            --arg windows_signature "$windows_signature" --arg windows_url "$base/$(basename "${windows[0]}")" \
-            '{version: $version, notes: $notes, platforms: {"darwin-aarch64": {signature: $mac_signature, url: $mac_url}, "windows-x86_64": {signature: $windows_signature, url: $windows_url}}}' \
+            --arg version "${TAG#v}" \
+            --arg notes "$notes" \
+            --arg signature "$signature" \
+            --arg url "$url" \
+            '{version: $version, notes: $notes, platforms: {"darwin-aarch64": {signature: $signature, url: $url}}}' \
             > release-assets/latest.json
-          jq -e '.platforms["darwin-aarch64"].signature != "" and .platforms["windows-x86_64"].signature != ""' release-assets/latest.json >/dev/null
+          jq -e \
+            '.version != "" and .platforms["darwin-aarch64"].signature != "" and (.platforms["darwin-aarch64"].url | startswith("https://"))' \
+            release-assets/latest.json >/dev/null
 
-      - name: Upload all platform assets together
+      - name: Upload release assets
+        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" != true ]; then
-            echo "::error::Release $TAG became public before upload; refusing to clobber its assets."
-            exit 1
-          fi
-
-          # A resumed draft may retain assets from an older failed attempt.
-          # Remove only names absent from this complete local transaction, then
-          # replace the expected names while the release remains hidden.
-          while IFS= read -r asset; do
-            [ -z "$asset" ] || [ -f "release-assets/$asset" ] || \
-              gh release delete-asset "$TAG" "$asset" --yes
-          done < <(gh release view "$TAG" --json assets --jq '.assets[].name')
-          gh release upload "$TAG" release-assets/* --clobber
-
-          expected=$(find release-assets -maxdepth 1 -type f -exec basename {} \; | LC_ALL=C sort)
-          actual=$(gh release view "$TAG" --json assets --jq '.assets[].name' | LC_ALL=C sort)
-          if [ "$actual" != "$expected" ]; then
-            echo "::error::Draft asset set is incomplete or unexpected; leaving $TAG hidden."
-            diff -u <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") || true
-            exit 1
-          fi
-
-      # The release is deliberately a draft until both platform builds, both
-      # updater signatures, the combined manifest, and every public artifact
-      # are present. Publishing is the atomic visibility boundary and triggers
-      # the Pages workflow that refreshes release.json/download links.
-      - name: Publish complete release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = true ] || {
-            echo "::error::Release $TAG is no longer a draft; refusing to publish over external changes."
-            exit 1
-          }
-          expected=$(find release-assets -maxdepth 1 -type f -exec basename {} \; | LC_ALL=C sort)
-          actual=$(gh release view "$TAG" --json assets --jq '.assets[].name' | LC_ALL=C sort)
-          [ "$actual" = "$expected" ] || {
-            echo "::error::Draft asset set changed before publication; leaving $TAG hidden."
-            exit 1
-          }
-          gh release edit "$TAG" --draft=false
+        run: gh release upload "$TAG" release-assets/* --clobber

@@ -43,7 +43,6 @@ import { QdrantImportWizard } from "./QdrantImportWizard";
 import { AddKnowledgeWizard } from "./AddKnowledgeWizard";
 import { CredentialStoreBanner } from "./ModelsSettings";
 import { InlineModelDownloadProgress } from "./InlineModelDownloadProgress";
-import { isWindows } from "../../lib/platform";
 
 /** The Docs tab.
  *
@@ -1065,20 +1064,7 @@ function KnowledgeJobProgress({ job, label }: { job: KnowledgeJob; label: string
 function KnowledgeCliInstall() {
   const [busy, setBusy] = useState(false);
   const [target, setTarget] = useState<string | null>(null);
-  const [installed, setInstalled] = useState(false);
-  const [pathReady, setPathReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    void api
-      .knowledgeCliStatus()
-      .then((status) => {
-        setInstalled(status.installed);
-        setPathReady(status.path_ready);
-        if (status.installed) setTarget(status.path);
-      })
-      .catch(() => {});
-  }, []);
 
   return (
     <section className="space-y-2 border-t border-border-subtle pt-4">
@@ -1086,13 +1072,9 @@ function KnowledgeCliInstall() {
         Command-line access
       </h3>
       <p className="text-[10px] leading-relaxed text-text-muted">
-        Install or repair the bundled <code className="font-mono">vterminal-docs</code> command in{" "}
-        <code className="font-mono">
-          {isWindows() ? "%LOCALAPPDATA%\\Programs\\VTerminal\\bin" : "~/.local/bin"}
-        </code>
-        . {isWindows()
-          ? " VTerminal manages only this exact user PATH entry."
-          : " This never edits shell profiles; if the directory is not on PATH, the result shows the exact executable location."}
+        Install the bundled <code className="font-mono">vterminal-docs</code> command into{" "}
+        <code className="font-mono">~/.local/bin</code>. This never edits shell profiles; if that
+        directory is not on PATH, the result shows the exact executable location.
       </p>
       <button
         type="button"
@@ -1102,23 +1084,18 @@ function KnowledgeCliInstall() {
           setError(null);
           void api
             .knowledgeCliInstall()
-            .then((path) => {
-              setTarget(path);
-              setInstalled(true);
-              setPathReady(isWindows() || pathReady);
-            })
+            .then(setTarget)
             .catch((reason) => setError(String(reason)))
             .finally(() => setBusy(false));
         }}
         className="flex items-center gap-1 rounded-md border border-border-subtle px-2 py-1 text-[10px] text-text-secondary hover:bg-bg-hover disabled:opacity-50"
       >
         {busy ? <Loader2 size={10} className="animate-spin" /> : <Terminal size={10} />}
-        {installed ? "Repair CLI" : "Install CLI"}
+        Install CLI
       </button>
       {target && (
         <p className="rounded border border-accent/30 bg-accent/10 px-2 py-1.5 font-mono text-[9px] text-accent">
-          {installed ? "Installed" : "Target"}: {target}
-          {isWindows() && !pathReady ? " (PATH repair required)" : ""}
+          Installed: {target}
         </p>
       )}
       {error && <p className="text-[9px] text-error">{error}</p>}

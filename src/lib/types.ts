@@ -53,7 +53,7 @@ export interface LaunchSpec {
   /** Local directory to start in. Ignored (with a log line) if it does not
    *  resolve to a readable directory on THIS machine — never fatal. */
   cwd?: string | null;
-  /** Shell override on macOS; Windows always uses the fixed WSL2/Bash backend. */
+  /** Shell binary override; falls back to settings.shell_path, then /bin/zsh. */
   shell?: string | null;
   hostId?: string | null;
   /** Becomes `Session.hostLabel` — the saved-host identity, not a rename. */
@@ -100,8 +100,7 @@ export interface Block {
 export type PtyEvent =
   | { type: "Spawned"; pid: number }
   | { type: "Exit"; exit_code: number | null }
-  | { type: "Error"; message: string }
-  | { type: "Warning"; message: string };
+  | { type: "Error"; message: string };
 
 // ---------- AI streaming ----------
 
@@ -521,14 +520,6 @@ export interface ModelStatus {
   loaded: string | null;
   state: ModelState;
   available: boolean;
-  acceleration?: LocalAccelerationInfo;
-}
-
-export interface LocalAccelerationInfo {
-  backend: string;
-  device_name: string | null;
-  device_memory_bytes: number | null;
-  fallback_reason: string | null;
 }
 
 // ---------- History ----------
@@ -963,7 +954,6 @@ export interface EmbeddingModelStatus {
   total_bytes: number | null;
   error: string | null;
   profile_id: string | null;
-  acceleration: LocalAccelerationInfo | null;
 }
 
 export interface EmbeddingCatalogEntry {

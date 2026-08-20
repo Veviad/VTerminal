@@ -6,7 +6,6 @@ import { useAppStore } from "../../stores/appStore";
 import { useSessions } from "../../hooks/useSessions";
 import { buildSshCommand, describeSshTarget, validateSshHost } from "../../lib/ssh";
 import { connectToHost } from "../../lib/sshConnect";
-import { isWindows } from "../../lib/platform";
 import { S } from "../../lib/strings";
 import { Field, inputClass } from "../ui/Row";
 import type { SshConfigCandidate, SshHost, SshHostInput } from "../../lib/types";
@@ -230,7 +229,6 @@ function HostForm({
 }) {
   const [draft, setDraft] = useState<SshHostInput>(initial);
   const [touched, setTouched] = useState(false);
-  const [identityError, setIdentityError] = useState<string | null>(null);
 
   const errors = useMemo(() => validateSshHost(draft), [draft]);
   const errorFor = (field: string) => errors.find((e) => e.field === field)?.message;
@@ -248,20 +246,8 @@ function HostForm({
     set(key, (value.trim() === "" ? null : value) as SshHostInput[typeof key]);
 
   const pickIdentity = async () => {
-    try {
-      setIdentityError(null);
-      const defaultPath = isWindows() ? await api.sshWslIdentityRoot() : null;
-      const picked = await openDialog({
-        multiple: false,
-        directory: false,
-        ...(defaultPath ? { defaultPath } : {}),
-      });
-      if (typeof picked !== "string") return;
-      const identity = isWindows() ? await api.sshWslPathFromHost(picked) : picked;
-      set("identity_file", identity);
-    } catch (pickError) {
-      setIdentityError(String(pickError));
-    }
+    const picked = await openDialog({ multiple: false, directory: false });
+    if (typeof picked === "string") set("identity_file", picked);
   };
 
   return (
@@ -314,15 +300,7 @@ function HostForm({
         />
       </Field>
 
-      <Field
-        label={S.settings.sshHosts.identityFile}
-        hint={
-          isWindows()
-            ? "Linux path in the default WSL distribution — the key itself is never stored"
-            : S.settings.sshHosts.identityFileHint
-        }
-        error={identityError ?? (touched ? errorFor("identity_file") : undefined)}
-      >
+      <Field label={S.settings.sshHosts.identityFile} hint={S.settings.sshHosts.identityFileHint}>
         <div className="flex gap-2">
           <input
             value={draft.identity_file ?? ""}

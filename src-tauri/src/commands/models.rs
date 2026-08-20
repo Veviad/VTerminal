@@ -312,7 +312,6 @@ pub struct ModelStatus {
     pub loaded: Option<String>,
     pub state: String,
     pub available: bool,
-    pub acceleration: serde_json::Value,
 }
 
 #[cfg(feature = "local-llm")]
@@ -320,12 +319,10 @@ pub struct ModelStatus {
 pub async fn model_status(app: tauri::AppHandle<Wry>) -> Result<ModelStatus, String> {
     let host = app.state::<crate::provider::local::ModelHost>();
     let (loaded, state) = host.status().await;
-    let acceleration = host.acceleration_snapshot().await;
     Ok(ModelStatus {
         loaded,
         state: state.to_string(),
         available: true,
-        acceleration,
     })
 }
 
@@ -336,12 +333,6 @@ pub async fn model_status() -> Result<ModelStatus, String> {
         loaded: None,
         state: "idle".into(),
         available: false,
-        acceleration: serde_json::json!({
-            "backend": "unavailable",
-            "device_name": null,
-            "device_memory_bytes": null,
-            "fallback_reason": "local inference is not included in this build"
-        }),
     })
 }
 

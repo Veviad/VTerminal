@@ -113,7 +113,7 @@ export function TabStrip() {
         );
       })}
       <button
-        onClick={() => void createSession().catch(() => {})}
+        onClick={() => void createSession()}
         className="rounded-md p-1 text-text-muted transition-colors duration-150 hover:text-text-secondary"
         title={S.header.newTab}
       >

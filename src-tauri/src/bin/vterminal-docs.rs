@@ -46,7 +46,6 @@ struct Context {
 
 #[tokio::main]
 async fn main() {
-    configure_local_backend_modules();
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let json = raw.iter().any(|arg| arg == "--json");
     if let Err(error) = run(raw, json).await {
@@ -60,33 +59,6 @@ async fn main() {
         }
         std::process::exit(1);
     }
-}
-
-/// Installed Windows builds keep loadable CPU/Vulkan modules beside this
-/// companion in `llama-backends`. Core llama/GGML DLLs are normal PE imports
-/// and are copied beside the executable by the installer before this runs.
-/// Developer builds intentionally fall back to llama-cpp-sys's build path.
-#[cfg(all(feature = "local-llm", target_os = "windows"))]
-fn configure_local_backend_modules() {
-    let Some(backends) = std::env::current_exe()
-        .ok()
-        .and_then(|executable| local_backend_modules_for_executable(&executable))
-    else {
-        return;
-    };
-    if backends.is_dir() {
-        vterminal_lib::provider::local::configure_backend_modules(backends);
-    }
-}
-
-#[cfg(not(all(feature = "local-llm", target_os = "windows")))]
-fn configure_local_backend_modules() {}
-
-#[cfg(any(all(feature = "local-llm", target_os = "windows"), test))]
-fn local_backend_modules_for_executable(executable: &Path) -> Option<PathBuf> {
-    executable
-        .parent()
-        .map(|directory| directory.join("llama-backends"))
 }
 
 async fn run(mut args: Vec<String>, json_output: bool) -> Result<(), String> {
@@ -146,8 +118,7 @@ fn is_mutating_command(args: &[String]) -> bool {
 
 #[cfg(test)]
 mod process_lock_scope_tests {
-    use super::{is_mutating_command, local_backend_modules_for_executable};
-    use std::path::{Path, PathBuf};
+    use super::is_mutating_command;
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
@@ -172,15 +143,6 @@ mod process_lock_scope_tests {
         ] {
             assert!(!is_mutating_command(&command), "{command:?}");
         }
-    }
-
-    #[test]
-    fn installed_companion_resolves_its_own_backend_directory() {
-        let executable = Path::new("/Programs/VTerminal/bin/vterminal-docs");
-        assert_eq!(
-            local_backend_modules_for_executable(executable),
-            Some(PathBuf::from("/Programs/VTerminal/bin/llama-backends"))
-        );
     }
 }
 

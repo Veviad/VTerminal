@@ -14,7 +14,6 @@ import { describeSshTarget } from "../../lib/ssh";
 import { S } from "../../lib/strings";
 import type { HistoryEntry, SshHost } from "../../lib/types";
 import { useRunbookStore } from "../../stores/runbookStore";
-import { shortcutFor, usesAlternateAction } from "../../lib/keymap";
 
 interface PaletteItem {
   id: string;
@@ -65,14 +64,14 @@ export function CommandPalette() {
         id: "act-new-tab",
         section: "actions",
         label: "New tab",
-        hint: shortcutFor("new-tab"),
-        run: () => void createSession().catch(() => {}),
+        hint: "⌘T",
+        run: () => void createSession(),
       },
       {
         id: "act-close-tab",
         section: "actions",
         label: "Close tab",
-        hint: shortcutFor("close-tab"),
+        hint: "⌘W",
         run: () => {
           const s = live();
           if (s.activeSessionId) void closeSession(s.activeSessionId);
@@ -110,14 +109,14 @@ export function CommandPalette() {
         id: "act-ai-panel",
         section: "actions",
         label: "Toggle AI panel",
-        hint: shortcutFor("toggle-ai-panel"),
+        hint: "⌘J",
         run: () => toggleAiPanel(),
       },
       {
         id: "act-composer",
         section: "actions",
         label: "AI command suggestion",
-        hint: shortcutFor("toggle-composer"),
+        hint: "⌘I",
         run: () => {
           const s = live();
           if (s.activeSessionId) {
@@ -129,7 +128,7 @@ export function CommandPalette() {
         id: "act-session-browser",
         section: "actions",
         label: S.sessions.title,
-        hint: shortcutFor("session-browser"),
+        hint: "⌘Y",
         keywords: "archive reopen closed tabs recent",
         run: () => live().setSessionBrowserOpen(true),
       },
@@ -148,7 +147,7 @@ export function CommandPalette() {
         id: "act-settings",
         section: "actions",
         label: "Open settings",
-        hint: shortcutFor("open-settings"),
+        hint: "⌘,",
         run: () => live().setSettingsOpen(true),
       },
       {
@@ -172,9 +171,7 @@ export function CommandPalette() {
       keywords: `${describeSshTarget(h)} ${h.tag ?? ""} ${h.config_alias ?? ""}`,
       // The gate's answer is delivered here, on the item the user is looking at
       // as they choose — the app has no toast channel and does not need one.
-      hint: gate.ok
-        ? describeSshTarget(h)
-        : `${describeSshTarget(h)} · ${shortcutFor("command-palette").replace(/K$/, "Enter")} ${gate.reason}`,
+      hint: gate.ok ? describeSshTarget(h) : `${describeSshTarget(h)} · ⌘⏎ ${gate.reason}`,
       // ⏎ is the safe one: a fresh tab, nothing existing can be clobbered.
       run: () => void connectToHost(h, "new-tab", createSession),
       // ⌘⏎ acts on your live shell — the same gradient as the history section.
@@ -213,9 +210,7 @@ export function CommandPalette() {
           run: () => {
             void api.modelLoad(m.id, () => {}).then(async () => {
               const st = await api.modelStatus();
-              useAppStore
-                .getState()
-                .setModelStatus(st.loaded, st.state, st.available, st.acceleration);
+              useAppStore.getState().setModelStatus(st.loaded, st.state, st.available);
             });
             useAppStore.getState().setModelStatus(m.id, "loading", true);
           },
@@ -256,7 +251,7 @@ export function CommandPalette() {
       e.preventDefault();
       const item = filtered[selected];
       if (item) {
-        if (usesAlternateAction(e.nativeEvent) && item.runAlt) item.runAlt();
+        if (e.metaKey && item.runAlt) item.runAlt();
         else item.run();
         close();
       }

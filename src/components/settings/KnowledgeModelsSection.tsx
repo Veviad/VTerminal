@@ -8,7 +8,6 @@ import type {
   DownloadEvent,
   EmbeddingCatalogEntry,
   EmbeddingInstallEvent,
-  EmbeddingModelStatus,
   EmbeddingProfile,
 } from "../../lib/types";
 import { useAppStore } from "../../stores/appStore";
@@ -17,7 +16,6 @@ import {
   formatBytes,
   InlineModelDownloadProgress,
 } from "./InlineModelDownloadProgress";
-import { AccelerationStatus } from "./AccelerationStatus";
 
 export const BUILTIN_EMBEDDING_MODEL_IDS = [
   "local/qwen3-embedding-0.6b",
@@ -138,21 +136,16 @@ export function KnowledgeModelsSection({
   readyProfiles?: EmbeddingProfile[];
 }) {
   const [catalog, setCatalog] = useState<EmbeddingCatalogEntry[]>([]);
-  const [statuses, setStatuses] = useState<EmbeddingModelStatus[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [installs, setInstalls] = useState<Record<string, InstallState>>({});
 
   const refresh = async () => {
-    const [catalogResult, statusResult] = await Promise.allSettled([
-      api.knowledgeEmbeddingModelsList(),
-      api.knowledgeEmbeddingModelStatus(),
-    ]);
-    if (catalogResult.status === "fulfilled") setCatalog(catalogResult.value);
-    if (statusResult.status === "fulfilled") setStatuses(statusResult.value);
-    const errors = [catalogResult, statusResult]
-      .filter((result): result is PromiseRejectedResult => result.status === "rejected")
-      .map((result) => String(result.reason));
-    setLoadError(errors.length > 0 ? errors.join(" · ") : null);
+    try {
+      setCatalog(await api.knowledgeEmbeddingModelsList());
+      setLoadError(null);
+    } catch (error) {
+      setLoadError(String(error));
+    }
   };
 
   useEffect(() => {
@@ -161,9 +154,6 @@ export function KnowledgeModelsSection({
 
   const byId = useMemo(() => new Map(catalog.map((entry) => [entry.id, entry])), [catalog]);
   const models = BUILTIN_EMBEDDING_MODEL_IDS.map((id) => byId.get(id) ?? FALLBACK_MODELS[id]);
-  const activeAcceleration = statuses.find(
-    (status) => status.loaded && status.acceleration,
-  )?.acceleration;
 
   const startInstall = (model: EmbeddingCatalogEntry, licenseAccepted: boolean) => {
     setInstalls((current) => ({
@@ -212,10 +202,6 @@ export function KnowledgeModelsSection({
         <p className="rounded-md border border-warning/30 bg-warning/10 px-2 py-1.5 text-[10px] text-warning">
           Model status could not be refreshed: {loadError}
         </p>
-      )}
-
-      {activeAcceleration && (
-        <AccelerationStatus label="Embedding inference" acceleration={activeAcceleration} />
       )}
 
       <div className="space-y-1.5">

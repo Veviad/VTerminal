@@ -231,10 +231,9 @@ Each phase is one action:
 | `ansible.playbook` | Native in 0.2.10. Uses a user-installed `ansible-runner` as the explicit local controller, binds approval to exact project/inventory digests, retains structured per-host outcomes, forces check and verify phases into preview-only check mode, and still requires verification after apply. |
 
 An Ansible action references files beneath the package's `ansible/` directory.
-The active terminal must be local because `ansible-runner` is the controller;
-its inventory may target remote hosts. On Windows, install `ansible-runner`
-inside the default WSL distro; VTerminal discovers it there and translates the
-package paths to Linux paths. Input mappings become JSON extra vars:
+VTerminal launches `ansible-runner` locally without inheriting the visible
+terminal shell; its inventory may target remote hosts. Input mappings become
+JSON extra vars:
 
 ```yaml
 apply:

@@ -14,9 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
-#[cfg(any(not(target_os = "windows"), test))]
-use std::fs::OpenOptions;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
@@ -163,10 +161,6 @@ struct PinnedPackageRoot {
     device: u64,
     #[cfg(unix)]
     inode: u64,
-    #[cfg(target_os = "windows")]
-    directory: File,
-    #[cfg(target_os = "windows")]
-    identity: crate::windows_fs::FileIdentity,
 }
 
 impl PinnedPackageRoot {
@@ -200,35 +194,8 @@ impl PinnedPackageRoot {
 
         #[cfg(not(unix))]
         {
-            #[cfg(target_os = "windows")]
-            {
-                let _ = inspected;
-                let directory =
-                    crate::windows_fs::open_no_reparse(path, true).map_err(|message| {
-                        PackageError::Io {
-                            path: path.to_path_buf(),
-                            source: std::io::Error::new(
-                                std::io::ErrorKind::PermissionDenied,
-                                message,
-                            ),
-                        }
-                    })?;
-                let identity = crate::windows_fs::identity(&directory).map_err(|message| {
-                    PackageError::Io {
-                        path: path.to_path_buf(),
-                        source: std::io::Error::other(message),
-                    }
-                })?;
-                Ok(Self {
-                    directory,
-                    identity,
-                })
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                let _ = (path, inspected);
-                Ok(Self {})
-            }
+            let _ = (path, inspected);
+            Ok(Self {})
         }
     }
 
@@ -241,20 +208,6 @@ impl PinnedPackageRoot {
         #[cfg(unix)]
         if metadata.dev() != self.device || metadata.ino() != self.inode {
             return Err(PackageError::ChangedDuringValidation);
-        }
-        #[cfg(target_os = "windows")]
-        {
-            let named = crate::windows_fs::open_no_reparse(canonical_root, true)
-                .map_err(|_| PackageError::ChangedDuringValidation)?;
-            if crate::windows_fs::identity(&named)
-                .map_err(|_| PackageError::ChangedDuringValidation)?
-                != self.identity
-                || crate::windows_fs::identity(&self.directory)
-                    .map_err(|_| PackageError::ChangedDuringValidation)?
-                    != self.identity
-            {
-                return Err(PackageError::ChangedDuringValidation);
-            }
         }
 
         Ok(())
@@ -288,23 +241,7 @@ impl PinnedPackageRoot {
 
         #[cfg(not(unix))]
         {
-            #[cfg(target_os = "windows")]
-            {
-                let file = crate::windows_fs::open_child_no_reparse(
-                    &self.directory,
-                    std::ffi::OsStr::new(DEFINITION_FILE),
-                    false,
-                )
-                .map_err(|message| PackageError::Io {
-                    path: display_path.to_path_buf(),
-                    source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, message),
-                })?;
-                validate_and_read_definition(file, display_path)
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                read_definition(display_path)
-            }
+            read_definition(display_path)
         }
     }
 }
@@ -330,7 +267,7 @@ pub fn resolve_package_file(
             });
         }
     };
-    if is_package_link(&metadata) {
+    if metadata.file_type().is_symlink() {
         return Err(PackageError::Symlink(joined));
     }
     if !metadata.is_file() {
@@ -432,7 +369,7 @@ fn validate_package_tree(root: &Path) -> Result<(), PackageError> {
             }
             let path = entry.path();
             let metadata = symlink_metadata(&path)?;
-            if is_package_link(&metadata) {
+            if metadata.file_type().is_symlink() {
                 return Err(PackageError::Symlink(path));
             }
             if !metadata.is_file() && !metadata.is_dir() {
@@ -466,7 +403,7 @@ fn validate_package_tree(root: &Path) -> Result<(), PackageError> {
     Ok(())
 }
 
-#[cfg(any(all(not(unix), not(target_os = "windows")), test))]
+#[cfg(any(not(unix), test))]
 fn read_definition(path: &Path) -> Result<Vec<u8>, PackageError> {
     // Open once without following the leaf, then validate and read that same
     // handle through a hard cap. A metadata(path) + fs::read(path) sequence can
@@ -590,27 +527,7 @@ fn symlink_metadata(path: &Path) -> Result<fs::Metadata, PackageError> {
     })
 }
 
-fn is_package_link(metadata: &fs::Metadata) -> bool {
-    if metadata.file_type().is_symlink() {
-        return true;
-    }
-    #[cfg(target_os = "windows")]
-    {
-        crate::windows_fs::is_reparse(metadata)
-    }
-    #[cfg(not(target_os = "windows"))]
-    false
-}
-
 fn canonicalize(path: &Path) -> Result<PathBuf, PackageError> {
-    #[cfg(target_os = "windows")]
-    {
-        crate::windows_fs::validate_local_ntfs_path(path).map_err(|message| PackageError::Io {
-            path: path.to_path_buf(),
-            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, message),
-        })
-    }
-    #[cfg(not(target_os = "windows"))]
     fs::canonicalize(path).map_err(|source| PackageError::Io {
         path: path.to_path_buf(),
         source,

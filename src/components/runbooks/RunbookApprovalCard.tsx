@@ -47,9 +47,11 @@ export function RunbookApprovalCard({
   const modelInvocation = approval.command.startsWith(
     "model://configured-agent/",
   );
+  const ansibleController = Boolean(approval.project_digest);
   const edited = command !== approval.command;
   const invalid =
-    !command.trim() || command.length > 4_096 || /[\r\n\0]/.test(command);
+    !ansibleController &&
+    (!command.trim() || command.length > 4_096 || /[\r\n\0]/.test(command));
   // Both approve paths execute the same text, so they share one predicate. The
   // bulk button used to be gated on `busy` alone.
   const approveDisabled = busy || (!modelInvocation && invalid);
@@ -128,6 +130,20 @@ export function RunbookApprovalCard({
             terminal command it proposes requires a separate approval.
           </span>
         </div>
+      ) : ansibleController ? (
+        <div className="space-y-1 rounded border border-border-subtle bg-bg-primary px-2 py-2">
+          <span className="flex items-center gap-1 text-[10px] text-text-muted">
+            <TerminalSquare size={10} /> Exact local controller command
+          </span>
+          <code className="block overflow-x-auto whitespace-pre font-mono text-[9px] text-text-secondary">
+            {approval.command}
+          </code>
+          <span className="block text-[9px] leading-relaxed text-text-muted">
+            VTerminal launches this command directly as a local process. It does
+            not run in, or inherit state from, the visible terminal and cannot be
+            edited without invalidating this approval.
+          </span>
+        </div>
       ) : (
         <div className="space-y-2">
           <label className="block space-y-1">
@@ -203,7 +219,7 @@ export function RunbookApprovalCard({
           )}
         </div>
 
-        {!autoApproving && onApproveAll && (
+        {!autoApproving && onApproveAll && !ansibleController && (
           <div className="space-y-1">
             <button
               onClick={() => {

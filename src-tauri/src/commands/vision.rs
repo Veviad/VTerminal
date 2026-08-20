@@ -331,12 +331,10 @@ mod enabled {
         app: tauri::AppHandle<Wry>,
     ) -> Result<crate::commands::models::ModelStatus, String> {
         let (loaded, state) = app.state::<VisionHost>().status().await;
-        let acceleration = app.state::<VisionHost>().acceleration_snapshot().await;
         Ok(crate::commands::models::ModelStatus {
             loaded,
             state: state.to_string(),
             available: true,
-            acceleration,
         })
     }
 
@@ -463,12 +461,6 @@ mod disabled {
             loaded: None,
             state: "idle".into(),
             available: false,
-            acceleration: serde_json::json!({
-                "backend": "unavailable",
-                "device_name": null,
-                "device_memory_bytes": null,
-                "fallback_reason": "local inference is not included in this build"
-            }),
         })
     }
 

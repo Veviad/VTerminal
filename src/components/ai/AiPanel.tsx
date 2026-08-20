@@ -43,7 +43,6 @@ import { interruptJob } from "../../lib/ptyExec";
 import { askReason, autoRuns, PERMISSION_MODES } from "../../lib/permissionMode";
 import { relativeTime } from "../../lib/relativeTime";
 import { S } from "../../lib/strings";
-import { shortcutFor } from "../../lib/keymap";
 import { Dropdown } from "../ui/Dropdown";
 import { EffortPicker } from "../ui/EffortPicker";
 import * as api from "../../lib/tauri";
@@ -643,7 +642,7 @@ function CollapsedRail({ busy }: { busy: boolean }) {
       <button
         onClick={() => setAiPanelOpen(true)}
         className="rounded-md p-1.5 text-text-muted transition-colors duration-150 hover:bg-bg-hover hover:text-text-secondary"
-        title={`${S.aiPanel.expand} (${shortcutFor("toggle-ai-panel")})`}
+        title={`${S.aiPanel.expand} (⌘J)`}
       >
         <Sparkles size={14} />
       </button>

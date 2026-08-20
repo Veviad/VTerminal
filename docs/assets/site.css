@@ -1893,12 +1893,6 @@ a:hover {
   gap: clamp(2rem, 6vw, 5rem);
 }
 
-.install-layout + .install-layout {
-  margin-top: clamp(3rem, 7vw, 6rem);
-  border-top: 1px solid var(--line-soft);
-  padding-top: clamp(3rem, 7vw, 6rem);
-}
-
 .req-list {
   display: grid;
   margin: 1.75rem 0 0;
@@ -2101,10 +2095,6 @@ a:hover {
   align-items: center;
   gap: 0.75rem 1rem;
   margin-bottom: 0.9rem;
-}
-
-.req-list + .download-cta {
-  margin-top: 1.5rem;
 }
 
 .download-cta .button {

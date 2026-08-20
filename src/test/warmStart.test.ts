@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { refreshModels, warmStart } from "../lib/selectModel";
+import { warmStart } from "../lib/selectModel";
 import { useAppStore } from "../stores/appStore";
 import * as api from "../lib/tauri";
 import type { ModelStatus } from "../lib/types";
@@ -61,35 +61,11 @@ beforeEach(() => {
     visionModelId: "vision/qwen3-vl-4b",
     visionAutoLoadOnStart: true,
     visionLoadedModelId: null,
-    visionAcceleration: null,
     visionLoadError: null,
   });
 });
 
 describe("warmStart", () => {
-  it("retains the vision host accelerator returned by model status", async () => {
-    vi.mocked(api.visionStatus).mockResolvedValue({
-      loaded: "vision/qwen3-vl-4b",
-      state: "ready",
-      available: true,
-      acceleration: {
-        backend: "cpu",
-        device_name: "CPU",
-        device_memory_bytes: null,
-        fallback_reason: "Vulkan backend failed to load",
-      },
-    });
-
-    await refreshModels();
-
-    expect(useAppStore.getState().visionAcceleration).toEqual({
-      backend: "cpu",
-      device_name: "CPU",
-      device_memory_bytes: null,
-      fallback_reason: "Vulkan backend failed to load",
-    });
-  });
-
   it("loads the sidecar only after the chat model has finished", async () => {
     const chatLoad = deferred();
     vi.mocked(api.modelLoad).mockImplementation(() => {

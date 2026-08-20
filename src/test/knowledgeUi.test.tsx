@@ -4,7 +4,6 @@ import type {
   DownloadEvent,
   EmbeddingCatalogEntry,
   EmbeddingInstallEvent,
-  EmbeddingModelStatus,
   EmbeddingProfile,
   KnowledgeBucketDescriptor,
   KnowledgeBucketRef,
@@ -19,7 +18,6 @@ import type {
 
 const api = vi.hoisted(() => ({
   knowledgeEmbeddingModelsList: vi.fn<() => Promise<EmbeddingCatalogEntry[]>>(),
-  knowledgeEmbeddingModelStatus: vi.fn<() => Promise<EmbeddingModelStatus[]>>(),
   knowledgeEmbeddingModelInstall: vi.fn<
     (
       modelId: string,
@@ -67,13 +65,6 @@ const api = vi.hoisted(() => ({
   knowledgeBucketEmbed: vi.fn(() => Promise.resolve({} as KnowledgeJob)),
   knowledgeBucketSemanticEnable: vi.fn(() => Promise.resolve({} as KnowledgeJob)),
   knowledgeCliInstall: vi.fn(() => Promise.resolve("/Users/test/.local/bin/vterminal-docs")),
-  knowledgeCliStatus: vi.fn(() =>
-    Promise.resolve({
-      installed: false,
-      path_ready: false,
-      path: "/Users/test/.local/bin/vterminal-docs",
-    }),
-  ),
 }));
 
 vi.mock("../lib/tauri", () => api);
@@ -198,7 +189,6 @@ beforeEach(() => {
       model(id, MODEL_LABELS[index], !id.includes("multilingual-e5")),
     ),
   );
-  api.knowledgeEmbeddingModelStatus.mockResolvedValue([]);
   api.knowledgeQdrantConnectionsList.mockResolvedValue([]);
   api.knowledgeQdrantConnectionTest.mockResolvedValue(connection());
   api.knowledgeDocumentsList.mockResolvedValue({ documents: [], next_cursor: null });
@@ -215,35 +205,6 @@ beforeEach(() => {
 });
 
 describe("embedding model UX", () => {
-  it("surfaces the loaded embedding host accelerator and CPU fallback reason", async () => {
-    api.knowledgeEmbeddingModelStatus.mockResolvedValue([
-      {
-        id: "local/qwen3-embedding-0.6b",
-        state: "ready",
-        installed: true,
-        loaded: true,
-        downloaded_bytes: 250_000_000,
-        total_bytes: 250_000_000,
-        error: null,
-        profile_id: "local/qwen3-embedding-0.6b",
-        acceleration: {
-          backend: "cpu",
-          device_name: "Ryzen 9",
-          device_memory_bytes: 16_000_000_000,
-          fallback_reason: "Vulkan allocation failed",
-        },
-      },
-    ]);
-
-    render(<KnowledgeModelsSection selectedProfileId={null} onSelectProfile={vi.fn()} />);
-
-    expect(
-      await screen.findByText(
-        "Embedding inference: CPU · Ryzen 9 · 16.0 GB device memory — Vulkan allocation failed",
-      ),
-    ).toBeInTheDocument();
-  });
-
   it("shows exactly the six local one-click models and only OpenAI/Mistral cloud profiles", async () => {
     render(<KnowledgeModelsSection selectedProfileId={null} onSelectProfile={vi.fn()} />);
 

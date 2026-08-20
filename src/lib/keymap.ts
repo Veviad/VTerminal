@@ -1,5 +1,3 @@
-import { desktopPlatform, isWindows } from "./platform";
-
 // App-reserved keyboard shortcuts. Enforced in two places:
 // 1. term.attachCustomKeyEventHandler(e => !matchesReserved(e)) — xterm ignores these
 // 2. useGlobalShortcuts window listener — preventDefault + dispatch the action
@@ -34,7 +32,7 @@ export interface ReservedBinding {
   label: string;
 }
 
-const MAC_RESERVED: ReservedBinding[] = [
+export const RESERVED: ReservedBinding[] = [
   { id: "new-tab", combo: "cmd+t", label: "New tab" },
   { id: "close-tab", combo: "cmd+w", label: "Close tab" },
   { id: "next-tab", combo: "cmd+shift+]", label: "Next tab" },
@@ -62,32 +60,6 @@ const MAC_RESERVED: ReservedBinding[] = [
   { id: "font-size-reset", combo: "cmd+0", label: "Reset font size" },
 ];
 
-export function bindingsForPlatform(platform: "windows" | "macos" | "other"): ReservedBinding[] {
-  if (platform !== "windows") return MAC_RESERVED.map((binding) => ({ ...binding }));
-  return MAC_RESERVED.map((binding) => ({
-    ...binding,
-    combo: binding.combo.startsWith("cmd+shift+")
-      ? binding.combo.replace("cmd+shift+", "ctrl+shift+")
-      : binding.combo.replace("cmd+", "ctrl+shift+"),
-  }));
-}
-
-export const RESERVED: ReservedBinding[] = bindingsForPlatform(desktopPlatform());
-
-export function shortcutFor(action: AppAction): string {
-  const combo = RESERVED.find((binding) => binding.id === action)?.combo ?? "";
-  return combo
-    .replace("cmd+", "⌘")
-    .replace("ctrl+", "Ctrl+")
-    .replace("shift+", "Shift+")
-    .replace("alt+", "Alt+")
-    .replace(/(^|\+)([a-z])$/i, (_match, prefix: string, key: string) => `${prefix}${key.toUpperCase()}`);
-}
-
-export function usesAlternateAction(e: Pick<KeyboardEvent, "metaKey" | "ctrlKey" | "shiftKey">): boolean {
-  return isWindows() ? e.ctrlKey && e.shiftKey : e.metaKey;
-}
-
 function comboMatches(combo: string, e: KeyboardEvent): boolean {
   const parts = combo.split("+");
   const key = parts[parts.length - 1];
@@ -99,36 +71,18 @@ function comboMatches(combo: string, e: KeyboardEvent): boolean {
   if (e.shiftKey !== needShift) return false;
   if (e.altKey !== needAlt) return false;
   if (e.ctrlKey !== needCtrl) return false;
-  // Windows app bindings all include Shift, so punctuation and number keys
-  // arrive as their shifted symbols (`!`, `_`, `{`, ...). Match the physical
-  // code for those keys while retaining e.key as the layout-friendly fallback.
+  // Match on e.key, case-insensitive; "=" also matches "+" (shifted layouts)
   const k = e.key.toLowerCase();
-  if (/^[0-9]$/.test(key)) return k === key || e.code === `Digit${key}`;
-  if (key === "=") return k === "=" || k === "+" || e.code === "Equal";
-  if (key === "-") return k === "-" || k === "_" || e.code === "Minus";
-  if (key === "[") return k === "[" || k === "{" || e.code === "BracketLeft";
-  if (key === "]") return k === "]" || k === "}" || e.code === "BracketRight";
-  if (key === ",") return k === "," || k === "<" || e.code === "Comma";
+  if (key === "=") return k === "=" || k === "+";
+  if (key === "[") return k === "[" || (e.code === "BracketLeft" && e.shiftKey);
+  if (key === "]") return k === "]" || (e.code === "BracketRight" && e.shiftKey);
   return k === key;
 }
 
-function matchBindings(e: KeyboardEvent, bindings: ReservedBinding[]): ReservedBinding | null {
-  if (!e.metaKey && !e.ctrlKey) return null;
-  for (const binding of bindings) {
-    if (comboMatches(binding.combo, e)) return binding;
+export function matchesReserved(e: KeyboardEvent): ReservedBinding | null {
+  if (!e.metaKey) return null; // all reserved combos are cmd-based
+  for (const b of RESERVED) {
+    if (comboMatches(b.combo, e)) return b;
   }
   return null;
-}
-
-export function matchesReserved(e: KeyboardEvent): ReservedBinding | null {
-  return matchBindings(e, RESERVED);
-}
-
-/** Explicit-platform variant used by tests and platform-specific callers that
- * need to interpret an event before the browser environment is initialized. */
-export function matchesReservedForPlatform(
-  e: KeyboardEvent,
-  platform: "windows" | "macos" | "other",
-): ReservedBinding | null {
-  return matchBindings(e, bindingsForPlatform(platform));
 }

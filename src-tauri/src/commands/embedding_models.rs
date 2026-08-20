@@ -296,7 +296,6 @@ pub struct EmbeddingModelStatus {
     pub total_bytes: Option<u64>,
     pub error: Option<String>,
     pub profile_id: Option<String>,
-    pub acceleration: Option<serde_json::Value>,
 }
 
 #[tauri::command]
@@ -305,9 +304,7 @@ pub async fn knowledge_embedding_model_status(
 ) -> Result<Vec<EmbeddingModelStatus>, String> {
     let dir = models_dir(&app)?;
     let installed = local::installed_artifacts(&dir);
-    let host = app.state::<EmbeddingHost>();
-    let loaded = host.status().await;
-    let acceleration = host.acceleration_snapshot().await;
+    let loaded = app.state::<EmbeddingHost>().status().await;
     Ok(crate::knowledge::embedding::BUILTIN_EMBEDDING_MODELS
         .iter()
         .map(|model| {
@@ -335,7 +332,6 @@ pub async fn knowledge_embedding_model_status(
                     None
                 },
                 profile_id: installed.map(|_| model.id.into()),
-                acceleration: (loaded.as_deref() == Some(model.id)).then(|| acceleration.clone()),
             }
         })
         .collect())

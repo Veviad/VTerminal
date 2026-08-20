@@ -311,11 +311,11 @@ pub async fn verify_installed_artifact(
 #[cfg(feature = "local-llm")]
 mod runtime {
     use std::num::NonZeroU32;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
     use llama_cpp_2::context::params::{LlamaContextParams, LlamaPoolingType};
     use llama_cpp_2::llama_batch::LlamaBatch;
+    use llama_cpp_2::model::params::LlamaModelParams;
     use llama_cpp_2::model::{AddBos, LlamaModel};
 
     use super::*;
@@ -327,45 +327,12 @@ mod runtime {
             artifact_sha256: String,
             path: String,
             model: Arc<LlamaModel>,
-            acceleration: crate::provider::local::LocalAcceleration,
         },
-    }
-
-    struct ReadyEmbedding {
-        model: Arc<LlamaModel>,
-        #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-        acceleration: crate::provider::local::LocalAcceleration,
-    }
-
-    #[derive(Debug)]
-    enum EmbedAttemptError {
-        /// Context allocation and decode can fail after a Vulkan model has
-        /// loaded successfully. These are the only failures a CPU reload can
-        /// reasonably repair.
-        Runtime(EmbeddingError),
-        Permanent(EmbeddingError),
-    }
-
-    impl EmbedAttemptError {
-        fn into_error(self) -> EmbeddingError {
-            match self {
-                Self::Runtime(error) | Self::Permanent(error) => error,
-            }
-        }
-    }
-
-    #[cfg(any(target_os = "windows", test))]
-    fn should_retry_on_cpu(
-        acceleration: &crate::provider::local::LocalAcceleration,
-        error: &EmbedAttemptError,
-    ) -> bool {
-        acceleration.backend == "vulkan" && matches!(error, EmbedAttemptError::Runtime(_))
     }
 
     pub struct EmbeddingHost {
         inner: tokio::sync::Mutex<HostSlot>,
         gate: Arc<tokio::sync::Semaphore>,
-        generation: AtomicU64,
     }
 
     impl Default for EmbeddingHost {
@@ -379,7 +346,6 @@ mod runtime {
             Self {
                 inner: tokio::sync::Mutex::new(HostSlot::Empty),
                 gate,
-                generation: AtomicU64::new(0),
             }
         }
 
@@ -392,25 +358,14 @@ mod runtime {
             }
         }
 
-        pub async fn acceleration_snapshot(&self) -> serde_json::Value {
-            let acceleration = match &*self.inner.lock().await {
-                HostSlot::Ready { acceleration, .. } => acceleration.clone(),
-                HostSlot::Empty => crate::provider::local::LocalAcceleration::unloaded(),
-            };
-            serde_json::to_value(acceleration)
-                .unwrap_or_else(|_| serde_json::json!({ "backend": "unknown" }))
-        }
-
         pub async fn unload(&self) {
-            self.generation.fetch_add(1, Ordering::SeqCst);
             *self.inner.lock().await = HostSlot::Empty;
         }
 
         async fn ready_model(
             &self,
             installed: &InstalledEmbeddingArtifact,
-            _profile: &EmbeddingProfile,
-        ) -> Result<ReadyEmbedding, EmbeddingError> {
+        ) -> Result<Arc<LlamaModel>, EmbeddingError> {
             {
                 let slot = self.inner.lock().await;
                 if let HostSlot::Ready {
@@ -418,44 +373,27 @@ mod runtime {
                     artifact_sha256,
                     path,
                     model,
-                    acceleration,
                 } = &*slot
                 {
                     if builtin_model_id == &installed.builtin_model_id
                         && artifact_sha256.eq_ignore_ascii_case(&installed.sha256)
                         && path == &installed.path
                     {
-                        return Ok(ReadyEmbedding {
-                            model: Arc::clone(model),
-                            acceleration: acceleration.clone(),
-                        });
+                        return Ok(Arc::clone(model));
                     }
                 }
             }
 
-            let my_generation = self.generation.load(Ordering::SeqCst);
             verify_installed_artifact(installed)
                 .await
                 .map_err(EmbeddingError::Profile)?;
             let path = installed.path.clone();
-            #[cfg(target_os = "windows")]
-            let profile = _profile.clone();
-            let (model, acceleration) = tokio::task::spawn_blocking(move || {
-                let (model, acceleration) =
-                    crate::provider::local::load_model_with_fallback(&path, "embedding model")?;
-                #[cfg(target_os = "windows")]
-                let (model, acceleration) = {
-                    let (model, acceleration, ()) =
-                        crate::provider::local::validate_or_retry_on_cpu(
-                            &path,
-                            "embedding model",
-                            model,
-                            acceleration,
-                            |model, _| validate_embedding_context(model, &profile),
-                        )?;
-                    (model, acceleration)
-                };
-                Ok::<_, String>((Arc::new(model), acceleration))
+            let model = tokio::task::spawn_blocking(move || {
+                let backend = crate::provider::local::backend()?;
+                let params = LlamaModelParams::default().with_n_gpu_layers(u32::MAX);
+                LlamaModel::load_from_file(backend, &path, &params)
+                    .map(Arc::new)
+                    .map_err(|error| format!("embedding model load failed: {error}"))
             })
             .await
             .map_err(|error| {
@@ -464,120 +402,13 @@ mod runtime {
             .map_err(EmbeddingError::Transport)?;
 
             let mut slot = self.inner.lock().await;
-            if self.generation.load(Ordering::SeqCst) != my_generation {
-                return Err(EmbeddingError::Transport(
-                    "embedding load cancelled by unload".into(),
-                ));
-            }
             *slot = HostSlot::Ready {
                 builtin_model_id: installed.builtin_model_id.clone(),
                 artifact_sha256: installed.sha256.clone(),
                 path: installed.path.clone(),
                 model: Arc::clone(&model),
-                acceleration: acceleration.clone(),
             };
-            Ok(ReadyEmbedding {
-                model,
-                acceleration,
-            })
-        }
-
-        // Kept type-checked on non-Windows hosts even though only the Windows
-        // call site is enabled. Native behavior remains unchanged, while CI on
-        // another host can still catch ownership mistakes in this transition.
-        #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-        async fn reload_on_cpu_after_runtime_failure(
-            &self,
-            installed: &InstalledEmbeddingArtifact,
-            ready: ReadyEmbedding,
-            failure: &EmbeddingError,
-        ) -> Result<ReadyEmbedding, EmbeddingError> {
-            let my_generation = self.generation.load(Ordering::SeqCst);
-            let slot_model = {
-                let mut slot = self.inner.lock().await;
-                let matches_failed_model = matches!(
-                    &*slot,
-                    HostSlot::Ready {
-                        builtin_model_id,
-                        artifact_sha256,
-                        path,
-                        model,
-                        acceleration,
-                    } if builtin_model_id == &installed.builtin_model_id
-                        && artifact_sha256.eq_ignore_ascii_case(&installed.sha256)
-                        && path == &installed.path
-                        && acceleration.backend == "vulkan"
-                        && Arc::ptr_eq(model, &ready.model)
-                );
-                if !matches_failed_model {
-                    return Err(EmbeddingError::Transport(format!(
-                        "embedding Vulkan runtime failed, but the loaded model changed before CPU fallback: {failure}"
-                    )));
-                }
-                match std::mem::replace(&mut *slot, HostSlot::Empty) {
-                    HostSlot::Ready { model, .. } => model,
-                    HostSlot::Empty => unreachable!("matched slot was ready"),
-                }
-            };
-
-            // No request can acquire another embedding model while `embed`
-            // holds the shared inference permit. Drop the host's Arc and
-            // require unique ownership before loading CPU weights, so the
-            // Vulkan allocation is actually gone rather than merely hidden.
-            drop(slot_model);
-            let model = Arc::try_unwrap(ready.model).map_err(|_| {
-                EmbeddingError::Transport(
-                    "embedding Vulkan model was still in use; CPU fallback was not attempted"
-                        .into(),
-                )
-            })?;
-            let path = installed.path.clone();
-            let runtime_error = failure.to_string();
-            let (model, acceleration) = tokio::task::spawn_blocking(move || {
-                let (model, acceleration, ()) = crate::provider::local::validate_or_retry_on_cpu(
-                    &path,
-                    "embedding model",
-                    model,
-                    ready.acceleration,
-                    |_model, accelerated| {
-                        if accelerated {
-                            Err(runtime_error.clone())
-                        } else {
-                            Ok(())
-                        }
-                    },
-                )?;
-                Ok::<_, String>((Arc::new(model), acceleration))
-            })
-            .await
-            .map_err(|error| {
-                EmbeddingError::Transport(format!(
-                    "embedding CPU fallback task failed after {failure}: {error}"
-                ))
-            })?
-            .map_err(|error| {
-                EmbeddingError::Transport(format!(
-                    "embedding CPU fallback failed after {failure}: {error}"
-                ))
-            })?;
-
-            let mut slot = self.inner.lock().await;
-            if self.generation.load(Ordering::SeqCst) != my_generation {
-                return Err(EmbeddingError::Transport(
-                    "embedding CPU fallback cancelled by unload".into(),
-                ));
-            }
-            *slot = HostSlot::Ready {
-                builtin_model_id: installed.builtin_model_id.clone(),
-                artifact_sha256: installed.sha256.clone(),
-                path: installed.path.clone(),
-                model: Arc::clone(&model),
-                acceleration: acceleration.clone(),
-            };
-            Ok(ReadyEmbedding {
-                model,
-                acceleration,
-            })
+            Ok(model)
         }
 
         /// Transform, tokenize, pool, MRL-truncate, and L2-normalize a batch.
@@ -603,62 +434,24 @@ mod runtime {
                 .iter()
                 .map(|input| profile.transform(purpose, input))
                 .collect();
-            // Acquire before cloning the resident model. This makes the
-            // Vulkan-to-CPU transition exclusive: no queued embedding request
-            // can retain and later execute against the discarded GPU model.
+            let model = self.ready_model(installed).await?;
+            if usize::try_from(model.n_embd_out()).unwrap_or(0) < profile.dimensions() {
+                return Err(EmbeddingError::Profile(format!(
+                    "GGUF emits {} dimensions, fewer than profile's {}",
+                    model.n_embd_out(),
+                    profile.dimensions()
+                )));
+            }
             let _permit =
                 self.gate.acquire().await.map_err(|_| {
                     EmbeddingError::Transport("local inference gate is closed".into())
                 })?;
-            let ready = self.ready_model(installed, profile).await?;
-            if usize::try_from(ready.model.n_embd_out()).unwrap_or(0) < profile.dimensions() {
-                return Err(EmbeddingError::Profile(format!(
-                    "GGUF emits {} dimensions, fewer than profile's {}",
-                    ready.model.n_embd_out(),
-                    profile.dimensions()
-                )));
-            }
-            let profile = Arc::new(profile.clone());
-            let transformed = Arc::new(transformed);
-            let first_model = Arc::clone(&ready.model);
-            let first_profile = Arc::clone(&profile);
-            let first_inputs = Arc::clone(&transformed);
-            let first = tokio::task::spawn_blocking(move || {
-                embed_blocking(&first_model, &first_profile, &first_inputs)
-            })
-            .await
-            .map_err(|error| {
-                EmbeddingError::Transport(format!("embedding task failed: {error}"))
-            })?;
-
-            match first {
-                Ok(batch) => Ok(batch),
-                Err(failure) => {
-                    // Unit-test builds keep this branch type-checked on other
-                    // hosts; the predicate still restricts it to a literal
-                    // Vulkan status, which non-Windows production never has.
-                    #[cfg(any(target_os = "windows", test))]
-                    {
-                        if should_retry_on_cpu(&ready.acceleration, &failure) {
-                            let original = failure.into_error();
-                            let cpu = self
-                                .reload_on_cpu_after_runtime_failure(installed, ready, &original)
-                                .await?;
-                            let retry = tokio::task::spawn_blocking(move || {
-                                embed_blocking(&cpu.model, &profile, &transformed)
-                            })
-                            .await
-                            .map_err(|error| {
-                                EmbeddingError::Transport(format!(
-                                    "embedding CPU retry task failed: {error}"
-                                ))
-                            })?;
-                            return retry.map_err(EmbedAttemptError::into_error);
-                        }
-                    }
-                    Err(failure.into_error())
-                }
-            }
+            let profile = profile.clone();
+            tokio::task::spawn_blocking(move || embed_blocking(&model, &profile, &transformed))
+                .await
+                .map_err(|error| {
+                    EmbeddingError::Transport(format!("embedding task failed: {error}"))
+                })?
         }
     }
 
@@ -673,52 +466,22 @@ mod runtime {
         }
     }
 
-    #[cfg(target_os = "windows")]
-    fn validate_embedding_context(
-        model: &LlamaModel,
-        profile: &EmbeddingProfile,
-    ) -> Result<(), String> {
-        let threads = crate::provider::local::perf_cores();
-        let params = LlamaContextParams::default()
-            .with_n_ctx(NonZeroU32::new(512.min(model.n_ctx_train()).max(1)))
-            .with_n_batch(512)
-            .with_n_ubatch(512)
-            .with_n_threads(threads)
-            .with_n_threads_batch(threads)
-            .with_embeddings(true)
-            .with_pooling_type(
-                pooling(profile.semantic().pooling).map_err(|error| error.to_string())?,
-            );
-        let context = model
-            .new_context(
-                crate::provider::local::backend().map_err(|error| error.to_string())?,
-                params,
-            )
-            .map_err(|error| format!("embedding context creation failed: {error}"))?;
-        drop(context);
-        Ok(())
-    }
-
     fn embed_blocking(
         model: &LlamaModel,
         profile: &EmbeddingProfile,
         inputs: &[String],
-    ) -> Result<EmbeddedBatch, EmbedAttemptError> {
-        let backend = crate::provider::local::backend()
-            .map_err(EmbeddingError::Transport)
-            .map_err(EmbedAttemptError::Permanent)?;
+    ) -> Result<EmbeddedBatch, EmbeddingError> {
+        let backend = crate::provider::local::backend().map_err(EmbeddingError::Transport)?;
         let mut vectors = Vec::with_capacity(inputs.len());
         for (index, input) in inputs.iter().enumerate() {
             // `add_special=true` is how llama.cpp's embedding runner applies the
             // vocabulary-declared BOS/EOS policy; it is not a hand-written token.
             let tokens = model.str_to_token(input, AddBos::Always).map_err(|error| {
-                EmbedAttemptError::Permanent(EmbeddingError::Vector(format!(
-                    "tokenize input {index}: {error}"
-                )))
+                EmbeddingError::Vector(format!("tokenize input {index}: {error}"))
             })?;
             if tokens.is_empty() {
-                return Err(EmbedAttemptError::Permanent(EmbeddingError::Vector(
-                    format!("input {index} tokenized to no tokens"),
+                return Err(EmbeddingError::Vector(format!(
+                    "input {index} tokenized to no tokens"
                 )));
             }
             let max_tokens = profile
@@ -726,11 +489,9 @@ mod runtime {
                 .max_input_tokens
                 .unwrap_or(model.n_ctx_train());
             if tokens.len() > max_tokens as usize {
-                return Err(EmbedAttemptError::Permanent(EmbeddingError::Vector(
-                    format!(
-                        "input {index} is {} tokens; this profile rejects inputs over {max_tokens}",
-                        tokens.len()
-                    ),
+                return Err(EmbeddingError::Vector(format!(
+                    "input {index} is {} tokens; this profile rejects inputs over {max_tokens}",
+                    tokens.len()
                 )));
             }
             let n_ctx = u32::try_from(tokens.len())
@@ -738,11 +499,9 @@ mod runtime {
                 .max(512)
                 .min(model.n_ctx_train());
             if tokens.len() > n_ctx as usize {
-                return Err(EmbedAttemptError::Permanent(EmbeddingError::Vector(
-                    format!(
-                        "input {index} is {} tokens; GGUF context is {n_ctx}",
-                        tokens.len()
-                    ),
+                return Err(EmbeddingError::Vector(format!(
+                    "input {index} is {} tokens; GGUF context is {n_ctx}",
+                    tokens.len()
                 )));
             }
             let n_batch = u32::try_from(tokens.len()).unwrap_or(u32::MAX).max(512);
@@ -754,37 +513,25 @@ mod runtime {
                 .with_n_threads(threads)
                 .with_n_threads_batch(threads)
                 .with_embeddings(true)
-                .with_pooling_type(
-                    pooling(profile.semantic().pooling).map_err(EmbedAttemptError::Permanent)?,
-                );
+                .with_pooling_type(pooling(profile.semantic().pooling)?);
             let mut context = model.new_context(backend, params).map_err(|error| {
-                EmbedAttemptError::Runtime(EmbeddingError::Transport(format!(
-                    "create context for input {index}: {error}"
-                )))
+                EmbeddingError::Transport(format!("create context for input {index}: {error}"))
             })?;
             let mut batch = LlamaBatch::new(tokens.len(), 1);
-            batch.add_sequence(&tokens, 0, false).map_err(|error| {
-                EmbedAttemptError::Permanent(EmbeddingError::Vector(format!(
-                    "batch input {index}: {error}"
-                )))
-            })?;
+            batch
+                .add_sequence(&tokens, 0, false)
+                .map_err(|error| EmbeddingError::Vector(format!("batch input {index}: {error}")))?;
             context.decode(&mut batch).map_err(|error| {
-                EmbedAttemptError::Runtime(EmbeddingError::Transport(format!(
-                    "evaluate input {index}: {error}"
-                )))
+                EmbeddingError::Transport(format!("evaluate input {index}: {error}"))
             })?;
             let output = context.embeddings_seq_ith(0).map_err(|error| {
-                EmbedAttemptError::Permanent(EmbeddingError::Vector(format!(
-                    "read embedding {index}: {error}"
-                )))
+                EmbeddingError::Vector(format!("read embedding {index}: {error}"))
             })?;
             if output.len() < profile.dimensions() {
-                return Err(EmbedAttemptError::Permanent(EmbeddingError::Vector(
-                    format!(
-                        "embedding {index} has {} dimensions; expected at least {}",
-                        output.len(),
-                        profile.dimensions()
-                    ),
+                return Err(EmbeddingError::Vector(format!(
+                    "embedding {index} has {} dimensions; expected at least {}",
+                    output.len(),
+                    profile.dimensions()
                 )));
             }
             // Qwen3 and EmbeddingGemma publish Matryoshka spaces. Reduction is
@@ -796,49 +543,8 @@ mod runtime {
             vectors,
             inputs.len(),
             profile.dimensions(),
-        )
-        .map_err(EmbedAttemptError::Permanent)?;
+        )?;
         Ok(EmbeddedBatch { vectors, report })
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        fn acceleration(backend: &str) -> crate::provider::local::LocalAcceleration {
-            crate::provider::local::LocalAcceleration {
-                backend: backend.into(),
-                device_name: None,
-                device_memory_bytes: None,
-                fallback_reason: None,
-            }
-        }
-
-        #[test]
-        fn cpu_retry_is_limited_to_vulkan_runtime_failures() {
-            let runtime = EmbedAttemptError::Runtime(EmbeddingError::Transport(
-                "create context for input 0: allocation failed".into(),
-            ));
-            let invalid = EmbedAttemptError::Permanent(EmbeddingError::Vector(
-                "input 0 exceeds the profile limit".into(),
-            ));
-
-            assert!(should_retry_on_cpu(&acceleration("vulkan"), &runtime));
-            assert!(!should_retry_on_cpu(&acceleration("cpu"), &runtime));
-            assert!(!should_retry_on_cpu(&acceleration("metal"), &runtime));
-            assert!(!should_retry_on_cpu(&acceleration("vulkan"), &invalid));
-        }
-
-        #[test]
-        fn retryable_failure_preserves_the_original_user_facing_error() {
-            let failure = EmbedAttemptError::Runtime(EmbeddingError::Transport(
-                "evaluate input 2: device allocation failed".into(),
-            ));
-            assert_eq!(
-                failure.into_error().to_string(),
-                "embedding request failed: evaluate input 2: device allocation failed"
-            );
-        }
     }
 }
 
@@ -860,15 +566,6 @@ impl EmbeddingHost {
     }
 
     pub async fn unload(&self) {}
-
-    pub async fn acceleration_snapshot(&self) -> serde_json::Value {
-        serde_json::json!({
-            "backend": "unavailable",
-            "device_name": null,
-            "device_memory_bytes": null,
-            "fallback_reason": "local inference is not included in this build"
-        })
-    }
 
     pub async fn embed(
         &self,
@@ -1034,12 +731,5 @@ mod tests {
         let reduced = profile_for_installation(&installed, Some(768)).unwrap();
         assert_ne!(native.fingerprint(), reduced.fingerprint());
         assert_eq!(reduced.dimensions(), 768);
-    }
-
-    #[cfg(feature = "local-llm")]
-    #[tokio::test]
-    async fn an_empty_embedding_host_has_its_own_unloaded_status() {
-        let host = EmbeddingHost::default();
-        assert_eq!(host.acceleration_snapshot().await["backend"], "unloaded");
     }
 }

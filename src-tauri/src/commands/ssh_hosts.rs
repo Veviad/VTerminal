@@ -65,13 +65,6 @@ fn valid_username(u: &str) -> bool {
 
 const COLORS: [&str; 5] = ["accent", "warning", "error", "success", "text-muted"];
 
-#[cfg(any(target_os = "windows", test))]
-fn valid_wsl_identity_path(path: &str) -> bool {
-    (path.starts_with('/') || path.starts_with("~/"))
-        && !path.contains('\\')
-        && !path.split('/').any(|component| component == "..")
-}
-
 /// Trims, drops empty optionals, and rejects anything that must never reach a
 /// command line. Mutates in place so create/update/import share one path.
 fn validate(h: &mut queries::SshHostInput) -> Result<(), String> {
@@ -165,14 +158,6 @@ fn validate(h: &mut queries::SshHostInput) -> Result<(), String> {
             if v.chars().count() > max {
                 return Err(format!("the {field} is too long (max {max} characters)"));
             }
-        }
-    }
-    #[cfg(target_os = "windows")]
-    if let Some(identity) = &h.identity_file {
-        if !valid_wsl_identity_path(identity) {
-            return Err(
-                "the identity file must be a Linux path in the default WSL distribution".into(),
-            );
         }
     }
     if let Some(c) = &h.color {
@@ -311,144 +296,8 @@ pub struct SshConfigCandidate {
     pub existing_id: Option<String>,
 }
 
-#[cfg(target_os = "windows")]
-struct WslSshContext {
-    distribution: String,
-    ssh_dir: std::path::PathBuf,
-}
-
-#[cfg(target_os = "windows")]
-fn wsl_ssh_context() -> Result<WslSshContext, String> {
-    let mut command = std::process::Command::new("wsl.exe");
-    command
-        .args(["--exec", "/usr/bin/env", "-0"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
-    let output =
-        super::settings::command_output_bounded(&mut command, std::time::Duration::from_secs(15))
-            .map_err(|error| format!("inspect the default WSL environment: {error}"))?;
-    if !output.status.success() {
-        return Err("the default WSL distribution is not ready".into());
-    }
-    let mut distribution = None;
-    let mut home = None;
-    for entry in output.stdout.split(|byte| *byte == 0) {
-        let Ok(entry) = std::str::from_utf8(entry) else {
-            continue;
-        };
-        if let Some(value) = entry.strip_prefix("WSL_DISTRO_NAME=") {
-            distribution = Some(value.to_string());
-        } else if let Some(value) = entry.strip_prefix("HOME=") {
-            home = Some(value.to_string());
-        }
-    }
-    let distribution = distribution.ok_or("WSL did not report its distribution name")?;
-    if distribution.is_empty()
-        || distribution
-            .chars()
-            .any(|character| character.is_control() || matches!(character, '/' | '\\'))
-    {
-        return Err("WSL reported an invalid distribution name".into());
-    }
-    let home = home.ok_or("WSL did not report its Linux home directory")?;
-    if !home.starts_with('/')
-        || home.contains('\\')
-        || home.split('/').any(|component| component == "..")
-    {
-        return Err("WSL reported an invalid Linux home directory".into());
-    }
-    let home_components = home.trim_start_matches('/').replace('/', "\\");
-    let ssh_dir = std::path::PathBuf::from(format!(
-        r"\\wsl.localhost\{}\{}\.ssh",
-        distribution, home_components
-    ));
-    Ok(WslSshContext {
-        distribution,
-        ssh_dir,
-    })
-}
-
-#[tauri::command]
-pub fn ssh_wsl_identity_root() -> Result<Option<String>, String> {
-    #[cfg(target_os = "windows")]
-    {
-        Ok(Some(
-            wsl_ssh_context()?.ssh_dir.to_string_lossy().into_owned(),
-        ))
-    }
-    #[cfg(not(target_os = "windows"))]
-    Ok(None)
-}
-
-#[cfg(target_os = "windows")]
-fn strip_wsl_unc_prefix<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
-    path.strip_prefix(prefix).or_else(|| {
-        let candidate = path.get(..prefix.len())?;
-        candidate
-            .eq_ignore_ascii_case(prefix)
-            .then(|| &path[prefix.len()..])
-    })
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn wsl_regular_file_probe_args(path: &str) -> Vec<String> {
-    vec![
-        "--exec".into(),
-        "/bin/sh".into(),
-        "-c".into(),
-        "test -f \"$1\"".into(),
-        "vterminal-identity-probe".into(),
-        path.into(),
-    ]
-}
-
-#[tauri::command]
-pub fn ssh_wsl_path_from_host(path: String) -> Result<String, String> {
-    #[cfg(target_os = "windows")]
-    {
-        let context = wsl_ssh_context()?;
-        let normalized = path.replace('/', "\\");
-        let localhost = format!(r"\\wsl.localhost\{}\", context.distribution);
-        let legacy = format!(r"\\wsl$\{}\", context.distribution);
-        let relative = strip_wsl_unc_prefix(&normalized, &localhost)
-            .or_else(|| strip_wsl_unc_prefix(&normalized, &legacy))
-            .ok_or(
-                "choose a file inside the default WSL distribution, not a Windows or other-distro path",
-            )?;
-        if relative.is_empty()
-            || relative
-                .split('\\')
-                .any(|component| component.is_empty() || matches!(component, "." | ".."))
-        {
-            return Err("the selected WSL identity path is invalid".into());
-        }
-        let linux_path = format!("/{}", relative.replace('\\', "/"));
-        let mut probe = std::process::Command::new("wsl.exe");
-        probe
-            .args(wsl_regular_file_probe_args(&linux_path))
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        let output =
-            super::settings::command_output_bounded(&mut probe, std::time::Duration::from_secs(10))
-                .map_err(|error| format!("validate the WSL identity file: {error}"))?;
-        if !output.status.success() {
-            return Err(
-                "the selected WSL identity file does not exist or is not a regular file".into(),
-            );
-        }
-        Ok(linux_path)
-    }
-    #[cfg(not(target_os = "windows"))]
-    Ok(path)
-}
-
 #[tauri::command]
 pub fn ssh_hosts_scan_config(db: State<'_, DbState>) -> Result<Vec<SshConfigCandidate>, String> {
-    #[cfg(target_os = "windows")]
-    let ssh_dir = wsl_ssh_context()?.ssh_dir;
-    #[cfg(not(target_os = "windows"))]
     let ssh_dir = dirs::home_dir()
         .ok_or_else(|| "cannot locate your home directory".to_string())?
         .join(".ssh");
@@ -527,31 +376,6 @@ mod tests {
     fn accepts_a_plain_host() {
         let mut h = host("Prod", "prod-01.example.com");
         assert!(validate(&mut h).is_ok());
-    }
-
-    #[test]
-    fn wsl_identity_paths_are_linux_only_and_confined_lexically() {
-        assert!(valid_wsl_identity_path("~/.ssh/id_ed25519"));
-        assert!(valid_wsl_identity_path("/home/casey/.ssh/work key"));
-        assert!(!valid_wsl_identity_path(r"C:\Users\casey\.ssh\id_ed25519"));
-        assert!(!valid_wsl_identity_path("/home/casey/../root/key"));
-    }
-
-    #[test]
-    fn wsl_identity_probe_keeps_the_linux_path_out_of_shell_source() {
-        let args = wsl_regular_file_probe_args("/home/casey/My Keys/id;still-a-path");
-        assert_eq!(
-            &args[..5],
-            [
-                "--exec",
-                "/bin/sh",
-                "-c",
-                "test -f \"$1\"",
-                "vterminal-identity-probe"
-            ]
-        );
-        assert_eq!(args.last().unwrap(), "/home/casey/My Keys/id;still-a-path");
-        assert!(!args[3].contains("casey"));
     }
 
     #[test]

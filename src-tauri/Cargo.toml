@@ -90,10 +90,8 @@ minijinja-contrib = { version = "2", features = ["pycompat"], optional = true }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
-keyring = { version = "4.1.6", default-features = false, features = ["v1"] }
-
 [target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "4.1.6", default-features = false, features = ["v1"] }
 # Attribute-only Keychain queries let presence checks avoid reading secret data
 # or presenting authentication UI.
 security-framework = "3.7"
@@ -114,24 +112,6 @@ plist = "1.10"
 # Build cost is bounded and does NOT touch cmake: llama-cpp-sys-2's build.rs
 # compiles tools/mtmd as a standalone cc::Build target.
 llama-cpp-2 = { version = "0.1.154", default-features = false, features = ["metal", "mtmd"], optional = true }
-
-[target.'cfg(target_os = "windows")'.dependencies]
-# Windows uses runtime-loaded GGML modules so a single installer can select
-# Vulkan when available and still start on machines that only have a CPU.
-llama-cpp-2 = { version = "0.1.154", default-features = false, features = ["dynamic-backends", "vulkan", "mtmd"], optional = true }
-winreg = "0.55"
-windows-sys = { version = "0.61", features = [
-    "Wdk_Foundation",
-    "Wdk_Storage_FileSystem",
-    "Win32_Foundation",
-    "Win32_Security",
-    "Win32_Security_Authorization",
-    "Win32_Storage_FileSystem",
-    "Win32_System_IO",
-    "Win32_System_Threading",
-    "Win32_System_WindowsProgramming",
-    "Win32_UI_WindowsAndMessaging",
-] }
 
 # Metal kernels are unusably slow at opt-level 0
 [profile.dev.package."*"]

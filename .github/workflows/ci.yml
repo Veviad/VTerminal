@@ -137,114 +137,6 @@ jobs:
       - name: Test (local-llm)
         run: cargo test --locked --features local-llm
 
-  windows:
-    name: Windows 11 / WSL backend
-    runs-on: windows-latest
-    timeout-minutes: 120
-    defaults:
-      run:
-        shell: pwsh
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-
-      - name: Install toolchain
-        run: |
-          rustup show
-          rustup component add clippy
-          rustup target add x86_64-pc-windows-msvc
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          workspaces: src-tauri
-          key: windows
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
-
-      - run: npm ci
-
-      - name: Managed CLI PATH script
-        run: ./scripts/windows-cli-path.tests.ps1
-
-      - name: Stub frontend assets
-        run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Set-Content -Path dist/index.html -Value '<!doctype html><title>ci stub</title>'
-
-      # The feature-off bundle has exactly one native sidecar and no llama/GGML
-      # resource DLLs. Build its release profile here so the NSIS smoke below
-      # packages the same class of companion binary a preview would ship.
-      - name: Stage Windows companion sidecar (feature-off)
-        run: |
-          New-Item -ItemType Directory -Force src-tauri/binaries | Out-Null
-          New-Item -ItemType File -Force src-tauri/binaries/vterminal-docs-x86_64-pc-windows-msvc.exe | Out-Null
-          cargo build --manifest-path src-tauri/Cargo.toml --release --locked --target x86_64-pc-windows-msvc --bin vterminal-docs
-          Copy-Item src-tauri/target/x86_64-pc-windows-msvc/release/vterminal-docs.exe src-tauri/binaries/vterminal-docs-x86_64-pc-windows-msvc.exe
-
-      - name: Clippy
-        working-directory: src-tauri
-        run: cargo clippy --all-targets --locked -- -D warnings
-
-      - name: Test
-        working-directory: src-tauri
-        run: cargo test --locked
-
-      # Bundle without the local-llm feature or DLL resource overlay. This
-      # compiles the real NSIS hooks, including their absent-runtime path, and
-      # proves that only the required companion sidecar/common PATH resource is
-      # needed by a cloud-only preview.
-      - name: NSIS smoke bundle (feature-off)
-        run: |
-          $stagedLocalDlls = @(
-            Get-ChildItem src-tauri/binaries/llama-runtime,src-tauri/binaries/llama-backends -Filter '*.dll' -File -ErrorAction SilentlyContinue
-          )
-          if ($stagedLocalDlls.Count -ne 0) {
-            throw "Feature-off NSIS smoke must not stage llama/GGML DLLs: $($stagedLocalDlls.Name -join ', ')"
-          }
-          npm run tauri build -- --target x86_64-pc-windows-msvc --bundles nsis --config src-tauri/tauri.windows.conf.json
-          $installer = @(Get-ChildItem src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis -Filter '*setup.exe' -File)
-          if ($installer.Count -ne 1) { throw "Expected one feature-off NSIS installer, found $($installer.Count)." }
-
-      - name: Install Vulkan SDK
-        run: |
-          choco install vulkan-sdk -y --no-progress
-          $sdk = [Environment]::GetEnvironmentVariable('VULKAN_SDK', 'Machine')
-          if ([string]::IsNullOrWhiteSpace($sdk)) { throw 'Vulkan SDK installation did not set VULKAN_SDK.' }
-          "VULKAN_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "$sdk\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append
-
-      - name: Clippy (local-llm, Vulkan and CPU backends)
-        working-directory: src-tauri
-        env:
-          CARGO_TARGET_DIR: D:\t
-          CMAKE_GENERATOR: Ninja
-        run: cargo clippy --all-targets --locked --features local-llm -- -D warnings
-
-      - name: Test (local-llm)
-        working-directory: src-tauri
-        env:
-          CARGO_TARGET_DIR: D:\t
-          CMAKE_GENERATOR: Ninja
-        run: cargo test --locked --features local-llm
-
-      # Exercise the exact one-installer CPU+Vulkan payload used by releases,
-      # not just the feature-off preview. The script rejects mixed/stale llama
-      # build outputs and an incomplete runtime/backend DLL set before bundling.
-      - name: NSIS smoke bundle (local-llm, Vulkan + CPU fallback)
-        env:
-          CARGO_TARGET_DIR: D:\t
-          CMAKE_GENERATOR: Ninja
-        run: |
-          ./scripts/build-windows.ps1
-          $installer = Get-ChildItem "$env:CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/bundle/nsis" -Filter '*setup.exe'
-          if ($installer.Count -ne 1) { throw "Expected one NSIS installer, found $($installer.Count)." }
-
   policy:
     name: PR policy
     runs-on: ubuntu-latest
@@ -318,7 +210,7 @@ jobs:
   # both. Add jobs to `needs` and the ruleset keeps working untouched.
   gate:
     name: Quality gate
-    needs: [frontend, format, rust, windows, policy]
+    needs: [frontend, format, rust, policy]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

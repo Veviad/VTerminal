@@ -1983,8 +1983,7 @@ spec:
             std::fs::write(&path, &expected).unwrap();
         }
         let actual = std::fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
-            .replace("\r\n", "\n");
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
         assert_eq!(
             actual, expected,
             "run UPDATE_RUNBOOK_SCHEMA=1 cargo test checked_in_schema_is_current"

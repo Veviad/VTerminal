@@ -11,12 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::fs;
-#[cfg(not(target_os = "windows"))]
-use std::fs::OpenOptions;
-#[cfg(not(target_os = "windows"))]
-use std::io::Seek;
-use std::io::{Read, Write};
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::ipc::Channel;
@@ -24,14 +20,13 @@ use tauri::{Manager, State, Wry};
 
 use crate::database::DbState;
 use crate::pty::PtyManager;
-use crate::runbooks::authoring;
 use crate::runbooks::db::{
     self, ApprovalRecord, AttemptRecord, RunCreation, RunRecord, SourceKind, SourceRegistration,
     SourceRegistrationInput, StepRecord, StepSeed,
 };
 use crate::runbooks::definition::{ApplyAction, CheckAction, RunbookDefinition, VerifyAction};
 use crate::runbooks::drafts::{
-    DraftPlatform, RunbookDraft, RunbookDraftDocument, RunbookDraftPreview, RunbookDraftSummary,
+    RunbookDraft, RunbookDraftDocument, RunbookDraftPreview, RunbookDraftSummary,
 };
 use crate::runbooks::engine::{
     execute_runbook, resume_runbook, validate_runtime_command, EngineConfig, EngineContext,
@@ -50,11 +45,12 @@ use crate::runbooks::runtime::{
 };
 use crate::runbooks::state::{
     ApprovalDecision, ApprovalStatus, AttemptStatus, EvidenceAvailability, EvidenceCaptureMode,
-    PauseDecision, RunStatus, RunbookPhase, StepStatus, TargetBinding, VerificationAssurance,
-    Waiver,
+    EvidenceRecordingPolicy, PauseDecision, RunStatus, RunbookPhase, StepStatus, TargetBinding,
+    VerificationAssurance, Waiver,
 };
 
 const RUNBOOKS_SETTING: &str = "runbooks_enabled";
+const RECORDING_POLICY_SETTING: &str = "runbooks_output_recording";
 const MAIN_DATABASE_FILE: &str = "veviad-shell.db";
 const MAX_ID_BYTES: usize = 256;
 const MAX_TARGET_FIELD_BYTES: usize = 4_096;
@@ -147,7 +143,8 @@ fn reconcile_builtin_sources(
     let package_root = app_data_dir
         .join(BUILTIN_LIBRARY_DIRECTORY)
         .join(BUILTIN_PACKAGES_DIRECTORY);
-    ensure_managed_directory(&package_root, "built-in runbook library")?;
+    fs::create_dir_all(&package_root)
+        .map_err(|error| format!("create built-in runbook library: {error}"))?;
     let root_metadata = fs::symlink_metadata(&package_root)
         .map_err(|error| format!("inspect built-in runbook library: {error}"))?;
     if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
@@ -195,13 +192,11 @@ fn materialize_builtin_package(
                     destination.display()
                 ));
             }
-            #[cfg(target_os = "windows")]
-            crate::windows_fs::validate_local_ntfs_path(&destination)?;
             if let Ok(package) = load_and_check_package(&destination) {
                 let readme_matches = package
                     .readme_path
                     .as_ref()
-                    .and_then(|path| read_managed_file(path).ok())
+                    .and_then(|path| fs::read(path).ok())
                     .is_some_and(|bytes| bytes == builtin.readme);
                 let ansible_absent = match fs::symlink_metadata(destination.join("ansible")) {
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
@@ -227,13 +222,12 @@ fn materialize_builtin_package(
 
     let suffix = uuid::Uuid::new_v4();
     let staging = package_root.join(format!(".{}.staging-{suffix}", builtin.id));
-    create_managed_directory(
-        package_root,
-        staging
-            .file_name()
-            .ok_or("built-in runbook staging directory has no filename")?,
-        "built-in runbook staging directory",
-    )?;
+    fs::create_dir(&staging).map_err(|error| {
+        format!(
+            "create built-in runbook staging directory {}: {error}",
+            staging.display()
+        )
+    })?;
     if let Err(error) = restrict_builtin_directory(&staging)
         .and_then(|()| write_builtin_file(&staging.join("runbook.vrun.yaml"), builtin.definition))
         .and_then(|()| write_builtin_file(&staging.join("README.md"), builtin.readme))
@@ -257,7 +251,7 @@ fn materialize_builtin_package(
     let backup = package_root.join(format!(".{}.backup-{suffix}", builtin.id));
     let had_destination = destination.exists();
     if had_destination {
-        promote_managed_directory(&destination, &backup).map_err(|error| {
+        fs::rename(&destination, &backup).map_err(|error| {
             let _ = fs::remove_dir_all(&staging);
             format!(
                 "move previous built-in runbook {} aside: {error}",
@@ -265,9 +259,9 @@ fn materialize_builtin_package(
             )
         })?;
     }
-    if let Err(error) = promote_managed_directory(&staging, &destination) {
+    if let Err(error) = fs::rename(&staging, &destination) {
         if had_destination {
-            let _ = promote_managed_directory(&backup, &destination);
+            let _ = fs::rename(&backup, &destination);
         }
         let _ = fs::remove_dir_all(&staging);
         return Err(format!(
@@ -287,116 +281,21 @@ fn materialize_builtin_package(
     load_and_check_package(&destination)
 }
 
-#[cfg(target_os = "windows")]
-fn ensure_managed_directory(path: &Path, label: &str) -> Result<PathBuf, String> {
-    let mut missing = Vec::new();
-    let mut existing = path;
-    while !existing.exists() {
-        missing.push(
-            existing
-                .file_name()
-                .ok_or_else(|| format!("{label} has no directory name"))?
-                .to_os_string(),
-        );
-        existing = existing
-            .parent()
-            .ok_or_else(|| format!("{label} has no existing parent"))?;
-    }
-    let mut current = crate::windows_fs::validate_local_ntfs_path(existing)?;
-    for name in missing.into_iter().rev() {
-        current = crate::windows_fs::create_secure_directory(&current, &name)?;
-    }
-    crate::windows_fs::validate_local_ntfs_path(&current)
-}
-
-#[cfg(not(target_os = "windows"))]
-fn ensure_managed_directory(path: &Path, label: &str) -> Result<PathBuf, String> {
-    fs::create_dir_all(path).map_err(|error| format!("create {label}: {error}"))?;
-    Ok(path.to_path_buf())
-}
-
-#[cfg(target_os = "windows")]
-fn create_managed_directory(
-    parent: &Path,
-    name: &std::ffi::OsStr,
-    label: &str,
-) -> Result<PathBuf, String> {
-    crate::windows_fs::create_secure_directory(parent, name)
-        .map_err(|error| format!("create {label}: {error}"))
-}
-
-#[cfg(not(target_os = "windows"))]
-fn create_managed_directory(
-    parent: &Path,
-    name: &std::ffi::OsStr,
-    label: &str,
-) -> Result<PathBuf, String> {
-    let path = parent.join(name);
-    fs::create_dir(&path).map_err(|error| format!("create {label} {}: {error}", path.display()))?;
-    Ok(path)
-}
-
-#[cfg(target_os = "windows")]
-fn promote_managed_directory(source: &Path, destination: &Path) -> Result<(), String> {
-    crate::windows_fs::promote_new_directory(source, destination)
-}
-
-#[cfg(not(target_os = "windows"))]
-fn promote_managed_directory(source: &Path, destination: &Path) -> Result<(), String> {
-    fs::rename(source, destination).map_err(|error| error.to_string())
-}
-
-#[cfg(target_os = "windows")]
-fn read_managed_file(path: &Path) -> Result<Vec<u8>, String> {
-    use std::io::Read as _;
-
-    let mut file = crate::windows_fs::open_no_reparse(path, false)?;
-    let identity = crate::windows_fs::identity(&file)?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .map_err(|error| format!("read managed file {}: {error}", path.display()))?;
-    crate::windows_fs::verify_identity(path, identity, false)?;
-    Ok(bytes)
-}
-
-#[cfg(not(target_os = "windows"))]
-fn read_managed_file(path: &Path) -> Result<Vec<u8>, String> {
-    fs::read(path).map_err(|error| format!("read managed file {}: {error}", path.display()))
-}
-
 fn write_builtin_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    let (created_path, created_identity, mut file) = crate::windows_fs::create_secure_file(
-        path.parent()
-            .ok_or("built-in runbook file has no parent directory")?,
-        path.file_name()
-            .ok_or("built-in runbook file has no filename")?,
-    )?;
-    #[cfg(not(target_os = "windows"))]
-    let mut file = {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-        }
-        options
-            .open(path)
-            .map_err(|error| format!("create built-in runbook file {}: {error}", path.display()))?
-    };
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| format!("create built-in runbook file {}: {error}", path.display()))?;
     file.write_all(bytes)
         .map_err(|error| format!("write built-in runbook file {}: {error}", path.display()))?;
     file.sync_all()
-        .map_err(|error| format!("sync built-in runbook file {}: {error}", path.display()))?;
-    #[cfg(target_os = "windows")]
-    {
-        if created_path != path {
-            return Err("built-in runbook path changed during protected creation".into());
-        }
-        crate::windows_fs::verify_identity(path, created_identity, false)?;
-    }
-    Ok(())
+        .map_err(|error| format!("sync built-in runbook file {}: {error}", path.display()))
 }
 
 fn restrict_builtin_directory(path: &Path) -> Result<(), String> {
@@ -410,17 +309,10 @@ fn restrict_builtin_directory(path: &Path) -> Result<(), String> {
             )
         })?;
     }
-    #[cfg(target_os = "windows")]
-    crate::windows_fs::restrict_to_current_user(path)?;
     Ok(())
 }
 
 fn sync_directory(path: &Path) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        crate::windows_fs::sync_directory(path)
-    }
-    #[cfg(not(target_os = "windows"))]
     OpenOptions::new()
         .read(true)
         .open(path)
@@ -516,7 +408,7 @@ impl Drop for AuthoredPublication {
             let _ = fs::remove_dir_all(&self.destination);
         }
         if let Some(backup) = self.backup.as_ref() {
-            let _ = promote_managed_directory(backup, &self.destination);
+            let _ = fs::rename(backup, &self.destination);
         }
         if self.staging.exists() {
             let _ = fs::remove_dir_all(&self.staging);
@@ -533,7 +425,8 @@ fn publish_authored_package(
     expected_source_sha256: Option<&str>,
     expected_readme_sha256: Option<&str>,
 ) -> Result<AuthoredPublication, String> {
-    ensure_managed_directory(authored_root, "authored runbook library")?;
+    fs::create_dir_all(authored_root)
+        .map_err(|error| format!("create authored runbook library: {error}"))?;
     let root_metadata = fs::symlink_metadata(authored_root)
         .map_err(|error| format!("inspect authored runbook library: {error}"))?;
     if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
@@ -547,8 +440,6 @@ fn publish_authored_package(
             if metadata.file_type().is_symlink() || !metadata.is_dir() {
                 return Err("authored runbook package path is not an ordinary directory".into());
             }
-            #[cfg(target_os = "windows")]
-            crate::windows_fs::validate_local_ntfs_path(destination)?;
             let expected_source = expected_source_sha256
                 .ok_or("an unexpected package already exists at this draft's app-managed path")?;
             let expected_readme = expected_readme_sha256
@@ -577,9 +468,9 @@ fn publish_authored_package(
                     return Err(format!("authored runbook {name} is not an ordinary file"));
                 }
             }
-            let current_source = read_managed_file(&destination.join("runbook.vrun.yaml"))
+            let current_source = fs::read(destination.join("runbook.vrun.yaml"))
                 .map_err(|error| format!("read authored runbook definition: {error}"))?;
-            let current_readme = read_managed_file(&destination.join("README.md"))
+            let current_readme = fs::read(destination.join("README.md"))
                 .map_err(|error| format!("read authored runbook README: {error}"))?;
             if sha256_hex(&current_source) != expected_source
                 || sha256_hex(&current_readme) != expected_readme
@@ -597,13 +488,8 @@ fn publish_authored_package(
 
     let suffix = uuid::Uuid::new_v4();
     let staging = authored_root.join(format!(".draft-staging-{suffix}"));
-    create_managed_directory(
-        authored_root,
-        staging
-            .file_name()
-            .ok_or("authored runbook staging directory has no filename")?,
-        "authored runbook staging directory",
-    )?;
+    fs::create_dir(&staging)
+        .map_err(|error| format!("create authored runbook staging directory: {error}"))?;
     restrict_builtin_directory(&staging)?;
     if let Err(error) = write_builtin_file(&staging.join("runbook.vrun.yaml"), source_yaml)
         .and_then(|()| write_builtin_file(&staging.join("README.md"), readme))
@@ -616,13 +502,13 @@ fn publish_authored_package(
 
     if destination.exists() {
         let backup_path = authored_root.join(format!(".draft-backup-{suffix}"));
-        promote_managed_directory(destination, &backup_path)
+        fs::rename(destination, &backup_path)
             .map_err(|error| format!("move previous authored runbook aside: {error}"))?;
         backup = Some(backup_path);
     }
-    if let Err(error) = promote_managed_directory(&staging, destination) {
+    if let Err(error) = fs::rename(&staging, destination) {
         if let Some(backup_path) = backup.as_ref() {
-            let _ = promote_managed_directory(backup_path, destination);
+            let _ = fs::rename(backup_path, destination);
         }
         let _ = fs::remove_dir_all(&staging);
         return Err(format!("publish authored runbook package: {error}"));
@@ -819,6 +705,12 @@ pub struct RunbookExportResult {
     pub files: Vec<String>,
 }
 
+/// One recorded artifact, read back for review.
+///
+/// `available: false` is a normal answer, not an error: an artifact can be
+/// deleted, resized or altered on disk after the run, and the report already
+/// carries an availability of its own. `bytes` is what the run RECORDED, so the
+/// UI can say how much is missing rather than silently showing nothing.
 #[derive(Debug, Clone, Serialize)]
 pub struct RunbookEvidenceContent {
     pub evidence_id: String,
@@ -851,6 +743,30 @@ fn gate(app: &tauri::AppHandle<Wry>) -> Result<(), String> {
     } else {
         Err("runbooks are switched off — enable them in Settings → Runbooks".into())
     }
+}
+
+/// The operator's retention floor. An unreadable or unrecognised stored value
+/// falls back to the default rather than erroring: this decides how much of a
+/// run is KEPT, and refusing to start a run over a malformed preference would
+/// be a worse outcome than recording the documented default amount.
+fn recording_policy(app: &tauri::AppHandle<Wry>) -> EvidenceRecordingPolicy {
+    crate::commands::settings::read_string(app, RECORDING_POLICY_SETTING)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_default()
+}
+
+/// The capture mode a run actually gets.
+///
+/// The webview picks a mode in preflight, but the operator's policy is the
+/// floor and it is applied HERE, not in the picker: clamping only frontend-side
+/// would leave the audit level settable by a stale or modified webview, which
+/// is the same threat model `gate()` exists for. A request may only be raised.
+fn resolved_evidence_mode(
+    requested: EvidenceCaptureMode,
+    policy: EvidenceRecordingPolicy,
+    declared: Option<EvidenceCaptureMode>,
+) -> EvidenceCaptureMode {
+    requested.at_least(policy.floor(declared))
 }
 
 #[tauri::command]
@@ -972,25 +888,10 @@ pub fn runbooks_draft_create(
     initial: Option<RunbookDraftDocument>,
 ) -> Result<RunbookDraft, String> {
     gate(&app)?;
-    let document = initial.unwrap_or_else(platform_default_draft_document);
+    let document = initial.unwrap_or_default();
     validate_draft_storage(&document)?;
     let connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
     Ok(db::create_runbook_draft(&connection, &document)?.draft)
-}
-
-fn default_draft_document_for_platform(windows: bool) -> RunbookDraftDocument {
-    let mut document = RunbookDraftDocument::default();
-    if windows {
-        // Runbooks execute inside the fixed WSL2 Bash backend, so a fresh
-        // Windows draft should carry the Linux target guard rather than the
-        // macOS guard used by the existing desktop default.
-        document.platform = DraftPlatform::Linux;
-    }
-    document
-}
-
-fn platform_default_draft_document() -> RunbookDraftDocument {
-    default_draft_document_for_platform(cfg!(target_os = "windows"))
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -1055,6 +956,8 @@ pub async fn runbooks_ai_generate(
     use crate::runbooks::authoring::{MAX_CONTEXT_CHARS, MAX_REQUIREMENTS_CHARS};
 
     gate(&app)?;
+    // Byte budgets over the char limits the authoring module trims to: this is
+    // the IPC boundary refusing an absurd payload, not the shaping step.
     validate_small_text(
         &requirements,
         "runbook requirements",
@@ -1065,15 +968,20 @@ pub async fn runbooks_ai_generate(
         validate_small_text(context, "terminal context", MAX_CONTEXT_CHARS * 4, false)?;
     }
 
+    // Resolved BEFORE the await, matching `runbooks_resume`: the model must be
+    // the one selected when the operator pressed Generate.
     let model = crate::commands::ai::active_model(&app);
     let resolved = crate::commands::ai::resolve_provider_for_model(&app, model).await?;
+
     let cancel = ai_state.register(&request_id);
-    let authored = authoring::author_draft(
+    let authored = crate::runbooks::authoring::author_draft(
         resolved.provider.as_ref(),
         &requirements,
         terminal_context.as_deref(),
         resolved.effort,
         cancel,
+        // The same gate publishing uses, so a document that would be refused at
+        // save time comes back with that refusal as an editable issue instead.
         &|document| validate_draft_preview(document).issues,
     )
     .await;
@@ -1081,6 +989,7 @@ pub async fn runbooks_ai_generate(
 
     let authored = authored?;
     if !authored.issues.is_empty() {
+        // Not an error: the wizard shows these against an editable document.
         log::info!(
             "generated runbook has {} unresolved issue(s) after one repair round",
             authored.issues.len()
@@ -1260,7 +1169,9 @@ pub fn runbooks_start(
 
     // Re-read and revalidate the full package immediately before committing the
     // immutable snapshot. A source edit never silently changes a registered run.
-    let package = match load_and_check_package(Path::new(&source.package_path)) {
+    let package_root = fs::canonicalize(&source.package_path)
+        .map_err(|error| format!("resolve runbook package root: {error}"))?;
+    let package = match load_and_check_package(&package_root) {
         Ok(package) => package,
         Err(error) => {
             mark_source_invalid(&db_state, &source, &error)?;
@@ -1280,6 +1191,12 @@ pub fn runbooks_start(
         "runbook inputs",
     )?;
 
+    let evidence_mode = resolved_evidence_mode(
+        request.evidence_mode,
+        recording_policy(&app),
+        package.definition.declared_record_output(),
+    );
+
     let active_model = crate::commands::ai::active_model(&app);
     let config = engine_config(&app, active_model);
     // Fail before creating durable active state if a background connection to
@@ -1296,7 +1213,7 @@ pub fn runbooks_start(
         canonical_sha256: package.snapshot.canonical_sha256.clone(),
         target: request.target_context.clone(),
         inputs: Value::Object(resolved.clone().into_iter().collect()),
-        evidence_mode: request.evidence_mode,
+        evidence_mode,
         app_version: env!("CARGO_PKG_VERSION").into(),
         model: Some(active_model.id.into()),
         steps: package
@@ -1321,10 +1238,10 @@ pub fn runbooks_start(
         run_id: record.id.clone(),
         definition: package.definition,
         definition_snapshot: package.snapshot,
-        package_root: package.root,
+        package_root: Some(package_root),
         target: request.target_context,
         inputs: resolved,
-        evidence_mode: request.evidence_mode,
+        evidence_mode,
         app_version: creation.app_version,
         model: creation.model,
         created_at: record.created_at,
@@ -1397,25 +1314,16 @@ pub fn runbooks_resume(
             );
         }
         reject_sensitive_value(&stored.inputs, "stored runbook inputs")?;
-        let package_root = if definition.uses_ansible_executor() {
-            let source_id = stored
-                .source_id
-                .as_deref()
-                .ok_or("resuming an Ansible run requires its registered package source")?;
-            let source = db::get_source(&connection, source_id)?
-                .ok_or("the Ansible runbook package source no longer exists")?;
-            let package = load_and_check_package(Path::new(&source.package_path))?;
-            if package.snapshot.source_sha256 != stored.source_sha256
-                || package.snapshot.canonical_sha256 != stored.canonical_sha256
-            {
-                return Err(
-                    "the Ansible runbook package changed; the interrupted run cannot be resumed"
-                        .into(),
-                );
+        let package_root = match &stored.source_id {
+            Some(source_id) => {
+                let source = db::get_source(&connection, source_id)?.ok_or_else(|| {
+                    format!("runbook source {source_id} for run {run_id} no longer exists")
+                })?;
+                Some(fs::canonicalize(&source.package_path).map_err(|error| {
+                    format!("resolve runbook package root for run {run_id}: {error}")
+                })?)
             }
-            package.root
-        } else {
-            PathBuf::new()
+            None => None,
         };
         let record = db::rebind_interrupted_run(
             &mut connection,
@@ -1428,6 +1336,9 @@ pub fn runbooks_resume(
         let view = run_view(&connection, &record)?;
         (record, definition, inputs, package_root, view)
     };
+    if definition.uses_unavailable_executor() && package_root.is_none() {
+        return Err("runbook package root is unavailable for this run; restart the run".into());
+    }
     let config = engine_config(&app, active_model);
     let spec = EngineRunSpec {
         run_id: record.id.clone(),
@@ -1536,6 +1447,62 @@ pub fn runbooks_cancel(
     Ok(())
 }
 
+/// How the operator arrived at an approval. This is a durable audit fact: it
+/// decides the wording of the reason recorded against the approval, and that
+/// wording is interpolated into the derived phase deviation.
+///
+/// Wire literals are hand-pinned rather than left to `rename_all`, because a
+/// serialized enum name IS a frontend type and `PreAuthorized` is exactly the
+/// multi-word variant that gets mangled. See `acknowledgement_wire_literals_are_pinned`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+pub enum ApprovalAcknowledgement {
+    /// The operator clicked approve on a command displayed on screen.
+    #[serde(rename = "acknowledged")]
+    Acknowledged,
+    /// Granted by run-level auto-approve; the command was never individually
+    /// displayed to anyone.
+    #[serde(rename = "pre_authorized")]
+    PreAuthorized,
+    /// A configured-model invocation allowed once. No terminal command runs.
+    #[serde(rename = "model_once")]
+    ModelOnce,
+}
+
+/// Builds the durable reason. Extracted from the command body so it can be
+/// tested: no case claims the operator vouched for the session's shell,
+/// functions, aliases or PATH, because with the attestation checkbox gone no
+/// case affirms it.
+fn approval_reason(
+    approved: bool,
+    model_invocation: bool,
+    edited: bool,
+    acknowledgement: ApprovalAcknowledgement,
+    target_basis: &str,
+) -> String {
+    if !approved {
+        return "operator declined the proposed command".to_string();
+    }
+    match (model_invocation, acknowledgement) {
+        (true, ApprovalAcknowledgement::PreAuthorized) => {
+            "operator pre-authorized this step via run-level auto-approve; the configured-model invocation was not individually displayed"
+                .to_string()
+        }
+        (true, _) => {
+            "operator acknowledged the displayed configured-model invocation and allowed it once"
+                .to_string()
+        }
+        (false, ApprovalAcknowledgement::PreAuthorized) => format!(
+            "operator pre-authorized this step via run-level auto-approve for bound target {target_basis}; the proposed command was not individually displayed"
+        ),
+        (false, _) if edited => format!(
+            "operator acknowledged the command displayed for bound target {target_basis} and approved an edited command"
+        ),
+        (false, _) => format!(
+            "operator acknowledged the proposed command displayed for bound target {target_basis} and approved it"
+        ),
+    }
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub fn runbooks_respond_approval(
     app: tauri::AppHandle<Wry>,
@@ -1545,7 +1512,7 @@ pub fn runbooks_respond_approval(
     approval_id: String,
     approved: bool,
     command: Option<String>,
-    shell_attested: bool,
+    acknowledgement: ApprovalAcknowledgement,
 ) -> Result<(), String> {
     gate(&app)?;
     validate_identifier(&run_id, "run id")?;
@@ -1575,14 +1542,20 @@ pub fn runbooks_respond_approval(
         .proposed_command
         .as_deref()
         .is_some_and(|value| value.starts_with("model://configured-agent/"));
-    if approved && !model_invocation && !shell_attested {
+    // The two checks that used to live here compared frontend-supplied claims
+    // about a fact this function already derives itself, and one of them had
+    // become a tautology once the card stopped asking for a separate
+    // attestation. This invariant can actually refuse something: a command
+    // nobody was shown cannot have been edited by an operator, which is what
+    // keeps the report's `edited` flag honest.
+    if approved && acknowledgement == ApprovalAcknowledgement::PreAuthorized && command.is_some() {
+        return Err("a pre-authorized approval cannot carry an edited command".into());
+    }
+    if approved && model_invocation != (acknowledgement == ApprovalAcknowledgement::ModelOnce) {
         return Err(
-            "shell approval requires operator attestation of the visible POSIX prompt and session shell state"
+            "a model invocation must be acknowledged as model_once, and only a model invocation may be"
                 .into(),
         );
-    }
-    if model_invocation && shell_attested {
-        return Err("model approval cannot carry a shell-prompt attestation".into());
     }
     let edited_command = if approved {
         normalize_edited_command(command, approval.proposed_command.as_deref())?
@@ -1595,21 +1568,13 @@ pub fn runbooks_respond_approval(
         (_, _, Some(cwd)) => format!("local session {} at {cwd}", target.session_id),
         _ => format!("session {}", target.session_id),
     };
-    let reason = if approved {
-        if model_invocation {
-            "operator allowed the configured model once".to_string()
-        } else if edited_command.is_some() {
-            format!(
-                "operator attested that the visible POSIX shell prompt is on bound target {target_basis}, trusted the session shell, functions, aliases, and PATH, and approved an edited command"
-            )
-        } else {
-            format!(
-                "operator attested that the visible POSIX shell prompt is on bound target {target_basis}, trusted the session shell, functions, aliases, and PATH, and approved the proposed command"
-            )
-        }
-    } else {
-        "operator declined the proposed command".to_string()
-    };
+    let reason = approval_reason(
+        approved,
+        model_invocation,
+        edited_command.is_some(),
+        acknowledgement,
+        &target_basis,
+    );
     command_state.approvals.respond(
         &approval_id,
         ApprovalResponse {
@@ -1977,6 +1942,14 @@ pub fn runbooks_report(
 }
 
 /// Read one recorded artifact back so the operator can review it in the app.
+///
+/// Until this existed a `full` run wrote redacted artifacts that nothing could
+/// open: the report showed `mode · bytes · available` and `runbooks_export`
+/// only copied files to a folder. Evidence that cannot be read is not proof.
+///
+/// The stored bytes are already redacted and capped, so this neither redacts
+/// nor truncates again — it re-verifies the recorded digest and hands back what
+/// was persisted, or reports that nothing trustworthy remains.
 #[tauri::command(rename_all = "snake_case")]
 pub fn runbooks_evidence_read(
     app: tauri::AppHandle<Wry>,
@@ -2007,6 +1980,9 @@ pub fn runbooks_evidence_read(
     Ok(RunbookEvidenceContent {
         evidence_id,
         available: true,
+        // Terminal output is not guaranteed valid UTF-8 and the artifact is
+        // stored verbatim, so a lossy decode is the honest read: refusing the
+        // whole artifact over one stray byte would hide the rest of the proof.
         text: String::from_utf8_lossy(&bytes).into_owned(),
         bytes: evidence.bytes,
         redacted: evidence.redacted,
@@ -2231,21 +2207,14 @@ fn cleanup_evidence_artifacts(
         errors: Vec::new(),
         complete: false,
     };
-    #[allow(unused_mut)]
-    let root = {
-        #[cfg(not(target_os = "windows"))]
-        let root = fs::canonicalize(app_data_dir);
-        #[cfg(target_os = "windows")]
-        let root = crate::windows_fs::validate_local_ntfs_path(app_data_dir);
-        match root {
-            Ok(root) => root,
-            Err(error) => {
-                push_cleanup_error(
-                    &mut outcome.errors,
-                    format!("cannot resolve protected app data: {error}"),
-                );
-                return outcome;
-            }
+    let root = match fs::canonicalize(app_data_dir) {
+        Ok(root) => root,
+        Err(error) => {
+            push_cleanup_error(
+                &mut outcome.errors,
+                format!("cannot resolve protected app data: {error}"),
+            );
+            return outcome;
         }
     };
     let expected_directory = PathBuf::from("runbooks").join(run_id);
@@ -2271,9 +2240,9 @@ fn cleanup_evidence_artifacts(
                 // the confirmed run. Hashes protect export integrity, but a
                 // crash may leave a partial staging/final file; mismatch must
                 // not make explicit history deletion impossible.
-                Ok(Some(path)) => match remove_evidence_artifact(&path) {
-                    Ok(true) => removed_any = true,
-                    Ok(false) => {}
+                Ok(Some(path)) => match fs::remove_file(&path) {
+                    Ok(()) => removed_any = true,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(error) => {
                         artifact_error = true;
                         push_cleanup_error(
@@ -2296,13 +2265,39 @@ fn cleanup_evidence_artifacts(
     // Never recurse. An empty, ordinary per-run directory can be removed; any
     // untracked content is retained and reported for explicit operator review.
     let run_directory = root.join(&expected_directory);
-    match remove_empty_evidence_directory(&run_directory) {
-        Ok(None | Some(true)) => {}
-        Ok(Some(false)) => push_cleanup_error(
+    match fs::symlink_metadata(&run_directory) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => push_cleanup_error(
             &mut outcome.errors,
-            "evidence run directory contains untracked content; retained".into(),
+            format!("cannot inspect the evidence run directory: {error}"),
         ),
-        Err(error) => push_cleanup_error(&mut outcome.errors, error),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            push_cleanup_error(
+                &mut outcome.errors,
+                "evidence run directory is not an ordinary confined directory; retained".into(),
+            );
+        }
+        Ok(_) => match fs::read_dir(&run_directory) {
+            Ok(mut entries) => {
+                if entries.next().is_none() {
+                    if let Err(error) = fs::remove_dir(&run_directory) {
+                        push_cleanup_error(
+                            &mut outcome.errors,
+                            format!("cannot remove the empty evidence run directory: {error}"),
+                        );
+                    }
+                } else {
+                    push_cleanup_error(
+                        &mut outcome.errors,
+                        "evidence run directory contains untracked content; retained".into(),
+                    );
+                }
+            }
+            Err(error) => push_cleanup_error(
+                &mut outcome.errors,
+                format!("cannot read the evidence run directory: {error}"),
+            ),
+        },
     }
     outcome.complete = outcome.errors.is_empty();
     outcome
@@ -2351,71 +2346,14 @@ fn confined_evidence_file(
             "{relative}: evidence artifact is not a regular file; retained"
         ));
     }
-    #[cfg(target_os = "windows")]
-    {
-        // The root and every component were validated without reparses above,
-        // and deletion pins the same path again. Avoid comparing drive syntax
-        // with the `\\?\` syntax Windows canonicalization may return.
-        Ok(Some(candidate))
+    let canonical = fs::canonicalize(&candidate)
+        .map_err(|error| format!("{relative}: cannot resolve artifact: {error}"))?;
+    if !canonical.starts_with(canonical_root) {
+        return Err(format!(
+            "{relative}: resolved artifact escapes protected app data; retained"
+        ));
     }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let canonical = fs::canonicalize(&candidate)
-            .map_err(|error| format!("{relative}: cannot resolve artifact: {error}"))?;
-        if !canonical.starts_with(canonical_root) {
-            return Err(format!(
-                "{relative}: resolved artifact escapes protected app data; retained"
-            ));
-        }
-        Ok(Some(canonical))
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn remove_evidence_artifact(path: &Path) -> Result<bool, String> {
-    crate::windows_fs::remove_file_no_reparse(path)
-        .map_err(|error| format!("delete evidence artifact: {error}"))
-}
-
-#[cfg(not(target_os = "windows"))]
-fn remove_evidence_artifact(path: &Path) -> Result<bool, String> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(format!("delete evidence artifact: {error}")),
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn remove_empty_evidence_directory(path: &Path) -> Result<Option<bool>, String> {
-    crate::windows_fs::remove_empty_directory_no_reparse(path)
-        .map_err(|error| format!("inspect or remove the evidence run directory: {error}"))
-}
-
-#[cfg(not(target_os = "windows"))]
-fn remove_empty_evidence_directory(path: &Path) -> Result<Option<bool>, String> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(format!(
-                "cannot inspect the evidence run directory: {error}"
-            ))
-        }
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(
-            "evidence run directory is not an ordinary confined directory; retained".into(),
-        );
-    }
-    let mut entries = fs::read_dir(path)
-        .map_err(|error| format!("cannot read the evidence run directory: {error}"))?;
-    if entries.next().is_some() {
-        return Ok(Some(false));
-    }
-    fs::remove_dir(path)
-        .map_err(|error| format!("cannot remove the empty evidence run directory: {error}"))?;
-    Ok(Some(true))
+    Ok(Some(canonical))
 }
 
 fn push_cleanup_error(errors: &mut Vec<String>, error: String) {
@@ -3065,7 +3003,7 @@ fn export_runbook_package_path(
     bundle_name: &str,
 ) -> Result<RunbookExportResult, String> {
     let destination = canonical_export_directory(destination)?;
-    let output_dir = destination.join(bundle_name);
+    let output_dir = destination.join(&bundle_name);
     match fs::symlink_metadata(&output_dir) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Ok(_) => {
@@ -3083,13 +3021,12 @@ fn export_runbook_package_path(
     }
 
     let staging = destination.join(format!(".{bundle_name}.staging-{}", uuid::Uuid::new_v4()));
-    create_managed_directory(
-        &destination,
-        staging
-            .file_name()
-            .ok_or("runbook export staging directory has no filename")?,
-        "runbook export staging directory",
-    )?;
+    fs::create_dir(&staging).map_err(|error| {
+        format!(
+            "create runbook export staging directory {}: {error}",
+            staging.display()
+        )
+    })?;
     if let Err(error) = restrict_builtin_directory(&staging) {
         let _ = fs::remove_dir_all(&staging);
         return Err(error);
@@ -3160,12 +3097,7 @@ fn exported_file_paths(output_dir: &Path, manifest: Vec<PackageManifestEntry>) -
         .collect()
 }
 
-#[cfg(all(not(target_vendor = "apple"), target_os = "windows"))]
-fn canonical_export_directory(destination: &Path) -> Result<PathBuf, String> {
-    crate::windows_fs::validate_local_ntfs_path(destination)
-}
-
-#[cfg(all(not(target_vendor = "apple"), not(target_os = "windows")))]
+#[cfg(not(target_vendor = "apple"))]
 fn canonical_export_directory(destination: &Path) -> Result<PathBuf, String> {
     if destination
         .components()
@@ -3207,9 +3139,6 @@ fn package_manifest(
     package_root: &Path,
     copy_to: Option<&Path>,
 ) -> Result<Vec<PackageManifestEntry>, String> {
-    #[cfg(target_os = "windows")]
-    let package_root = crate::windows_fs::validate_local_ntfs_path(package_root)?;
-    #[cfg(not(target_os = "windows"))]
     let package_root = fs::canonicalize(package_root)
         .map_err(|error| format!("resolve runbook package for export: {error}"))?;
     let entries = collect_package_entries(&package_root)?;
@@ -3219,15 +3148,12 @@ fn package_manifest(
         if directory {
             if let Some(output_root) = copy_to {
                 let output = output_root.join(&relative_path);
-                create_managed_directory(
-                    output
-                        .parent()
-                        .ok_or("exported package directory has no parent")?,
-                    output
-                        .file_name()
-                        .ok_or("exported package directory has no filename")?,
-                    "exported package directory",
-                )?;
+                fs::create_dir(&output).map_err(|error| {
+                    format!(
+                        "create exported package directory {}: {error}",
+                        output.display()
+                    )
+                })?;
                 restrict_builtin_directory(&output)?;
             }
             manifest.push(PackageManifestEntry {
@@ -3278,22 +3204,12 @@ fn collect_package_entries(package_root: &Path) -> Result<Vec<(PathBuf, bool)>, 
                     path.display()
                 ));
             }
-            #[cfg(target_os = "windows")]
-            if crate::windows_fs::is_reparse(&metadata) {
-                return Err(format!(
-                    "reparse points are not allowed in runbook packages: {}",
-                    path.display()
-                ));
-            }
             if !metadata.is_file() && !metadata.is_dir() {
                 return Err(format!(
                     "unsupported special file in runbook package: {}",
                     path.display()
                 ));
             }
-            #[cfg(target_os = "windows")]
-            let resolved = crate::windows_fs::validate_local_ntfs_path(&path)?;
-            #[cfg(not(target_os = "windows"))]
             let resolved = fs::canonicalize(&path)
                 .map_err(|error| format!("resolve runbook package entry: {error}"))?;
             if !resolved.starts_with(package_root) {
@@ -3341,21 +3257,6 @@ fn read_package_file(
     source: &Path,
     destination: Option<&Path>,
 ) -> Result<(u64, String), String> {
-    #[cfg(target_os = "windows")]
-    let (output_path, output_identity, mut output) = if let Some(destination) = destination {
-        let (path, identity, file) = crate::windows_fs::create_secure_file(
-            destination
-                .parent()
-                .ok_or("exported package file has no parent")?,
-            destination
-                .file_name()
-                .ok_or("exported package file has no filename")?,
-        )?;
-        (Some(path), Some(identity), Some(file))
-    } else {
-        (None, None, None)
-    };
-    #[cfg(not(target_os = "windows"))]
     let mut output = if let Some(destination) = destination {
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
@@ -3373,12 +3274,7 @@ fn read_package_file(
     } else {
         None
     };
-    let result = read_package_file_to_handle(package_root, source, output.as_mut())?;
-    #[cfg(target_os = "windows")]
-    if let (Some(path), Some(identity)) = (output_path, output_identity) {
-        crate::windows_fs::verify_identity(&path, identity, false)?;
-    }
-    Ok(result)
+    read_package_file_to_handle(package_root, source, output.as_mut())
 }
 
 fn read_package_file_to_handle(
@@ -3394,16 +3290,6 @@ fn read_package_file_to_handle(
             source.display()
         ));
     }
-    #[cfg(target_os = "windows")]
-    if crate::windows_fs::is_reparse(&named_metadata) {
-        return Err(format!(
-            "runbook package file {} is a reparse point",
-            source.display()
-        ));
-    }
-    #[cfg(target_os = "windows")]
-    let resolved = crate::windows_fs::validate_local_ntfs_path(source)?;
-    #[cfg(not(target_os = "windows"))]
     let resolved = fs::canonicalize(source)
         .map_err(|error| format!("resolve runbook package file {}: {error}", source.display()))?;
     if !resolved.starts_with(package_root) {
@@ -3412,23 +3298,16 @@ fn read_package_file_to_handle(
             source.display()
         ));
     }
-    #[cfg(target_os = "windows")]
-    let mut input = crate::windows_fs::open_no_reparse(source, false)?;
-    #[cfg(target_os = "windows")]
-    let input_identity = crate::windows_fs::identity(&input)?;
-    #[cfg(not(target_os = "windows"))]
-    let mut input = {
-        let mut source_options = OpenOptions::new();
-        source_options.read(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            source_options.custom_flags(libc::O_NOFOLLOW);
-        }
-        source_options
-            .open(source)
-            .map_err(|error| format!("open runbook package file {}: {error}", source.display()))?
-    };
+    let mut source_options = OpenOptions::new();
+    source_options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        source_options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut input = source_options
+        .open(source)
+        .map_err(|error| format!("open runbook package file {}: {error}", source.display()))?;
     let opened_metadata = input
         .metadata()
         .map_err(|error| format!("inspect opened runbook package file: {error}"))?;
@@ -3477,8 +3356,6 @@ fn read_package_file_to_handle(
             source.display()
         ));
     }
-    #[cfg(target_os = "windows")]
-    crate::windows_fs::verify_identity(source, input_identity, false)?;
     if let Some(output) = output {
         output
             .sync_all()
@@ -4063,16 +3940,8 @@ fn publish_export_directory(staging: &Path, destination: &Path) -> Result<(), St
         }
         Err(error) => return Err(format!("inspect runbook export destination: {error}")),
     }
-    #[cfg(target_os = "windows")]
-    {
-        crate::windows_fs::promote_new_directory(staging, destination)
-            .map_err(|error| format!("atomically publish runbook export: {error}"))
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        fs::rename(staging, destination)
-            .map_err(|error| format!("atomically publish runbook export: {error}"))
-    }
+    fs::rename(staging, destination)
+        .map_err(|error| format!("atomically publish runbook export: {error}"))
 }
 
 fn export_report_bundle(
@@ -4082,9 +3951,7 @@ fn export_report_bundle(
 ) -> Result<RunbookExportResult, String> {
     #[cfg(unix)]
     let destination = destination.to_path_buf();
-    #[cfg(target_os = "windows")]
-    let destination = crate::windows_fs::validate_local_ntfs_path(destination)?;
-    #[cfg(not(any(unix, target_os = "windows")))]
+    #[cfg(not(unix))]
     let destination = {
         let metadata = fs::symlink_metadata(destination)
             .map_err(|error| format!("inspect export destination: {error}"))?;
@@ -4139,22 +4006,16 @@ fn export_report_bundle(
                 evidence.id
             ));
         }
-        #[cfg(target_os = "windows")]
-        let file = crate::windows_fs::open_no_reparse(&source, false)
-            .map_err(|error| format!("open evidence {}: {error}", evidence.id))?;
-        #[cfg(not(target_os = "windows"))]
-        let file = {
-            let mut options = OpenOptions::new();
-            options.read(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.custom_flags(libc::O_NOFOLLOW);
-            }
-            options.open(&source).map_err(|error| {
-                format!("open evidence {} without symlinks: {error}", evidence.id)
-            })?
-        };
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        let file = options
+            .open(&source)
+            .map_err(|error| format!("open evidence {} without symlinks: {error}", evidence.id))?;
         let opened_metadata = file
             .metadata()
             .map_err(|error| format!("inspect opened evidence {}: {error}", evidence.id))?;
@@ -4470,46 +4331,7 @@ fn write_export_bundle(
     Ok((output_dir, written))
 }
 
-#[cfg(target_os = "windows")]
-fn write_export_bundle(
-    destination: &Path,
-    bundle_name: &str,
-    canonical_json: &[u8],
-    markdown: &[u8],
-    evidence_files: Vec<(String, Vec<u8>)>,
-) -> Result<(PathBuf, Vec<String>), String> {
-    let output_dir =
-        crate::windows_fs::create_secure_directory(destination, std::ffi::OsStr::new(bundle_name))?;
-    let mut written = Vec::new();
-    written.push(write_new_file(&output_dir, "report.json", canonical_json)?);
-    written.push(write_new_file(&output_dir, "report.md", markdown)?);
-    if !evidence_files.is_empty() {
-        let evidence_dir = crate::windows_fs::create_secure_directory(
-            &output_dir,
-            std::ffi::OsStr::new("evidence"),
-        )?;
-        for (name, bytes) in evidence_files {
-            written.push(write_new_file(&evidence_dir, &name, &bytes)?);
-        }
-        crate::windows_fs::sync_directory(&evidence_dir)?;
-    }
-    crate::windows_fs::sync_directory(&output_dir)?;
-    Ok((output_dir, written))
-}
-
-#[cfg(target_os = "windows")]
-fn write_new_file(parent: &Path, name: &str, bytes: &[u8]) -> Result<String, String> {
-    let (path, file_identity, mut file) =
-        crate::windows_fs::create_secure_file(parent, std::ffi::OsStr::new(name))?;
-    file.write_all(bytes)
-        .map_err(|error| format!("write export file {}: {error}", path.display()))?;
-    file.sync_all()
-        .map_err(|error| format!("sync export file {}: {error}", path.display()))?;
-    crate::windows_fs::verify_identity(&path, file_identity, false)?;
-    Ok(path.to_string_lossy().into_owned())
-}
-
-#[cfg(all(not(unix), not(target_os = "windows")))]
+#[cfg(not(unix))]
 fn write_export_bundle(
     destination: &Path,
     bundle_name: &str,
@@ -4543,7 +4365,7 @@ fn write_export_bundle(
     Ok((output_dir, written))
 }
 
-#[cfg(all(not(unix), not(target_os = "windows")))]
+#[cfg(not(unix))]
 fn write_new_file(path: &Path, bytes: &[u8]) -> Result<String, String> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -4562,7 +4384,7 @@ fn write_new_file(path: &Path, bytes: &[u8]) -> Result<String, String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
-#[cfg(all(not(unix), not(target_os = "windows")))]
+#[cfg(not(unix))]
 fn restrict_directory(_path: &Path) -> Result<(), String> {
     Ok(())
 }
@@ -4576,14 +4398,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn new_drafts_use_the_terminal_platform_guard() {
+    fn a_stale_webview_cannot_record_less_than_the_operator_allows() {
+        use EvidenceCaptureMode::{Full, None as NoCapture, Tail};
+        use EvidenceRecordingPolicy as Policy;
+
+        // The preflight picker will not offer a below-floor mode, but the
+        // request arrives over IPC and is not trusted. Every downgrade attempt
+        // is silently raised rather than rejected: the operator asked for at
+        // least this much evidence, and failing the run would keep none of it.
+        for requested in [NoCapture, Tail, Full] {
+            assert_eq!(resolved_evidence_mode(requested, Policy::All, None), Full);
+            assert_eq!(
+                resolved_evidence_mode(requested, Policy::All, Some(NoCapture)),
+                Full,
+                "a package cannot opt out of an operator's record-everything policy",
+            );
+        }
+
+        // Raising a single run above the floor stays available.
         assert_eq!(
-            default_draft_document_for_platform(false).platform,
-            DraftPlatform::Macos13
+            resolved_evidence_mode(Full, Policy::None, None),
+            Full,
+            "`none` is off by default, not recording forbidden",
         );
         assert_eq!(
-            default_draft_document_for_platform(true).platform,
-            DraftPlatform::Linux
+            resolved_evidence_mode(NoCapture, Policy::None, None),
+            NoCapture
+        );
+
+        // `runbook` defers to the package, and to tail when it asks for nothing.
+        assert_eq!(
+            resolved_evidence_mode(NoCapture, Policy::Runbook, None),
+            Tail
+        );
+        assert_eq!(
+            resolved_evidence_mode(NoCapture, Policy::Runbook, Some(Full)),
+            Full,
+        );
+        assert_eq!(
+            resolved_evidence_mode(Full, Policy::Runbook, Some(NoCapture)),
+            Full,
         );
     }
 
@@ -5165,14 +5019,14 @@ spec:
             title: "Inspect".into(),
             required: true,
             on_failure: None,
-            apply: None,
-            verify: None,
             check: crate::runbooks::drafts::DraftCheck::Shell {
                 command: "curl -u operator:credential https://example.invalid".into(),
                 env: BTreeMap::new(),
                 compliant_exit_codes: vec![0],
                 noncompliant_exit_codes: vec![1],
             },
+            apply: None,
+            verify: None,
         });
         let preview = validate_draft_preview(&document);
         assert!(preview.issues.iter().any(|issue| issue.path == "document"));
@@ -5293,6 +5147,94 @@ spec:
     }
 
     #[test]
+    fn acknowledgement_wire_literals_are_pinned() {
+        use serde_json::json;
+        for (wire, expected) in [
+            ("acknowledged", ApprovalAcknowledgement::Acknowledged),
+            ("pre_authorized", ApprovalAcknowledgement::PreAuthorized),
+            ("model_once", ApprovalAcknowledgement::ModelOnce),
+        ] {
+            assert_eq!(
+                serde_json::from_value::<ApprovalAcknowledgement>(json!(wire)).unwrap(),
+                expected,
+                "{wire} must stay the wire literal the frontend sends"
+            );
+        }
+        // The shapes `rename_all` or a hand-written camelCase would produce.
+        for wrong in ["PreAuthorized", "preAuthorized", "pre-authorized", "auto"] {
+            assert!(
+                serde_json::from_value::<ApprovalAcknowledgement>(json!(wrong)).is_err(),
+                "{wrong} must not deserialize"
+            );
+        }
+    }
+
+    #[test]
+    fn approval_reason_distinguishes_acknowledged_from_pre_authorized() {
+        let basis = "local session s1 at /srv/app";
+
+        let acknowledged = approval_reason(
+            true,
+            false,
+            false,
+            ApprovalAcknowledgement::Acknowledged,
+            basis,
+        );
+        assert!(acknowledged.contains("operator acknowledged"));
+        assert!(acknowledged.contains(basis));
+
+        let edited = approval_reason(
+            true,
+            false,
+            true,
+            ApprovalAcknowledgement::Acknowledged,
+            basis,
+        );
+        assert!(edited.contains("approved an edited command"));
+
+        let pre = approval_reason(
+            true,
+            false,
+            false,
+            ApprovalAcknowledgement::PreAuthorized,
+            basis,
+        );
+        assert!(pre.contains("pre-authorized"));
+        assert!(pre.contains("not individually displayed"));
+
+        let model_pre = approval_reason(
+            true,
+            true,
+            false,
+            ApprovalAcknowledgement::PreAuthorized,
+            basis,
+        );
+        assert!(model_pre.contains("configured-model invocation was not individually displayed"));
+
+        assert_eq!(
+            approval_reason(
+                false,
+                false,
+                false,
+                ApprovalAcknowledgement::Acknowledged,
+                basis
+            ),
+            "operator declined the proposed command"
+        );
+
+        // The checkbox that made this claim is gone, so nothing may keep making
+        // it. This is the guardrail for the whole rewording.
+        for reason in [acknowledged, edited, pre, model_pre] {
+            for forbidden in ["aliases", "PATH", "trusted", "attested"] {
+                assert!(
+                    !reason.contains(forbidden),
+                    "{reason:?} must not claim {forbidden}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn unchanged_approval_command_is_not_recorded_as_an_edit() {
         assert_eq!(
             normalize_edited_command(Some("echo ok".into()), Some("echo ok")).unwrap(),
@@ -5332,8 +5274,8 @@ spec:
             output_captured_bytes: 0,
             output_redacted: false,
             output_truncated: false,
-            structured_outcomes: None,
             error: None,
+            structured_outcomes: None,
             intent_at: now(),
             started_at: Some(now()),
             result_at: None,

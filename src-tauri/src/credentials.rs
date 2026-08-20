@@ -2,8 +2,7 @@
 //!
 //! Secrets are deliberately represented by [`Secret`], which cannot be
 //! serialized and whose `Debug` implementation is always redacted. The only
-//! production implementation is the operating-system credential vault, under
-//! one stable service name (macOS Keychain or Windows Credential Manager).
+//! production implementation is macOS Keychain, under one stable service name.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -18,12 +17,12 @@ use zeroize::Zeroizing;
 use crate::commands::settings::STORE_NAME;
 
 pub const SERVICE: &str = "com.veviad.terminal";
-pub const GENERIC_ERROR: &str = "The system credential vault is unavailable. Credentials are blocked until operating-system credential access is restored.";
-const CANCELLED_ERROR: &str =
-    "Credential access was cancelled. Retry the action to ask the operating system again.";
-const DENIED_ERROR: &str = "Credential access was not allowed for this item. Retry the action or review the item's access in the system credential vault.";
+pub const GENERIC_ERROR: &str =
+    "macOS Keychain is unavailable. Credentials are blocked until Keychain access is restored.";
+const CANCELLED_ERROR: &str = "Keychain access was cancelled. Retry the action to ask macOS again.";
+const DENIED_ERROR: &str = "Keychain access was not allowed for this item. Retry the action or review the item's access in Keychain Access.";
 const ITEM_ERROR: &str =
-    "The requested credential could not be accessed. Retry the action or replace it in Settings.";
+    "The requested Keychain item could not be accessed. Retry the action or replace it in Settings.";
 
 const LEGACY_PROVIDER_KEYS: [(&str, CredentialId); 4] = [
     ("anthropic_api_key", CredentialId::Anthropic),
@@ -127,7 +126,6 @@ impl From<&str> for Secret {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum VaultError {
     Unavailable,
-    #[cfg_attr(target_os = "windows", allow(dead_code))]
     Cancelled,
     Denied,
     Item,
@@ -152,11 +150,11 @@ trait CredentialStore: Send + Sync {
     fn delete(&self, id: &CredentialId) -> Result<(), VaultError>;
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 #[derive(Default)]
 struct SystemStore;
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 impl SystemStore {
     fn entry(id: &CredentialId) -> Result<keyring::v1::Entry, VaultError> {
         keyring::v1::Entry::new(SERVICE, &id.account()).map_err(classify_keyring_error)
@@ -188,23 +186,20 @@ fn classify_platform_error(error: &(dyn std::error::Error + Send + Sync + 'stati
         })
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 fn classify_keyring_error(error: keyring::v1::Error) -> VaultError {
     classify_keyring_error_ref(&error)
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 fn classify_keyring_error_ref(error: &keyring::v1::Error) -> VaultError {
     match error {
         keyring::v1::Error::NoDefaultStore | keyring::v1::Error::BadStoreFormat(_) => {
             VaultError::Unavailable
         }
-        #[cfg(target_os = "macos")]
         keyring::v1::Error::PlatformFailure(error) | keyring::v1::Error::NoStorageAccess(error) => {
             classify_platform_error(error.as_ref())
         }
-        #[cfg(target_os = "windows")]
-        keyring::v1::Error::NoStorageAccess(_) => VaultError::Denied,
         _ => VaultError::Item,
     }
 }
@@ -237,7 +232,7 @@ fn macos_has(id: &CredentialId) -> Result<bool, VaultError> {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 impl CredentialStore for SystemStore {
     fn available(&self) -> Result<(), VaultError> {
         keyring::v1::Entry::store_status()
@@ -255,16 +250,7 @@ impl CredentialStore for SystemStore {
     }
 
     fn has(&self, id: &CredentialId) -> Result<bool, VaultError> {
-        #[cfg(target_os = "macos")]
-        {
-            macos_has(id)
-        }
-        #[cfg(target_os = "windows")]
-        {
-            Ok(self
-                .get(id)?
-                .is_some_and(|secret| !secret.expose().trim().is_empty()))
-        }
+        macos_has(id)
     }
 
     fn set(&self, id: &CredentialId, value: &Secret) -> Result<(), VaultError> {
@@ -281,11 +267,11 @@ impl CredentialStore for SystemStore {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(target_os = "macos"))]
 #[derive(Default)]
 struct SystemStore;
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(target_os = "macos"))]
 impl CredentialStore for SystemStore {
     fn available(&self) -> Result<(), VaultError> {
         Err(VaultError::Unavailable)
@@ -424,7 +410,7 @@ pub fn state(app: &tauri::AppHandle<Wry>) -> tauri::State<'_, CredentialStoreSta
 }
 
 /// Read a credential from the system vault outside Tauri state. The standalone
-/// Knowledge CLI uses this to share the exact same system-vault accounts as the app
+/// Knowledge CLI uses this to share the exact same Keychain accounts as the app
 /// without ever parsing or recreating plaintext settings fields.
 pub fn headless_get(id: &CredentialId) -> Result<Option<Secret>, String> {
     let store = SystemStore;
@@ -434,7 +420,7 @@ pub fn headless_get(id: &CredentialId) -> Result<Option<Secret>, String> {
     store.get(id).map_err(|error| error.message().to_string())
 }
 
-/// Check credential metadata without reading the secret. On macOS this uses an
+/// Check Keychain metadata without reading the secret. On macOS this uses an
 /// attribute-only query with authentication UI explicitly suppressed.
 pub fn headless_has(id: &CredentialId) -> Result<bool, String> {
     let store = SystemStore;
@@ -501,7 +487,7 @@ fn collect_legacy(store: &tauri_plugin_store::Store<Wry>) -> LegacyCredentials {
                 let credential = connection_origins
                     .get(&connection_id)
                     .and_then(|endpoint| qdrant_id(&connection_id, endpoint).ok())
-                    // Orphaned legacy keys remain protected in the system vault even
+                    // Orphaned legacy keys remain protected in Keychain even
                     // though no connection can resolve them.
                     .unwrap_or(CredentialId::Qdrant(connection_id));
                 legacy.values.insert(credential, key.into());
@@ -540,7 +526,7 @@ fn secure_permissions(_path: &std::path::Path) -> Result<(), VaultError> {
     Ok(())
 }
 
-/// Initialize the system credential vault and atomically retire legacy plaintext settings. Errors
+/// Initialize Keychain and atomically retire legacy plaintext settings. Errors
 /// never abort startup. Only a vault-wide availability failure blocks all later
 /// operations; cancellation, access denial, and item/migration failures remain
 /// retryable without affecting unrelated credentials.
@@ -578,7 +564,7 @@ pub fn initialize(app: &tauri::AppHandle<Wry>, state: &CredentialStoreState) {
     if let Err(error) = result {
         if error == VaultError::Unavailable {
             state.blocked.store(true, Ordering::SeqCst);
-            log::error!("credential vault initialization failed; credential access is blocked");
+            log::error!("Keychain initialization failed; credential access is blocked");
         } else {
             log::warn!(
                 "credential migration or settings sanitization did not complete; it will be retried"
