@@ -121,10 +121,20 @@ try {
     }
   }
 
-  npm run tauri build -- --target $target --bundles nsis --features local-llm `
-    --config src-tauri/tauri.updater.conf.json `
-    --config src-tauri/tauri.windows.conf.json `
-    --config src-tauri/tauri.windows.local-llm.conf.json
+  if ($RequireSigning) {
+    # Production releases create signed updater artifacts as well as the NSIS
+    # installer. Keeping this config out of unsigned smoke builds avoids
+    # weakening Tauri's fail-closed private-key check.
+    npm run tauri build -- --target $target --bundles nsis --features local-llm `
+      --config src-tauri/tauri.updater.conf.json `
+      --config src-tauri/tauri.windows.conf.json `
+      --config src-tauri/tauri.windows.local-llm.conf.json
+  }
+  else {
+    npm run tauri build -- --target $target --bundles nsis --features local-llm `
+      --config src-tauri/tauri.windows.conf.json `
+      --config src-tauri/tauri.windows.local-llm.conf.json
+  }
 }
 finally {
   Pop-Location
