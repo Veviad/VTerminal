@@ -1,9 +1,10 @@
-# Windows 11 WSL2 beta
+# Windows 11 WSL2 preview (testing)
 
-VTerminal's Windows beta targets Windows 11 x64 and the default WSL2
+VTerminal's Windows preview targets Windows 11 x64 and the default WSL2
 distribution. The terminal backend is deliberately fixed to Bash inside that
 distribution. PowerShell, cmd, distro selection, Windows 10, ARM64, MSI, and
-Microsoft Store packages are not supported in this beta.
+Microsoft Store packages are not supported in this preview. This build is for
+testing and is not yet considered stable.
 
 ## Prerequisites
 
@@ -37,17 +38,19 @@ Get-Content .\SHA256SUMS.txt
 Get-AuthenticodeSignature .\VTerminal_<version>_x64-setup.exe
 ```
 
-The first hash must match the installer entry in `SHA256SUMS.txt`, and the
-Authenticode `Status` must be `Valid`. Then run the installer. It installs for
-the current user and bootstraps WebView2 when the runtime is absent; it does not
-request an administrator-level WSL installation.
+The first hash must match the installer entry in `SHA256SUMS.txt`. The preview
+installer is intentionally not Authenticode signed, so the reported status is
+expected to be `NotSigned`; Windows therefore reports an unknown publisher and
+SmartScreen may require **More info → Run anyway**. It installs for the current
+user and bootstraps WebView2 when the runtime is absent; it does not request an
+administrator-level WSL installation.
 
 On first launch, VTerminal checks the default WSL distribution and Bash. After
 setup or repair, close and reopen VTerminal. New PowerShell windows also pick up
 the managed `vterminal-docs.exe` PATH entry; already-open shells retain their old
 environment.
 
-To upgrade, run the newer signed installer or approve an update in
+To upgrade, run the newer preview installer or approve an update in
 **Settings → Updates**. Uninstall through **Settings → Apps → Installed apps**.
 Uninstall removes only VTerminal's exact managed CLI PATH entry and does not
 remove WSL, distributions, models, or unrelated PATH entries.
@@ -70,19 +73,10 @@ The managed PATH transformation can be exercised without touching the registry:
 .\scripts\windows-cli-path.tests.ps1
 ```
 
-Production builds use `npm run build:windows:signed` and require:
-
-- .NET 8, Azure CLI, `artifact-signing-cli`, and a current Windows SDK containing
-  Authenticode inspection tools
-
-- `TAURI_SIGNING_PRIVATE_KEY` and optional password for updater signatures
-- `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, and `AZURE_TENANT_ID`
-- `AZURE_ARTIFACT_SIGNING_ENDPOINT`, `AZURE_ARTIFACT_SIGNING_ACCOUNT`, and
-  `AZURE_ARTIFACT_SIGNING_PROFILE`
-
-The sidecar and backend DLLs are signed first. Tauri then signs the application
-and NSIS installer before creating the updater signature, so updater verification
-covers the exact Authenticode-signed bytes.
+Release builds use `npm run build:windows:release` and require
+`TAURI_SIGNING_PRIVATE_KEY` plus its optional password. That key creates the
+Tauri updater signature; it does not add an Authenticode publisher signature to
+the application or installer.
 
 ## Troubleshooting
 
@@ -146,11 +140,11 @@ host unloads.
 
 ## Clean-VM acceptance
 
-Before publishing a Windows beta, exercise this checklist on clean Windows 11
+Before publishing a Windows preview, exercise this checklist on clean Windows 11
 x64 VMs and retain the installer hashes and logs with the release candidate:
 
-1. Verify Authenticode is `Valid` for the application, installer, companion CLI,
-   and every bundled backend DLL. Install, upgrade, updater-failure recovery,
+1. Verify the installer SHA-256 against `SHA256SUMS.txt` and confirm the expected
+   `NotSigned` Authenticode status is disclosed before download. Install, upgrade, updater-failure recovery,
    rollback behavior, and uninstall must leave no VTerminal process or managed
    PATH entry behind. Confirm the final workspace/archive flush completes after
    updater verification and before installer handoff.

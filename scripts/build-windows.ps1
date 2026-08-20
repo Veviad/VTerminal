@@ -1,5 +1,6 @@
 param(
-  [switch]$RequireSigning
+  [switch]$CreateUpdaterArtifacts,
+  [switch]$RequireAuthenticode
 )
 
 $ErrorActionPreference = "Stop"
@@ -110,7 +111,7 @@ try {
     throw "The staged backend payload must contain Vulkan and at least one CPU implementation."
   }
 
-  if ($RequireSigning) {
+  if ($RequireAuthenticode) {
     $env:VTERMINAL_REQUIRE_WINDOWS_SIGNING = "1"
     & (Join-Path $repo "scripts\sign-windows.ps1") $sidecarDestination
     foreach ($dll in Get-ChildItem -LiteralPath $runtimeDestination -Filter "*.dll" -File) {
@@ -121,10 +122,10 @@ try {
     }
   }
 
-  if ($RequireSigning) {
-    # Production releases create signed updater artifacts as well as the NSIS
-    # installer. Keeping this config out of unsigned smoke builds avoids
-    # weakening Tauri's fail-closed private-key check.
+  if ($CreateUpdaterArtifacts) {
+    # Updater signing is independent of Authenticode. Public preview releases
+    # still create Tauri-signed updater artifacts even when the Windows PE
+    # files and NSIS installer intentionally remain unsigned.
     npm run tauri build -- --target $target --bundles nsis --features local-llm `
       --config src-tauri/tauri.updater.conf.json `
       --config src-tauri/tauri.windows.conf.json `

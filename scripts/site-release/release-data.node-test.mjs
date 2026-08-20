@@ -273,7 +273,7 @@ test("renders the checked-in Pages source and writes sanitized release.json", as
     2,
   );
   assert.match(html, /aria-label="Download VTerminal 0\.3\.0-beta\.2 for macOS \(Apple Silicon\), 12\.8 MB\."/);
-  assert.match(html, /aria-label="Download VTerminal 0\.3\.0-beta\.2 for Windows 11 \(x64\), 18\.8 MB\."/);
+  assert.match(html, /aria-label="Download VTerminal 0\.3\.0-beta\.2 Windows 11 preview \(x64\), 18\.8 MB\."/);
   assert.match(html, /aria-label="Pre-release 0\.3\.0-beta\.2\. Read the release notes\."/);
   assert.match(html, /"softwareVersion": "0\.3\.0-beta\.2"/);
   assert.match(

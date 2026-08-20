@@ -377,7 +377,7 @@ function markerValues(data) {
   const aria = {
     download: `Download VTerminal ${data.release.version} for macOS (Apple Silicon), ${data.dmg.formatted_size}.`,
     windows_download: windows
-      ? `Download VTerminal ${data.release.version} for Windows 11 (x64), ${windows.formatted_size}.`
+      ? `Download VTerminal ${data.release.version} Windows 11 preview (x64), ${windows.formatted_size}.`
       : `VTerminal ${data.release.version} does not include a Windows installer.`,
     announcement: `${data.release.label} ${data.release.version}. Read the release notes.`,
   };

@@ -269,7 +269,7 @@
               data-release-platform="windows"
               data-release-href="windows"
               data-release-aria="windows_download"
-              >Download for Windows</a
+              >Windows preview</a
             >
             <a
               class="button button-outline"
@@ -331,7 +331,7 @@
               data-release-aria="windows_download"
             >
               <svg class="ui-icon" aria-hidden="true"><use href="#i-download" /></svg>
-              Download for Windows
+              Windows preview
             </a>
             <a
               class="button button-secondary"
@@ -341,8 +341,8 @@
           </div>
           <p class="download-meta hero-download-meta">
             <span data-release-text="version">Latest release</span> · macOS Apple
-            Silicon <span data-release-platform="windows">or Windows 11 x64 </span>·
-            <a href="#download">signed installers and requirements</a>
+            Silicon <span data-release-platform="windows">or Windows 11 x64 preview </span>·
+            <a href="#download">installers and requirements</a>
           </p>
           <p class="release-date">
             Published <span data-release-text="published_date">—</span>
@@ -366,7 +366,7 @@
           <ul class="hero-proof" aria-label="At a glance">
             <li>
               <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
-              <span>macOS Apple Silicon + Windows 11 x64</span>
+              <span>macOS Apple Silicon + Windows 11 x64 preview</span>
             </li>
             <li>
               <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
@@ -1420,7 +1420,8 @@
             </h2>
             <p class="section-lead">
               macOS ships as a Developer ID-signed and notarized disk image;
-              Windows 11 ships as a signed, per-user installer. On-device
+              Windows 11 is available as an unsigned, per-user preview installer
+              for testing and is not yet considered stable. On-device
               inference is compiled in on both, with Metal on Mac and dynamic
               Vulkan with automatic CPU fallback on Windows.
             </p>
@@ -1439,17 +1440,17 @@
               </div>
               <div class="req-row">
                 <dt>Windows</dt>
-                <dd>Windows 11 x64, WSL2 default distribution, Bash</dd>
+                <dd>Windows 11 x64 preview (testing), WSL2 default distribution, Bash</dd>
               </div>
               <div class="req-row">
                 <dt>Packages</dt>
-                <dd>Apple Silicon DMG; signed per-user Windows NSIS installer</dd>
+                <dd>Apple Silicon DMG; unsigned per-user Windows NSIS preview</dd>
               </div>
               <div class="req-row">
                 <dt>Signatures</dt>
                 <dd>
                   macOS Developer ID signed, notarized and stapled; Windows
-                  Authenticode signed
+                  preview intentionally unsigned (verify SHA-256)
                 </dd>
               </div>
               <div class="req-row">
@@ -1476,13 +1477,19 @@
                 data-release-aria="windows_download"
               >
                 <svg class="ui-icon" aria-hidden="true"><use href="#i-download" /></svg>
-                Download for Windows 11
+                Download Windows 11 preview
               </a>
               <span class="download-meta">
                 <code data-release-text="windows_name">Windows installer</code><br />
                 <span data-release-text="windows_size">EXE</span> · x64 · per-user NSIS
               </span>
             </div>
+            <p class="install-note" data-release-platform="windows">
+              <strong>Preview/testing:</strong> Windows support is not yet considered
+              stable. The installer is not Authenticode signed, so Windows reports
+              an unknown publisher and SmartScreen may require
+              <strong>More info → Run anyway</strong>. Verify its published SHA-256 first.
+            </p>
             <p class="install-note" data-release-platform="windows">
               VTerminal checks for a working WSL2 default distribution on first launch. It
               never installs or upgrades WSL administratively; if WSL is absent,
@@ -1616,8 +1623,8 @@
 
         <div class="install-layout shell" data-release-platform="windows">
           <div>
-            <p class="eyebrow">Windows 11 installation</p>
-            <h2 class="section-heading section-heading-wide">Signed, Per User, WSL First.</h2>
+            <p class="eyebrow">Windows 11 preview installation</p>
+            <h2 class="section-heading section-heading-wide">Preview, Per User, WSL First.</h2>
             <p class="section-lead">
               The NSIS installer needs no administrator rights. VTerminal uses the
               default WSL2 distribution and interactive Bash; it does not install
@@ -1649,7 +1656,7 @@
             <li class="step">
               <span class="step-number" aria-hidden="true">2</span>
               <div class="step-body">
-                <h3>Run the Signed Installer</h3>
+                <h3>Run the Preview Installer</h3>
                 <p>
                   Launch <code data-release-text="windows_name">VTerminal_x64-setup.exe</code>.
                   It installs for the current user and manages only VTerminal's
@@ -1720,7 +1727,7 @@
               data-release-platform="windows"
               data-release-href="windows"
               data-release-aria="windows_download"
-              >Download for Windows</a
+              >Windows preview</a
             >
             <a
               class="button button-outline"

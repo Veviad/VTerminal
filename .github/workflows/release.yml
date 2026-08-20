@@ -210,28 +210,15 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
 
-      - name: Verify signing configuration
+      # Tauri updater signatures are mandatory. Authenticode is deliberately
+      # optional for the Windows preview and is not supplied by this workflow.
+      - name: Verify updater signing key
         shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_ARTIFACT_SIGNING_ENDPOINT: ${{ secrets.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
-          AZURE_ARTIFACT_SIGNING_ACCOUNT: ${{ secrets.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
-          AZURE_ARTIFACT_SIGNING_PROFILE: ${{ secrets.AZURE_ARTIFACT_SIGNING_PROFILE }}
         run: |
-          $required = @(
-            $env:TAURI_SIGNING_PRIVATE_KEY,
-            $env:AZURE_CLIENT_ID,
-            $env:AZURE_CLIENT_SECRET,
-            $env:AZURE_TENANT_ID,
-            $env:AZURE_ARTIFACT_SIGNING_ENDPOINT,
-            $env:AZURE_ARTIFACT_SIGNING_ACCOUNT,
-            $env:AZURE_ARTIFACT_SIGNING_PROFILE
-          )
-          if ($required | Where-Object { [string]::IsNullOrWhiteSpace($_) }) {
-            throw 'Windows releases require the Tauri updater key and Azure Artifact Signing configuration.'
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw 'Windows releases require the Tauri updater signing key.'
           }
 
       - name: Install build prerequisites
@@ -259,7 +246,6 @@ jobs:
           "CMAKE_GENERATOR=Ninja" | Out-File -FilePath $env:GITHUB_ENV -Append
           "CARGO_TARGET_DIR=$shortTarget" | Out-File -FilePath $env:GITHUB_ENV -Append
           "$sdk\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append
-          cargo install artifact-signing-cli --locked
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -269,18 +255,12 @@ jobs:
           cache-bin: false
           save-if: false
 
-      - name: Build signed NSIS installer
+      - name: Build unsigned Windows preview installer
         shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_ARTIFACT_SIGNING_ENDPOINT: ${{ secrets.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
-          AZURE_ARTIFACT_SIGNING_ACCOUNT: ${{ secrets.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
-          AZURE_ARTIFACT_SIGNING_PROFILE: ${{ secrets.AZURE_ARTIFACT_SIGNING_PROFILE }}
-        run: ./scripts/build-windows.ps1 -RequireSigning
+        run: ./scripts/build-windows.ps1 -CreateUpdaterArtifacts
 
       - name: Verify and collect artifacts
         shell: pwsh
@@ -291,7 +271,9 @@ jobs:
           $updaterSignature = "$($installer[0].FullName).sig"
           if (-not (Test-Path $updaterSignature)) { throw 'The signed Windows updater signature is missing.' }
           $authenticode = Get-AuthenticodeSignature $installer[0].FullName
-          if ($authenticode.Status -ne 'Valid') { throw "Installer Authenticode status is $($authenticode.Status)." }
+          if ($authenticode.Status -ne 'NotSigned') {
+            throw "The Windows preview is expected to be unsigned, but Authenticode status is $($authenticode.Status)."
+          }
           New-Item -ItemType Directory -Force release-assets | Out-Null
           Copy-Item $installer[0].FullName release-assets/
           Copy-Item $updaterSignature release-assets/
@@ -339,8 +321,11 @@ jobs:
           EOF
           fi
           cat >> NOTES.md <<'EOF'
-          Windows 11 requires WSL2 with a default distribution and Bash. The
-          Windows installer, application, and companion CLI are Authenticode signed.
+          > **Windows 11 preview:** the Windows build is for testing and is not
+          > yet considered stable. It requires WSL2 with a default distribution
+          > and Bash. The installer is intentionally not Authenticode signed, so
+          > Windows reports an unknown publisher and Microsoft Defender SmartScreen
+          > may require **More info → Run anyway**.
 
           Verify downloads with `shasum -a 256 -c SHA256SUMS.txt` on macOS or
           `Get-FileHash .\VTerminal_*_x64-setup.exe -Algorithm SHA256` on Windows.

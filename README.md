@@ -1,12 +1,12 @@
 # VTerminal
 
-A lean, AI-powered terminal for macOS and Windows 11 — Warp-style command blocks and an AI agent, without the bulk. Local models run **in-process** with Metal on Mac or Vulkan with CPU fallback on Windows: no Ollama, no vLLM, no daemon to babysit. Cloud models sit behind the same interface.
+A lean, AI-powered terminal for macOS and the Windows 11 preview — Warp-style command blocks and an AI agent, without the bulk. Local models run **in-process** with Metal on Mac or Vulkan with CPU fallback on Windows: no Ollama, no vLLM, no daemon to babysit. Cloud models sit behind the same interface.
 
-**[Download the latest release](https://vterminal.veviad.com/#download)** (macOS Apple Silicon or Windows 11 x64) · **[vterminal.veviad.com](https://vterminal.veviad.com)**
+**[Download the latest release](https://vterminal.veviad.com/#download)** (macOS Apple Silicon or Windows 11 x64 preview) · **[vterminal.veviad.com](https://vterminal.veviad.com)**
 
-The sections below build from source. If you just want to run the app, take the download above — release installers include on-device inference. Published macOS releases beginning with v0.2.3 are Developer ID signed with hardened runtime, notarized by Apple, and stapled for normal Gatekeeper verification. Windows releases are Authenticode signed.
+The sections below build from source. If you just want to run the app, take the download above — release installers include on-device inference. Published macOS releases beginning with v0.2.3 are Developer ID signed with hardened runtime, notarized by Apple, and stapled for normal Gatekeeper verification. The Windows preview installer is intentionally not Authenticode signed.
 
-On macOS, quit VTerminal completely before replacing `/Applications/VTerminal.app` and eject older disk images. On Windows, run the newer signed per-user installer; it upgrades the existing installation and preserves app data.
+On macOS, quit VTerminal completely before replacing `/Applications/VTerminal.app` and eject older disk images. On Windows, run the newer per-user preview installer; it upgrades the existing installation and preserves app data.
 
 ![platform](https://img.shields.io/badge/macOS%20%7C%20Windows%2011-Apple%20Silicon%20%7C%20x64-black)
 ![stack](https://img.shields.io/badge/Tauri%202-Rust-informational)
@@ -14,6 +14,8 @@ On macOS, quit VTerminal completely before replacing `/Applications/VTerminal.ap
 ![license](https://img.shields.io/badge/license-GPL--3.0-blue)
 
 > **Status: early.** VTerminal is pre-1.0 and developed in the open. It is used daily by its author, but expect rough edges and breaking changes between versions.
+
+> **Windows status: preview/testing.** Windows 11 support is not yet considered stable. Its installer is unsigned, so Windows reports an unknown publisher and SmartScreen may require **More info → Run anyway**. Verify the published SHA-256 checksum before running it.
 
 ---
 
@@ -92,8 +94,7 @@ npm run tauri build -- --features local-llm
 This local artifact uses whatever signing identity is configured on your Mac; it does not reproduce the Developer ID-signed and notarized GitHub release unless you supply the corresponding release signing environment.
 
 On Windows 11, first confirm `wsl.exe --status` reports WSL2 and a default
-distribution. Then build the local NSIS package (unsigned unless the Azure
-signing variables are configured):
+distribution. Then build the unsigned local NSIS package:
 
 ```powershell
 npm run build:windows
@@ -107,9 +108,10 @@ Get-FileHash .\VTerminal_*_x64-setup.exe -Algorithm SHA256
 Get-AuthenticodeSignature .\VTerminal_*_x64-setup.exe
 ```
 
-Compare the first command's hash with `SHA256SUMS.txt`; the Authenticode status
-must be `Valid`. The installer is per-user and VTerminal checks WSL2/Bash on
-first launch rather than making an administrator-level WSL change.
+Compare the first command's hash with `SHA256SUMS.txt`. The preview installer is
+expected to report `NotSigned`; the hash is the public download-integrity check.
+The installer is per-user and VTerminal checks WSL2/Bash on first launch rather
+than making an administrator-level WSL change.
 
 The app launches only the fixed default-distribution WSL2/Bash backend. Native
 PowerShell, cmd, distro selection, Windows 10, ARM64, MSI, and Store packaging
@@ -118,7 +120,7 @@ and clean-VM acceptance guide](docs/WINDOWS.md).
 
 ## Experimental updates
 
-VTerminal includes an experimental signed update chain for macOS Apple Silicon and Windows 11 x64 releases. Open **Settings → Updates** to check manually or opt in to automatic checks.
+VTerminal includes an experimental cryptographically signed update chain for macOS Apple Silicon and the Windows 11 x64 preview. This updater signature is independent of the Windows preview installer's missing Authenticode publisher signature. Open **Settings → Updates** to check manually or opt in to automatic checks.
 
 - **Automatic updates are off by default.** Enabling them checks immediately, then every 24 hours.
 - **Stable releases and prereleases share one channel.** Manual **Check now** remains available while automatic checks are disabled.
@@ -170,7 +172,7 @@ The built-in artifacts are pinned, checksum-verified, loaded and tested by the a
 
 Qdrant receives extracted manifests, chunks, metadata and vectors, not original binaries. Read-only credentials can attach and search; wider permissions unlock document upload, replace and deletion or collection management. Upload jobs persist immediately, run automatically in the background and stay visible through Extract → Chunk → Embed → Upload, including retryable failures. TurboQuant is an advanced, opt-in sidecar for Qdrant 1.18+; bits4 is recommended, original vectors remain, and confirmed state is read back from Qdrant before the UI reports success.
 
-The signed standalone `vterminal-docs` CLI installs from the UI into `~/.local/bin` on macOS. The Windows installer places it under `%LOCALAPPDATA%\Programs\VTerminal\bin`, and the Settings action reports or repairs that managed copy. Windows setup manages only that exact user PATH entry, and uninstall removes only the managed entry. It shares the app's saved profiles, connections, model cache, chunking and job records. It can list profiles; list/test connections; list/create/delete buckets; list/ingest/replace/delete documents; and search, with JSON output and stdin support. Text, structured text, page JSON and text-layer PDFs work headlessly; OCR-required inputs direct you to the UI.
+The standalone `vterminal-docs` CLI installs from the UI into `~/.local/bin` on macOS. The Windows installer places it under `%LOCALAPPDATA%\Programs\VTerminal\bin`, and the Settings action reports or repairs that managed copy. Windows setup manages only that exact user PATH entry, and uninstall removes only the managed entry. It shares the app's saved profiles, connections, model cache, chunking and job records. It can list profiles; list/test connections; list/create/delete buckets; list/ingest/replace/delete documents; and search, with JSON output and stdin support. Text, structured text, page JSON and text-layer PDFs work headlessly; OCR-required inputs direct you to the UI.
 
 Local embedding stays on the device. Qdrant and cloud-provider credentials stay backend-only in the operating-system credential vault. Before the first cloud ingestion, the UI explains that document chunks—and later search queries—will leave the device. Embedding profiles are immutable fingerprints of the exact model, revision, dimensions and query/document transforms; changing any of those creates a new profile and requires re-embedding.
 
