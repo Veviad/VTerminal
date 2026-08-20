@@ -1,0 +1,21 @@
+name: Windows clean build
+
+on:
+  schedule:
+    - cron: '0 4 1 * *'
+  workflow_dispatch:
+
+concurrency:
+  group: windows-clean
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Uncached Windows validation
+    uses: ./.github/workflows/windows-ci.yml
+    with:
+      restore-cache: false
+      save-cache: false

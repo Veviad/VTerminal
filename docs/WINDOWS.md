@@ -173,16 +173,19 @@ x64 VMs and retain the installer hashes and logs with the release candidate:
    extraction, image/vision attachment handling, external links, and display
    recovery after sleep/resume on clean Windows 11 VMs.
 
-The repository's required `windows-latest` CI job compiles and tests feature-off
-and local-inference configurations. It produces one feature-off NSIS smoke
-bundle with only the companion sidecar and common installer resources, followed
-by the production-shaped local-inference NSIS smoke containing both CPU and
-Vulkan backends.
+The repository's required Windows validation runs two `windows-latest` jobs in
+parallel. The core job compiles and tests the feature-off configuration and
+produces an NSIS smoke bundle with only the companion sidecar and common
+installer resources. The local-model job compiles and tests CPU/Vulkan local
+inference and produces the production-shaped NSIS smoke containing both
+backends. Pull requests restore a dependency cache written only by `main`; a
+monthly scheduled workflow runs both jobs without restoring or saving a cache
+to preserve clean-build coverage.
 Windows local-inference builds require CMake's Ninja generator in addition to
-the MSVC toolchain and Vulkan SDK; `scripts/build-windows.ps1` verifies Ninja
-and selects it explicitly before Cargo configures llama.cpp. The script also
-uses a drive-root Cargo target directory (`C:\vt` locally and `<workspace
+the MSVC toolchain and pinned Vulkan SDK; `scripts/build-windows.ps1` verifies
+Ninja and selects it explicitly before Cargo configures llama.cpp. The script
+also uses a drive-root Cargo target directory (`C:\vt` locally and `<workspace
 drive>:\t` in CI) so llama.cpp's nested Vulkan shader build stays below MSVC's
-effective path limit.
+effective path limit and the cache targets the directory Cargo actually uses.
 The hardware and WSL lifecycle checks above remain release acceptance tests
 because hosted CI cannot represent the required driver and clean-VM matrix.

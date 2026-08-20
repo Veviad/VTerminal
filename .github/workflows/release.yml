@@ -236,15 +236,23 @@ jobs:
 
       - name: Install build prerequisites
         shell: pwsh
+        env:
+          VULKAN_PACKAGE_VERSION: 1.4.350
+          VULKAN_SDK_VERSION: 1.4.350.0
         run: |
           rustup show
           rustup target add x86_64-pc-windows-msvc
-          choco install vulkan-sdk -y --no-progress
-          $sdk = [Environment]::GetEnvironmentVariable('VULKAN_SDK', 'Machine')
-          if ([string]::IsNullOrWhiteSpace($sdk)) { throw 'Vulkan SDK installation did not set VULKAN_SDK.' }
+          choco install vulkan-sdk --version $env:VULKAN_PACKAGE_VERSION -y --no-progress
+          $sdk = "C:\VulkanSDK\$env:VULKAN_SDK_VERSION"
+          if (-not (Test-Path -LiteralPath $sdk -PathType Container)) {
+            throw "Vulkan SDK $env:VULKAN_SDK_VERSION was not installed at $sdk."
+          }
           Get-Command ninja -ErrorAction Stop | Out-Null
           $shortTarget = Join-Path ([IO.Path]::GetPathRoot($env:GITHUB_WORKSPACE)) 't'
           "VULKAN_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "VULKAN_PACKAGE_VERSION=$env:VULKAN_PACKAGE_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "VULKAN_SDK_VERSION=$env:VULKAN_SDK_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "WINDOWS_BUILD_CACHE_REV=windows-x64-cpu-vulkan-v1" | Out-File -FilePath $env:GITHUB_ENV -Append
           "CMAKE_GENERATOR=Ninja" | Out-File -FilePath $env:GITHUB_ENV -Append
           "CARGO_TARGET_DIR=$shortTarget" | Out-File -FilePath $env:GITHUB_ENV -Append
           "$sdk\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append
@@ -252,9 +260,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          workspaces: src-tauri
-          key: windows-release
-          cache-on-failure: true
+          shared-key: ${{ env.WINDOWS_BUILD_CACHE_REV }}
+          workspaces: src-tauri -> ../../../../t
+          env-vars: VULKAN_PACKAGE_VERSION VULKAN_SDK_VERSION VULKAN_SDK WINDOWS_BUILD_CACHE_REV
+          cache-bin: false
+          save-if: false
 
       - name: Build signed NSIS installer
         shell: pwsh
