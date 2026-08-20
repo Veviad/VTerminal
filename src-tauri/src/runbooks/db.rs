@@ -3773,6 +3773,8 @@ fn assemble_report(
                 network: approval.network,
                 privileged: approval.privileged,
                 opaque: approval.opaque,
+                project_digest: approval.project_digest.clone(),
+                inventory_digest: approval.inventory_digest.clone(),
                 actor: approval.actor.clone(),
                 reason: approval.reason.clone(),
                 requested_at: approval.requested_at.clone(),
