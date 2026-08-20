@@ -1169,7 +1169,9 @@ pub fn runbooks_start(
 
     // Re-read and revalidate the full package immediately before committing the
     // immutable snapshot. A source edit never silently changes a registered run.
-    let package = match load_and_check_package(Path::new(&source.package_path)) {
+    let package_root = fs::canonicalize(&source.package_path)
+        .map_err(|error| format!("resolve runbook package root: {error}"))?;
+    let package = match load_and_check_package(&package_root) {
         Ok(package) => package,
         Err(error) => {
             mark_source_invalid(&db_state, &source, &error)?;
@@ -1236,6 +1238,7 @@ pub fn runbooks_start(
         run_id: record.id.clone(),
         definition: package.definition,
         definition_snapshot: package.snapshot,
+        package_root: Some(package_root),
         target: request.target_context,
         inputs: resolved,
         evidence_mode,
@@ -1289,7 +1292,7 @@ pub fn runbooks_resume(
     let active_model = crate::commands::ai::active_model(&app);
     let resume_app_version = env!("CARGO_PKG_VERSION");
     let resume_model = active_model.id;
-    let (record, definition, inputs, view) = {
+    let (record, definition, inputs, package_root, view) = {
         let mut connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
         let stored = db::get_run(&connection, &run_id)?
             .ok_or_else(|| format!("unknown runbook run: {run_id}"))?;
@@ -1311,6 +1314,17 @@ pub fn runbooks_resume(
             );
         }
         reject_sensitive_value(&stored.inputs, "stored runbook inputs")?;
+        let package_root = match &stored.source_id {
+            Some(source_id) => {
+                let source = db::get_source(&connection, source_id)?.ok_or_else(|| {
+                    format!("runbook source {source_id} for run {run_id} no longer exists")
+                })?;
+                Some(fs::canonicalize(&source.package_path).map_err(|error| {
+                    format!("resolve runbook package root for run {run_id}: {error}")
+                })?)
+            }
+            None => None,
+        };
         let record = db::rebind_interrupted_run(
             &mut connection,
             &run_id,
@@ -1320,8 +1334,11 @@ pub fn runbooks_resume(
             Some(resume_model),
         )?;
         let view = run_view(&connection, &record)?;
-        (record, definition, inputs, view)
+        (record, definition, inputs, package_root, view)
     };
+    if definition.uses_unavailable_executor() && package_root.is_none() {
+        return Err("runbook package root is unavailable for this run; restart the run".into());
+    }
     let config = engine_config(&app, active_model);
     let spec = EngineRunSpec {
         run_id: record.id.clone(),
@@ -1332,6 +1349,7 @@ pub fn runbooks_resume(
             source_sha256: record.source_sha256,
             canonical_sha256: record.canonical_sha256,
         },
+        package_root,
         target: target_context,
         inputs,
         evidence_mode: record.evidence_mode,

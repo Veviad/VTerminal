@@ -465,7 +465,7 @@ fn repair_v6_runbook_steps_assurance(conn: &Connection) -> Result<(), String> {
             changed            INTEGER NOT NULL DEFAULT 0 CHECK(changed IN (0,1)),
             assurance          TEXT CHECK(assurance IS NULL OR assurance IN
                                    ('deterministic_shell','shell_observed','agent_assisted',
-                                    'operator_attested')),
+                                    'ansible_runner','operator_attested')),
             summary            TEXT,
             operator_comment   TEXT,
             waiver_actor       TEXT,
@@ -3731,6 +3731,8 @@ fn assemble_report(
                 network: approval.network,
                 privileged: approval.privileged,
                 opaque: approval.opaque,
+                project_digest: approval.project_digest.clone(),
+                inventory_digest: approval.inventory_digest.clone(),
                 actor: approval.actor.clone(),
                 reason: approval.reason.clone(),
                 requested_at: approval.requested_at.clone(),
@@ -6009,6 +6011,8 @@ mod tests {
             network: false,
             privileged: false,
             opaque: true,
+            project_digest: None,
+            inventory_digest: None,
         }
     }
 

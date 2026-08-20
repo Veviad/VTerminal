@@ -1,7 +1,7 @@
 {
   "name": "vterminal",
   "private": true,
-  "version": "0.2.8",
+  "version": "0.2.10",
   "author": "Shawn Maholick",
   "type": "module",
   "scripts": {

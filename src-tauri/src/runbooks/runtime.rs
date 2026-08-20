@@ -39,6 +39,8 @@ pub enum RunbookEvent {
         network: bool,
         privileged: bool,
         opaque: bool,
+        project_digest: Option<String>,
+        inventory_digest: Option<String>,
     },
     RunInTerminal {
         run_id: String,

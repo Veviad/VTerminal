@@ -265,8 +265,8 @@ string_enum! {
         // The bound PTY returned an observed exit status, without claiming the
         // parent interactive shell itself was an attested runtime.
         ShellObserved => "shell_observed",
-        /// Ansible follow-on adapter execution with explicit project and
-        /// inventory digests for per-host reconciliation.
+        // Ansible follow-on adapter execution with explicit project and
+        // inventory digests for per-host reconciliation.
         AnsibleRunner => "ansible_runner",
         AgentAssisted => "agent_assisted",
         OperatorAttested => "operator_attested",

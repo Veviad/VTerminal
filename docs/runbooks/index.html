@@ -57,7 +57,7 @@
       <section class="guide-hero" aria-labelledby="guide-title">
         <div class="guide-hero-inner">
             <span class="guide-status"
-            >Available in 0.2.8 · Experimental · Disabled by default</span
+            >Available in 0.2.10 · Experimental · Disabled by default</span
             >
           <h1 id="guide-title">Reusable Runbooks</h1>
           <p class="guide-hero-copy">
@@ -383,7 +383,7 @@
             <pre class="guide-code"><code>my-runbook/
 ├── runbook.vrun.yaml   required
 ├── README.md           optional
-└── ansible/            reserved for the follow-on adapter</code></pre>
+└── ansible/            optional; used by ansible.playbook actions</code></pre>
 
             <pre class="guide-code"><code>apiVersion: runbooks.veviad.com/v1alpha1
 kind: Runbook
@@ -725,13 +725,11 @@ spec:
               <article class="guide-card">
                 <h3><code>ansible.playbook</code></h3>
                 <p>
-                  Native v1 recognizes and validates the format, but refuses
-                  runtime execution today. It never falls back to a generic shell
-                  execution. The planned follow-on adapter will require a
-                  user-installed <code>ansible-runner</code>, bind approval to
-                  exact project and inventory digests, retain structured
-                  per-host outcomes, keep check mode preview-only, and still
-                  require verification.
+                  Native in 0.2.10. It invokes a user-installed
+                  <code>ansible-runner</code> as the explicit local controller,
+                  binds approval to exact project and inventory digests, and
+                  retains structured per-host outcomes. Check and verify are
+                  preview-only; apply still requires subsequent verification.
                 </p>
               </article>
             </div>
@@ -893,16 +891,18 @@ spec:
             id="ansible"
             aria-labelledby="ansible-title"
           >
-            <p class="eyebrow">Follow-On Adapter</p>
-            <h2 id="ansible-title">Ansible Is Reserved, Not Silently Emulated</h2>
+            <p class="eyebrow">Native in 0.2.10</p>
+            <h2 id="ansible-title">Ansible Runner, Explicitly Controlled</h2>
             <p>
-              Native v1 recognizes <code>ansible.playbook</code> so the format
-              can evolve without an ambiguous shell fallback, but it refuses to
-              execute it today. The planned adapter will use a user-installed
-              <code>ansible-runner</code> as an explicit local controller, bind
-              approval to exact project/inventory digests and retain structured
-              per-host outcomes. Check mode will remain preview-only, and
-              verification will still be required.
+              <code>ansible.playbook</code> executes through a user-installed
+              <code>ansible-runner</code>; there is no fallback to
+              <code>ansible-playbook</code> or a generic shell action. Every
+              approval shows and binds the exact project and inventory digests,
+              and reports retain structured outcomes per host. Check and verify
+              run with <code>--check --diff</code>, while a successful apply must
+              still pass verification. Runner is launched as a local controller
+              without inheriting the visible terminal shell; its inventory may
+              target remote hosts.
             </p>
 
             <div class="guide-links">

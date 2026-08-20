@@ -30,6 +30,32 @@ import {
   stepStateTone,
 } from "./runbookUi";
 
+function AnsibleHostOutcomes({ value }: { value: unknown }) {
+  if (!value || typeof value !== "object" || !("hosts" in value)) return null;
+  const hosts = (value as {
+    hosts?: Record<string, Partial<Record<"ok" | "changed" | "failed" | "unreachable" | "skipped", number>>>;
+  }).hosts;
+  if (!hosts || typeof hosts !== "object") return null;
+  return (
+    <div className="mt-2 overflow-x-auto rounded border border-border-subtle">
+      <table className="w-full text-left text-[9px] text-text-secondary">
+        <thead className="bg-bg-secondary text-text-muted">
+          <tr><th className="px-2 py-1">Host</th><th>OK</th><th>Changed</th><th>Failed</th><th>Unreachable</th><th>Skipped</th></tr>
+        </thead>
+        <tbody>
+          {Object.entries(hosts).map(([host, outcome]) => (
+            <tr key={host} className="border-t border-border-subtle">
+              <td className="px-2 py-1 font-mono">{host}</td>
+              <td>{outcome.ok ?? 0}</td><td>{outcome.changed ?? 0}</td><td>{outcome.failed ?? 0}</td>
+              <td>{outcome.unreachable ?? 0}</td><td>{outcome.skipped ?? 0}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 export function RunbookReportViewer({
   report,
   onRerun,
@@ -262,6 +288,7 @@ function ReportStep({
                   {attempt.executed_command}
                 </code>
               )}
+              {attempt.structured_outcomes != null && <AnsibleHostOutcomes value={attempt.structured_outcomes} />}
               {attempt.output_tail && (
                 <pre className="mt-1 max-h-36 overflow-auto whitespace-pre-wrap font-mono text-[9px] text-text-secondary">
                   {attempt.output_tail}{attempt.output_truncated ? "\n[… output truncated …]" : ""}

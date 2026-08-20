@@ -1,23 +1,27 @@
 //! Authoritative sequential execution for native runbook actions.
 //!
-//! The engine deliberately does not write to a terminal itself. Every command is
-//! emitted through [`RunbookEvent::RunInTerminal`] and is completed only by an
-//! [`ObservedPtyResult`] returned through [`RunbookPtyState`]. This preserves the
-//! visible active SSH/container terminal as the execution context while Rust
-//! remains authoritative over approvals, lifecycle state and reports.
+//! Shell commands are emitted through [`RunbookEvent::RunInTerminal`] and are
+//! completed only by an [`ObservedPtyResult`] returned through [`RunbookPtyState`].
+//! The native Ansible adapter is the deliberate exception: it launches the
+//! user-installed `ansible-runner` as a local controller after digest-bound
+//! approval, without routing it through or inheriting the active terminal shell.
 
 use async_trait::async_trait;
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 // Both traits are in play: `io::Write` syncs evidence artifacts to disk,
 // `fmt::Write` builds the agent briefing string.
 use std::fmt::Write as _;
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{ExitStatus, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::database::DbState;
 use crate::provider::{Effort, Provider};
@@ -27,11 +31,11 @@ use super::agent_executor::{
     AgentCommandOutcome, AgentPhaseConfig,
 };
 use super::definition::{
-    ApplyAction, CheckAction, CheckOutcomes, Constraints, FailurePolicy, Goal, Privilege,
-    RunbookDefinition, ShellAction, Step, VerifyAction, MAX_SHELL_COMMAND_CHARS,
+    AnsiblePlaybookAction, ApplyAction, CheckAction, CheckOutcomes, Constraints, FailurePolicy,
+    Goal, Privilege, RunbookDefinition, ShellAction, Step, VerifyAction, MAX_SHELL_COMMAND_CHARS,
     RUNBOOK_ENV_PREFIX,
 };
-use super::package::DefinitionSnapshot;
+use super::package::{resolve_package_file, DefinitionSnapshot};
 use super::redact::{sanitize_evidence, sanitize_output_tail};
 use super::report::{
     status_from_checklist, ReportApproval, ReportAttempt, ReportChecklistItem, ReportDefinition,
@@ -58,6 +62,7 @@ const CLEAN_ENV_PREFIX: &str = "/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sb
 const TERMINAL_GUARD_PREFIX: &str = "/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C PAGER=cat GIT_PAGER=cat SYSTEMD_PAGER=cat SYSTEMD_PAGELESS=1 LESS=FRX DEBIAN_FRONTEND=noninteractive /bin/sh -c ";
 const TERMINAL_GUARD_SUFFIX: &str = " < /dev/null";
 const MAX_TERMINAL_INSTRUMENTATION_CHARS: usize = 96;
+const MAX_ANSIBLE_STREAM_BYTES: usize = 1024 * 1024;
 
 /// A small seam around Tauri's IPC channel keeps the engine unit-testable.
 pub trait RunbookEventSink: Send + Sync {
@@ -115,6 +120,7 @@ pub struct EngineRunSpec {
     pub run_id: String,
     pub definition: RunbookDefinition,
     pub definition_snapshot: DefinitionSnapshot,
+    pub package_root: Option<PathBuf>,
     pub target: TargetBinding,
     pub inputs: BTreeMap<String, Value>,
     pub evidence_mode: EvidenceCaptureMode,
@@ -395,12 +401,30 @@ enum PhaseActionRef<'a> {
     ShellVerify(&'a ShellAction, &'a [i32]),
     Agent(&'a str),
     Manual(&'a str),
+    AnsiblePlaybook(&'a AnsiblePlaybookAction, &'a AnsibleRunMode),
     /// The step's `goal.checks`, standing in for an absent `check:` or
     /// `verify:`. One block then serves both, which is what the shipped Linux
     /// baseline was already doing by hand — its check and verify commands are
     /// byte-identical.
     Goal(&'a Goal),
     Unavailable(&'static str),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AnsibleRunMode {
+    Check,
+    Apply,
+    Verify,
+}
+
+impl AnsibleRunMode {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Check => "check",
+            Self::Apply => "apply",
+            Self::Verify => "verify",
+        }
+    }
 }
 
 impl<'a> EngineRunner<'a> {
@@ -768,6 +792,8 @@ impl<'a> EngineRunner<'a> {
                     network: approval.network,
                     privileged: approval.privileged,
                     opaque: approval.opaque,
+                    project_digest: approval.project_digest.clone(),
+                    inventory_digest: approval.inventory_digest.clone(),
                     actor: approval.actor.clone(),
                     reason: approval.reason.clone(),
                     requested_at: approval.requested_at.clone(),
@@ -837,8 +863,8 @@ impl<'a> EngineRunner<'a> {
             }
             (Some(CheckAction::Agent { instructions }), _) => PhaseActionRef::Agent(instructions),
             (Some(CheckAction::Manual { instructions }), _) => PhaseActionRef::Manual(instructions),
-            (Some(CheckAction::AnsiblePlaybook { .. }), _) => {
-                PhaseActionRef::Unavailable("ansible.playbook adapter is not available in v1")
+            (Some(CheckAction::AnsiblePlaybook { action, .. }), _) => {
+                PhaseActionRef::AnsiblePlaybook(action, &AnsibleRunMode::Check)
             }
             // An explicit `check:` always wins; the goal only stands in when
             // the author wrote none. Validation guarantees one of the two.
@@ -895,8 +921,8 @@ impl<'a> EngineRunner<'a> {
             } => PhaseActionRef::ShellApply(action, success_exit_codes),
             ApplyAction::Agent { instructions } => PhaseActionRef::Agent(instructions),
             ApplyAction::Manual { instructions } => PhaseActionRef::Manual(instructions),
-            ApplyAction::AnsiblePlaybook { .. } => {
-                PhaseActionRef::Unavailable("ansible.playbook adapter is not available in v1")
+            ApplyAction::AnsiblePlaybook { action, .. } => {
+                PhaseActionRef::AnsiblePlaybook(action, &AnsibleRunMode::Apply)
             }
         };
         let applied = self
@@ -935,8 +961,8 @@ impl<'a> EngineRunner<'a> {
             (Some(VerifyAction::Manual { instructions }), _) => {
                 PhaseActionRef::Manual(instructions)
             }
-            (Some(VerifyAction::AnsiblePlaybook { .. }), _) => {
-                PhaseActionRef::Unavailable("ansible.playbook adapter is not available in v1")
+            (Some(VerifyAction::AnsiblePlaybook { action, .. }), _) => {
+                PhaseActionRef::AnsiblePlaybook(action, &AnsibleRunMode::Verify)
             }
         };
         let verified = self
@@ -1037,6 +1063,18 @@ impl<'a> EngineRunner<'a> {
                 self.execute_manual(index, step, phase, instructions).await
             }
             PhaseActionRef::Goal(goal) => self.execute_goal(index, step, phase, goal).await,
+            PhaseActionRef::AnsiblePlaybook(action, AnsibleRunMode::Check) => {
+                self.execute_ansible(index, step, phase, action, AnsibleRunMode::Check)
+                    .await
+            }
+            PhaseActionRef::AnsiblePlaybook(action, AnsibleRunMode::Apply) => {
+                self.execute_ansible(index, step, phase, action, AnsibleRunMode::Apply)
+                    .await
+            }
+            PhaseActionRef::AnsiblePlaybook(action, AnsibleRunMode::Verify) => {
+                self.execute_ansible(index, step, phase, action, AnsibleRunMode::Verify)
+                    .await
+            }
             PhaseActionRef::Unavailable(reason) => Ok(PhaseRun::Completed {
                 completion: PhaseCompletion {
                     run_id: self.spec.run_id.clone(),
@@ -1377,6 +1415,365 @@ impl<'a> EngineRunner<'a> {
         }
     }
 
+    async fn execute_ansible(
+        &mut self,
+        index: usize,
+        step: &Step,
+        phase: RunbookPhase,
+        action: &AnsiblePlaybookAction,
+        mode: AnsibleRunMode,
+    ) -> Result<PhaseRun, String> {
+        let package_root = self
+            .spec
+            .package_root
+            .as_ref()
+            .ok_or("runbook execution is missing the package root; restart this run")?
+            .to_path_buf();
+        let runner = find_ansible_runner()?;
+        let project_root = fs::canonicalize(package_root.join("ansible"))
+            .map_err(|error| format!("resolve runbook Ansible project: {error}"))?;
+        let playbook_path =
+            resolve_package_file(&package_root, &action.playbook).map_err(|error| {
+                format!(
+                    "cannot resolve ansible playbook {} for step {}: {error}",
+                    action.playbook, step.id
+                )
+            })?;
+        let playbook_relative = playbook_path
+            .strip_prefix(&project_root)
+            .map_err(|_| {
+                format!(
+                    "ansible playbook path is outside the package Ansible project for step {}",
+                    step.id
+                )
+            })?
+            .to_string_lossy()
+            .to_string();
+
+        let artifacts = AnsibleArtifactDirectory::create()?;
+        let extra_vars = ansible_extra_vars(&action.input_vars, &self.spec.inputs)?;
+        let command_args = ansible_runner_command(
+            &package_root,
+            &project_root,
+            &playbook_relative,
+            action.inventory.as_deref(),
+            action.limit.as_deref(),
+            extra_vars.as_deref(),
+            matches!(mode, AnsibleRunMode::Check | AnsibleRunMode::Verify),
+            artifacts.path(),
+        )?;
+        let attempted_command = ansible_preview_command(&runner.to_string_lossy(), &command_args);
+        let attempt_id = self.create_attempt(
+            index,
+            step,
+            phase,
+            "ansible_runner",
+            Some(&attempted_command),
+        )?;
+
+        let (project_digest, inventory_digest) = (
+            ansible_project_digest(&project_root)?,
+            match &action.inventory {
+                Some(inventory) => Some(ansible_inventory_digest(&package_root, inventory)?),
+                None => None,
+            },
+        );
+        let request_project_digest = project_digest.clone();
+        let request_inventory_digest = inventory_digest.clone();
+        let request = ApprovalRequest {
+            approval_id: uuid::Uuid::new_v4().to_string(),
+            run_id: self.spec.run_id.clone(),
+            step_id: step.id.clone(),
+            phase,
+            command: attempted_command.clone(),
+            explanation: clean_persisted_text(&format!(
+                "Execute ansible.playbook {} for the {} phase",
+                action.playbook,
+                phase.as_str()
+            )),
+            read_only: matches!(mode, AnsibleRunMode::Check | AnsibleRunMode::Verify),
+            network: true,
+            privileged: true,
+            opaque: true,
+            project_digest: Some(project_digest),
+            inventory_digest,
+        };
+
+        let executed_command = match self
+            .await_approval(index, &attempt_id, request, false)
+            .await?
+        {
+            ApprovalGate::Approved(resolved) => resolved
+                .executed_command
+                .clone()
+                .ok_or("approved action did not resolve an executed command")?
+                .trim()
+                .to_string(),
+            ApprovalGate::Declined(reason) => return Ok(PhaseRun::Paused(reason)),
+            ApprovalGate::Cancelled => return Ok(PhaseRun::Cancelled),
+        };
+
+        let current_project_digest = ansible_project_digest(&project_root)?;
+        let current_inventory_digest = match &action.inventory {
+            Some(inventory) => Some(ansible_inventory_digest(&package_root, inventory)?),
+            None => None,
+        };
+        if current_project_digest != request_project_digest
+            || current_inventory_digest != request_inventory_digest
+        {
+            self.finish_attempt(
+                index,
+                &attempt_id,
+                AttemptStatus::Unknown,
+                None,
+                None,
+                None,
+                0,
+                0,
+                false,
+                Some(
+                    "ansible project or inventory changed after approval; re-approve with updated digests",
+                ),
+                None,
+            )?;
+            return Ok(PhaseRun::Paused(
+                "ansible digest mismatch after approval; re-approve the updated playbook reference"
+                    .into(),
+            ));
+        }
+
+        if !self.ensure_target(index, step)? {
+            self.finish_attempt(
+                index,
+                &attempt_id,
+                AttemptStatus::Unknown,
+                None,
+                None,
+                None,
+                0,
+                0,
+                false,
+                Some("terminal target changed after approval and before ansible dispatch"),
+                None,
+            )?;
+            return Ok(PhaseRun::Paused(
+                "terminal target changed after approval; ansible was not dispatched".into(),
+            ));
+        }
+        if self.cancelled() {
+            self.finish_attempt(
+                index,
+                &attempt_id,
+                AttemptStatus::Cancelled,
+                None,
+                None,
+                None,
+                0,
+                0,
+                false,
+                Some("run cancelled before ansible execution dispatch"),
+                None,
+            )?;
+            return Ok(PhaseRun::Cancelled);
+        }
+
+        self.start_attempt(&attempt_id, &executed_command)?;
+
+        let timeout = Duration::from_secs(self.context.config.command_timeout_secs);
+        let started = Instant::now();
+        let mut command = tokio::process::Command::new(&runner);
+        command
+            .current_dir(&package_root)
+            .args(&command_args)
+            .kill_on_drop(true)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                let message = format!("start ansible-runner: {error}");
+                self.finish_attempt(
+                    index,
+                    &attempt_id,
+                    AttemptStatus::Unknown,
+                    None,
+                    Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64),
+                    None,
+                    0,
+                    0,
+                    false,
+                    Some(&message),
+                    None,
+                )?;
+                return Ok(PhaseRun::Completed {
+                    completion: PhaseCompletion {
+                        run_id: self.spec.run_id.clone(),
+                        step_id: step.id.clone(),
+                        phase,
+                        result: PhaseResult::Unknown,
+                        assurance: None,
+                        summary: message,
+                    },
+                    operator_comment: None,
+                });
+            }
+        };
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or("ansible-runner stdout was not captured")?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or("ansible-runner stderr was not captured")?;
+        let process = tokio::spawn(async move {
+            let wait = async {
+                child
+                    .wait()
+                    .await
+                    .map_err(|error| format!("wait for ansible-runner: {error}"))
+            };
+            let (status, stdout, stderr) = tokio::try_join!(
+                wait,
+                read_bounded_ansible_stream(stdout),
+                read_bounded_ansible_stream(stderr),
+            )?;
+            Ok::<_, String>(AnsibleProcessOutput {
+                status,
+                stdout,
+                stderr,
+            })
+        });
+        let mut process = process;
+        let mut cancel = self.cancel.clone();
+        let (observed, cancelled) = tokio::select! {
+            result = &mut process => (
+                result.map_err(|error| format!("join ansible-runner task: {error}"))?,
+                false,
+            ),
+            _ = tokio::time::sleep(timeout) => {
+                process.abort();
+                let _ = process.await;
+                (Err("ansible-runner execution timed out".into()), false)
+            },
+            changed = cancel.changed() => {
+                let _ = changed;
+                process.abort();
+                let _ = process.await;
+                (Err("run cancelled during ansible-runner execution".into()), true)
+            },
+        };
+        let observed = match observed {
+            Ok(observed) => observed,
+            Err(message) => {
+                self.finish_attempt(
+                    index,
+                    &attempt_id,
+                    if cancelled {
+                        AttemptStatus::Cancelled
+                    } else {
+                        AttemptStatus::Unknown
+                    },
+                    None,
+                    Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64),
+                    None,
+                    0,
+                    0,
+                    false,
+                    Some(&message),
+                    None,
+                )?;
+                if cancelled {
+                    return Ok(PhaseRun::Cancelled);
+                }
+                return Ok(PhaseRun::Completed {
+                    completion: PhaseCompletion {
+                        run_id: self.spec.run_id.clone(),
+                        step_id: step.id.clone(),
+                        phase,
+                        result: PhaseResult::Unknown,
+                        assurance: None,
+                        summary: message,
+                    },
+                    operator_comment: None,
+                });
+            }
+        };
+
+        let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        let stdout = String::from_utf8_lossy(&observed.stdout.tail).into_owned();
+        let stderr = String::from_utf8_lossy(&observed.stderr.tail).into_owned();
+        let output = match (stdout.is_empty(), stderr.is_empty()) {
+            (_, true) => stdout.clone(),
+            (true, false) => stderr.clone(),
+            (false, false) => format!("{stdout}\n{stderr}"),
+        };
+        let output_observed_bytes = observed
+            .stdout
+            .observed_bytes
+            .saturating_add(observed.stderr.observed_bytes);
+        let output_captured_bytes = u64::try_from(observed.stdout.tail.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(u64::try_from(observed.stderr.tail.len()).unwrap_or(u64::MAX));
+        let output_truncated = observed.stdout.truncated || observed.stderr.truncated;
+        let exit_code = observed.status.code();
+
+        let host_outcomes = parse_ansible_events(&stdout);
+        let result = map_ansible_result(mode, exit_code, &host_outcomes);
+        let structured_outcomes = ansible_structured_outcomes(mode, exit_code, &host_outcomes);
+        let summary = if host_outcomes.is_empty() {
+            match exit_code {
+                Some(0) => "ansible-runner returned no structured per-host outcomes".into(),
+                Some(code) => format!(
+                    "ansible execution for {} phase finished with exit code {code}",
+                    phase.as_str()
+                ),
+                None => "ansible execution finished without an exit status".into(),
+            }
+        } else {
+            format!(
+                "ansible execution completed for {} phase with {} host outcomes",
+                phase.as_str(),
+                host_outcomes.len()
+            )
+        };
+
+        let attempt_status = match result {
+            PhaseResult::Compliant
+            | PhaseResult::Noncompliant
+            | PhaseResult::Applied
+            | PhaseResult::Verified => AttemptStatus::Succeeded,
+            PhaseResult::Failed => AttemptStatus::Failed,
+            PhaseResult::Unknown => AttemptStatus::Unknown,
+        };
+        self.finish_attempt(
+            index,
+            &attempt_id,
+            attempt_status,
+            exit_code,
+            Some(duration_ms),
+            Some(&output),
+            output_observed_bytes,
+            output_captured_bytes,
+            output_truncated,
+            None,
+            structured_outcomes.as_ref(),
+        )?;
+        let assurance = (matches!(mode, AnsibleRunMode::Verify) && result == PhaseResult::Verified)
+            .then_some(VerificationAssurance::AnsibleRunner);
+        Ok(PhaseRun::Completed {
+            completion: PhaseCompletion {
+                run_id: self.spec.run_id.clone(),
+                step_id: step.id.clone(),
+                phase,
+                result,
+                assurance,
+                summary,
+            },
+            operator_comment: None,
+        })
+    }
+
     fn resolve_environment(&self, action: &ShellAction) -> Result<HashMap<String, String>, String> {
         self.resolve_environment_map(&action.env)
     }
@@ -1451,6 +1848,8 @@ impl<'a> EngineRunner<'a> {
             network: class.network,
             privileged: class.privileged,
             opaque: class.opaque,
+            project_digest: None,
+            inventory_digest: None,
         };
 
         let (executed_command, approval_id) = if request.requires_approval() {
@@ -1488,6 +1887,7 @@ impl<'a> EngineRunner<'a> {
                 0,
                 false,
                 Some("target changed after approval and before dispatch"),
+                None,
             )?;
             return Ok(CommandDispatch::Paused(
                 "terminal target changed after approval; command was not dispatched".into(),
@@ -1509,6 +1909,7 @@ impl<'a> EngineRunner<'a> {
                 0,
                 false,
                 Some("run cancelled before terminal dispatch"),
+                None,
             )?;
             return Ok(CommandDispatch::Cancelled);
         }
@@ -1562,6 +1963,7 @@ impl<'a> EngineRunner<'a> {
                 0,
                 false,
                 Some("run cancelled before the visible terminal result was observed"),
+                None,
             )?;
             return Ok(CommandDispatch::Cancelled);
         }
@@ -1590,6 +1992,7 @@ impl<'a> EngineRunner<'a> {
             observed.output_captured_bytes,
             observed.output_truncated,
             observed.error.as_deref(),
+            None,
         )?;
         Ok(CommandDispatch::Observed(observed))
     }
@@ -1618,6 +2021,8 @@ impl<'a> EngineRunner<'a> {
             network: request.network,
             privileged: request.privileged,
             opaque: request.opaque,
+            project_digest: request.project_digest.clone(),
+            inventory_digest: request.inventory_digest.clone(),
             actor: None,
             reason: None,
             requested_at,
@@ -1635,6 +2040,8 @@ impl<'a> EngineRunner<'a> {
             network: request.network,
             privileged: request.privileged,
             opaque: request.opaque,
+            project_digest: request.project_digest.clone(),
+            inventory_digest: request.inventory_digest.clone(),
         });
 
         let response = tokio::select! {
@@ -1686,8 +2093,7 @@ impl<'a> EngineRunner<'a> {
         {
             response.decision = ApprovalDecision::Decline;
             response.reason = Some(
-                "this approval represents a model invocation and cannot be edited as a shell command"
-                    .into(),
+                "this digest-bound or model approval cannot be edited as a shell command".into(),
             );
             response.edited_command = None;
         }
@@ -1932,6 +2338,7 @@ impl<'a> EngineRunner<'a> {
         output_captured_bytes: u64,
         source_truncated: bool,
         error: Option<&str>,
+        structured_outcomes: Option<&Value>,
     ) -> Result<(), String> {
         // Terminal bridge errors cross the same persistence/export boundary as
         // command output. Redact and cap them once before either SQLite or the
@@ -2045,7 +2452,7 @@ impl<'a> EngineRunner<'a> {
                     output_captured_bytes,
                     source_truncated,
                     error: cleaned_error.as_deref(),
-                    structured_outcomes: None,
+                    structured_outcomes: structured_outcomes.cloned(),
                 },
             )?;
             // Tail evidence is fully represented inside SQLite, so record its
@@ -2100,7 +2507,7 @@ impl<'a> EngineRunner<'a> {
             attempt.status = status;
             attempt.exit_code = exit_code;
             attempt.duration_ms = duration_ms;
-            attempt.structured_outcomes = None;
+            attempt.structured_outcomes = structured_outcomes.cloned();
             attempt.output_tail = attempt_output.as_ref().map(|value| value.text.clone());
             attempt.output_observed_bytes = output_observed_bytes;
             attempt.output_captured_bytes = output_captured_bytes;
@@ -2429,6 +2836,8 @@ impl<'a> EngineRunner<'a> {
             network: self.context.config.model_networked,
             privileged: false,
             opaque: true,
+            project_digest: None,
+            inventory_digest: None,
         };
         match self
             .await_approval(index, &attempt_id, request, false)
@@ -2541,6 +2950,7 @@ impl<'a> EngineRunner<'a> {
             0,
             false,
             error,
+            None,
         )?;
         Ok(phase_run)
     }
@@ -2623,6 +3033,7 @@ impl<'a> EngineRunner<'a> {
                 0,
                 false,
                 Some("run cancelled before a manual outcome was observed"),
+                None,
             )?;
             return Ok(PhaseRun::Cancelled);
         }
@@ -2651,6 +3062,7 @@ impl<'a> EngineRunner<'a> {
                 0,
                 false,
                 Some("manual action response timed out"),
+                None,
             )?;
             return Ok(PhaseRun::Completed {
                 completion: PhaseCompletion {
@@ -2676,6 +3088,7 @@ impl<'a> EngineRunner<'a> {
                 0,
                 false,
                 Some("manual attestation reported a changed terminal target"),
+                None,
             )?;
             return Ok(PhaseRun::Paused(
                 "terminal target changed during the manual action; the operator outcome was not accepted"
@@ -2694,6 +3107,7 @@ impl<'a> EngineRunner<'a> {
                 0,
                 false,
                 Some("terminal target changed while the manual action was awaiting attestation"),
+                None,
             )?;
             return Ok(PhaseRun::Paused(
                 "terminal target changed during the manual action; the operator outcome was not accepted"
@@ -2731,6 +3145,7 @@ impl<'a> EngineRunner<'a> {
             false,
             (result == PhaseResult::Failed)
                 .then_some("manual outcome is invalid for the active phase or reported failure"),
+            None,
         )?;
         Ok(PhaseRun::Completed {
             completion: PhaseCompletion {
@@ -3385,6 +3800,482 @@ impl<'a> EngineRunner<'a> {
     fn cancelled(&self) -> bool {
         *self.cancel.borrow()
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AnsibleHostOutcome {
+    host: String,
+    ok: u64,
+    changed: u64,
+    failed: u64,
+    skipped: u64,
+    unreachable: u64,
+    rescued: u64,
+    ignored: u64,
+}
+
+struct AnsibleArtifactDirectory {
+    path: PathBuf,
+}
+
+impl AnsibleArtifactDirectory {
+    fn create() -> Result<Self, String> {
+        let path = std::env::temp_dir().join(format!("vterminal-ansible-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&path).map_err(|error| {
+            format!(
+                "create temporary Ansible artifact directory {}: {error}",
+                path.display()
+            )
+        })?;
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for AnsibleArtifactDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+struct BoundedAnsibleStream {
+    tail: Vec<u8>,
+    observed_bytes: u64,
+    truncated: bool,
+}
+
+struct AnsibleProcessOutput {
+    status: ExitStatus,
+    stdout: BoundedAnsibleStream,
+    stderr: BoundedAnsibleStream,
+}
+
+async fn read_bounded_ansible_stream<R>(mut stream: R) -> Result<BoundedAnsibleStream, String>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut tail = Vec::new();
+    let mut observed_bytes = 0_u64;
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        let read = stream
+            .read(&mut buffer)
+            .await
+            .map_err(|error| format!("read ansible-runner output: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        observed_bytes = observed_bytes.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+        let overflow = tail
+            .len()
+            .saturating_add(read)
+            .saturating_sub(MAX_ANSIBLE_STREAM_BYTES);
+        if overflow > 0 {
+            tail.drain(..overflow.min(tail.len()));
+        }
+        tail.extend_from_slice(&buffer[..read]);
+    }
+    let truncated = observed_bytes > u64::try_from(tail.len()).unwrap_or(u64::MAX);
+    Ok(BoundedAnsibleStream {
+        tail,
+        observed_bytes,
+        truncated,
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AnsibleRecapField {
+    Ok,
+    Changed,
+    Failed,
+    Skipped,
+    Unreachable,
+    Rescued,
+    Ignored,
+}
+
+fn ansible_extra_vars(
+    input_vars: &BTreeMap<String, String>,
+    resolved_inputs: &BTreeMap<String, Value>,
+) -> Result<Option<String>, String> {
+    let mut vars = Map::new();
+    for (ansible_variable, input_id) in input_vars {
+        let value = resolved_inputs
+            .get(input_id)
+            .ok_or_else(|| format!("ansible input {input_id} is not defined"))?;
+        if ansible_variable.is_empty()
+            || !ansible_variable.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+            })
+        {
+            return Err(format!(
+                "ansible input variable name {ansible_variable} is invalid"
+            ));
+        }
+        vars.insert(ansible_variable.clone(), value.clone());
+    }
+    if vars.is_empty() {
+        return Ok(None);
+    }
+    serde_json::to_string(&Value::Object(vars))
+        .map(Some)
+        .map_err(|error| format!("serialize Ansible extra variables: {error}"))
+}
+
+fn ansible_runner_command(
+    package_root: &Path,
+    project_root: &Path,
+    playbook_relative: &str,
+    inventory: Option<&str>,
+    limit: Option<&str>,
+    extra_vars: Option<&str>,
+    check_mode: bool,
+    artifact_root: &Path,
+) -> Result<Vec<String>, String> {
+    let mut command = vec![
+        "run".into(),
+        package_root.to_string_lossy().into_owned(),
+        "--project-dir".into(),
+        project_root.to_string_lossy().into_owned(),
+        "--playbook".into(),
+        playbook_relative.to_owned(),
+        "--artifact-dir".into(),
+        artifact_root.to_string_lossy().into_owned(),
+        "--json".into(),
+    ];
+    if let Some(inventory) = inventory {
+        let inventory_path = resolve_package_file(package_root, inventory)
+            .map_err(|error| format!("cannot resolve ansible inventory {inventory}: {error}"))?;
+        command.push("--inventory".into());
+        command.push(inventory_path.to_string_lossy().into_owned());
+    }
+    if let Some(limit) = limit {
+        if limit
+            .chars()
+            .any(super::definition::is_unsafe_single_line_character)
+        {
+            return Err("ansible limit contains control or format characters".into());
+        }
+        command.push("--limit".into());
+        command.push(limit.to_owned());
+    }
+    let mut cmdline = Vec::<String>::new();
+    if check_mode {
+        cmdline.extend(["--check".into(), "--diff".into()]);
+    }
+    if let Some(extra_vars) = extra_vars {
+        cmdline.push("--extra-vars".into());
+        cmdline.push(quote_posix_shell(extra_vars));
+    }
+    if !cmdline.is_empty() {
+        command.push("--cmdline".into());
+        command.push(cmdline.join(" "));
+    }
+    Ok(command)
+}
+
+fn ansible_preview_command(program: &str, args: &[String]) -> String {
+    let mut preview = String::from(program);
+    for arg in args {
+        preview.push(' ');
+        preview.push_str(&quote_posix_shell(arg));
+    }
+    preview
+}
+
+fn ansible_project_digest(package_root: &Path) -> Result<String, String> {
+    let mut files = Vec::new();
+    collect_ansible_project_files(package_root, package_root, &mut files)?;
+    let mut hasher = Sha256::new();
+    for path in files {
+        let relative = path
+            .strip_prefix(package_root)
+            .map_err(|_| "ansible project digest path is outside the package root".to_string())?;
+        hasher.update(relative.to_string_lossy().as_bytes());
+        hasher.update([0]);
+        let bytes = fs::read(&path).map_err(|error| {
+            format!(
+                "failed to read runbook ansible project file {}: {error}",
+                path.display()
+            )
+        })?;
+        hasher.update(bytes);
+        hasher.update([0]);
+    }
+    let digest = hasher.finalize();
+    Ok(format!("sha256:{}", hex_digest(digest)))
+}
+
+fn ansible_inventory_digest(package_root: &Path, inventory: &str) -> Result<String, String> {
+    let inventory_path = resolve_package_file(package_root, inventory)
+        .map_err(|error| format!("cannot resolve ansible inventory {inventory}: {error}"))?;
+    let bytes = fs::read(&inventory_path)
+        .map_err(|error| format!("failed to read ansible inventory {inventory}: {error}"))?;
+    Ok(format!(
+        "sha256:{}",
+        crate::runbooks::package::sha256_hex(&bytes)
+    ))
+}
+
+fn collect_ansible_project_files(
+    root: &Path,
+    current: &Path,
+    files: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    if root != current && !current.starts_with(root) {
+        return Err("ansible project walk escaped the package root".into());
+    }
+    let mut entries = fs::read_dir(current)
+        .map_err(|error| {
+            format!(
+                "read ansible project directory {}: {error}",
+                current.display()
+            )
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| {
+            format!(
+                "read ansible project directory {}: {error}",
+                current.display()
+            )
+        })?
+        .into_iter()
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    entries.sort();
+    for path in entries {
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| format!("inspect ansible project file {}: {error}", path.display()))?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!(
+                "runbook ansible path {} is a symlink and cannot be followed",
+                path.display()
+            ));
+        }
+        if metadata.is_dir() {
+            collect_ansible_project_files(root, &path, files)?;
+        } else if metadata.is_file() {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn parse_ansible_events(output: &str) -> Vec<AnsibleHostOutcome> {
+    let mut outcomes = BTreeMap::<String, AnsibleHostOutcome>::new();
+    for line in output.lines() {
+        let Some(start) = line.find('{') else {
+            continue;
+        };
+        let Ok(event) = serde_json::from_str::<Value>(&line[start..]) else {
+            continue;
+        };
+        let Some(event_name) = event.get("event").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(data) = event.get("event_data") else {
+            continue;
+        };
+        if event_name == "playbook_on_stats" {
+            outcomes.clear();
+            for (field, outcome_field) in [
+                ("ok", AnsibleRecapField::Ok),
+                ("changed", AnsibleRecapField::Changed),
+                ("failures", AnsibleRecapField::Failed),
+                ("dark", AnsibleRecapField::Unreachable),
+                ("skipped", AnsibleRecapField::Skipped),
+                ("rescued", AnsibleRecapField::Rescued),
+                ("ignored", AnsibleRecapField::Ignored),
+            ] {
+                let Some(values) = data.get(field).and_then(Value::as_object) else {
+                    continue;
+                };
+                for (host, count) in values {
+                    let outcome = outcomes
+                        .entry(host.clone())
+                        .or_insert_with(|| empty_ansible_host_outcome(host));
+                    set_ansible_recap_field(outcome, outcome_field, count.as_u64().unwrap_or(0));
+                }
+            }
+            if let Some(processed) = data.get("processed").and_then(Value::as_object) {
+                for host in processed.keys() {
+                    outcomes
+                        .entry(host.clone())
+                        .or_insert_with(|| empty_ansible_host_outcome(host));
+                }
+            }
+            continue;
+        }
+        let Some(host) = data.get("host").and_then(Value::as_str) else {
+            continue;
+        };
+        let outcome = outcomes
+            .entry(host.to_owned())
+            .or_insert_with(|| empty_ansible_host_outcome(host));
+        match event_name {
+            "runner_on_ok" => {
+                outcome.ok = outcome.ok.saturating_add(1);
+                if data
+                    .get("res")
+                    .and_then(|result| result.get("changed"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    outcome.changed = outcome.changed.saturating_add(1);
+                }
+            }
+            "runner_on_failed" => outcome.failed = outcome.failed.saturating_add(1),
+            "runner_on_unreachable" => outcome.unreachable = outcome.unreachable.saturating_add(1),
+            "runner_on_skipped" => outcome.skipped = outcome.skipped.saturating_add(1),
+            _ => {}
+        }
+    }
+    outcomes.into_values().collect()
+}
+
+fn empty_ansible_host_outcome(host: &str) -> AnsibleHostOutcome {
+    AnsibleHostOutcome {
+        host: host.to_owned(),
+        ok: 0,
+        changed: 0,
+        failed: 0,
+        skipped: 0,
+        unreachable: 0,
+        rescued: 0,
+        ignored: 0,
+    }
+}
+
+fn set_ansible_recap_field(outcome: &mut AnsibleHostOutcome, field: AnsibleRecapField, value: u64) {
+    match field {
+        AnsibleRecapField::Ok => outcome.ok = value,
+        AnsibleRecapField::Changed => outcome.changed = value,
+        AnsibleRecapField::Failed => outcome.failed = value,
+        AnsibleRecapField::Skipped => outcome.skipped = value,
+        AnsibleRecapField::Unreachable => outcome.unreachable = value,
+        AnsibleRecapField::Rescued => outcome.rescued = value,
+        AnsibleRecapField::Ignored => outcome.ignored = value,
+    }
+}
+
+fn find_ansible_runner() -> Result<PathBuf, String> {
+    let mut directories = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if let Some(home) = dirs::home_dir() {
+        directories.push(home.join(".local/bin"));
+    }
+    directories.extend([
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+        PathBuf::from("/usr/bin"),
+    ]);
+    for directory in directories {
+        let candidate = directory.join("ansible-runner");
+        if candidate.is_file() {
+            return candidate.canonicalize().map_err(|error| {
+                format!(
+                    "resolve installed ansible-runner {}: {error}",
+                    candidate.display()
+                )
+            });
+        }
+    }
+    Err(
+        "ansible.playbook requires a user-installed ansible-runner available on PATH or in a standard user binary directory"
+            .into(),
+    )
+}
+
+fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
+    bytes
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn map_ansible_result(
+    mode: AnsibleRunMode,
+    exit_code: Option<i32>,
+    host_outcomes: &[AnsibleHostOutcome],
+) -> PhaseResult {
+    if exit_code != Some(0) {
+        return PhaseResult::Failed;
+    }
+    if host_outcomes.is_empty() {
+        return PhaseResult::Unknown;
+    }
+    if host_outcomes
+        .iter()
+        .any(|outcome| outcome.failed > 0 || outcome.unreachable > 0)
+    {
+        return PhaseResult::Failed;
+    }
+    match mode {
+        AnsibleRunMode::Check => {
+            if host_outcomes.iter().any(|outcome| outcome.changed > 0) {
+                PhaseResult::Noncompliant
+            } else {
+                PhaseResult::Compliant
+            }
+        }
+        AnsibleRunMode::Apply => PhaseResult::Applied,
+        AnsibleRunMode::Verify => {
+            if host_outcomes.iter().any(|outcome| outcome.changed > 0) {
+                PhaseResult::Failed
+            } else {
+                PhaseResult::Verified
+            }
+        }
+    }
+}
+
+fn ansible_structured_outcomes(
+    mode: AnsibleRunMode,
+    exit_code: Option<i32>,
+    host_outcomes: &[AnsibleHostOutcome],
+) -> Option<Value> {
+    let mut summary = Map::new();
+    summary.insert("mode".into(), mode.as_str().into());
+    if let Some(code) = exit_code {
+        summary.insert("exit_code".into(), code.into());
+    }
+    summary.insert(
+        "host_count".into(),
+        u64::try_from(host_outcomes.len()).unwrap_or(0).into(),
+    );
+    summary.insert(
+        "changed_hosts".into(),
+        u64::try_from(
+            host_outcomes
+                .iter()
+                .filter(|outcome| outcome.changed > 0)
+                .count(),
+        )
+        .unwrap_or(0)
+        .into(),
+    );
+    let mut host_map = Map::new();
+    for host in host_outcomes {
+        let mut value = Map::new();
+        value.insert("ok".into(), host.ok.into());
+        value.insert("changed".into(), host.changed.into());
+        value.insert("failed".into(), host.failed.into());
+        value.insert("skipped".into(), host.skipped.into());
+        value.insert("unreachable".into(), host.unreachable.into());
+        value.insert("rescued".into(), host.rescued.into());
+        value.insert("ignored".into(), host.ignored.into());
+        host_map.insert(host.host.clone(), Value::Object(value));
+    }
+    let mut payload = Map::new();
+    payload.insert("executor".into(), "ansible_runner".into());
+    payload.insert("summary".into(), Value::Object(summary));
+    payload.insert("host_outcomes".into(), Value::Object(host_map));
+    Some(Value::Object(payload))
 }
 
 /// Create the protected evidence hierarchy one component at a time and reject
@@ -4291,6 +5182,7 @@ spec:
                 run_id,
                 definition,
                 definition_snapshot: snapshot,
+                package_root: None,
                 target,
                 inputs: BTreeMap::new(),
                 evidence_mode,
@@ -4437,6 +5329,7 @@ spec:
                 run_id: uuid::Uuid::new_v4().to_string(),
                 definition,
                 definition_snapshot: snapshot,
+                package_root: None,
                 target,
                 inputs: BTreeMap::new(),
                 evidence_mode: EvidenceCaptureMode::Full,
@@ -4643,6 +5536,59 @@ spec:
         assert!(wrapped.contains("/bin/sh -c 'printf '"));
         assert!(wrapped.ends_with(" < /dev/null"));
         assert!(validate_runtime_command(&wrapped).is_ok());
+    }
+
+    #[test]
+    fn ansible_stats_produce_complete_per_host_outcomes() {
+        let output = serde_json::json!({
+            "event": "playbook_on_stats",
+            "event_data": {
+                "processed": {"web-1": 1, "web-2": 1},
+                "ok": {"web-1": 4, "web-2": 3},
+                "changed": {"web-1": 1},
+                "failures": {"web-2": 1},
+                "dark": {},
+                "skipped": {"web-2": 2}
+            }
+        })
+        .to_string();
+        let outcomes = parse_ansible_events(&output);
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(outcomes[0].host, "web-1");
+        assert_eq!(outcomes[0].changed, 1);
+        assert_eq!(outcomes[1].host, "web-2");
+        assert_eq!(outcomes[1].failed, 1);
+        assert_eq!(outcomes[1].skipped, 2);
+        assert_eq!(
+            map_ansible_result(AnsibleRunMode::Check, Some(0), &outcomes),
+            PhaseResult::Failed
+        );
+        assert_eq!(
+            map_ansible_result(AnsibleRunMode::Verify, Some(0), &[]),
+            PhaseResult::Unknown
+        );
+    }
+
+    #[test]
+    fn ansible_command_uses_runner_project_json_and_preview_modes() {
+        let command = ansible_runner_command(
+            Path::new("/tmp/package"),
+            Path::new("/tmp/package/ansible"),
+            "site.yml",
+            None,
+            Some("web"),
+            Some(r#"{"port":8080}"#),
+            true,
+            Path::new("/tmp/artifacts"),
+        )
+        .unwrap();
+        assert!(command
+            .windows(2)
+            .any(|pair| pair == ["--project-dir", "/tmp/package/ansible"]));
+        assert!(command.iter().any(|argument| argument == "--json"));
+        assert!(command.windows(2).any(|pair| {
+            pair == ["--cmdline", "--check --diff --extra-vars '{\"port\":8080}'"]
+        }));
     }
 
     #[cfg(unix)]

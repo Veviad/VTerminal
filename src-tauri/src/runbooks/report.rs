@@ -112,6 +112,10 @@ pub struct ReportApproval {
     pub network: bool,
     pub privileged: bool,
     pub opaque: bool,
+    #[serde(default)]
+    pub project_digest: Option<String>,
+    #[serde(default)]
+    pub inventory_digest: Option<String>,
     pub actor: Option<String>,
     pub reason: Option<String>,
     pub requested_at: String,
@@ -526,15 +530,25 @@ fn render_markdown(report: &RunbookReport, canonical_json: &str) -> String {
             // The derived `phase_deviation` also embeds it, but only for non-apply
             // phases — so without this column a bulk-approved apply step, the
             // highest-consequence case, left no trace anywhere.
-            out.push_str("| Status | Phase | Actor | Edited | Basis | Requested | Decided |\n");
-            out.push_str("| --- | --- | --- | --- | --- | --- | --- |\n");
+            out.push_str(
+                "| Status | Phase | Actor | Edited | Digests | Basis | Requested | Decided |\n",
+            );
+            out.push_str("| --- | --- | --- | --- | --- | --- | --- | --- |\n");
             for approval in &step.approvals {
+                let digests = match (&approval.project_digest, &approval.inventory_digest) {
+                    (Some(project), Some(inventory)) => {
+                        format!("project {project}; inventory {inventory}")
+                    }
+                    (Some(project), None) => format!("project {project}"),
+                    _ => "—".into(),
+                };
                 out.push_str(&format!(
-                    "| {} | {} | {} | {} | {} | {} | {} |\n",
+                    "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
                     approval.status.as_str(),
                     approval.phase.as_str(),
                     table(approval.actor.as_deref().unwrap_or("—")),
                     if approval.edited { "yes" } else { "no" },
+                    table(&digests),
                     table(approval.reason.as_deref().unwrap_or("—")),
                     table(&approval.requested_at),
                     table(approval.decided_at.as_deref().unwrap_or("—")),
@@ -928,6 +942,8 @@ mod tests {
             network: true,
             privileged: true,
             opaque: true,
+            project_digest: None,
+            inventory_digest: None,
             actor: Some("operator".into()),
             reason: Some("reviewed".into()),
             requested_at: "2026-01-01T00:00:00Z".into(),
@@ -1054,6 +1070,8 @@ mod tests {
             network: false,
             privileged: true,
             opaque: false,
+            project_digest: None,
+            inventory_digest: None,
             actor: Some("operator".into()),
             reason: Some(
                 "operator pre-authorized this step via run-level auto-approve for bound target local session s1; the proposed command was not individually displayed"
@@ -1065,9 +1083,9 @@ mod tests {
         });
 
         let markdown = report.markdown().unwrap();
-        assert!(
-            markdown.contains("| Status | Phase | Actor | Edited | Basis | Requested | Decided |")
-        );
+        assert!(markdown.contains(
+            "| Status | Phase | Actor | Edited | Digests | Basis | Requested | Decided |"
+        ));
         assert!(markdown.contains("was not individually displayed"));
         assert!(
             report.checklist[0]
@@ -1161,15 +1179,15 @@ mod tests {
                 exit_code: Some(0),
                 duration_ms: Some(1),
                 output_tail: None,
-            output_observed_bytes: 0,
-            output_captured_bytes: 0,
-            output_redacted: false,
-            output_truncated: false,
-            error: None,
-            structured_outcomes: None,
-            intent_at: "2026-01-01T00:00:00Z".into(),
-            result_at: Some("2026-01-01T00:00:01Z".into()),
-        });
+                output_observed_bytes: 0,
+                output_captured_bytes: 0,
+                output_redacted: false,
+                output_truncated: false,
+                error: None,
+                structured_outcomes: None,
+                intent_at: "2026-01-01T00:00:00Z".into(),
+                result_at: Some("2026-01-01T00:00:01Z".into()),
+            });
         }
         assert!(report.validate().unwrap_err().contains("attempts"));
 
@@ -1186,15 +1204,15 @@ mod tests {
                 exit_code: Some(0),
                 duration_ms: Some(1),
                 output_tail: None,
-            output_observed_bytes: 0,
-            output_captured_bytes: 0,
-            output_redacted: false,
-            output_truncated: false,
-            error: None,
-            structured_outcomes: None,
-            intent_at: "2026-01-01T00:00:00Z".into(),
-            result_at: Some("2026-01-01T00:00:01Z".into()),
-        });
+                output_observed_bytes: 0,
+                output_captured_bytes: 0,
+                output_redacted: false,
+                output_truncated: false,
+                error: None,
+                structured_outcomes: None,
+                intent_at: "2026-01-01T00:00:00Z".into(),
+                result_at: Some("2026-01-01T00:00:01Z".into()),
+            });
             report.checklist[0].evidence.push(ReportEvidence {
                 id: format!("evidence-{index}"),
                 attempt_id: attempt_id.clone(),
