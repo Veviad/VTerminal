@@ -1203,6 +1203,12 @@ a:hover {
   margin: 0;
 }
 
+.release-highlights-history {
+  margin-top: clamp(4rem, 8vw, 6.5rem);
+  border-top: 1px solid var(--line);
+  padding-top: clamp(3rem, 6vw, 4.5rem);
+}
+
 .release-highlights-grid {
   position: relative;
   display: grid;

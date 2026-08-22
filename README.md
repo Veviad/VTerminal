@@ -43,6 +43,7 @@ Modern AI terminals tend to be Electron apps that phone home for every completio
 - **Explain & fix** — one click on a failed block streams a diagnosis and a corrected command
 - **Ask** — a chat panel with your blocks, output, and files as context
 - **Agent mode** — multi-step runs that propose commands, execute them in your *visible* terminal, and read the real output
+- **Resumable Agent runs** — bounded checkpoints preserve the latest safe transcript after completed model/tool rounds, including when a run pauses or a provider fails after commands have run
 - **Per-model reasoning effort** — `off → low → medium → high → max`, showing only the rungs each model actually accepts
 - **Image & file attachments** — drag, paste, or pick. An optional on-device vision sidecar transcribes screenshots so even a non-vision chat model can use them.
 - **Knowledge buckets** — attach local SQLite document buckets and compatible Qdrant collections to one Ask or Agent request, with UI-first ingestion and source-qualified citations.
@@ -51,6 +52,7 @@ Modern AI terminals tend to be Electron apps that phone home for every completio
 **Interface**
 - Six themes — Veviad Developer UI (default), Veviad UI, Midnight, Nord, Solarized Dark, Light — each with a matched terminal ANSI palette
 - Command palette (⌘K on macOS, Ctrl+Shift+K on Windows), persistent command history, and model switching
+- Stable Local + SSH Sidecar renderers, plus explicit **Rename with AI** for replacing manual or SSH-derived tab labels
 - Resizable AI panel that keeps its proportion when you resize the window
 
 ## Requirements
@@ -182,6 +184,7 @@ This matters more in a terminal than anywhere else, so it is worth being precise
 
 - Every command a model proposes is **classified** on two independent axes — is it read-only, and does it reach the network — and both are shown on the approval card.
 - The **permission mode** is per-session, never persisted, and never inherited. Arming it *is* the authorization.
+- **Reads** mode can auto-run network-backed commands only when their shape is proven read-only and web access is enabled. GitHub CLI writes, GraphQL, request bodies, method overrides, browser launches, and unknown shapes remain approval-gated.
 - Commands run in your **visible PTY**, so you see exactly what ran, and it runs wherever that tab is — including over `ssh`.
 - Commands you edit before approving are treated as *your* text, not the model's.
 
