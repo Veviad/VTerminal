@@ -225,6 +225,8 @@ pub async fn run_command(
         exit_code: Some(exit_code),
         duration_ms,
         error: None,
+        target_role: None,
+        target_session_id: None,
     });
 
     Ok(ExecResult {

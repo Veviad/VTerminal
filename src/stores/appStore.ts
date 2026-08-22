@@ -26,8 +26,28 @@ import { MAX_ATTACHMENTS } from "../lib/attachments";
 import type { Phase } from "../lib/osc133";
 import type { PermissionMode } from "../lib/permissionMode";
 import { PANEL_DEFAULT_RATIO, clampPanelRatio } from "../lib/panelRatio";
+import { ownRecordValue, withRecordValue, withoutRecordKey } from "../lib/records";
 import { S } from "../lib/strings";
 import { DEFAULT_THEME_ID } from "../lib/themes";
+import {
+  captureSidecarRemoteIdentity,
+  clampSidecarRatio,
+  createSidecarBinding,
+  inspectCurrentSidecarHealth,
+  resolveAiOwner as resolveSidecarAiOwner,
+  roleForSession,
+  sameRemoteIdentity,
+  sessionIdForRole,
+  sidecarForSession as findSidecarForSession,
+  validateSidecarTarget,
+  type AgentTargetRole,
+  type SidecarBinding,
+  type SidecarDegradation,
+  type SidecarHealth,
+  type SidecarRemoteIdentity,
+  type SidecarSplitOrientation,
+  type SidecarStartResult,
+} from "../lib/sidecar";
 
 // Per-session UI state (Cowork convStreams pattern — per-entity map, no
 // global-sync mirroring; components read sessionUi[activeSessionId]).
@@ -69,6 +89,23 @@ export interface SessionUiState {
 
 export type AiMode = "ask" | "explain" | "agent";
 
+export type SettingsTab =
+  | "models"
+  | "agent"
+  | "docs"
+  | "runbooks"
+  | "appearance"
+  | "terminal"
+  | "hosts"
+  | "updates"
+  | "about";
+
+export interface CommandTargetMeta {
+  role: AgentTargetRole;
+  sessionId: string;
+  label: string;
+}
+
 export interface AiStreamState {
   mode: AiMode;
   status: "idle" | "streaming" | "awaiting_approval" | "executing" | "error" | "paused";
@@ -102,6 +139,8 @@ export interface AiStreamState {
     explanation: string;
     readOnly: boolean;
     network: boolean;
+    targetRole?: AgentTargetRole;
+    targetSessionId?: string;
   } | null;
   /** How much this agent run may do without asking. Per-session, never
    *  persisted, never inherited — see `restoreAiTranscript` and
@@ -239,6 +278,39 @@ export interface AppState {
   sessions: Session[];
   activeSessionId: string | null;
   sessionUi: Record<string, SessionUiState>;
+  /** Live, conversation-scoped terminal pairings. In-memory only: settings and
+   *  workspace persistence map explicit fields and never serialize this map. */
+  sidecars: Record<string, SidecarBinding>;
+  /** Either member resolves to the transcript-owning session. */
+  resolveAiOwner(sessionId: string): string;
+  sidecarForSession(sessionId: string): SidecarBinding | null;
+  sidecarHealth(sessionId: string): SidecarHealth | null;
+  startSidecar(
+    ownerSessionId: string,
+    localSessionId: string,
+    remoteSessionId: string,
+    remoteIdentity: SidecarRemoteIdentity,
+  ): SidecarStartResult;
+  endSidecar(sessionId: string): void;
+  swapSidecarPanes(sessionId: string): void;
+  setSidecarRatio(sessionId: string, ratio: number): void;
+  setSidecarOrientation(sessionId: string, orientation: SidecarSplitOrientation): void;
+  setSidecarFocusedSession(sessionId: string, focusedSessionId: string): void;
+  setSidecarPermission(
+    sessionId: string,
+    role: AgentTargetRole,
+    mode: PermissionMode,
+  ): void;
+  replaceSidecarTarget(
+    sessionId: string,
+    role: AgentTargetRole,
+    replacementSessionId: string,
+    remoteIdentity?: SidecarRemoteIdentity,
+  ): SidecarStartResult;
+  markSidecarDegraded(sessionId: string, degradation: SidecarDegradation): void;
+  /** Re-evaluate session/SSH identity after state changes. This never clears a
+   *  sticky degradation; Replace is the explicit recovery path. */
+  refreshSidecarHealth(sessionId: string): SidecarHealth | null;
   /** `activate: false` during a multi-tab restore — otherwise every restored
    *  tab momentarily becomes active and acquires/releases a WebGL context. */
   addSession(s: Session, activate?: boolean): void;
@@ -276,7 +348,12 @@ export interface AppState {
     status?: AiStreamState["status"],
   ): void;
   setPermissionMode(sessionId: string, mode: PermissionMode): void;
-  noteBlockedCommand(sessionId: string, command: string, note: string): void;
+  noteBlockedCommand(
+    sessionId: string,
+    command: string,
+    note: string,
+    target?: CommandTargetMeta,
+  ): void;
   /** Record a message typed mid-run, pending backend confirmation. */
   queueSteer(sessionId: string, id: string, text: string): void;
   /** The loop appended these — clear their badges and drop them from the queue. */
@@ -290,6 +367,7 @@ export interface AppState {
     approvalId: string,
     command: string,
     explanation?: string,
+    target?: CommandTargetMeta,
   ): void;
   appendCommandOutput(sessionId: string, approvalId: string, chunk: string): void;
   /** REPLACE the card's output. The PTY path re-reads the live terminal tail
@@ -391,6 +469,8 @@ export interface AppState {
   setSessionBrowserOpen(open: boolean): void;
   settingsOpen: boolean;
   setSettingsOpen(open: boolean): void;
+  settingsTab: SettingsTab;
+  setSettingsTab(tab: SettingsTab): void;
   activeRenderer: "webgl" | "dom";
   setActiveRenderer(r: "webgl" | "dom"): void;
   termDims: { cols: number; rows: number };
@@ -606,10 +686,250 @@ function patchCommand(
   }));
 }
 
+function reconcileSidecars(
+  sidecars: Record<string, SidecarBinding>,
+  sessions: Session[],
+  sessionUi: Record<string, SessionUiState>,
+): Record<string, SidecarBinding> {
+  let changed = false;
+  const next: Array<[string, SidecarBinding]> = [];
+  for (const [owner, binding] of Object.entries(sidecars)) {
+    // Degradation is sticky. Reconnect/replacement needs explicit review before
+    // either target can execute again.
+    if (binding.degraded) {
+      next.push([owner, binding]);
+      continue;
+    }
+    const health = inspectCurrentSidecarHealth(binding, { sessions, sessionUi });
+    if (health.degradation) {
+      next.push([owner, { ...binding, degraded: health.degradation }]);
+      changed = true;
+    } else {
+      next.push([owner, binding]);
+    }
+  }
+  return changed ? Object.fromEntries(next) : sidecars;
+}
+
+function withoutSidecarForSession(
+  sidecars: Record<string, SidecarBinding>,
+  sessionId: string,
+): Record<string, SidecarBinding> {
+  const binding = findSidecarForSession(sidecars, sessionId);
+  if (!binding) return sidecars;
+  return withoutRecordKey(sidecars, binding.ownerSessionId);
+}
+
+function permissionReset(
+  aiStreams: Record<string, AiStreamState>,
+  ownerSessionId: string,
+): Record<string, AiStreamState> {
+  const stream = ownRecordValue(aiStreams, ownerSessionId);
+  if (stream?.permissionMode !== "auto_read" && stream?.permissionMode !== "auto_all") {
+    return aiStreams;
+  }
+  return withRecordValue<AiStreamState>(aiStreams, ownerSessionId, {
+    ...stream,
+    permissionMode: "ask",
+  });
+}
+
 export const useAppStore = create<AppState>((set, get) => ({
   sessions: [],
   activeSessionId: null,
   sessionUi: {},
+  sidecars: {},
+
+  resolveAiOwner: (sessionId) => resolveSidecarAiOwner(get().sidecars, sessionId),
+
+  sidecarForSession: (sessionId) => findSidecarForSession(get().sidecars, sessionId),
+
+  sidecarHealth: (sessionId) => {
+    const state = get();
+    const binding = findSidecarForSession(state.sidecars, sessionId);
+    if (!binding) return null;
+    if (binding.degraded) return { status: "degraded", degradation: binding.degraded };
+    return inspectCurrentSidecarHealth(binding, state);
+  },
+
+  startSidecar: (ownerSessionId, localSessionId, remoteSessionId, remoteIdentity) => {
+    const state = get();
+    const result = createSidecarBinding(
+      state,
+      state.sidecars,
+      ownerSessionId,
+      localSessionId,
+      remoteSessionId,
+      remoteIdentity,
+    );
+    if (!result.ok) return result;
+    set((current) => ({
+      sidecars: {
+        ...current.sidecars,
+        [result.binding.ownerSessionId]: result.binding,
+      },
+      // A previous single-terminal mode must not leak authority into a newly
+      // linked conversation. The companion stream remains untouched.
+      aiStreams: permissionReset(current.aiStreams, result.binding.ownerSessionId),
+    }));
+    return result;
+  },
+
+  endSidecar: (sessionId) =>
+    set((state) => {
+      const binding = findSidecarForSession(state.sidecars, sessionId);
+      if (!binding) return {};
+      return {
+        sidecars: withoutSidecarForSession(state.sidecars, sessionId),
+        aiStreams: permissionReset(state.aiStreams, binding.ownerSessionId),
+      };
+    }),
+
+  swapSidecarPanes: (sessionId) =>
+    set((state) => {
+      const binding = findSidecarForSession(state.sidecars, sessionId);
+      if (!binding) return {};
+      const [first, second] = binding.paneOrder;
+      return {
+        sidecars: {
+          ...state.sidecars,
+          [binding.ownerSessionId]: { ...binding, paneOrder: [second, first] as const },
+        },
+      };
+    }),
+
+  setSidecarRatio: (sessionId, ratio) =>
+    set((state) => {
+      const binding = findSidecarForSession(state.sidecars, sessionId);
+      if (!binding) return {};
+      return {
+        sidecars: {
+          ...state.sidecars,
+          [binding.ownerSessionId]: { ...binding, splitRatio: clampSidecarRatio(ratio) },
+        },
+      };
+    }),
+
+  setSidecarOrientation: (sessionId, splitOrientation) =>
+    set((state) => {
+      const binding = findSidecarForSession(state.sidecars, sessionId);
+      if (!binding) return {};
+      return {
+        sidecars: {
+          ...state.sidecars,
+          [binding.ownerSessionId]: { ...binding, splitOrientation },
+        },
+      };
+    }),
+
+  setSidecarFocusedSession: (sessionId, focusedSessionId) =>
+    set((state) => {
+      const binding = findSidecarForSession(state.sidecars, sessionId);
+      if (!binding || !roleForSession(binding, focusedSessionId)) return {};
+      return {
+        activeSessionId: focusedSessionId,
+        sidecars: {
+          ...state.sidecars,
+          [binding.ownerSessionId]: { ...binding, focusedSessionId },
+        },
+      };
+    }),
+
+  setSidecarPermission: (sessionId, role, mode) =>
+    set((state) => {
+      const binding = findSidecarForSession(state.sidecars, sessionId);
+      if (!binding || binding.degraded) return {};
+      return {
+        sidecars: {
+          ...state.sidecars,
+          [binding.ownerSessionId]: {
+            ...binding,
+            permissions: { ...binding.permissions, [role]: mode },
+          },
+        },
+      };
+    }),
+
+  replaceSidecarTarget: (sessionId, role, replacementSessionId, remoteIdentity) => {
+    const state = get();
+    const binding = findSidecarForSession(state.sidecars, sessionId);
+    if (!binding) return { ok: false, reason: "This terminal does not belong to a sidecar." };
+
+    const currentTarget = sessionIdForRole(binding, role);
+    if (currentTarget === binding.ownerSessionId && replacementSessionId !== currentTarget) {
+      return {
+        ok: false,
+        reason: "The transcript-owning target cannot be replaced. End the sidecar and start it from the new terminal.",
+      };
+    }
+    if (replacementSessionId === sessionIdForRole(binding, role === "local" ? "remote" : "local")) {
+      return { ok: false, reason: "Choose two different terminals." };
+    }
+    const occupied = findSidecarForSession(state.sidecars, replacementSessionId);
+    if (occupied && occupied.ownerSessionId !== binding.ownerSessionId) {
+      return { ok: false, reason: "That terminal already belongs to another sidecar." };
+    }
+
+    const eligible = validateSidecarTarget(state, replacementSessionId, role);
+    if (!eligible.ok) return eligible;
+
+    let nextIdentity = binding.remoteIdentity;
+    if (role === "remote") {
+      const liveIdentity = captureSidecarRemoteIdentity(
+        state.sessions.find((session) => session.id === replacementSessionId),
+        ownRecordValue(state.sessionUi, replacementSessionId),
+      );
+      if (!liveIdentity || (remoteIdentity && !sameRemoteIdentity(liveIdentity, remoteIdentity))) {
+        return { ok: false, reason: "The replacement SSH identity could not be verified." };
+      }
+      nextIdentity = liveIdentity;
+    }
+
+    const replacement: SidecarBinding = {
+      ...binding,
+      localSessionId: role === "local" ? replacementSessionId : binding.localSessionId,
+      remoteSessionId: role === "remote" ? replacementSessionId : binding.remoteSessionId,
+      remoteIdentity: nextIdentity,
+      focusedSessionId:
+        binding.focusedSessionId === currentTarget ? replacementSessionId : binding.focusedSessionId,
+      permissions: { local: "ask", remote: "ask" },
+      degraded: null,
+    };
+    set((current) => ({
+      sidecars: { ...current.sidecars, [binding.ownerSessionId]: replacement },
+      aiStreams: permissionReset(current.aiStreams, binding.ownerSessionId),
+    }));
+    return { ok: true, binding: replacement };
+  },
+
+  markSidecarDegraded: (sessionId, degradation) =>
+    set((state) => {
+      const binding = findSidecarForSession(state.sidecars, sessionId);
+      if (!binding || binding.degraded) return {};
+      return {
+        sidecars: {
+          ...state.sidecars,
+          [binding.ownerSessionId]: { ...binding, degraded: degradation },
+        },
+      };
+    }),
+
+  refreshSidecarHealth: (sessionId) => {
+    const state = get();
+    const binding = findSidecarForSession(state.sidecars, sessionId);
+    if (!binding) return null;
+    if (binding.degraded) return { status: "degraded", degradation: binding.degraded };
+    const health = inspectCurrentSidecarHealth(binding, state);
+    if (health.degradation) {
+      set((current) => ({
+        sidecars: {
+          ...current.sidecars,
+          [binding.ownerSessionId]: { ...binding, degraded: health.degradation },
+        },
+      }));
+    }
+    return health;
+  },
 
   addSession: (s, activate = true) =>
     set((state) => ({
@@ -640,6 +960,23 @@ export const useAppStore = create<AppState>((set, get) => ({
       const sessions = state.sessions.filter((s) => s.id !== id);
       const { [id]: _ui, ...sessionUi } = state.sessionUi;
       const { [id]: _ai, ...aiStreams } = state.aiStreams;
+      const binding = findSidecarForSession(state.sidecars, id);
+      let sidecars = state.sidecars;
+      if (binding?.ownerSessionId === id) {
+        sidecars = withoutSidecarForSession(sidecars, id);
+      } else if (binding) {
+        sidecars = {
+          ...sidecars,
+          [binding.ownerSessionId]: {
+            ...binding,
+            focusedSessionId: binding.ownerSessionId,
+            degraded: binding.degraded ?? {
+              role: roleForSession(binding, id) ?? "remote",
+              reason: "session_missing",
+            },
+          },
+        };
+      }
       let activeSessionId = state.activeSessionId;
       if (activeSessionId === id) {
         const idx = state.sessions.findIndex((s) => s.id === id);
@@ -649,20 +986,44 @@ export const useAppStore = create<AppState>((set, get) => ({
         sessions,
         sessionUi,
         aiStreams,
+        sidecars,
         activeSessionId,
         // A closed tab must not leave the rename editor open over its neighbour.
         renamingSessionId: state.renamingSessionId === id ? null : state.renamingSessionId,
       };
     }),
 
-  setActiveSession: (id) => set({ activeSessionId: id }),
+  setActiveSession: (id) =>
+    set((state) => {
+      const binding = findSidecarForSession(state.sidecars, id);
+      if (!binding || !roleForSession(binding, id)) return { activeSessionId: id };
+      return {
+        activeSessionId: id,
+        sidecars: {
+          ...state.sidecars,
+          [binding.ownerSessionId]: { ...binding, focusedSessionId: id },
+        },
+      };
+    }),
 
   updateSession: (id, u) =>
-    set((state) => ({
-      sessions: state.sessions.map((s) => (s.id === id ? { ...s, ...u } : s)),
-    })),
+    set((state) => {
+      const sessions = state.sessions.map((s) => (s.id === id ? { ...s, ...u } : s));
+      return {
+        sessions,
+        sidecars: reconcileSidecars(state.sidecars, sessions, state.sessionUi),
+      };
+    }),
 
-  updateSessionUi: (id, u) => set((state) => withSessionUi(state, id, (ui) => ({ ...ui, ...u }))),
+  updateSessionUi: (id, u) =>
+    set((state) => {
+      const patch = withSessionUi(state, id, (ui) => ({ ...ui, ...u }));
+      if (!patch.sessionUi) return patch;
+      return {
+        ...patch,
+        sidecars: reconcileSidecars(state.sidecars, state.sessions, patch.sessionUi),
+      };
+    }),
 
   startBlock: (sessionId, block) =>
     set((state) =>
@@ -751,8 +1112,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     ),
 
   restoreAiTranscript: (sessionId, messages, modelTranscript, capturedAt) =>
-    set((state) =>
-      withAiStream(state, sessionId, (s) => ({
+    set((state) => ({
+      ...withAiStream(state, sessionId, (s) => ({
         ...s,
         // Always "ask", never the archived mode: coming back to a tab silently
         // armed in agent mode is a surprise, and one click undoes it.
@@ -765,8 +1126,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         streamingContent: "",
         thinkingContent: "",
         pendingProposal: null,
-        // permissionMode stays "ask" — per-session, never persisted, never
-        // inherited. A restored transcript must not arrive pre-armed.
+        // Explicit rather than merely inherited from a new session: even a
+        // direct restore into a live tab must not arrive pre-armed.
+        permissionMode: "ask",
         //
         // Same stance for the pause: a Continue button surviving a restore would
         // offer to resume a finished run against a transcript the user has only
@@ -775,20 +1137,27 @@ export const useAppStore = create<AppState>((set, get) => ({
         lastError: null,
         restoredAt: capturedAt,
       })),
-    ),
+      // Live terminal pairings are never reconstructed from archived state.
+      sidecars: withoutSidecarForSession(state.sidecars, sessionId),
+    })),
 
   newAiConversation: (sessionId) =>
-    set((state) =>
-      withAiStream(state, sessionId, (s) => ({
-        // Spread the zero value rather than listing fields: a field added to
-        // AiStreamState later would otherwise silently survive the wipe.
-        ...emptyAiStream(),
-        // The only thing a new chat inherits is the mode you were working in.
-        // Attached blocks, permissionMode and restoredAt deliberately do not
-        // carry over — the same stance restoreAiTranscript takes.
-        mode: s.mode,
-      })),
-    ),
+    set((state) => {
+      const ownerSessionId = resolveSidecarAiOwner(state.sidecars, sessionId);
+      return {
+        ...withAiStream(state, ownerSessionId, (s) => ({
+          // Spread the zero value rather than listing fields: a field added to
+          // AiStreamState later would otherwise silently survive the wipe.
+          ...emptyAiStream(),
+          // The only thing a new chat inherits is the mode you were working in.
+          // Attached blocks, permissionMode and restoredAt deliberately do not
+          // carry over — the same stance restoreAiTranscript takes.
+          mode: s.mode,
+        })),
+        // New Chat is the explicit conversation boundary for a sidecar.
+        sidecars: withoutSidecarForSession(state.sidecars, sessionId),
+      };
+    }),
 
   pushAiMessage: (sessionId, msg) =>
     set((state) => withAiStream(state, sessionId, (s) => ({ ...s, messages: [...s.messages, msg] }))),
@@ -824,7 +1193,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   // No approvalId: policy refuses BEFORE the gate is created, so there is no id
   // to key on. The message id is index-based instead, which is fine because
   // nothing ever updates it again.
-  noteBlockedCommand: (sessionId, command, note) =>
+  noteBlockedCommand: (sessionId, command, note, target) =>
     set((state) =>
       withAiStream(state, sessionId, (s) => {
         const flushed = flushStreaming(s);
@@ -844,6 +1213,13 @@ export const useAppStore = create<AppState>((set, get) => ({
                 exitCode: null,
                 status: "blocked" as const,
                 note,
+                ...(target
+                  ? {
+                      targetRole: target.role,
+                      targetSessionId: target.sessionId,
+                      targetLabel: target.label,
+                    }
+                  : {}),
               },
             },
           ],
@@ -909,7 +1285,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   flushAiStreaming: (sessionId) =>
     set((state) => withAiStream(state, sessionId, (s) => flushStreaming(s))),
 
-  beginCommand: (sessionId, approvalId, command, explanation) =>
+  beginCommand: (sessionId, approvalId, command, explanation, target) =>
     set((state) =>
       withAiStream(state, sessionId, (s) => {
         const flushed = flushStreaming(s);
@@ -931,6 +1307,13 @@ export const useAppStore = create<AppState>((set, get) => ({
                 exitCode: null,
                 status: "running" as const,
                 ...(explanation ? { explanation } : {}),
+                ...(target
+                  ? {
+                      targetRole: target.role,
+                      targetSessionId: target.sessionId,
+                      targetLabel: target.label,
+                    }
+                  : {}),
               },
             },
           ],
@@ -1197,6 +1580,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   setSessionBrowserOpen: (open) => set({ sessionBrowserOpen: open }),
   settingsOpen: false,
   setSettingsOpen: (open) => set({ settingsOpen: open }),
+  settingsTab: "models",
+  setSettingsTab: (tab) => set({ settingsTab: tab }),
   activeRenderer: "dom",
   setActiveRenderer: (r) => set({ activeRenderer: r }),
   termDims: { cols: 80, rows: 24 },

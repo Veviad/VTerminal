@@ -95,6 +95,20 @@ pub fn blocks_network(class: &CommandClass, web_access: bool) -> bool {
     !web_access && class.network
 }
 
+/// Whether a model-authored command would enter another shell/environment.
+///
+/// Sidecar targets are established by the user and bound to immutable session
+/// ids. Allowing the model to nest ssh/container/VM shells inside either one
+/// would make the role label false, so linked runs refuse these commands before
+/// drawing an approval card. Single-terminal runs deliberately do not call this
+/// function and preserve their existing behaviour.
+pub fn is_environment_transition(command: &str) -> bool {
+    split_segments(command)
+        .filter(|segments| !segments.is_empty())
+        .map(|segments| segments.iter().any(segment_is_environment_transition))
+        .unwrap_or_else(|| sweep_for_environment_transition(command))
+}
+
 // ---------------------------------------------------------------------------
 // Tables
 // ---------------------------------------------------------------------------
@@ -932,6 +946,62 @@ fn segment_is_network(seg: &Segment) -> bool {
     verbs_match(&rule.verbs, &head.verb)
 }
 
+fn transition_name_and_words(name: &str, words: &[String]) -> bool {
+    let has = |candidates: &[&str]| {
+        words
+            .iter()
+            .map(|word| word.to_ascii_lowercase())
+            .any(|word| candidates.contains(&word.as_str()))
+    };
+    match name {
+        // These always establish a remote terminal session.
+        "ssh" | "mosh" | "et" => true,
+        // Container entry points. `run` is included because an interactive run
+        // creates a new environment just as surely as `exec` does.
+        "docker" | "podman" | "nerdctl" => has(&["exec", "attach", "run"]),
+        "kubectl" | "oc" => has(&["exec"]),
+        "vagrant" => has(&["ssh"]),
+        // Common VM/container-shell frontends. Include their actual `enter`
+        // spelling as well as shell/ssh aliases.
+        "distrobox" | "toolbox" | "lima" | "colima" | "limactl" => has(&["enter", "shell", "ssh"]),
+        _ => false,
+    }
+}
+
+fn segment_is_environment_transition(seg: &Segment) -> bool {
+    let Some(head) = head_of(&seg.text) else {
+        return sweep_for_environment_transition(&seg.text);
+    };
+    let words = tokenize(&seg.text);
+    if transition_name_and_words(&head.name, &words) {
+        return true;
+    }
+    // Wrapper flags are intentionally not modelled by `head_of` (`sudo -u root
+    // ssh` resolves `root` as the head). Only wrapped segments get this broader
+    // sweep, avoiding false positives in ordinary data such as
+    // `printf '%s' 'ssh prod'`.
+    head.wrapped && sweep_for_environment_transition(&seg.text)
+}
+
+/// Conservative fallback for structurally opaque commands. It scans adjacent
+/// words so `$(ssh host)` cannot evade the Sidecar boundary. This path is used
+/// only after the quote-aware segment parser has already declined the line.
+fn sweep_for_environment_transition(text: &str) -> bool {
+    let words = tokenize(text);
+    words.iter().enumerate().any(|(index, word)| {
+        let word = word.trim_matches(|c: char| "`$(){};|&<>'\"".contains(c));
+        let name = word.rsplit('/').next().unwrap_or(word).to_ascii_lowercase();
+        let rest = words[index + 1..]
+            .iter()
+            .map(|next| {
+                next.trim_matches(|c: char| "`$(){};|&<>'\"".contains(c))
+                    .to_ascii_lowercase()
+            })
+            .collect::<Vec<_>>();
+        transition_name_and_words(&name, &rest)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1250,5 +1320,52 @@ mod tests {
         assert!(!blocks_network(&fetch, true));
         assert!(!blocks_network(&local, false));
         assert!(!blocks_network(&local, true));
+    }
+
+    #[test]
+    fn recognises_sidecar_environment_transitions() {
+        for cmd in [
+            "ssh prod-01",
+            "mosh prod-01",
+            "et prod-01",
+            "docker exec -it api sh",
+            "docker --context prod exec -it api sh",
+            "podman attach api",
+            "nerdctl run alpine",
+            "kubectl exec deploy/api -- sh",
+            "oc exec pod/api -- bash",
+            "vagrant ssh web",
+            "distrobox enter dev",
+            "toolbox enter fedora",
+            "limactl shell default",
+            "colima ssh",
+            "sudo ssh bastion",
+            "sudo -n ssh bastion",
+            "pwd && ssh prod-01",
+            "echo $(ssh prod-01)",
+        ] {
+            assert!(
+                is_environment_transition(cmd),
+                "should be blocked in Sidecar mode: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_sidecar_commands_are_not_environment_transitions() {
+        for cmd in [
+            "gh issue view 42",
+            "docker ps",
+            "docker compose config",
+            "kubectl get pods",
+            "vagrant status",
+            "cat docker-compose.yml",
+            "printf '%s' 'ssh prod-01'",
+        ] {
+            assert!(
+                !is_environment_transition(cmd),
+                "should remain available in Sidecar mode: {cmd}"
+            );
+        }
     }
 }

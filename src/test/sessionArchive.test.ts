@@ -174,6 +174,8 @@ describe("toArchiveMessages", () => {
       exit_code: 0,
       status: "done",
       note: null,
+      target_role: null,
+      target_label: null,
     });
   });
 

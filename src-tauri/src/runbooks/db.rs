@@ -4487,6 +4487,8 @@ mod tests {
         let version: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
+        // Runbooks keep their own schema_version table. The session archive's
+        // v11 migration is in database::migrations and does not advance this DB.
         assert_eq!(version, 10);
         assert!(table_has_column(&conn, "runbook_attempts", "structured_outcomes").unwrap());
         assert!(table_has_column(&conn, "runbook_approvals", "project_digest").unwrap());

@@ -105,6 +105,8 @@ export type PtyEvent =
 
 // ---------- AI streaming ----------
 
+export type AgentTargetRole = "local" | "remote";
+
 export type StreamEvent =
   | { type: "Started"; request_id: string; model: string }
   | { type: "Delta"; content: string }
@@ -119,10 +121,19 @@ export type StreamEvent =
       explanation: string;
       read_only: boolean;
       network: boolean;
+      /** Present only for a linked Sidecar run. */
+      target_role?: AgentTargetRole;
+      target_session_id?: string;
     }
   /** Policy refused a command outright: never proposed, never run, no approval
    *  gate to settle. Rendered through the existing `"blocked"` command status. */
-  | { type: "CommandBlocked"; command: string; reason: string }
+  | {
+      type: "CommandBlocked";
+      command: string;
+      reason: string;
+      target_role?: AgentTargetRole;
+      target_session_id?: string;
+    }
   /** Backend asks the FRONTEND to run this in the session's live PTY and report
    *  back via submitCommandResult — the backend cannot see PTY bytes itself. */
   | {
@@ -135,8 +146,17 @@ export type StreamEvent =
       /** Repeated from the proposal: an auto-run command never drew a card, so
        *  this is the only place its justification reaches the transcript. */
       explanation: string;
+      target_role?: AgentTargetRole;
+      target_session_id?: string;
     }
-  | { type: "CommandStarted"; approval_id: string; command: string; explanation: string }
+  | {
+      type: "CommandStarted";
+      approval_id: string;
+      command: string;
+      explanation: string;
+      target_role?: AgentTargetRole;
+      target_session_id?: string;
+    }
   | { type: "CommandOutput"; approval_id: string; chunk: string; is_stderr: boolean }
   /** exit_code is null when the command outlived its timeout — it is still
    *  running in the user's terminal and was NOT killed. */
@@ -146,6 +166,8 @@ export type StreamEvent =
       exit_code: number | null;
       duration_ms: number;
       error?: string | null;
+      target_role?: AgentTargetRole;
+      target_session_id?: string;
     }
   /** The loop appended these queued steering messages to the transcript. This is
    *  the ONLY thing that clears a message's "queued" badge — one that never gets
@@ -203,6 +225,12 @@ export interface TerminalContext {
   screen_tail: string;
   /** Whether OSC 133 marks are actually arriving for this session. */
   shell_integration: boolean;
+}
+
+/** Optional second execution environment for a Sidecar Agent turn. */
+export interface SidecarAgentTargets {
+  local: TerminalContext;
+  remote: TerminalContext;
 }
 
 /**
@@ -294,6 +322,10 @@ export interface AiMessage {
     /** The line actually typed, when `hardenCommand` changed it. Shown so the
      *  user can see the env prefix they did not approve. Not archived. */
     typed?: string;
+    /** Persisted display provenance for Sidecar command timelines. */
+    targetRole?: AgentTargetRole;
+    targetSessionId?: string;
+    targetLabel?: string;
   };
 }
 
@@ -675,6 +707,8 @@ export interface ArchivedMessage {
     exit_code: number | null;
     status: "running" | "done" | "skipped" | "timeout" | "blocked";
     note: string | null;
+    target_role: AgentTargetRole | null;
+    target_label: string | null;
   } | null;
   /** Always present (empty when the turn had none) — Rust serializes a `Vec`. */
   attachments: ArchivedAttachment[];
@@ -739,6 +773,8 @@ export interface ArchiveMessageInput {
     exit_code: number | null;
     status: string;
     note: string | null;
+    target_role: AgentTargetRole | null;
+    target_label: string | null;
   } | null;
   /** Metadata and a disk path, never the bytes. */
   attachments: ArchiveAttachmentInput[] | null;

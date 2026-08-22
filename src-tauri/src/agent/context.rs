@@ -35,9 +35,23 @@ pub struct BlockSummary {
     pub output_tail: String,
 }
 
+/// The two immutable execution environments attached to one Sidecar agent run.
+///
+/// This is an optional `agent_start` argument rather than a replacement for
+/// `TerminalContext`: older/single-terminal callers keep sending exactly the
+/// context they do today, while a linked caller adds this role-labelled pair.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SidecarTargets {
+    pub local: TerminalContext,
+    pub remote: TerminalContext,
+}
+
 const MAX_BLOCKS: usize = 8;
 const MAX_TAIL_CHARS: usize = 2048;
 const MAX_SCREEN_CHARS: usize = 4096;
+/// Both targets share one prompt budget. Each receives half, so activity is
+/// trimmed symmetrically instead of allowing a noisy host to evict the other.
+const MAX_SIDECAR_CONTEXT_CHARS: usize = 12_000;
 
 impl RemoteContext {
     /// `ssh prod-01` / `docker exec` — for prompts and the approval card.
@@ -53,6 +67,12 @@ impl TerminalContext {
     /// Renders the environment header + recent commands, hard-capped so the
     /// prompt stays well under the context budget.
     pub fn render(&self) -> String {
+        let mut out = self.render_identity();
+        out.push_str(&self.render_activity());
+        out
+    }
+
+    fn render_identity(&self) -> String {
         let mut out = String::new();
 
         // Lead with the session's nature. Getting this wrong is worse than
@@ -77,6 +97,11 @@ impl TerminalContext {
             }
         }
 
+        out
+    }
+
+    fn render_activity(&self) -> String {
+        let mut out = String::new();
         let blocks: Vec<&BlockSummary> = self
             .recent_blocks
             .iter()
@@ -105,8 +130,83 @@ impl TerminalContext {
             out.push_str(&tail(&self.screen_tail, MAX_SCREEN_CHARS));
             out.push('\n');
         }
-
         out
+    }
+
+    /// Render one half of a linked context while preserving its identity and
+    /// the newest activity. The oldest command/output material is what yields
+    /// when this terminal exceeds its fair half of the combined budget.
+    fn render_sidecar_target(&self, role: &str, max: usize) -> String {
+        let heading = format!("=== SIDECAR TARGET: {role} ===\n");
+        let identity = self.render_identity();
+        let ending = format!("=== END SIDECAR TARGET: {role} ===\n");
+        let fixed_len = heading.len() + identity.len() + ending.len();
+        if fixed_len >= max {
+            return truncate_head(&(heading + &identity + &ending), max);
+        }
+
+        let activity = self.render_activity();
+        let available = max - fixed_len;
+        let activity = if activity.len() <= available {
+            activity
+        } else {
+            let marker = "\n[older terminal activity trimmed]\n";
+            let keep = available.saturating_sub(marker.len());
+            format!("{marker}{}", tail_within(&activity, keep))
+        };
+        format!("{heading}{identity}{activity}{ending}")
+    }
+}
+
+impl SidecarTargets {
+    /// Fail closed on a stale or incorrectly labelled pairing before a provider
+    /// is loaded. The frontend performs richer live/idle checks; these are the
+    /// role and identity invariants the backend can verify from the IPC value.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.local.session_id.trim().is_empty() || self.remote.session_id.trim().is_empty() {
+            return Err("sidecar targets must have non-empty session ids".into());
+        }
+        if self.local.session_id == self.remote.session_id {
+            return Err(
+                "sidecar local and remote targets must be different terminal sessions".into(),
+            );
+        }
+        if self.local.remote.is_some() {
+            return Err("sidecar local target is inside a nested session".into());
+        }
+        let Some(remote) = &self.remote.remote else {
+            return Err("sidecar remote target is not inside an SSH session".into());
+        };
+        if !remote.kind.eq_ignore_ascii_case("ssh") {
+            return Err(format!(
+                "sidecar remote target must be an SSH session, not {}",
+                remote.kind
+            ));
+        }
+        if remote
+            .target
+            .as_deref()
+            .is_none_or(|target| target.trim().is_empty())
+        {
+            return Err("sidecar remote target has no validated SSH identity".into());
+        }
+        Ok(())
+    }
+
+    /// Render two unmistakably separated environments under one hard cap.
+    pub fn render(&self) -> String {
+        let intro = "SIDECAR MODE: two separate terminal environments are linked. Facts, paths, \n\
+credentials, environment variables, and command results belong only to the labelled target.\n\
+Never assume state is shared between LOCAL and REMOTE.\n\n";
+        let target_budget = MAX_SIDECAR_CONTEXT_CHARS
+            .saturating_sub(intro.len())
+            .saturating_sub(1)
+            / 2;
+        let local = self.local.render_sidecar_target("LOCAL", target_budget);
+        let remote = self.remote.render_sidecar_target("REMOTE", target_budget);
+        let rendered = format!("{intro}{local}\n{remote}");
+        debug_assert!(rendered.len() <= MAX_SIDECAR_CONTEXT_CHARS);
+        rendered
     }
 }
 
@@ -120,6 +220,44 @@ fn tail(text: &str, max: usize) -> String {
         cut += 1;
     }
     format!("…{}", &text[cut..])
+}
+
+/// First `max` bytes, cut on a char boundary. Used only for pathological
+/// identity metadata that alone exceeds a target's complete prompt allowance.
+fn truncate_head(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let marker = "…";
+    let mut cut = max.saturating_sub(marker.len());
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    if cut == 0 {
+        return String::new();
+    }
+    format!("{}{marker}", &text[..cut])
+}
+
+/// A newest-content tail whose marker is included inside `max` (unlike the
+/// legacy `tail`, whose caps predate the strict combined Sidecar ceiling).
+fn tail_within(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
+    }
+    let marker = "…";
+    if max <= marker.len() {
+        return String::new();
+    }
+    let keep = max - marker.len();
+    let mut cut = text.len() - keep;
+    while !text.is_char_boundary(cut) {
+        cut += 1;
+    }
+    format!("{marker}{}", &text[cut..])
 }
 
 #[cfg(test)]
@@ -193,5 +331,78 @@ mod tests {
             target: None,
         };
         assert_eq!(r.describe(), "docker");
+    }
+
+    fn sidecar() -> SidecarTargets {
+        SidecarTargets {
+            local: base(),
+            remote: TerminalContext {
+                session_id: "s2".into(),
+                cwd: Some("/Users/me/app".into()),
+                git_branch: Some("main".into()),
+                remote: Some(RemoteContext {
+                    kind: "ssh".into(),
+                    target: Some("deploy@prod-01".into()),
+                }),
+                ..base()
+            },
+        }
+    }
+
+    #[test]
+    fn sidecar_context_is_role_labelled_and_does_not_leak_local_facts_remote() {
+        let rendered = sidecar().render();
+        assert!(rendered.contains("SIDECAR TARGET: LOCAL"));
+        assert!(rendered.contains("SIDECAR TARGET: REMOTE"));
+        assert_eq!(
+            rendered.matches("Working directory: /Users/me/app").count(),
+            1
+        );
+        assert_eq!(rendered.matches("Git branch: main").count(), 1);
+        assert!(rendered.contains("ssh deploy@prod-01"));
+    }
+
+    #[test]
+    fn sidecar_context_has_one_even_combined_cap() {
+        let mut targets = sidecar();
+        let noisy = (0..20)
+            .map(|i| BlockSummary {
+                command: format!("command-{i}"),
+                exit_code: Some(0),
+                output_tail: format!("output-{i}-{}", "x".repeat(3000)),
+            })
+            .collect::<Vec<_>>();
+        targets.local.recent_blocks = noisy.clone();
+        targets.remote.recent_blocks = noisy;
+        targets.local.screen_tail = "l".repeat(2_000);
+        targets.remote.screen_tail = "r".repeat(2_000);
+
+        let rendered = targets.render();
+        assert!(rendered.len() <= MAX_SIDECAR_CONTEXT_CHARS);
+        assert_eq!(
+            rendered.matches("older terminal activity trimmed").count(),
+            2
+        );
+        assert!(rendered.contains("command-19"));
+    }
+
+    #[test]
+    fn sidecar_validation_pins_local_and_ssh_roles() {
+        assert!(sidecar().validate().is_ok());
+
+        let mut same = sidecar();
+        same.remote.session_id = same.local.session_id.clone();
+        assert!(same.validate().unwrap_err().contains("different"));
+
+        let mut nested_local = sidecar();
+        nested_local.local.remote = nested_local.remote.remote.clone();
+        assert!(nested_local
+            .validate()
+            .unwrap_err()
+            .contains("local target"));
+
+        let mut docker_remote = sidecar();
+        docker_remote.remote.remote.as_mut().unwrap().kind = "docker".into();
+        assert!(docker_remote.validate().unwrap_err().contains("SSH"));
     }
 }
