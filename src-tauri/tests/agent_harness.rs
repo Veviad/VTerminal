@@ -182,10 +182,11 @@ async fn run_scenario_with_context(
     });
 
     let request_id = format!("harness-{}", uuid::Uuid::new_v4());
+    let scratch = tempfile::tempdir().expect("create private harness working directory");
     let config = run::AgentConfig {
         request_id: request_id.clone(),
         shell: "/bin/zsh".into(),
-        cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
+        cwd: Some(scratch.path().to_string_lossy().into_owned()),
         temperature: None,
         effort: vterminal_lib::provider::Effort::Off,
         max_iterations,
@@ -217,6 +218,11 @@ async fn run_scenario_with_context(
     )
     .await;
 
+    // Mirror the command boundary's lifecycle cleanup. The private TempDir is
+    // intentionally kept alive until execution and all state drains finish.
+    approvals.drain_for_request(&request_id);
+    pty_exec.drain_for_request(&request_id);
+    steers.drain_for_request(&request_id);
     let captured = events.lock().unwrap().clone();
     ScenarioResult {
         outcome,
@@ -346,6 +352,14 @@ async fn provider_failure_after_execution_keeps_the_command_result() {
         .iter()
         .any(|message| { message.role == Role::Tool && message.content.contains("recover-me") }));
     assert_storage_safe_checkpoints(&result.events);
+    assert_eq!(
+        event_types(&result.events)
+            .iter()
+            .filter(|event| **event == "Checkpoint")
+            .count(),
+        2,
+        "the provider failure must reuse the completed tool-batch checkpoint"
+    );
 }
 
 #[tokio::test]

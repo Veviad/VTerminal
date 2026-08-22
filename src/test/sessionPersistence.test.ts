@@ -565,6 +565,37 @@ describe("transactional exit persistence", () => {
     ]);
   });
 
+  it("retries a failed Agent checkpoint once on the slow transcript timer", async () => {
+    useAppStore.setState({
+      aiStreams: {
+        a: {
+          ...emptyAiStream(),
+          messages: [
+            {
+              id: "m1",
+              role: "user",
+              content: "checkpoint me",
+              createdAt: "2026-08-14T12:00:00.000Z",
+            },
+          ],
+          modelTranscript: [{ role: "user", content: "checkpoint retry" }],
+        },
+      },
+    });
+    archivePutMock.mockRejectedValueOnce(new Error("disk unavailable"));
+
+    startPersistence();
+    markTranscriptCheckpoint("a");
+    expect(archivePutMock).toHaveBeenCalledTimes(1);
+
+    for (let i = 0; i < 5; i += 1) await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(2_999);
+    expect(archivePutMock).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(archivePutMock).toHaveBeenCalledTimes(2);
+  });
+
   it("waits for a tab-close archive IPC even after its UI budget expires", async () => {
     const closeWrite = deferred<void>();
     archivePutMock.mockReturnValueOnce(closeWrite.promise);

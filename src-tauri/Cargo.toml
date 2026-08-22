@@ -133,6 +133,11 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+[dev-dependencies]
+# Integration harnesses execute shell commands and need a private working
+# directory that is removed automatically even when an assertion unwinds.
+tempfile = "3"
+
 # Metal kernels are unusably slow at opt-level 0
 [profile.dev.package."*"]
 opt-level = 2

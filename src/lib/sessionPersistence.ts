@@ -196,7 +196,14 @@ function startAgentCheckpointDrain(): void {
       const ready = [...dirtyAgentCheckpoints];
       dirtyAgentCheckpoints.clear();
       for (const sessionId of ready) {
-        await archiveTranscriptOnly(sessionId);
+        const saved = await archiveTranscriptOnly(sessionId);
+        // A failed immediate checkpoint gets one bounded retry on the existing
+        // slow transcript timer. Do not re-add it to this drain: that would spin
+        // against a persistent disk/IPC failure and starve later sessions.
+        if (!saved && persistenceActive()) {
+          dirtyTranscript.add(sessionId);
+          scheduleTranscript();
+        }
       }
     }
   })().finally(() => {
