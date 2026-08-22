@@ -207,21 +207,23 @@ export async function archiveOnClose(sessionId: string): Promise<void> {
  * Metadata-and-transcript only: no blob, so this stays cheap enough to run on a
  * timer.
  */
-export async function archiveTranscriptOnly(sessionId: string): Promise<void> {
+export async function archiveTranscriptOnly(sessionId: string): Promise<boolean> {
   const stream = useAppStore.getState().aiStreams[sessionId];
   // Nothing said yet: writing an empty open row would put a live tab in the
   // archive with nothing to show for it.
-  if (!stream || stream.messages.length === 0) return;
+  if (!stream || stream.messages.length === 0) return true;
   const row = buildArchiveRow(sessionId, {
     isOpen: true,
     closeReason: null,
     withScrollback: false,
     withTranscript: true,
   });
-  if (!row) return;
+  if (!row) return true;
   try {
     await api.archivePut(row);
+    return true;
   } catch (err) {
     console.warn(`archiving the transcript of ${sessionId} failed:`, err);
+    return false;
   }
 }

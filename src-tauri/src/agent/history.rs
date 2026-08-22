@@ -76,6 +76,28 @@ pub fn normalize(messages: &mut Vec<ChatMessage>) {
     merge_adjacent_same_role(messages);
 }
 
+/// Produce the bounded, provider-valid transcript that may cross IPC or go to disk.
+///
+/// The live loop keeps its fresh system prompt and the current turn's image bytes for
+/// as long as the provider needs them. Neither belongs in durable history: the next
+/// turn builds a fresh system prompt, and historical images are intentionally replaced
+/// by notes. Treating the whole copy as history also applies the same trimming and
+/// tool-pair repair that a reopened transcript receives before it is sent again.
+pub fn storage_snapshot(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    let mut snapshot: Vec<ChatMessage> = messages
+        .iter()
+        .filter(|message| message.role != Role::System)
+        .cloned()
+        .collect();
+
+    trim_to_budget(&mut snapshot);
+    rescue_orphaned_tool_results(&mut snapshot);
+    drop_unanswered_tool_calls(&mut snapshot);
+    strip_stale_images(&mut snapshot);
+    merge_adjacent_same_role(&mut snapshot);
+    snapshot
+}
+
 /// Turn tool results whose call is gone into plain user notes.
 ///
 /// A `Role::Tool` message is only meaningful to a provider as the answer to a
@@ -316,6 +338,54 @@ mod tests {
 
     fn user_with_image(text: &str, data: &str) -> ChatMessage {
         ChatMessage::user_with_images(text, vec![png(data)])
+    }
+
+    #[test]
+    fn storage_snapshot_removes_system_and_image_bytes() {
+        let messages = vec![
+            ChatMessage::system("fresh private context"),
+            user_with_image("inspect this", "BASE64-SENTINEL"),
+            ChatMessage::assistant("done"),
+        ];
+
+        let snapshot = storage_snapshot(&messages);
+        assert!(snapshot.iter().all(|message| message.role != Role::System));
+        assert!(snapshot.iter().all(|message| message.images.is_none()));
+        assert!(snapshot[0].content.contains("1 image"));
+        assert!(snapshot[0].content.contains("attached to this message"));
+        assert!(!serde_json::to_string(&snapshot)
+            .unwrap()
+            .contains("BASE64-SENTINEL"));
+    }
+
+    #[test]
+    fn storage_snapshot_repairs_an_incomplete_tool_turn() {
+        let messages = vec![
+            ChatMessage::system("system"),
+            ChatMessage::user("goal"),
+            assistant_with("answered"),
+            tool_result("answered"),
+            assistant_with("unanswered"),
+        ];
+
+        let snapshot = storage_snapshot(&messages);
+        let mut wire = vec![ChatMessage::system("fresh")];
+        wire.extend(snapshot.clone());
+        wire.push(ChatMessage::user("continue"));
+        normalize(&mut wire);
+        assert_wire_valid(&wire);
+        assert!(snapshot.iter().any(|message| {
+            message
+                .tool_calls
+                .as_ref()
+                .is_some_and(|calls| calls.iter().any(|call| call.id == "answered"))
+        }));
+        assert!(snapshot.iter().all(|message| {
+            message
+                .tool_calls
+                .as_ref()
+                .is_none_or(|calls| calls.iter().all(|call| call.id != "unanswered"))
+        }));
     }
 
     /// "Drag a screenshot in and press enter" produces a user turn with images and

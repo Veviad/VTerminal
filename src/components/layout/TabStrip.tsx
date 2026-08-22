@@ -3,7 +3,7 @@ import { Link2, Loader2, Pencil, Plus, Server, Sparkles, Terminal, X } from "luc
 import { useAppStore } from "../../stores/appStore";
 import { useSessions } from "../../hooks/useSessions";
 import { resolveSessionTitle } from "../../lib/sessionTitle";
-import { isNaming, nameSession } from "../../lib/sessionNaming";
+import { isNaming, renameSessionWithAi } from "../../lib/sessionNaming";
 import { S } from "../../lib/strings";
 import type { Session } from "../../lib/types";
 import { roleForSession, sidecarForSession } from "../../lib/sidecar";
@@ -201,7 +201,8 @@ function TabMenu({
   onRename: () => void;
 }) {
   const { closeSession } = useSessions();
-  const aiReady = useAppStore((s) => s.aiReady());
+  const [naming, setNaming] = useState(false);
+  const [namingError, setNamingError] = useState<string | null>(null);
 
   // Escape closes too — a menu that only dismisses on click is a trap for
   // keyboard users.
@@ -232,14 +233,28 @@ function TabMenu({
         </button>
         <button
           className={item}
-          disabled={!aiReady}
+          disabled={naming}
           onClick={() => {
-            nameSession(session.id, { force: true });
-            onClose();
+            setNaming(true);
+            setNamingError(null);
+            void renameSessionWithAi(session.id)
+              .then(onClose)
+              .catch((reason) => {
+                setNamingError(reason instanceof Error ? reason.message : String(reason));
+              })
+              .finally(() => {
+                setNaming(false);
+              });
           }}
         >
-          <Sparkles size={11} /> {S.tabs.renameWithAi}
+          {naming ? <Loader2 size={11} className="animate-spin" /> : <Sparkles size={11} />}
+          {naming ? S.tabs.naming : S.tabs.renameWithAi}
         </button>
+        {namingError && (
+          <p role="alert" className="px-2.5 py-1 text-[10px] leading-snug text-error">
+            {namingError}
+          </p>
+        )}
         {(session.userTitle || session.aiTitle) && (
           <button
             className={item}

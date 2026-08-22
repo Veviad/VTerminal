@@ -150,7 +150,7 @@ export const S = {
     permissionHint: {
       ask: "Every command waits for your approval",
       auto_read:
-        "Commands that only read run straight away. Anything that writes — or reaches the network — still waits for you.",
+        "Commands proven to only read run straight away, including network-backed reads. Writes and uncertain commands still wait for you.",
       auto_all: "Every command runs without asking, including writes and network access",
     },
     // Document buckets. Deliberately says the agent "can search" rather than "will
@@ -165,12 +165,11 @@ export const S = {
     autoAllWarning:
       "Auto-accept is ON — commands run in your terminal, on the host it is connected to, without asking",
     autoReadNote:
-      "Read-only commands run without asking. Anything that creates, edits, deletes or reaches the network still stops here.",
+      "Proven read-only commands run without asking, including network-backed reads. Writes and uncertain commands still stop here.",
     // Why a card is up even though an auto mode is armed. Without this the mode
     // just looks broken.
     askedBecause: {
-      network: "asking: this reaches the network",
-      writes: "asking: this may change files",
+      writes: "asking: this may change state or could not be verified as read-only",
     },
     deepThink: "Extended thinking",
     editHint: "click command to edit",
