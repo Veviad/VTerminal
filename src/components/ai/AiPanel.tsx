@@ -32,7 +32,9 @@ import {
   setAiPanelOpen,
 } from "../../lib/aiPanel";
 import { panelWidthCss, ratioFromDrag } from "../../lib/panelRatio";
+import { ownRecordValue } from "../../lib/records";
 import { useAiStream } from "../../hooks/useAiStream";
+import { useDismissibleLayer } from "../../hooks/useDismissibleLayer";
 import { useAutoGrow } from "../../hooks/useAutoGrow";
 import { AiMessageView } from "./AiMessageView";
 import { BlockContextChip } from "./BlockContextChip";
@@ -94,6 +96,27 @@ import { SidecarReplacementPopover } from "../sidecar/SidecarReplacementPopover"
 const NO_BLOCKS: Block[] = [];
 /** Same identity-stability reason as NO_BLOCKS. */
 const NO_ATTACHMENTS: Attachment[] = [];
+
+const PERMISSION_OPTIONS = [
+  {
+    value: "ask",
+    label: S.aiPanel.permission.ask,
+    title: S.aiPanel.permissionHint.ask,
+    tone: "accent",
+  },
+  {
+    value: "auto_read",
+    label: S.aiPanel.permission.auto_read,
+    title: S.aiPanel.permissionHint.auto_read,
+    tone: "accent",
+  },
+  {
+    value: "auto_all",
+    label: S.aiPanel.permission.auto_all,
+    title: S.aiPanel.permissionHint.auto_all,
+    tone: "warning",
+  },
+] as const;
 
 /** Dragging selected TEXT across the panel also fires the drag events. Checking
  *  for the `Files` kind keeps the overlay from flashing on a text selection —
@@ -228,7 +251,11 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const permissionMode = stream?.permissionMode ?? "ask";
   const proposalRole = pendingProposal?.targetRole ?? null;
   const proposalPermissionMode =
-    sidecar && proposalRole ? sidecar.permissions[proposalRole] : permissionMode;
+    sidecar && proposalRole
+      ? proposalRole === "local"
+        ? sidecar.permissions.local
+        : sidecar.permissions.remote
+      : permissionMode;
   const proposalTarget =
     sidecar && proposalRole
       ? sidecarTargetLabel(sidecar, proposalRole, sessions, sessionUi)
@@ -295,10 +322,12 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   useEffect(() => {
     const open = (event: Event) => {
       setSidecarMenuOpen(true);
-      setReplacingTarget(Boolean((event as CustomEvent<{ replace?: boolean }>).detail?.replace));
+      setReplacingTarget(Boolean((event as CustomEvent<{ replace?: boolean }>).detail.replace));
     };
     window.addEventListener("vterminal:open-sidecar", open);
-    return () => window.removeEventListener("vterminal:open-sidecar", open);
+    return () => {
+      window.removeEventListener("vterminal:open-sidecar", open);
+    };
   }, []);
 
   const agentMode = mode === "agent";
@@ -426,7 +455,9 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
           {agentMode && sessionId && (
             <div className="relative">
               <button
-                onClick={() => setSidecarMenuOpen((open) => !open)}
+                onClick={() => {
+                  setSidecarMenuOpen((open) => !open);
+                }}
                 disabled={busy}
                 className={`flex items-center gap-1 rounded-md px-1.5 py-1 text-[10px] font-medium transition-colors ${
                   sidecar
@@ -461,7 +492,9 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
                         setSidecarMenuOpen(false);
                         return null;
                       }}
-                      onBack={() => setReplacingTarget(false)}
+                      onBack={() => {
+                        setReplacingTarget(false);
+                      }}
                       onClose={() => {
                         setReplacingTarget(false);
                         setSidecarMenuOpen(false);
@@ -470,13 +503,19 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
                   ) : (
                     <ActiveSidecarMenu
                       binding={sidecar}
-                      onSwap={() => swapSidecarPanes(sidecar.ownerSessionId)}
-                      onReplace={() => setReplacingTarget(true)}
+                      onSwap={() => {
+                        swapSidecarPanes(sidecar.ownerSessionId);
+                      }}
+                      onReplace={() => {
+                        setReplacingTarget(true);
+                      }}
                       onEnd={() => {
                         endSidecar(sidecar.ownerSessionId);
                         setSidecarMenuOpen(false);
                       }}
-                      onClose={() => setSidecarMenuOpen(false)}
+                      onClose={() => {
+                        setSidecarMenuOpen(false);
+                      }}
                     />
                   )
                 ) : (
@@ -509,7 +548,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
                       );
                       const identity = captureSidecarRemoteIdentity(
                         remoteSession,
-                        live.sessionUi[remoteId],
+                        ownRecordValue(live.sessionUi, remoteId),
                       );
                       if (!identity) return "The SSH target identity could not be verified.";
                       const result = startSidecar(sessionId, localId, remoteId, identity);
@@ -528,7 +567,9 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
                       setSettingsTab("hosts");
                       setSettingsOpen(true);
                     }}
-                    onClose={() => setSidecarMenuOpen(false)}
+                    onClose={() => {
+                      setSidecarMenuOpen(false);
+                    }}
                   />
                 ))}
             </div>
@@ -546,12 +587,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
           {agentMode && sessionId && !sidecar && (
             <Dropdown
               value={permissionMode}
-              options={PERMISSION_MODES.map((m) => ({
-                value: m,
-                label: S.aiPanel.permission[m],
-                title: S.aiPanel.permissionHint[m],
-                tone: m === "auto_all" ? ("warning" as const) : ("accent" as const),
-              }))}
+              options={PERMISSION_OPTIONS}
               onChange={(next) => {
                 useAppStore.getState().setPermissionMode(sessionId, next);
                 // Switching to a mode that WOULD have auto-run the card already
@@ -905,18 +941,7 @@ function ActiveSidecarMenu({
   onClose: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => event.key === "Escape" && onClose();
-    const onPointer = (event: PointerEvent) => {
-      if (!ref.current?.contains(event.target as Node)) onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    window.addEventListener("pointerdown", onPointer);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("pointerdown", onPointer);
-    };
-  }, [onClose]);
+  useDismissibleLayer(ref, onClose);
 
   const item =
     "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-start text-[11px] text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary";
@@ -984,7 +1009,9 @@ function SidecarContextBar({
             }`}
           >
             <button
-              onClick={() => onFocus(targetSessionId)}
+              onClick={() => {
+                onFocus(targetSessionId);
+              }}
               className={`flex min-w-0 flex-1 items-center gap-1 text-start text-[9px] font-medium uppercase tracking-wide ${
                 role === "remote" ? "text-warning" : "text-accent"
               }`}
@@ -1006,14 +1033,11 @@ function SidecarContextBar({
               </span>
             </button>
             <Dropdown
-              value={binding.permissions[role]}
-              options={PERMISSION_MODES.map((mode) => ({
-                value: mode,
-                label: S.aiPanel.permission[mode],
-                title: S.aiPanel.permissionHint[mode],
-                tone: mode === "auto_all" ? ("warning" as const) : ("accent" as const),
-              }))}
-              onChange={(next) => onPermission(role, next)}
+              value={role === "local" ? binding.permissions.local : binding.permissions.remote}
+              options={PERMISSION_OPTIONS}
+              onChange={(next) => {
+                onPermission(role, next);
+              }}
               ariaLabel={`${role === "remote" ? "SSH" : "Local"}: ${S.aiPanel.permissionLabel}`}
               hint={S.aiPanel.permissionLabel}
               size="sm"
@@ -1034,7 +1058,7 @@ function terminalChoice(
   sessionUi: Record<string, SessionUiState>,
 ): SidecarTerminalChoice {
   const session = sessions.find((candidate) => candidate.id === sessionId);
-  const ui = sessionUi[sessionId];
+  const ui = ownRecordValue(sessionUi, sessionId);
   const label = session ? resolveSessionTitle(session, ui) : sessionId;
   const detail =
     role === "remote"
@@ -1053,7 +1077,7 @@ function sidecarTargetLabel(
 ): string {
   if (role === "remote") return binding.remoteIdentity.label;
   const session = sessions.find((candidate) => candidate.id === binding.localSessionId);
-  const ui = sessionUi[binding.localSessionId];
+  const ui = ownRecordValue(sessionUi, binding.localSessionId);
   if (ui?.cwd) return collapseHome(ui.cwd);
   return session ? resolveSessionTitle(session, ui) : "local shell";
 }
@@ -1350,6 +1374,7 @@ function CommandMessage({
   if (!cmd) return null;
   const failed = cmd.status === "done" && (cmd.exitCode ?? 0) !== 0;
   const stall = cmd.status === "running" && cmd.stall ? STALL_UI[cmd.stall] : null;
+  const interruptSessionId = cmd.targetSessionId ?? sessionId;
   const targetName = cmd.targetLabel ?? (cmd.targetRole === "remote" ? "SSH target" : "local shell");
   return (
     <div
@@ -1427,9 +1452,11 @@ function CommandMessage({
         <div className="flex items-center gap-2 bg-warning/10 px-2.5 py-1 text-[10px] text-warning">
           <stall.icon size={11} className="shrink-0" />
           <span className="min-w-0 flex-1">{stall.label}</span>
-          {stall.offer && (cmd.targetSessionId || sessionId) && (
+          {stall.offer && interruptSessionId && (
             <button
-              onClick={() => interruptJob(cmd.targetSessionId ?? sessionId!)}
+              onClick={() => {
+                interruptJob(interruptSessionId);
+              }}
               title={S.aiPanel.interruptHint}
               className="shrink-0 rounded border border-warning/40 px-1.5 py-0.5 font-medium transition-colors duration-150 hover:bg-warning/20"
             >

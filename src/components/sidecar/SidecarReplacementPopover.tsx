@@ -1,8 +1,23 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { ArrowLeft, Link2, Server, Terminal, X } from "lucide-react";
+import { useDismissibleLayer } from "../../hooks/useDismissibleLayer";
 import type { AgentTargetRole } from "../../lib/sidecar";
 import { S } from "../../lib/strings";
 import type { SidecarTerminalChoice } from "./SidecarPairingPopover";
+
+function choicesForRole(
+  choices: Record<AgentTargetRole, readonly SidecarTerminalChoice[]>,
+  role: AgentTargetRole,
+): readonly SidecarTerminalChoice[] {
+  return role === "local" ? choices.local : choices.remote;
+}
+
+function firstChoice(
+  choices: readonly SidecarTerminalChoice[],
+): SidecarTerminalChoice | undefined {
+  for (const choice of choices) return choice;
+  return undefined;
+}
 
 export function SidecarReplacementPopover({
   defaultRole,
@@ -18,32 +33,28 @@ export function SidecarReplacementPopover({
   onClose: () => void;
 }) {
   const [role, setRole] = useState<AgentTargetRole>(defaultRole);
-  const [selected, setSelected] = useState(choices[defaultRole][0]?.id ?? "");
+  const [selected, setSelected] = useState(
+    firstChoice(choicesForRole(choices, defaultRole))?.id ?? "",
+  );
   const [error, setError] = useState<string | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
-  const roleChoices = choices[role];
+  const roleChoices = choicesForRole(choices, role);
   const chosen = useMemo(
-    () => roleChoices.find((choice) => choice.id === selected) ?? roleChoices[0],
+    () => roleChoices.find((choice) => choice.id === selected) ?? firstChoice(roleChoices),
     [roleChoices, selected],
   );
 
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => event.key === "Escape" && onClose();
-    const onPointer = (event: PointerEvent) => {
-      if (!panelRef.current?.contains(event.target as Node)) onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    window.addEventListener("pointerdown", onPointer);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("pointerdown", onPointer);
-    };
-  }, [onClose]);
+  useDismissibleLayer(panelRef, onClose);
 
   const chooseRole = (next: AgentTargetRole) => {
     setRole(next);
-    setSelected(choices[next][0]?.id ?? "");
+    setSelected(firstChoice(choicesForRole(choices, next))?.id ?? "");
     setError(null);
+  };
+
+  const handleReplace = () => {
+    if (!chosen) return;
+    setError(onReplace(role, chosen.id));
   };
 
   return (
@@ -52,7 +63,9 @@ export function SidecarReplacementPopover({
       role="dialog"
       aria-label={S.aiPanel.sidecar.replace}
       className="absolute end-0 top-full z-50 mt-1 w-[310px] rounded-lg border border-border-subtle bg-bg-elevated p-3 shadow-lg"
-      onPointerDown={(event) => event.stopPropagation()}
+      onPointerDown={(event) => {
+        event.stopPropagation();
+      }}
     >
       <div className="mb-3 flex items-center gap-1.5">
         <button
@@ -82,7 +95,9 @@ export function SidecarReplacementPopover({
           <button
             key={candidateRole}
             type="button"
-            onClick={() => chooseRole(candidateRole)}
+            onClick={() => {
+              chooseRole(candidateRole);
+            }}
             className={`flex items-center justify-center gap-1 rounded px-2 py-1 text-[10px] font-medium ${
               role === candidateRole
                 ? "bg-bg-hover text-text-primary"
@@ -100,7 +115,7 @@ export function SidecarReplacementPopover({
         <label className="mb-3 block text-[10px] text-text-muted">
           <span className="mb-1 block font-medium text-text-secondary">Replacement terminal</span>
           <select
-            value={chosen?.id ?? ""}
+            value={chosen ? chosen.id : ""}
             onChange={(event) => {
               setSelected(event.target.value);
               setError(null);
@@ -130,7 +145,7 @@ export function SidecarReplacementPopover({
       <button
         type="button"
         disabled={!chosen}
-        onClick={() => chosen && setError(onReplace(role, chosen.id))}
+        onClick={handleReplace}
         className="flex w-full items-center justify-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[11px] font-medium text-bg-primary hover:bg-accent-hover disabled:opacity-50"
       >
         <Link2 size={11} />

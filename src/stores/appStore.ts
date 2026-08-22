@@ -26,6 +26,7 @@ import { MAX_ATTACHMENTS } from "../lib/attachments";
 import type { Phase } from "../lib/osc133";
 import type { PermissionMode } from "../lib/permissionMode";
 import { PANEL_DEFAULT_RATIO, clampPanelRatio } from "../lib/panelRatio";
+import { ownRecordValue, withRecordValue, withoutRecordKey } from "../lib/records";
 import { S } from "../lib/strings";
 import { DEFAULT_THEME_ID } from "../lib/themes";
 import {
@@ -691,23 +692,23 @@ function reconcileSidecars(
   sessionUi: Record<string, SessionUiState>,
 ): Record<string, SidecarBinding> {
   let changed = false;
-  const next: Record<string, SidecarBinding> = {};
+  const next: Array<[string, SidecarBinding]> = [];
   for (const [owner, binding] of Object.entries(sidecars)) {
     // Degradation is sticky. Reconnect/replacement needs explicit review before
     // either target can execute again.
     if (binding.degraded) {
-      next[owner] = binding;
+      next.push([owner, binding]);
       continue;
     }
     const health = inspectCurrentSidecarHealth(binding, { sessions, sessionUi });
     if (health.degradation) {
-      next[owner] = { ...binding, degraded: health.degradation };
+      next.push([owner, { ...binding, degraded: health.degradation }]);
       changed = true;
     } else {
-      next[owner] = binding;
+      next.push([owner, binding]);
     }
   }
-  return changed ? next : sidecars;
+  return changed ? Object.fromEntries(next) : sidecars;
 }
 
 function withoutSidecarForSession(
@@ -716,18 +717,21 @@ function withoutSidecarForSession(
 ): Record<string, SidecarBinding> {
   const binding = findSidecarForSession(sidecars, sessionId);
   if (!binding) return sidecars;
-  const next = { ...sidecars };
-  delete next[binding.ownerSessionId];
-  return next;
+  return withoutRecordKey(sidecars, binding.ownerSessionId);
 }
 
 function permissionReset(
   aiStreams: Record<string, AiStreamState>,
   ownerSessionId: string,
 ): Record<string, AiStreamState> {
-  const stream = aiStreams[ownerSessionId];
-  if (!stream || stream.permissionMode === "ask") return aiStreams;
-  return { ...aiStreams, [ownerSessionId]: { ...stream, permissionMode: "ask" } };
+  const stream = ownRecordValue(aiStreams, ownerSessionId);
+  if (stream?.permissionMode !== "auto_read" && stream?.permissionMode !== "auto_all") {
+    return aiStreams;
+  }
+  return withRecordValue<AiStreamState>(aiStreams, ownerSessionId, {
+    ...stream,
+    permissionMode: "ask",
+  });
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -873,7 +877,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (role === "remote") {
       const liveIdentity = captureSidecarRemoteIdentity(
         state.sessions.find((session) => session.id === replacementSessionId),
-        state.sessionUi[replacementSessionId],
+        ownRecordValue(state.sessionUi, replacementSessionId),
       );
       if (!liveIdentity || (remoteIdentity && !sameRemoteIdentity(liveIdentity, remoteIdentity))) {
         return { ok: false, reason: "The replacement SSH identity could not be verified." };

@@ -19,6 +19,7 @@ import { archiveOnClose } from "../lib/sessionArchive";
 import { trackArchiveMutation } from "../lib/archiveWriteTracker";
 import { forgetRunbookTerminal } from "../lib/runbookTerminalPrivacy";
 import { replayBanner, stripReplayBanners } from "../lib/replayBanner";
+import { ownRecordValue } from "../lib/records";
 import { nextOrdinal, shortenCommand } from "../lib/sessionTitle";
 import { defaultShell, isWindows } from "../lib/platform";
 import { cancelNaming } from "../lib/sessionNaming";
@@ -85,7 +86,7 @@ function cancelLinkedSessionWork(
   }
 
   const cancellations: Promise<unknown>[] = [];
-  const requestId = store.aiStreams[ownerSessionId]?.requestId;
+  const requestId = ownRecordValue(store.aiStreams, ownerSessionId)?.requestId;
   if (requestId) {
     // Same synchronous fence as useAiStream.cancel: fold visible partial text,
     // settle the panel, and invalidate request/generation ownership first.
@@ -103,7 +104,7 @@ function cancelLinkedSessionWork(
   // Inline command-composer requests are per terminal rather than per shared
   // conversation. A target disappearing invalidates either member's proposal.
   for (const targetSessionId of new Set(targetSessionIds)) {
-    const composerRequestId = store.sessionUi[targetSessionId]?.composerRequestId;
+    const composerRequestId = ownRecordValue(store.sessionUi, targetSessionId)?.composerRequestId;
     if (composerRequestId) {
       // Composer callbacks already compare this id before committing. Clear it
       // synchronously so a late proposal cannot reopen on the surviving pane.

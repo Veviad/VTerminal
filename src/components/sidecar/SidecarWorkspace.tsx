@@ -3,6 +3,7 @@ import { Link2Off, Server, Terminal, Unplug } from "lucide-react";
 import * as api from "../../lib/tauri";
 import { setAiPanelOpen } from "../../lib/aiPanel";
 import { abortSession } from "../../lib/ptyExec";
+import { ownRecordValue } from "../../lib/records";
 import { sessionIdForRole, type AgentTargetRole, type SidecarBinding } from "../../lib/sidecar";
 import { collapseHome, resolveSessionTitle } from "../../lib/sessionTitle";
 import { S } from "../../lib/strings";
@@ -17,7 +18,7 @@ export function SidecarWorkspace({ binding }: { binding: SidecarBinding }) {
   const sessionUi = useAppStore((state) => state.sessionUi);
   const activeSessionId = useAppStore((state) => state.activeSessionId);
   const requestId = useAppStore(
-    (state) => state.aiStreams[binding.ownerSessionId]?.requestId ?? null,
+    (state) => ownRecordValue(state.aiStreams, binding.ownerSessionId)?.requestId ?? null,
   );
   const setOrientation = useAppStore((state) => state.setSidecarOrientation);
   const setFocused = useAppStore((state) => state.setSidecarFocusedSession);
@@ -36,7 +37,9 @@ export function SidecarWorkspace({ binding }: { binding: SidecarBinding }) {
     update();
     const observer = new ResizeObserver(update);
     observer.observe(host);
-    return () => observer.disconnect();
+    return () => {
+      observer.disconnect();
+    };
   }, [binding.ownerSessionId, setOrientation]);
 
   // Identity drift is a hard execution fence. Store reconciliation marks the
@@ -67,7 +70,9 @@ export function SidecarWorkspace({ binding }: { binding: SidecarBinding }) {
         sessions={sessions}
         sessionUi={sessionUi}
         activeSessionId={activeSessionId}
-        onFocus={(id) => setFocused(binding.ownerSessionId, id)}
+        onFocus={(id) => {
+          setFocused(binding.ownerSessionId, id);
+        }}
       />
       <SidecarDivider binding={binding} />
       <SidecarPane
@@ -77,7 +82,9 @@ export function SidecarWorkspace({ binding }: { binding: SidecarBinding }) {
         sessions={sessions}
         sessionUi={sessionUi}
         activeSessionId={activeSessionId}
-        onFocus={(id) => setFocused(binding.ownerSessionId, id)}
+        onFocus={(id) => {
+          setFocused(binding.ownerSessionId, id);
+        }}
       />
       {binding.degraded && (
         <div className="pointer-events-auto absolute inset-x-2 top-10 z-30 flex flex-wrap items-center justify-center gap-2 rounded-md border border-warning/50 bg-bg-elevated/95 px-3 py-2 text-[11px] text-warning shadow-lg">
@@ -95,7 +102,9 @@ export function SidecarWorkspace({ binding }: { binding: SidecarBinding }) {
             {S.aiPanel.sidecar.replace}
           </button>
           <button
-            onClick={() => endSidecar(binding.ownerSessionId)}
+            onClick={() => {
+              endSidecar(binding.ownerSessionId);
+            }}
             className="flex items-center gap-1 rounded px-2 py-0.5 text-text-secondary hover:bg-bg-hover"
           >
             <Link2Off size={10} /> {S.aiPanel.sidecar.end}
@@ -125,7 +134,7 @@ function SidecarPane({
 }) {
   const sessionId = sessionIdForRole(binding, role);
   const session = sessions.find((candidate) => candidate.id === sessionId);
-  const ui = sessionUi[sessionId];
+  const ui = ownRecordValue(sessionUi, sessionId);
   const focused = activeSessionId === sessionId;
   const degraded = binding.degraded?.role === role;
   const roleLabel = role === "local" ? S.aiPanel.sidecar.local : S.aiPanel.sidecar.remote;
@@ -137,6 +146,9 @@ function SidecarPane({
         : session
           ? resolveSessionTitle(session, ui)
           : sessionId;
+  const focusSession = () => {
+    if (session) onFocus(sessionId);
+  };
 
   return (
     <section
@@ -145,10 +157,10 @@ function SidecarPane({
         focused ? "ring-1 ring-inset ring-accent/50" : ""
       }`}
       aria-label={`${roleLabel} terminal ${detail}`}
-      onPointerDownCapture={() => session && onFocus(sessionId)}
+      onPointerDownCapture={focusSession}
     >
       <button
-        onClick={() => session && onFocus(sessionId)}
+        onClick={focusSession}
         className={`flex h-8 shrink-0 items-center gap-2 border-b px-2.5 text-start text-[10px] font-medium uppercase tracking-wide transition-colors ${
           focused
             ? "border-accent/40 bg-accent/10 text-accent"
@@ -193,7 +205,9 @@ function SidecarPane({
 function SidecarDivider({ binding }: { binding: SidecarBinding }) {
   const setRatio = useAppStore((state) => state.setSidecarRatio);
   const vertical = binding.splitOrientation === "vertical";
-  const commit = (ratio: number) => setRatio(binding.ownerSessionId, ratio);
+  const commit = (ratio: number) => {
+    setRatio(binding.ownerSessionId, ratio);
+  };
 
   return (
     <div
@@ -204,7 +218,9 @@ function SidecarDivider({ binding }: { binding: SidecarBinding }) {
       aria-valuemin={30}
       aria-valuemax={70}
       aria-valuenow={Math.round(binding.splitRatio * 100)}
-      onDoubleClick={() => commit(0.5)}
+      onDoubleClick={() => {
+        commit(0.5);
+      }}
       onKeyDown={(event) => {
         const previous = vertical ? "ArrowUp" : "ArrowLeft";
         const next = vertical ? "ArrowDown" : "ArrowRight";

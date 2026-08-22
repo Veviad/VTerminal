@@ -243,6 +243,20 @@ describe("sidecar store", () => {
     expect(useAppStore.getState().sidecars).toEqual({});
   });
 
+  it("removes only the owning sidecar when unrelated pairings exist", () => {
+    addLocal();
+    addRemote();
+    addLocal("local-2");
+    addRemote("remote-2", "deploy-2@example.test", "saved-remote-2", "Staging");
+    start();
+    const unrelated = start("local-2", "local-2", "remote-2");
+
+    useAppStore.getState().removeSession("local");
+
+    expect(useAppStore.getState().sidecars).toEqual({ "local-2": unrelated });
+    expect(useAppStore.getState().sidecarForSession("remote-2")?.ownerSessionId).toBe("local-2");
+  });
+
   it("ends the binding and resets the owner when New Chat is invoked from either pane", () => {
     addLocal();
     addRemote();

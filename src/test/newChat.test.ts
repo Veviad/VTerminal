@@ -227,7 +227,7 @@ describe("startNewChat", () => {
       [remoteId, "cancelled"],
     ]);
     expect(aiCancelMock).toHaveBeenCalledWith("sidecar-request");
-    expect(split().session_id).toMatch(new RegExp(`^${ownerId}#`));
+    expect(split().session_id.startsWith(`${ownerId}#`)).toBe(true);
     expect(blanked().session_id).toBe(ownerId);
     expect(useAppStore.getState().sidecars).toEqual({});
     // Ending Sidecar is presentation/conversation state only: both live PTYs

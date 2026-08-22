@@ -6,6 +6,8 @@ import {
   SidecarPairingPopover,
   type SidecarTerminalChoice,
 } from "../components/sidecar/SidecarPairingPopover";
+import { SidecarReplacementPopover } from "../components/sidecar/SidecarReplacementPopover";
+import type { AgentTargetRole } from "../lib/sidecar";
 import { S } from "../lib/strings";
 
 const localChoices: readonly SidecarTerminalChoice[] = [
@@ -35,7 +37,7 @@ function renderPairingPopover({
   onOpenHosts?: () => void;
   onClose?: () => void;
 } = {}) {
-  render(
+  return render(
     <SidecarPairingPopover
       localChoices={local}
       remoteChoices={remote}
@@ -43,6 +45,30 @@ function renderPairingPopover({
       defaultRemoteId={defaultRemoteId}
       onStart={onStart}
       onOpenHosts={onOpenHosts}
+      onClose={onClose}
+    />,
+  );
+}
+
+function renderReplacementPopover({
+  defaultRole = "local",
+  choices = { local: localChoices, remote: remoteChoices },
+  onReplace = vi.fn(() => null),
+  onBack = vi.fn(),
+  onClose = vi.fn(),
+}: {
+  defaultRole?: AgentTargetRole;
+  choices?: Record<AgentTargetRole, readonly SidecarTerminalChoice[]>;
+  onReplace?: (role: AgentTargetRole, sessionId: string) => string | null;
+  onBack?: () => void;
+  onClose?: () => void;
+} = {}) {
+  return render(
+    <SidecarReplacementPopover
+      defaultRole={defaultRole}
+      choices={choices}
+      onReplace={onReplace}
+      onBack={onBack}
       onClose={onClose}
     />,
   );
@@ -119,6 +145,67 @@ describe("SidecarPairingPopover", () => {
     expect(onOpenHosts).toHaveBeenCalledOnce();
     expect(onClose).toHaveBeenCalledOnce();
     expect(onStart).not.toHaveBeenCalled();
+  });
+
+  it("dismisses on Escape and a pointer outside, but not a pointer inside", () => {
+    const onClose = vi.fn();
+    renderPairingPopover({ onClose });
+
+    fireEvent.pointerDown(
+      screen.getByRole("dialog", { name: S.aiPanel.sidecar.title }),
+    );
+    expect(onClose).not.toHaveBeenCalled();
+
+    fireEvent.pointerDown(document.body);
+    expect(onClose).toHaveBeenCalledOnce();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(2);
+  });
+
+  it("removes dismissal listeners when the popover unmounts", () => {
+    const onClose = vi.fn();
+    const { unmount } = renderPairingPopover({ onClose });
+
+    unmount();
+    fireEvent.pointerDown(document.body);
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    expect(onClose).not.toHaveBeenCalled();
+  });
+});
+
+describe("SidecarReplacementPopover", () => {
+  it("switches roles using that role's choices and replaces the selected target", () => {
+    const onReplace = vi.fn(() => null);
+    renderReplacementPopover({ onReplace });
+
+    fireEvent.click(screen.getByRole("button", { name: S.aiPanel.sidecar.remote }));
+    expect(screen.getByRole("combobox", { name: "Replacement terminal" })).toHaveValue(
+      "remote-1",
+    );
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Replacement terminal" }), {
+      target: { value: "remote-2" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: S.aiPanel.sidecar.replace }));
+
+    expect(onReplace).toHaveBeenCalledWith("remote", "remote-2");
+  });
+
+  it("keeps replacement disabled and never calls the handler when the role has no choices", () => {
+    const onReplace = vi.fn(() => null);
+    renderReplacementPopover({
+      choices: { local: [], remote: [] },
+      onReplace,
+    });
+
+    expect(screen.queryByRole("combobox", { name: "Replacement terminal" })).not.toBeInTheDocument();
+    const replace = screen.getByRole("button", { name: S.aiPanel.sidecar.replace });
+    expect(replace).toBeDisabled();
+
+    fireEvent.click(replace);
+    expect(onReplace).not.toHaveBeenCalled();
   });
 });
 

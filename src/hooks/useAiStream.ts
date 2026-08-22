@@ -27,6 +27,7 @@ import type {
   TerminalContext,
 } from "../lib/types";
 import { normalizeKnowledgeBucketRef } from "../lib/knowledge";
+import { ownRecordValue } from "../lib/records";
 import { defaultShell, localOsLabel } from "../lib/platform";
 import { sessionIdForRole } from "../lib/sidecar";
 import { collapseHome, resolveSessionTitle } from "../lib/sessionTitle";
@@ -362,7 +363,7 @@ export function useAiStream() {
     try {
       staged = await persistAttachments(
         ownerSessionId,
-        store.aiStreams[ownerSessionId]?.pendingAttachments ?? [],
+        ownRecordValue(store.aiStreams, ownerSessionId)?.pendingAttachments ?? [],
       );
     } catch (err) {
       if (ownsActiveRequest(ownerSessionId, requestId)) {
@@ -415,11 +416,12 @@ export function useAiStream() {
     // Read at dispatch time, not captured earlier: a reopened session's archived
     // transcript is written into the store asynchronously, and this is what turns
     // agent mode from single-shot into an actual conversation.
-    const history = useAppStore.getState().aiStreams[ownerSessionId]?.modelTranscript ?? [];
+    const history =
+      ownRecordValue(useAppStore.getState().aiStreams, ownerSessionId)?.modelTranscript ?? [];
     // Read at dispatch time for the same reason as `history`: the user may attach or
     // detach a bucket between turns, and each turn is a fresh run whose tool vector is
     // decided from this list.
-    const activeStream = useAppStore.getState().aiStreams[ownerSessionId];
+    const activeStream = ownRecordValue(useAppStore.getState().aiStreams, ownerSessionId);
     const docBuckets =
       activeStream?.attachedBucketRefs ??
       (activeStream?.attachedBucketIds ?? []).map(normalizeKnowledgeBucketRef);
@@ -437,7 +439,9 @@ export function useAiStream() {
         history,
         outgoing.images,
         docBuckets,
-        (e) => dispatchPanelEvent(ownerSessionId, requestId, e),
+        (e) => {
+          dispatchPanelEvent(ownerSessionId, requestId, e);
+        },
         sidecarTargets,
       );
       // Done/Paused clears requestId before agentStart resolves. generationId
@@ -493,7 +497,7 @@ export function useAiStream() {
       if (!body) return;
       const initialStore = useAppStore.getState();
       const ownerSessionId = initialStore.resolveAiOwner(sessionId);
-      const stream = initialStore.aiStreams[ownerSessionId];
+      const stream = ownRecordValue(initialStore.aiStreams, ownerSessionId);
       // Nothing to steer — this is an ordinary Send. Covers the race where the
       // run ended between the panel rendering and the user hitting Enter.
       if (!stream?.requestId || stream.mode !== "agent") {
@@ -521,7 +525,7 @@ export function useAiStream() {
     async (sessionId: string, decision: "run" | "skip" | "stop", editedCommand?: string) => {
       const initialStore = useAppStore.getState();
       const ownerSessionId = initialStore.resolveAiOwner(sessionId);
-      const stream = initialStore.aiStreams[ownerSessionId];
+      const stream = ownRecordValue(initialStore.aiStreams, ownerSessionId);
       const proposal = stream?.pendingProposal;
       if (!proposal) return;
       if (decision === "skip") {
@@ -537,7 +541,7 @@ export function useAiStream() {
   const cancel = useCallback(async (sessionId: string) => {
     const initialStore = useAppStore.getState();
     const ownerSessionId = initialStore.resolveAiOwner(sessionId);
-    const stream = initialStore.aiStreams[ownerSessionId];
+    const stream = ownRecordValue(initialStore.aiStreams, ownerSessionId);
     const binding = initialStore.sidecarForSession(ownerSessionId);
     // Release a command we are still awaiting in the terminal. This never
     // interrupts the command itself — it is running in the user's own shell,
@@ -575,16 +579,16 @@ export function useAiStream() {
 function isSessionBusy(sessionId: string): boolean {
   const store = useAppStore.getState();
   const ownerSessionId = store.resolveAiOwner(sessionId);
-  const status = store.aiStreams[ownerSessionId]?.status;
+  const status = ownRecordValue(store.aiStreams, ownerSessionId)?.status;
   return status === "streaming" || status === "awaiting_approval" || status === "executing";
 }
 
 function ownsGeneration(sessionId: string, generationId: string): boolean {
-  return useAppStore.getState().aiStreams[sessionId]?.generationId === generationId;
+  return ownRecordValue(useAppStore.getState().aiStreams, sessionId)?.generationId === generationId;
 }
 
 function ownsActiveRequest(sessionId: string, requestId: string): boolean {
-  const stream = useAppStore.getState().aiStreams[sessionId];
+  const stream = ownRecordValue(useAppStore.getState().aiStreams, sessionId);
   return stream?.generationId === requestId && stream.requestId === requestId;
 }
 
@@ -635,7 +639,7 @@ function resolveCommandTarget(
   }
 
   const targetSession = store.sessions.find((session) => session.id === expectedSessionId);
-  const targetUi = store.sessionUi[expectedSessionId];
+  const targetUi = ownRecordValue(store.sessionUi, expectedSessionId);
   const label =
     event.target_role === "remote"
       ? current.remoteIdentity.label
@@ -658,7 +662,7 @@ function canDispatchToTarget(
   expectedSessionId: string,
 ): boolean {
   const store = useAppStore.getState();
-  if (store.aiStreams[ownerSessionId]?.requestId !== requestId) return false;
+  if (ownRecordValue(store.aiStreams, ownerSessionId)?.requestId !== requestId) return false;
   const target = resolveCommandTarget(ownerSessionId, event);
   return target.ok && target.sessionId === expectedSessionId;
 }
@@ -671,7 +675,7 @@ function rejectTargetedRun(
 ): void {
   if (approvalId) void api.respondToApproval(approvalId, "stop").catch(() => {});
   const store = useAppStore.getState();
-  if (store.aiStreams[ownerSessionId]?.requestId !== requestId) return;
+  if (ownRecordValue(store.aiStreams, ownerSessionId)?.requestId !== requestId) return;
   store.finishAiStream(ownerSessionId, `Sidecar safety check stopped this run: ${reason}`);
   markTranscriptDirty(ownerSessionId);
   void api.aiCancel(requestId).catch(() => {});
@@ -694,7 +698,7 @@ function dispatchPanelEvent(sessionId: string, requestId: string, e: StreamEvent
   const store = useAppStore.getState();
   // Ownership check: drop events from a superseded/cancelled request so a
   // stale stream can never mutate a newer run's state.
-  if (store.aiStreams[sessionId]?.requestId !== requestId) return;
+  if (ownRecordValue(store.aiStreams, sessionId)?.requestId !== requestId) return;
   switch (e.type) {
     case "Delta":
       store.appendAiDelta(sessionId, e.content);
@@ -714,9 +718,12 @@ function dispatchPanelEvent(sessionId: string, requestId: string, e: StreamEvent
         break;
       }
       const binding = useAppStore.getState().sidecarForSession(sessionId);
-      const mode = target.meta && binding
-        ? binding.permissions[target.meta.role]
-        : (store.aiStreams[sessionId]?.permissionMode ?? "ask");
+      const mode =
+        target.meta && binding
+          ? target.meta.role === "local"
+            ? binding.permissions.local
+            : binding.permissions.remote
+          : (ownRecordValue(store.aiStreams, sessionId)?.permissionMode ?? "ask");
       const verdict = { readOnly: e.read_only, network: e.network };
       if (autoRuns(mode, verdict)) {
         // Auto-run is frontend sugar over the same gate: respond instantly. The

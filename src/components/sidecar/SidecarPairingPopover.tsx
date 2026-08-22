@@ -1,11 +1,24 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { Link2, Server, ShieldCheck, Terminal, X } from "lucide-react";
+import { useDismissibleLayer } from "../../hooks/useDismissibleLayer";
 import { S } from "../../lib/strings";
 
 export interface SidecarTerminalChoice {
   id: string;
   label: string;
   detail: string;
+}
+
+function firstChoiceId(choices: readonly SidecarTerminalChoice[]): string {
+  for (const choice of choices) return choice.id;
+  return "";
+}
+
+function initialChoiceId(
+  preferredId: string | null,
+  choices: readonly SidecarTerminalChoice[],
+): string {
+  return preferredId === null ? firstChoiceId(choices) : preferredId;
 }
 
 export function SidecarPairingPopover({
@@ -26,25 +39,12 @@ export function SidecarPairingPopover({
   onOpenHosts: () => void;
   onClose: () => void;
 }) {
-  const [localId, setLocalId] = useState(defaultLocalId ?? localChoices[0]?.id ?? "");
-  const [remoteId, setRemoteId] = useState(defaultRemoteId ?? remoteChoices[0]?.id ?? "");
+  const [localId, setLocalId] = useState(initialChoiceId(defaultLocalId, localChoices));
+  const [remoteId, setRemoteId] = useState(initialChoiceId(defaultRemoteId, remoteChoices));
   const [error, setError] = useState<string | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    const onPointer = (event: PointerEvent) => {
-      if (!panelRef.current?.contains(event.target as Node)) onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    window.addEventListener("pointerdown", onPointer);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("pointerdown", onPointer);
-    };
-  }, [onClose]);
+  useDismissibleLayer(panelRef, onClose);
 
   const canStart = Boolean(localId && remoteId && localId !== remoteId);
 
@@ -54,7 +54,9 @@ export function SidecarPairingPopover({
       role="dialog"
       aria-label={S.aiPanel.sidecar.title}
       className="absolute end-0 top-full z-50 mt-1 w-[310px] rounded-lg border border-border-subtle bg-bg-elevated p-3 shadow-lg"
-      onPointerDown={(event) => event.stopPropagation()}
+      onPointerDown={(event) => {
+        event.stopPropagation();
+      }}
     >
       <div className="mb-3 flex items-start justify-between gap-2">
         <div>
@@ -160,7 +162,9 @@ function ChoiceRow({
       {choices.length > 0 ? (
         <select
           value={value}
-          onChange={(event) => onChange(event.target.value)}
+          onChange={(event) => {
+            onChange(event.target.value);
+          }}
           className="w-full rounded-md border border-border-subtle bg-bg-primary px-2 py-1.5 text-[11px] text-text-primary outline-none focus:border-accent"
         >
           {choices.map((choice) => (
