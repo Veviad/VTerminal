@@ -14,7 +14,7 @@ import { abortSession, resetSessionMode } from "../lib/ptyExec";
 import { sanitizeCommand } from "../lib/ptyExecShell";
 import { clearPendingConnect, takePendingConnect } from "../lib/sshConnect";
 import { replayScrollback, subscribeTerm } from "../lib/termRegistry";
-import { trackSession } from "../lib/sessionPersistence";
+import { markTranscriptDirty, trackSession } from "../lib/sessionPersistence";
 import { archiveOnClose } from "../lib/sessionArchive";
 import { trackArchiveMutation } from "../lib/archiveWriteTracker";
 import { forgetRunbookTerminal } from "../lib/runbookTerminalPrivacy";
@@ -55,6 +55,70 @@ function clearLongRunningTimer(sessionId: string): void {
     clearTimeout(timer);
     longRunningTimers.delete(sessionId);
   }
+}
+
+/** Fence every asynchronous continuation that can still act on a linked pair.
+ *
+ * This runs before a user-initiated PTY kill and synchronously at the start of
+ * an observed PTY exit. `aiCancel` may take a round trip, so store ownership is
+ * retired first; late events then fail the existing generation checks even if
+ * the backend has not acknowledged cancellation yet.
+ *
+ * Returns null when there is no cancellation IPC to await. Keeping that fast
+ * path synchronous preserves closeSession's existing persistence lease/PTY-kill
+ * ordering for ordinary idle tabs. */
+function cancelLinkedSessionWork(
+  sessionId: string,
+  reason: "closed" | "cancelled",
+): Promise<void> | null {
+  const store = useAppStore.getState();
+  const binding = store.sidecarForSession(sessionId);
+  const ownerSessionId = store.resolveAiOwner(sessionId);
+  const targetSessionIds = binding
+    ? [binding.localSessionId, binding.remoteSessionId]
+    : [sessionId];
+
+  // Release both target-specific PTY waiters. This never sends Ctrl+C or kills
+  // a shell command; it only stops the agent from awaiting disposed terminals.
+  for (const targetSessionId of new Set(targetSessionIds)) {
+    abortSession(targetSessionId, reason);
+  }
+
+  const cancellations: Promise<unknown>[] = [];
+  const requestId = store.aiStreams[ownerSessionId]?.requestId;
+  if (requestId) {
+    // Same synchronous fence as useAiStream.cancel: fold visible partial text,
+    // settle the panel, and invalidate request/generation ownership first.
+    store.finishAiStream(ownerSessionId);
+    markTranscriptDirty(ownerSessionId);
+    cancellations.push(api.aiCancel(requestId));
+  } else {
+    // Covers the Done → agentStart promise gap, where requestId is already null
+    // but a stale transcript continuation still owns generationId.
+    store.flushAiStreaming(ownerSessionId);
+    store.fenceAiGeneration(ownerSessionId);
+    if (binding) markTranscriptDirty(ownerSessionId);
+  }
+
+  // Inline command-composer requests are per terminal rather than per shared
+  // conversation. A target disappearing invalidates either member's proposal.
+  for (const targetSessionId of new Set(targetSessionIds)) {
+    const composerRequestId = store.sessionUi[targetSessionId]?.composerRequestId;
+    if (composerRequestId) {
+      // Composer callbacks already compare this id before committing. Clear it
+      // synchronously so a late proposal cannot reopen on the surviving pane.
+      store.updateSessionUi(targetSessionId, {
+        composerStatus: "idle",
+        composerProposal: null,
+        composerError: null,
+        composerRequestId: null,
+      });
+      cancellations.push(api.aiCancel(composerRequestId));
+    }
+  }
+
+  if (cancellations.length === 0) return null;
+  return Promise.allSettled(cancellations).then(() => undefined);
 }
 
 /** Resolve once the shell reaches its input phase (OSC 133;B), or on timeout /
@@ -139,6 +203,11 @@ export function useSessions() {
           // machine — until this block ends, the local cwd is not the truth.
           const nested = detectNesting(command);
           if (nested) {
+            // Entering a nested environment invalidates a Sidecar local role.
+            // Fence the provider even when this workspace is not mounted.
+            if (useAppStore.getState().sidecarForSession(sessionId)) {
+              void cancelLinkedSessionWork(sessionId, "cancelled");
+            }
             // Claimed only on an exact command match, so a connect the user
             // typed by hand still gets `remote` but no saved-host identity.
             const connect = takePendingConnect(sessionId, command);
@@ -187,6 +256,11 @@ export function useSessions() {
           // `ssh` returned — we are back on the local shell, so local cwd is
           // trustworthy again and any remote exec mode must be forgotten.
           if (s.sessionUi[sessionId]?.nestedBlockId === blockId) {
+            // The SSH role stopped being SSH. Cancel before publishing the
+            // identity transition so no hidden Sidecar continues generating.
+            if (s.sidecarForSession(sessionId)) {
+              void cancelLinkedSessionWork(sessionId, "cancelled");
+            }
             s.updateSessionUi(sessionId, { remote: null, nestedBlockId: null, remoteHost: null });
             resetSessionMode(sessionId);
           }
@@ -295,6 +369,9 @@ export function useSessions() {
       },
       (event) => {
         if (event.type === "Exit") {
+          // Cancel the SHARED owner before marking either target unavailable.
+          // updateSession below then degrades (or removes) the binding.
+          void cancelLinkedSessionWork(sessionId, "closed");
           api.releasePtyChannels(sessionId);
           useAppStore.getState().updateSession(sessionId, {
             exited: true,
@@ -469,17 +546,12 @@ export function useSessions() {
   const closeSession = useCallback(
     (sessionId: string) =>
       trackArchiveMutation(async () => {
-        // Cancel any in-flight AI work scoped to this session — otherwise the
-        // stream callbacks resurrect store entries for the dead session and the
-        // local model keeps generating for nobody.
-        const state = useAppStore.getState();
-        const streamReq = state.aiStreams[sessionId]?.requestId;
-        if (streamReq) void api.aiCancel(streamReq).catch(() => {});
-        const composerReq = state.sessionUi[sessionId]?.composerRequestId;
-        if (composerReq) void api.aiCancel(composerReq).catch(() => {});
-        // A command the agent typed into this terminal is still being awaited —
-        // release it now, or its poll keeps running against a disposed xterm.
-        abortSession(sessionId, "closed");
+        const bindingAtClose = useAppStore.getState().sidecarForSession(sessionId);
+        // Sidecar work belongs to the owner conversation, not necessarily the
+        // tab being closed. Fence it and release BOTH PTY waiters before the
+        // selected target can disappear.
+        const cancellation = cancelLinkedSessionWork(sessionId, "closed");
+        if (cancellation) await cancellation;
         // Only cleared on nested-block end otherwise, so a tab closed while inside
         // ssh leaks its negotiated exec mode for the life of the app.
         resetSessionMode(sessionId);
@@ -488,11 +560,26 @@ export function useSessions() {
         cancelNaming(sessionId);
 
         const entry = getTerm(sessionId);
-        if (entry) releaseWebgl(entry);
+        // A linked target becomes a degraded, scrollback-preserving pane. Keep
+        // its xterm and renderer mounted until the user replaces or unlinks it;
+        // a second close after End Sidecar follows the ordinary disposal path.
+        if (entry && !bindingAtClose) releaseWebgl(entry);
         try {
           await api.ptyKill(sessionId);
         } catch {
           // Session may already be gone (shell exited) — still clean up the UI.
+        }
+        if (bindingAtClose) {
+          forgetRunbookTerminal(sessionId);
+          const store = useAppStore.getState();
+          const live = store.sessions.find((session) => session.id === sessionId);
+          if (live) {
+            store.updateSession(sessionId, {
+              exited: true,
+              exitCode: live.exitCode,
+            });
+          }
+          return;
         }
         // Ordering here is load-bearing and easy to break:
         //   after ptyKill  — so the shell's final bytes are in the buffer

@@ -42,6 +42,7 @@ import type {
   RemoteServerInput,
   Settings,
   SettingsPatch,
+  SidecarAgentTargets,
   SshConfigCandidate,
   SshHost,
   SshHostInput,
@@ -231,6 +232,8 @@ export async function agentStart(
    *  and an empty list means the run is never offered a `search_docs` tool at all. */
   docBuckets: KnowledgeBucketRef[],
   onEvent: (e: StreamEvent) => void,
+  /** Optional immutable local/SSH target pair for a linked Agent turn. */
+  sidecarTargets?: SidecarAgentTargets,
 ): Promise<ChatMessage[]> {
   const channel = new Channel<StreamEvent>();
   channel.onmessage = onEvent;
@@ -246,6 +249,7 @@ export async function agentStart(
       // `doc_buckets` here silently deserializes the optional Rust argument as
       // `None`, which removes `search_docs` from the agent's tool vector.
       docBuckets,
+      sidecarTargets: sidecarTargets ?? null,
       onEvent: channel,
     });
   } finally {

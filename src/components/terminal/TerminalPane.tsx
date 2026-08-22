@@ -6,11 +6,24 @@ import { AiComposer } from "../ai/AiComposer";
 import { useAppStore } from "../../stores/appStore";
 import { S } from "../../lib/strings";
 
-export function TerminalPane({ sessionId, active }: { sessionId: string; active: boolean }) {
+export function TerminalPane({
+  sessionId,
+  active,
+  visible = active,
+  showComposer = true,
+}: {
+  sessionId: string;
+  /** Owns keyboard focus and the sole WebGL renderer. */
+  active: boolean;
+  /** Sidecar keeps two panes visible while only one is active. */
+  visible?: boolean;
+  /** A linked workspace has one shared Agent panel, not two inline composers. */
+  showComposer?: boolean;
+}) {
   const session = useAppStore((s) => s.sessions.find((x) => x.id === sessionId));
 
   return (
-    <div className={active ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
+    <div className={visible ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
       <div className="relative min-h-0 flex-1 bg-bg-terminal">
         <TerminalView sessionId={sessionId} active={active} />
         <BlockGutter sessionId={sessionId} />
@@ -24,7 +37,7 @@ export function TerminalPane({ sessionId, active }: { sessionId: string; active:
           </div>
         )}
       </div>
-      <AiComposer sessionId={sessionId} />
+      {showComposer && <AiComposer sessionId={sessionId} />}
     </div>
   );
 }

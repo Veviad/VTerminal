@@ -1,6 +1,5 @@
-import { useState } from "react";
 import { ArrowLeft } from "lucide-react";
-import { useAppStore } from "../../stores/appStore";
+import { useAppStore, type SettingsTab } from "../../stores/appStore";
 import { ModelsSettings } from "./ModelsSettings";
 import { AppearanceSection } from "./AppearanceSection";
 import { TerminalSection } from "./TerminalSection";
@@ -12,21 +11,10 @@ import { UpdatesSection } from "./UpdatesSection";
 import { Row } from "../ui/Row";
 import { S } from "../../lib/strings";
 
-type Tab =
-  | "models"
-  | "agent"
-  | "docs"
-  | "runbooks"
-  | "appearance"
-  | "terminal"
-  | "hosts"
-  | "updates"
-  | "about";
-
 // The Docs tab is listed even while the feature is off: its own toggle is the first
 // thing inside it, and a tab that only appears once the feature is enabled leaves the
 // switch nowhere to be found.
-const TABS: { id: Tab; label: string }[] = [
+const TABS: { id: SettingsTab; label: string }[] = [
   { id: "models", label: S.settings.tabs.models },
   { id: "agent", label: S.settings.tabs.agent },
   { id: "docs", label: S.settings.tabs.docs },
@@ -40,7 +28,8 @@ const TABS: { id: Tab; label: string }[] = [
 
 export function SettingsPage() {
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
-  const [tab, setTab] = useState<Tab>("models");
+  const tab = useAppStore((s) => s.settingsTab);
+  const setTab = useAppStore((s) => s.setSettingsTab);
 
   return (
     <div className="flex h-full flex-col bg-bg-primary">

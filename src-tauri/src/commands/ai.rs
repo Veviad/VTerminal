@@ -1,7 +1,7 @@
 use tauri::ipc::Channel;
 use tauri::{State, Wry};
 
-use crate::agent::context::TerminalContext;
+use crate::agent::context::{SidecarTargets, TerminalContext};
 use crate::agent::{prompts, AiState, StreamEvent};
 use crate::models::catalog::{self, CatalogModel, Effort, ProviderId};
 use crate::provider::{ChatMessage, ChatParams, Provider, ToolChoiceMode};
@@ -652,6 +652,9 @@ pub async fn agent_start(
     request_id: String,
     goal: String,
     context: TerminalContext,
+    // Optional role-labelled PTYs for Agent Sidecar mode. `context` remains
+    // required so every existing/single-terminal caller keeps the same API.
+    sidecar_targets: Option<SidecarTargets>,
     // Document buckets the user attached to this session. Same `Option` reasoning as
     // `history` below.
     doc_buckets: Option<Vec<crate::knowledge::KnowledgeBucketRef>>,
@@ -663,6 +666,15 @@ pub async fn agent_start(
     images: Option<Vec<crate::provider::ImagePart>>,
     on_event: Channel<StreamEvent>,
 ) -> Result<Vec<crate::provider::ChatMessage>, String> {
+    if let Some(targets) = &sidecar_targets {
+        if let Err(message) = targets.validate() {
+            let _ = on_event.send(StreamEvent::Error {
+                message: message.clone(),
+            });
+            return Err(message);
+        }
+    }
+
     // Before anything that can await: resolving a local provider loads a GGUF,
     // which takes seconds, and a steer typed in that window must not be refused
     // for a run the user can already see starting.
@@ -706,10 +718,32 @@ pub async fn agent_start(
     };
     let docs_attached = !doc_buckets.is_empty();
 
+    let (rendered_context, command_cwd, exec_target, sidecar_mode) =
+        if let Some(targets) = &sidecar_targets {
+            (
+                targets.render(),
+                targets.local.cwd.clone(),
+                crate::agent::run::ExecTarget::Sidecar {
+                    local_session_id: targets.local.session_id.clone(),
+                    remote_session_id: targets.remote.session_id.clone(),
+                },
+                true,
+            )
+        } else {
+            (
+                context.render(),
+                context.cwd.clone(),
+                crate::agent::run::ExecTarget::Pty {
+                    session_id: context.session_id.clone(),
+                },
+                false,
+            )
+        };
+
     let config = crate::agent::run::AgentConfig {
         request_id: request_id.clone(),
         shell,
-        cwd: context.cwd.clone(),
+        cwd: command_cwd,
         temperature: crate::commands::settings::read_f64_opt(&app, "temperature").map(|t| t as f32),
         effort: resolved.effort,
         // Clamped on READ as well as on write: `save_settings` bounds this to
@@ -726,13 +760,16 @@ pub async fn agent_start(
         )),
         web_access,
         doc_buckets,
-        // Always the user's visible terminal: commands must run where the user
-        // is (including a remote host) and be visible while they run.
-        exec_target: crate::agent::run::ExecTarget::Pty {
-            session_id: context.session_id.clone(),
-        },
+        // Always a user-established visible PTY. Sidecar freezes one session id
+        // per role; ordinary runs retain their single destination.
+        exec_target,
     };
     let history = history.unwrap_or_default();
+    let agent_instructions = if sidecar_mode {
+        format!("{}\n\n{}", prompts::AGENT, prompts::AGENT_SIDECAR)
+    } else {
+        prompts::AGENT.to_string()
+    };
     // The curl tier is appended separately rather than living in AGENT because a
     // model that holds a real fetch tool must not be told to shell out for the
     // same job. Today no model has one, so every run gets it; the native tier
@@ -742,23 +779,23 @@ pub async fn agent_start(
         // same job; a model with neither must not be told it can reach the web.
         (true, true) => format!(
             "{}\n\n{}\n\n{}",
-            prompts::AGENT,
+            agent_instructions,
             prompts::AGENT_WEB_NATIVE,
-            context.render()
+            rendered_context
         ),
         (true, false) => format!(
             "{}\n\n{}\n\n{}",
-            prompts::AGENT,
+            agent_instructions,
             prompts::AGENT_WEB_CURL,
-            context.render()
+            rendered_context
         ),
         // Internet off. This arm used to append nothing, which was harmless only
         // because `ai_web_access` had no writer and could never be false.
         (false, _) => format!(
             "{}\n\n{}\n\n{}",
-            prompts::AGENT,
+            agent_instructions,
             prompts::AGENT_WEB_NONE,
-            context.render()
+            rendered_context
         ),
     };
     // Paired with the tool: appended exactly when `tools()` adds `search_docs`, so the

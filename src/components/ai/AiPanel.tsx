@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   BookOpen,
   Brain,
+  ArrowLeftRight,
   ChevronDown,
   ChevronRight,
   FileText,
@@ -9,17 +10,21 @@ import {
   Image as ImageIcon,
   KeyRound,
   Keyboard,
+  Link2,
+  Link2Off,
   MessageSquarePlus,
   MonitorX,
   Paperclip,
   ScanText,
   Send,
+  Server,
   ShieldCheck,
   Sparkles,
   Square,
+  Terminal,
   Zap,
 } from "lucide-react";
-import { useAppStore, type AiMode } from "../../stores/appStore";
+import { useAppStore, type AiMode, type SessionUiState } from "../../stores/appStore";
 import {
   beginPanelResize,
   commitAiPanelRatio,
@@ -61,7 +66,22 @@ import {
   stageInputs,
   type FoldedBlock,
 } from "../../lib/attachInput";
-import type { AiMessage, Attachment, Block, CommandStall } from "../../lib/types";
+import type { AiMessage, Attachment, Block, CommandStall, Session } from "../../lib/types";
+import {
+  captureSidecarRemoteIdentity,
+  sessionIdForRole,
+  sidecarForSession,
+  validateSidecarTarget,
+  type AgentTargetRole,
+  type SidecarBinding,
+} from "../../lib/sidecar";
+import { getTerm } from "../../lib/termRegistry";
+import { collapseHome, resolveSessionTitle } from "../../lib/sessionTitle";
+import {
+  SidecarPairingPopover,
+  type SidecarTerminalChoice,
+} from "../sidecar/SidecarPairingPopover";
+import { SidecarReplacementPopover } from "../sidecar/SidecarReplacementPopover";
 
 /** Stable fallback for the blocks selector.
  *
@@ -85,6 +105,11 @@ function hasFiles(dt: DataTransfer | null): boolean {
 
 export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const collapsed = !useAppStore((s) => s.aiPanelOpen);
+  const sessions = useAppStore((s) => s.sessions);
+  const sessionUi = useAppStore((s) => s.sessionUi);
+  const aiStreams = useAppStore((s) => s.aiStreams);
+  const sidecars = useAppStore((s) => s.sidecars);
+  const activeSessionId = useAppStore((s) => s.activeSessionId);
   const stream = useAppStore((s) => (sessionId ? s.aiStreams[sessionId] : undefined));
   const blocks = useAppStore((s) =>
     sessionId ? (s.sessionUi[sessionId]?.blocks ?? NO_BLOCKS) : NO_BLOCKS,
@@ -102,10 +127,19 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const detachFileFromAi = useAppStore((s) => s.detachFileFromAi);
   const setAiMode = useAppStore((s) => s.setAiMode);
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
+  const setSettingsTab = useAppStore((s) => s.setSettingsTab);
+  const startSidecar = useAppStore((s) => s.startSidecar);
+  const endSidecar = useAppStore((s) => s.endSidecar);
+  const swapSidecarPanes = useAppStore((s) => s.swapSidecarPanes);
+  const replaceSidecarTarget = useAppStore((s) => s.replaceSidecarTarget);
+  const setSidecarPermission = useAppStore((s) => s.setSidecarPermission);
+  const setSidecarFocusedSession = useAppStore((s) => s.setSidecarFocusedSession);
   const { ask, startAgent, continueRun, steer, respondToProposal, cancel } = useAiStream();
   const chatIsKept = useAppStore(selectArchiveWillKeepChats);
   const [input, setInput] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);
+  const [sidecarMenuOpen, setSidecarMenuOpen] = useState(false);
+  const [replacingTarget, setReplacingTarget] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const asideRef = useRef<HTMLElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -116,6 +150,58 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   // cursor crosses, so a flag flickers the overlay off mid-drag.
   const [dragDepth, setDragDepth] = useState(0);
   const ratio = useAppStore((s) => s.aiPanelRatio);
+  const sidecar = sessionId ? sidecarForSession(sidecars, sessionId) : null;
+  const sidecarView = { sessions, sessionUi, aiStreams };
+  const availableFor = (role: AgentTargetRole) =>
+    sessions.filter(
+      (candidate) =>
+        !sidecarForSession(sidecars, candidate.id) &&
+        validateSidecarTarget(sidecarView, candidate.id, role, {
+          terminalAvailable: (id) => Boolean(getTerm(id)),
+        }).ok,
+    );
+  const ownerLocal = sessionId
+    ? validateSidecarTarget(sidecarView, sessionId, "local", {
+        terminalAvailable: (id) => Boolean(getTerm(id)),
+      }).ok
+    : false;
+  const ownerRemote = sessionId
+    ? validateSidecarTarget(sidecarView, sessionId, "remote", {
+        terminalAvailable: (id) => Boolean(getTerm(id)),
+      }).ok
+    : false;
+  const localChoices = (ownerLocal
+    ? availableFor("local").filter((candidate) => candidate.id === sessionId)
+    : ownerRemote
+      ? availableFor("local")
+      : []
+  ).map((candidate) => terminalChoice(candidate.id, "local", sessions, sessionUi));
+  const remoteChoices = (ownerRemote
+    ? availableFor("remote").filter((candidate) => candidate.id === sessionId)
+    : ownerLocal
+      ? availableFor("remote")
+      : []
+  ).map((candidate) => terminalChoice(candidate.id, "remote", sessions, sessionUi));
+  const replacementChoices = (role: AgentTargetRole): SidecarTerminalChoice[] => {
+    if (!sidecar) return [];
+    const currentTarget = sessionIdForRole(sidecar, role);
+    const otherTarget = sessionIdForRole(sidecar, role === "local" ? "remote" : "local");
+    return sessions
+      .filter((candidate) => {
+        if (candidate.id === otherTarget) return false;
+        // Moving the transcript-owning role would orphan the shared timeline.
+        // It may still be explicitly recovered in its existing terminal.
+        if (currentTarget === sidecar.ownerSessionId && candidate.id !== currentTarget) {
+          return false;
+        }
+        const occupied = sidecarForSession(sidecars, candidate.id);
+        if (occupied && occupied.ownerSessionId !== sidecar.ownerSessionId) return false;
+        return validateSidecarTarget(sidecarView, candidate.id, role, {
+          terminalAvailable: (id) => Boolean(getTerm(id)),
+        }).ok;
+      })
+      .map((candidate) => terminalChoice(candidate.id, role, sessions, sessionUi));
+  };
 
   // A SHARE of the panel, not a fixed 120px: the same number is too small on a
   // tall window and too greedy on a short one. The composer is `shrink-0` and
@@ -140,6 +226,13 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const thinkingContent = stream?.thinkingContent ?? "";
   const pendingProposal = stream?.pendingProposal ?? null;
   const permissionMode = stream?.permissionMode ?? "ask";
+  const proposalRole = pendingProposal?.targetRole ?? null;
+  const proposalPermissionMode =
+    sidecar && proposalRole ? sidecar.permissions[proposalRole] : permissionMode;
+  const proposalTarget =
+    sidecar && proposalRole
+      ? sidecarTargetLabel(sidecar, proposalRole, sessions, sessionUi)
+      : describeRemote(remote) ?? cwd;
   const attachedBlocks = (stream?.attachedBlockIds ?? [])
     .map((id) => blocks.find((b) => b.id === id))
     .filter((b) => b !== undefined);
@@ -194,7 +287,19 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
 
   // One panel serves every tab, so an armed confirmation would otherwise follow
   // the user to the next one and discard a conversation they never clicked on.
-  useEffect(() => setConfirmClear(false), [sessionId]);
+  useEffect(() => {
+    setConfirmClear(false);
+    setReplacingTarget(false);
+  }, [sessionId]);
+
+  useEffect(() => {
+    const open = (event: Event) => {
+      setSidecarMenuOpen(true);
+      setReplacingTarget(Boolean((event as CustomEvent<{ replace?: boolean }>).detail?.replace));
+    };
+    window.addEventListener("vterminal:open-sidecar", open);
+    return () => window.removeEventListener("vterminal:open-sidecar", open);
+  }, []);
 
   const agentMode = mode === "agent";
   // Agent mode is steerable mid-run; ask mode is one provider call with no round
@@ -203,7 +308,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const queuedSteers = stream?.steerQueue.length ?? 0;
 
   const submit = () => {
-    if (!sessionId || !input.trim() || !aiReady) return;
+    if (!sessionId || !input.trim() || !aiReady || sidecar?.degraded) return;
     // Blocked, never silently stripped: an answer about an image the model never
     // received is indistinguishable from an answer about one it did.
     if (imagesBlocked) return;
@@ -261,7 +366,16 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
           {(["ask", "agent"] as const).map((m) => (
             <button
               key={m}
-              onClick={() => sessionId && setAiMode(sessionId, m)}
+              onClick={() => {
+                if (!sessionId) return;
+                if (m === "ask" && sidecar) {
+                  const focusedSessionId = sidecar.focusedSessionId;
+                  endSidecar(sidecar.ownerSessionId);
+                  setAiMode(focusedSessionId, m);
+                  return;
+                }
+                setAiMode(sessionId, m);
+              }}
               disabled={busy}
               className={`flex items-center gap-1 rounded-md px-2.5 py-0.5 text-[11px] font-medium transition-all duration-150 ${
                 (mode === m || (mode === "explain" && m === "ask"))
@@ -309,6 +423,116 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
           >
             <MessageSquarePlus size={14} />
           </button>
+          {agentMode && sessionId && (
+            <div className="relative">
+              <button
+                onClick={() => setSidecarMenuOpen((open) => !open)}
+                disabled={busy}
+                className={`flex items-center gap-1 rounded-md px-1.5 py-1 text-[10px] font-medium transition-colors ${
+                  sidecar
+                    ? "bg-accent/10 text-accent"
+                    : "text-text-muted hover:bg-bg-hover hover:text-text-secondary"
+                } ${busy ? "opacity-50" : ""}`}
+                title={S.aiPanel.sidecar.title}
+                aria-expanded={sidecarMenuOpen}
+              >
+                <Link2 size={11} />
+                {S.aiPanel.sidecar.label}
+              </button>
+              {sidecarMenuOpen &&
+                (sidecar ? (
+                  replacingTarget ? (
+                    <SidecarReplacementPopover
+                      defaultRole={sidecar.degraded?.role ?? (
+                        sidecar.ownerSessionId === sidecar.localSessionId ? "remote" : "local"
+                      )}
+                      choices={{
+                        local: replacementChoices("local"),
+                        remote: replacementChoices("remote"),
+                      }}
+                      onReplace={(role, replacementSessionId) => {
+                        const result = replaceSidecarTarget(
+                          sidecar.ownerSessionId,
+                          role,
+                          replacementSessionId,
+                        );
+                        if (!result.ok) return result.reason;
+                        setReplacingTarget(false);
+                        setSidecarMenuOpen(false);
+                        return null;
+                      }}
+                      onBack={() => setReplacingTarget(false)}
+                      onClose={() => {
+                        setReplacingTarget(false);
+                        setSidecarMenuOpen(false);
+                      }}
+                    />
+                  ) : (
+                    <ActiveSidecarMenu
+                      binding={sidecar}
+                      onSwap={() => swapSidecarPanes(sidecar.ownerSessionId)}
+                      onReplace={() => setReplacingTarget(true)}
+                      onEnd={() => {
+                        endSidecar(sidecar.ownerSessionId);
+                        setSidecarMenuOpen(false);
+                      }}
+                      onClose={() => setSidecarMenuOpen(false)}
+                    />
+                  )
+                ) : (
+                  <SidecarPairingPopover
+                    localChoices={localChoices}
+                    remoteChoices={remoteChoices}
+                    defaultLocalId={
+                      ownerLocal
+                        ? sessionId
+                        : localChoices.some((choice) => choice.id === activeSessionId)
+                          ? activeSessionId
+                          : (localChoices[0]?.id ?? null)
+                    }
+                    defaultRemoteId={
+                      ownerRemote
+                        ? sessionId
+                        : remoteChoices.some((choice) => choice.id === activeSessionId)
+                          ? activeSessionId
+                          : (remoteChoices[0]?.id ?? null)
+                    }
+                    onStart={(localId, remoteId) => {
+                      const live = useAppStore.getState();
+                      const runtime = { terminalAvailable: (id: string) => Boolean(getTerm(id)) };
+                      const localValidation = validateSidecarTarget(live, localId, "local", runtime);
+                      if (!localValidation.ok) return localValidation.reason;
+                      const remoteValidation = validateSidecarTarget(live, remoteId, "remote", runtime);
+                      if (!remoteValidation.ok) return remoteValidation.reason;
+                      const remoteSession = live.sessions.find(
+                        (candidate) => candidate.id === remoteId,
+                      );
+                      const identity = captureSidecarRemoteIdentity(
+                        remoteSession,
+                        live.sessionUi[remoteId],
+                      );
+                      if (!identity) return "The SSH target identity could not be verified.";
+                      const result = startSidecar(sessionId, localId, remoteId, identity);
+                      if (result.ok) {
+                        const focus =
+                          activeSessionId === localId || activeSessionId === remoteId
+                            ? activeSessionId
+                            : sessionId;
+                        if (focus) setSidecarFocusedSession(sessionId, focus);
+                        setSidecarMenuOpen(false);
+                        return null;
+                      }
+                      return result.reason;
+                    }}
+                    onOpenHosts={() => {
+                      setSettingsTab("hosts");
+                      setSettingsOpen(true);
+                    }}
+                    onClose={() => setSidecarMenuOpen(false)}
+                  />
+                ))}
+            </div>
+          )}
           {/* A dropdown rather than a segmented control, because three segmented
               controls plus two buttons need ~510px and this panel defaults to 420px and
               floors at 320px, in a fixed-height row with no wrap and no scroll.
@@ -319,7 +543,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
               fine; hiding the state would break the promise that arming auto-accept is a
               deliberate, visible act. The per-mode explanations also read better here:
               as a segmented control they were tooltips nobody hovered. */}
-          {agentMode && sessionId && (
+          {agentMode && sessionId && !sidecar && (
             <Dropdown
               value={permissionMode}
               options={PERMISSION_MODES.map((m) => ({
@@ -377,14 +601,40 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
         </div>
       </div>
 
-      {agentMode && permissionMode === "auto_all" && (
+      {agentMode && sidecar && (
+        <SidecarContextBar
+          binding={sidecar}
+          sessions={sessions}
+          sessionUi={sessionUi}
+          activeSessionId={activeSessionId}
+          onFocus={(targetSessionId) =>
+            setSidecarFocusedSession(sidecar.ownerSessionId, targetSessionId)
+          }
+          onPermission={(role, next) => {
+            setSidecarPermission(sidecar.ownerSessionId, role, next);
+            if (
+              pendingProposal?.targetRole === role &&
+              autoRuns(next, pendingProposal)
+            ) {
+              void respondToProposal(sidecar.ownerSessionId, "run");
+            }
+          }}
+        />
+      )}
+
+      {agentMode && !sidecar && permissionMode === "auto_all" && (
         <div className="shrink-0 border-b border-border-subtle bg-warning/10 px-3 py-1 text-[10px] text-warning">
           {S.aiPanel.autoAllWarning}
         </div>
       )}
-      {agentMode && permissionMode === "auto_read" && (
+      {agentMode && !sidecar && permissionMode === "auto_read" && (
         <div className="shrink-0 border-b border-border-subtle px-3 py-1 text-[10px] text-text-muted">
           {S.aiPanel.autoReadNote}
+        </div>
+      )}
+      {agentMode && sidecar?.permissions.remote === "auto_all" && (
+        <div className="shrink-0 border-b border-border-subtle bg-warning/10 px-3 py-1 text-[10px] text-warning">
+          {S.aiPanel.sidecar.remoteAll(sidecar.remoteIdentity.label)}
         </div>
       )}
 
@@ -394,7 +644,11 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
           <p className="pt-6 text-center text-[12px] text-text-muted">
             {aiReady
               ? agentMode
-                ? S.aiPanel.agentPlaceholder
+                ? sidecar
+                  ? sidecar.degraded
+                    ? S.aiPanel.sidecar.degradedHint
+                    : S.aiPanel.sidecar.example
+                  : S.aiPanel.agentPlaceholder
                 : S.aiPanel.placeholder
               : S.composer.blocked[aiBlockedReason ?? "load"]}
           </p>
@@ -432,12 +686,13 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             key={pendingProposal.approvalId}
             command={pendingProposal.command}
             explanation={pendingProposal.explanation}
-            remote={!!remote}
-            target={describeRemote(remote) ?? cwd}
+            remote={proposalRole ? proposalRole === "remote" : !!remote}
+            targetRole={proposalRole ?? undefined}
+            target={proposalTarget}
             queuedSteers={queuedSteers}
             // Why this is asking despite an armed auto mode. Null in Confirm,
             // where no explanation is owed.
-            askedBecause={askReason(permissionMode, pendingProposal)}
+            askedBecause={askReason(proposalPermissionMode, pendingProposal)}
             onRespond={(decision, edited) => void respondToProposal(sessionId, decision, edited)}
           />
         )}
@@ -456,7 +711,9 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             <button
               type="button"
               onClick={() => void continueRun(sessionId)}
-              className="mt-1.5 rounded-md bg-accent px-3 py-1 text-[11px] font-medium text-bg-primary transition-colors duration-150 hover:bg-accent-hover"
+              disabled={Boolean(sidecar?.degraded)}
+              title={sidecar?.degraded ? S.aiPanel.sidecar.degradedHint : undefined}
+              className="mt-1.5 rounded-md bg-accent px-3 py-1 text-[11px] font-medium text-bg-primary transition-colors duration-150 hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
             >
               {S.aiPanel.pausedContinue}
             </button>
@@ -587,7 +844,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
               }
             }}
             rows={1}
-            disabled={busy && !steering}
+            disabled={(busy && !steering) || Boolean(sidecar?.degraded)}
             placeholder={
               steering
                 ? S.aiPanel.steerPlaceholder
@@ -615,7 +872,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
           {(!busy || steering) && (
             <button
               onClick={submit}
-              disabled={!input.trim() || !aiReady || imagesBlocked}
+              disabled={!input.trim() || !aiReady || imagesBlocked || Boolean(sidecar?.degraded)}
               title={
                 imagesBlocked
                   ? S.attachments.noVision(activeEntry?.label ?? "This model")
@@ -632,6 +889,173 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
       </div>
     </aside>
   );
+}
+
+function ActiveSidecarMenu({
+  binding,
+  onSwap,
+  onReplace,
+  onEnd,
+  onClose,
+}: {
+  binding: SidecarBinding;
+  onSwap: () => void;
+  onReplace: () => void;
+  onEnd: () => void;
+  onClose: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => event.key === "Escape" && onClose();
+    const onPointer = (event: PointerEvent) => {
+      if (!ref.current?.contains(event.target as Node)) onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("pointerdown", onPointer);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("pointerdown", onPointer);
+    };
+  }, [onClose]);
+
+  const item =
+    "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-start text-[11px] text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary";
+  return (
+    <div
+      ref={ref}
+      role="menu"
+      className="absolute end-0 top-full z-50 mt-1 w-[220px] rounded-lg border border-border-subtle bg-bg-elevated p-2 shadow-lg"
+    >
+      <div className="mb-2 flex items-center gap-2 border-b border-border-subtle px-1 pb-2 text-[10px] text-text-muted">
+        <Link2 size={11} className="text-accent" />
+        <span className="min-w-0 truncate">
+          Local + {binding.remoteIdentity.label}
+        </span>
+      </div>
+      <button className={item} role="menuitem" onClick={onSwap}>
+        <ArrowLeftRight size={11} /> {S.aiPanel.sidecar.swap}
+      </button>
+      <button className={item} role="menuitem" onClick={onReplace}>
+        <Link2 size={11} /> {S.aiPanel.sidecar.replace}
+      </button>
+      <button
+        className={`${item} text-error hover:text-error`}
+        role="menuitem"
+        onClick={onEnd}
+      >
+        <Link2Off size={11} /> {S.aiPanel.sidecar.end}
+      </button>
+    </div>
+  );
+}
+
+function SidecarContextBar({
+  binding,
+  sessions,
+  sessionUi,
+  activeSessionId,
+  onFocus,
+  onPermission,
+}: {
+  binding: SidecarBinding;
+  sessions: Session[];
+  sessionUi: Record<string, SessionUiState>;
+  activeSessionId: string | null;
+  onFocus: (sessionId: string) => void;
+  onPermission: (role: AgentTargetRole, mode: (typeof PERMISSION_MODES)[number]) => void;
+}) {
+  return (
+    <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-border-subtle bg-bg-primary px-2 py-1.5">
+      {(["local", "remote"] as const).map((role) => {
+        const targetSessionId =
+          role === "local" ? binding.localSessionId : binding.remoteSessionId;
+        const focused = activeSessionId === targetSessionId;
+        const degraded = binding.degraded?.role === role;
+        const label = sidecarTargetLabel(binding, role, sessions, sessionUi);
+        return (
+          <div
+            key={role}
+            className={`flex min-w-0 flex-1 items-center gap-1 rounded-md border px-1.5 py-1 ${
+              degraded
+                ? "border-error/50 bg-error-subtle"
+                : focused
+                  ? "border-accent/40 bg-accent/10"
+                  : "border-border-subtle bg-bg-card"
+            }`}
+          >
+            <button
+              onClick={() => onFocus(targetSessionId)}
+              className={`flex min-w-0 flex-1 items-center gap-1 text-start text-[9px] font-medium uppercase tracking-wide ${
+                role === "remote" ? "text-warning" : "text-accent"
+              }`}
+              aria-label={`Focus ${role} Sidecar terminal ${label}`}
+            >
+              {role === "remote" ? <Server size={10} /> : <Terminal size={10} />}
+              <span>{role === "remote" ? S.aiPanel.sidecar.remote : S.aiPanel.sidecar.local}</span>
+              <span aria-hidden="true">·</span>
+              <span className="min-w-0 truncate font-mono normal-case tracking-normal text-text-secondary">
+                {label}
+              </span>
+              <span
+                className={`ms-auto flex shrink-0 items-center gap-0.5 normal-case tracking-normal ${
+                  degraded ? "text-error" : "text-text-muted"
+                }`}
+              >
+                {degraded && <Link2Off size={9} />}
+                {degraded ? S.aiPanel.sidecar.degraded : S.aiPanel.sidecar.connected}
+              </span>
+            </button>
+            <Dropdown
+              value={binding.permissions[role]}
+              options={PERMISSION_MODES.map((mode) => ({
+                value: mode,
+                label: S.aiPanel.permission[mode],
+                title: S.aiPanel.permissionHint[mode],
+                tone: mode === "auto_all" ? ("warning" as const) : ("accent" as const),
+              }))}
+              onChange={(next) => onPermission(role, next)}
+              ariaLabel={`${role === "remote" ? "SSH" : "Local"}: ${S.aiPanel.permissionLabel}`}
+              hint={S.aiPanel.permissionLabel}
+              size="sm"
+              disabled={Boolean(binding.degraded)}
+              icon={<ShieldCheck size={9} />}
+            />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function terminalChoice(
+  sessionId: string,
+  role: AgentTargetRole,
+  sessions: Session[],
+  sessionUi: Record<string, SessionUiState>,
+): SidecarTerminalChoice {
+  const session = sessions.find((candidate) => candidate.id === sessionId);
+  const ui = sessionUi[sessionId];
+  const label = session ? resolveSessionTitle(session, ui) : sessionId;
+  const detail =
+    role === "remote"
+      ? describeRemote(ui?.remote ?? null) ?? "SSH"
+      : ui?.cwd
+        ? collapseHome(ui.cwd)
+        : "local shell";
+  return { id: sessionId, label, detail };
+}
+
+function sidecarTargetLabel(
+  binding: SidecarBinding,
+  role: AgentTargetRole,
+  sessions: Session[],
+  sessionUi: Record<string, SessionUiState>,
+): string {
+  if (role === "remote") return binding.remoteIdentity.label;
+  const session = sessions.find((candidate) => candidate.id === binding.localSessionId);
+  const ui = sessionUi[binding.localSessionId];
+  if (ui?.cwd) return collapseHome(ui.cwd);
+  return session ? resolveSessionTitle(session, ui) : "local shell";
 }
 
 /** Collapsed state: a narrow strip that keeps the AI one click away instead of
@@ -926,8 +1350,34 @@ function CommandMessage({
   if (!cmd) return null;
   const failed = cmd.status === "done" && (cmd.exitCode ?? 0) !== 0;
   const stall = cmd.status === "running" && cmd.stall ? STALL_UI[cmd.stall] : null;
+  const targetName = cmd.targetLabel ?? (cmd.targetRole === "remote" ? "SSH target" : "local shell");
   return (
-    <div className="overflow-hidden rounded-lg border border-border-subtle">
+    <div
+      className={`overflow-hidden rounded-lg border ${
+        cmd.targetRole === "remote"
+          ? "border-warning/40"
+          : cmd.targetRole === "local"
+            ? "border-accent/30"
+            : "border-border-subtle"
+      }`}
+    >
+      {cmd.targetRole && (
+        <div
+          className={`flex items-center gap-1.5 border-b border-border-subtle px-2.5 py-1 text-[9px] font-semibold uppercase tracking-wide ${
+            cmd.targetRole === "remote"
+              ? "bg-warning/10 text-warning"
+              : "bg-accent/10 text-accent"
+          }`}
+          aria-label={`${cmd.targetRole === "remote" ? "Remote" : "Local"} command destination ${targetName}`}
+        >
+          {cmd.targetRole === "remote" ? <Server size={10} /> : <Terminal size={10} />}
+          <span>{cmd.targetRole === "remote" ? S.aiPanel.sidecar.remote : S.aiPanel.sidecar.local}</span>
+          <span aria-hidden="true">·</span>
+          <span className="min-w-0 truncate font-mono normal-case tracking-normal">
+            {targetName}
+          </span>
+        </div>
+      )}
       <div className="flex items-center justify-between gap-2 bg-bg-hover px-2.5 py-1">
         <code className="min-w-0 truncate font-mono text-[11px] text-text-primary">
           $ {cmd.command}
@@ -977,9 +1427,9 @@ function CommandMessage({
         <div className="flex items-center gap-2 bg-warning/10 px-2.5 py-1 text-[10px] text-warning">
           <stall.icon size={11} className="shrink-0" />
           <span className="min-w-0 flex-1">{stall.label}</span>
-          {stall.offer && sessionId && (
+          {stall.offer && (cmd.targetSessionId || sessionId) && (
             <button
-              onClick={() => interruptJob(sessionId)}
+              onClick={() => interruptJob(cmd.targetSessionId ?? sessionId!)}
               title={S.aiPanel.interruptHint}
               className="shrink-0 rounded border border-warning/40 px-1.5 py-0.5 font-medium transition-colors duration-150 hover:bg-warning/20"
             >

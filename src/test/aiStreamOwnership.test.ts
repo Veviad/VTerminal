@@ -23,16 +23,22 @@ const api = vi.hoisted(() => ({
 }));
 
 const persistence = vi.hoisted(() => ({ markTranscriptDirty: vi.fn() }));
+const pty = vi.hoisted(() => ({
+  abortSession: vi.fn(),
+  runInTerminal: vi.fn(),
+}));
+const terminalRegistry = vi.hoisted(() => ({
+  entries: new Map<string, { disposed: boolean }>(),
+}));
 
 vi.mock("../lib/tauri", () => api);
 vi.mock("../lib/sessionNaming", () => ({ nameSession: vi.fn() }));
 vi.mock("../lib/sessionPersistence", () => persistence);
 vi.mock("../lib/aiPanel", () => ({ setAiPanelOpen: vi.fn() }));
-vi.mock("../lib/ptyExec", () => ({
-  abortSession: vi.fn(),
-  runInTerminal: vi.fn(),
+vi.mock("../lib/ptyExec", () => pty);
+vi.mock("../lib/termRegistry", () => ({
+  getTerm: (sessionId: string) => terminalRegistry.entries.get(sessionId),
 }));
-vi.mock("../lib/termRegistry", () => ({ getTerm: () => undefined }));
 vi.mock("../lib/terminalSnapshot", () => ({
   readLineRange: () => "",
   readScreenTail: () => "",
@@ -42,6 +48,7 @@ import { useAiStream } from "../hooks/useAiStream";
 import { useAppStore } from "../stores/appStore";
 
 const SID = "ai-owner";
+const REMOTE_SID = "ssh-prod";
 
 function session(): Session {
   return {
@@ -89,17 +96,57 @@ beforeEach(() => {
   api.attachmentPut.mockResolvedValue({ path: "/tmp/attachment" });
   api.visionDescribe.mockResolvedValue("description");
   api.knowledgeSearchDetailed.mockResolvedValue({ hits: [], warnings: [], partial: false });
+  pty.runInTerminal.mockResolvedValue({
+    exitCode: 0,
+    output: "ok",
+    durationMs: 1,
+    mode: "integrated",
+  });
+  terminalRegistry.entries.clear();
 
   useAppStore.setState({
     sessions: [],
     activeSessionId: null,
     sessionUi: {},
     aiStreams: {},
+    sidecars: {},
     catalog: [],
     activeModelId: "test-model",
   });
   useAppStore.getState().addSession(session());
 });
+
+function installSidecar(): void {
+  const remote: Session = {
+    ...session(),
+    id: REMOTE_SID,
+    hostId: "saved-prod",
+    hostLabel: "Production",
+    ordinal: 2,
+  };
+  const store = useAppStore.getState();
+  store.addSession(remote, false);
+  store.updateSessionUi(SID, {
+    cwd: "/Users/me/project",
+    gitBranch: "main",
+    integrationActive: true,
+  });
+  store.updateSessionUi(REMOTE_SID, {
+    remote: { kind: "ssh", target: "deploy@prod-01" },
+    nestedBlockId: "ssh-block",
+    runningBlockId: "ssh-block",
+    remoteHost: { id: "saved-prod", label: "Production", color: null },
+  });
+  terminalRegistry.entries.set(SID, { disposed: false });
+  terminalRegistry.entries.set(REMOTE_SID, { disposed: false });
+  const result = store.startSidecar(SID, SID, REMOTE_SID, {
+    kind: "ssh",
+    target: "deploy@prod-01",
+    hostId: "saved-prod",
+    label: "Production",
+  });
+  if (!result.ok) throw new Error(result.reason);
+}
 
 describe("AI generation ownership", () => {
   it("forwards attached Qdrant buckets when starting an agent run", async () => {
@@ -316,5 +363,228 @@ describe("AI generation ownership", () => {
     expect(stream.status).toBe("idle");
     expect(stream.lastError).toBeNull();
     expect(stream.messages[stream.messages.length - 1]?.content).toBe("fresh");
+  });
+});
+
+describe("AI Sidecar routing", () => {
+  it("sends separately grounded local and SSH contexts to agentStart", async () => {
+    installSidecar();
+    const { result } = renderHook(() => useAiStream());
+
+    await act(async () => result.current.startAgent(REMOTE_SID, "inspect locally, deploy remotely"));
+
+    expect(api.agentStart).toHaveBeenCalledOnce();
+    const call = api.agentStart.mock.calls[0];
+    expect(call[2]).toMatchObject({
+      session_id: SID,
+      cwd: "/Users/me/project",
+      git_branch: "main",
+      remote: null,
+    });
+    expect(call[7]).toEqual({
+      local: expect.objectContaining({
+        session_id: SID,
+        cwd: "/Users/me/project",
+        git_branch: "main",
+        remote: null,
+      }),
+      remote: expect.objectContaining({
+        session_id: REMOTE_SID,
+        cwd: null,
+        git_branch: null,
+        remote: { kind: "ssh", target: "deploy@prod-01" },
+      }),
+    });
+  });
+
+  it("applies auto-run permission to the proposed target only", async () => {
+    installSidecar();
+    useAppStore.getState().setSidecarPermission(SID, "local", "auto_all");
+    // Remote deliberately remains `ask`.
+    let onEvent!: (event: StreamEvent) => void;
+    api.agentStart.mockImplementationOnce((...args: unknown[]) => {
+      onEvent = args[6] as (event: StreamEvent) => void;
+      return Promise.resolve([]);
+    });
+    const { result } = renderHook(() => useAiStream());
+    await act(async () => result.current.startAgent(SID, "compare both targets"));
+
+    act(() => {
+      onEvent({
+        type: "CommandProposal",
+        approval_id: "local-read",
+        command: "gh issue view 42",
+        explanation: "Read the issue with local credentials",
+        read_only: true,
+        network: true,
+        target_role: "local",
+        target_session_id: SID,
+      });
+    });
+    expect(api.respondToApproval).toHaveBeenCalledWith("local-read", "run");
+
+    act(() => {
+      onEvent({
+        type: "CommandProposal",
+        approval_id: "remote-read",
+        command: "cat compose.yml",
+        explanation: "Inspect the deployed Compose file",
+        read_only: true,
+        network: false,
+        target_role: "remote",
+        target_session_id: REMOTE_SID,
+      });
+    });
+    expect(api.respondToApproval).toHaveBeenCalledTimes(1);
+    expect(useAppStore.getState().aiStreams[SID].pendingProposal).toMatchObject({
+      approvalId: "remote-read",
+      targetRole: "remote",
+      targetSessionId: REMOTE_SID,
+    });
+  });
+
+  it("routes RunInTerminal by emitted session id even when the other pane is focused", async () => {
+    installSidecar();
+    useAppStore.getState().setSidecarFocusedSession(SID, SID);
+    let onEvent!: (event: StreamEvent) => void;
+    api.agentStart.mockImplementationOnce((...args: unknown[]) => {
+      onEvent = args[6] as (event: StreamEvent) => void;
+      return Promise.resolve([]);
+    });
+    const { result } = renderHook(() => useAiStream());
+    await act(async () => result.current.startAgent(SID, "restart the service"));
+
+    act(() => {
+      onEvent({
+        type: "RunInTerminal",
+        approval_id: "remote-run",
+        session_id: REMOTE_SID,
+        command: "docker compose up -d api",
+        timeout_secs: 120,
+        explanation: "Apply the requested service update",
+        target_role: "remote",
+        target_session_id: REMOTE_SID,
+      });
+    });
+
+    expect(useAppStore.getState().activeSessionId).toBe(SID);
+    expect(pty.runInTerminal).toHaveBeenCalledOnce();
+    expect(pty.runInTerminal.mock.calls[0].slice(0, 3)).toEqual([
+      REMOTE_SID,
+      "remote-run",
+      "docker compose up -d api",
+    ]);
+  });
+
+  it("rejects mismatched backend target metadata before terminal dispatch", async () => {
+    installSidecar();
+    let onEvent!: (event: StreamEvent) => void;
+    api.agentStart.mockImplementationOnce((...args: unknown[]) => {
+      onEvent = args[6] as (event: StreamEvent) => void;
+      return Promise.resolve([]);
+    });
+    const { result } = renderHook(() => useAiStream());
+    await act(async () => result.current.startAgent(SID, "deploy"));
+    const requestId = useAppStore.getState().aiStreams[SID].requestId;
+
+    act(() => {
+      onEvent({
+        type: "RunInTerminal",
+        approval_id: "mismatch",
+        session_id: SID,
+        command: "uname -a",
+        timeout_secs: 30,
+        explanation: "Inspect the remote host",
+        target_role: "remote",
+        // A stale/corrupt event cannot redirect `remote` into the local PTY.
+        target_session_id: SID,
+      });
+    });
+
+    expect(pty.runInTerminal).not.toHaveBeenCalled();
+    expect(api.submitCommandResult).toHaveBeenCalledWith(
+      "mismatch",
+      null,
+      expect.stringContaining("Nothing was executed"),
+      0,
+      "target_changed",
+    );
+    expect(api.aiCancel).toHaveBeenCalledWith(requestId);
+  });
+
+  it("fails the final canWrite guard when a valid target becomes stale during preflight", async () => {
+    installSidecar();
+    const probe = deferred<void>();
+    const terminalWrite = vi.fn();
+    pty.runInTerminal.mockImplementationOnce(
+      async (
+        sessionId: string,
+        _approvalId: string,
+        _command: string,
+        opts: { canWrite?: () => boolean },
+      ) => {
+        await probe.promise;
+        const allowed = opts.canWrite?.() ?? true;
+        if (allowed) terminalWrite(sessionId);
+        return {
+          exitCode: null,
+          output: "",
+          durationMs: 1,
+          mode: "integrated",
+          ...(allowed ? {} : { error: "target_changed" as const }),
+        };
+      },
+    );
+    let onEvent!: (event: StreamEvent) => void;
+    api.agentStart.mockImplementationOnce((...args: unknown[]) => {
+      onEvent = args[6] as (event: StreamEvent) => void;
+      return Promise.resolve([]);
+    });
+    const { result } = renderHook(() => useAiStream());
+    await act(async () => result.current.startAgent(SID, "deploy"));
+
+    act(() => {
+      onEvent({
+        type: "RunInTerminal",
+        approval_id: "stale-during-probe",
+        session_id: REMOTE_SID,
+        command: "pwd",
+        timeout_secs: 30,
+        explanation: "Confirm the deployment directory",
+        target_role: "remote",
+        target_session_id: REMOTE_SID,
+      });
+    });
+    expect(pty.runInTerminal).toHaveBeenCalledOnce();
+
+    // Simulates End/Replace/identity degradation while ptyExec is probing the
+    // shell. The guard passed to ptyExec is evaluated only immediately before
+    // its one write.
+    act(() => useAppStore.getState().endSidecar(SID));
+    probe.resolve();
+    await flushPreflight();
+
+    expect(terminalWrite).not.toHaveBeenCalled();
+    expect(api.submitCommandResult).toHaveBeenCalledWith(
+      "stale-during-probe",
+      null,
+      "",
+      1,
+      "target_changed",
+    );
+  });
+
+  it("cancelling from either pane aborts pending work in both terminals", async () => {
+    installSidecar();
+    const { result } = renderHook(() => useAiStream());
+    await act(async () => result.current.startAgent(REMOTE_SID, "inspect both targets"));
+    const requestId = useAppStore.getState().aiStreams[SID].requestId;
+
+    await act(async () => result.current.cancel(REMOTE_SID));
+
+    expect(pty.abortSession).toHaveBeenCalledTimes(2);
+    expect(pty.abortSession).toHaveBeenNthCalledWith(1, SID, "cancelled");
+    expect(pty.abortSession).toHaveBeenNthCalledWith(2, REMOTE_SID, "cancelled");
+    expect(api.aiCancel).toHaveBeenCalledWith(requestId);
   });
 });

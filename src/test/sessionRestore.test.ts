@@ -3,20 +3,52 @@ import { renderHook } from "@testing-library/react";
 
 const restoreMock = vi.fn();
 const scrollbackMock = vi.fn(async (_id: string) => null as string | null);
-const spawnMock = vi.fn(async () => 1234);
+const ptyEventHandlers = new Map<string, (event: { type: string; exit_code?: number | null }) => void>();
+const spawnMock = vi.fn(
+  async (
+    sessionId: string,
+    _params: unknown,
+    _onData: unknown,
+    onEvent: (event: { type: string; exit_code?: number | null }) => void,
+  ) => {
+    ptyEventHandlers.set(sessionId, onEvent);
+    return 1234;
+  },
+);
+const aiCancelMock = vi.fn(async (_requestId: string) => {});
+const ptyKillMock = vi.fn(async (_sessionId: string) => {});
+const abortSessionMock = vi.fn();
+const archiveOnCloseMock = vi.fn(async (_sessionId: string) => {});
+const disposeTermMock = vi.fn();
+const releaseWebglMock = vi.fn();
 
 vi.mock("../lib/tauri", () => ({
   workspaceRestore: () => restoreMock(),
   workspaceScrollback: (id: string) => scrollbackMock(id),
-  ptySpawn: () => spawnMock(),
+  ptySpawn: (
+    sessionId: string,
+    params: unknown,
+    onData: unknown,
+    onEvent: (event: { type: string; exit_code?: number | null }) => void,
+  ) => spawnMock(sessionId, params, onData, onEvent),
   ptyWrite: async () => {},
   ptyResize: async () => {},
   ptyAck: async () => {},
-  ptyKill: async () => {},
+  ptyKill: (sessionId: string) => ptyKillMock(sessionId),
   releasePtyChannels: () => {},
-  aiCancel: async () => {},
+  aiCancel: (requestId: string) => aiCancelMock(requestId),
   historyRecord: async () => "",
   sshHostsTouch: async () => {},
+}));
+
+vi.mock("../lib/ptyExec", () => ({
+  abortSession: (sessionId: string, reason: string) => abortSessionMock(sessionId, reason),
+  isBusy: () => false,
+  resetSessionMode: vi.fn(),
+}));
+
+vi.mock("../lib/sessionArchive", () => ({
+  archiveOnClose: (sessionId: string) => archiveOnCloseMock(sessionId),
 }));
 
 const fakeTerm = {
@@ -51,8 +83,8 @@ vi.mock("../lib/termRegistry", () => ({
   }),
   subscribeTerm: () => () => {},
   emitTerm: () => {},
-  disposeTerm: () => {},
-  releaseWebgl: () => {},
+  disposeTerm: (sessionId: string) => disposeTermMock(sessionId),
+  releaseWebgl: (entry: unknown) => releaseWebglMock(entry),
   acquireWebgl: () => {},
   replayScrollback: async () => {},
 }));
@@ -60,10 +92,12 @@ vi.mock("../lib/termRegistry", () => ({
 vi.mock("../lib/sessionPersistence", () => ({
   trackSession: () => {},
   startPersistence: () => {},
+  markTranscriptDirty: () => {},
 }));
 
 import { useSessions } from "../hooks/useSessions";
 import { useAppStore } from "../stores/appStore";
+import { captureSidecarRemoteIdentity } from "../lib/sidecar";
 import { initialUpdateState, useUpdateStore } from "../stores/updateStore";
 import type { SessionSnapshotMeta } from "../lib/types";
 
@@ -90,8 +124,34 @@ beforeEach(() => {
   restoreMock.mockReset();
   scrollbackMock.mockReset();
   scrollbackMock.mockResolvedValue(null);
-  spawnMock.mockClear();
-  useAppStore.setState({ sessions: [], activeSessionId: null, sessionUi: {}, aiStreams: {} });
+  ptyEventHandlers.clear();
+  spawnMock.mockReset();
+  spawnMock.mockImplementation(
+    async (
+      sessionId: string,
+      _params: unknown,
+      _onData: unknown,
+      onEvent: (event: { type: string; exit_code?: number | null }) => void,
+    ) => {
+      ptyEventHandlers.set(sessionId, onEvent);
+      return 1234;
+    },
+  );
+  aiCancelMock.mockClear();
+  aiCancelMock.mockResolvedValue(undefined);
+  ptyKillMock.mockClear();
+  ptyKillMock.mockResolvedValue(undefined);
+  abortSessionMock.mockClear();
+  archiveOnCloseMock.mockClear();
+  disposeTermMock.mockClear();
+  releaseWebglMock.mockClear();
+  useAppStore.setState({
+    sessions: [],
+    activeSessionId: null,
+    sessionUi: {},
+    aiStreams: {},
+    sidecars: {},
+  });
   useUpdateStore.setState({ ...initialUpdateState });
 });
 
@@ -259,4 +319,99 @@ describe("restoreSessions", () => {
       globalThis.requestAnimationFrame = original;
     }
   }, 5000);
+});
+
+describe("sidecar terminal lifecycle", () => {
+  async function createLinkedPair() {
+    const { result } = renderHook(() => useSessions());
+    const localId = await result.current.createSession();
+    const remoteId = await result.current.createSession({
+      hostId: "host-prod",
+      title: "Production",
+      activate: false,
+    });
+    useAppStore.getState().updateSessionUi(remoteId, {
+      remote: { kind: "ssh", target: "deploy@prod" },
+      nestedBlockId: "ssh-prod",
+      runningBlockId: "ssh-prod",
+      remoteHost: { id: "host-prod", label: "Production", color: null },
+    });
+    const state = useAppStore.getState();
+    const identity = captureSidecarRemoteIdentity(
+      state.sessions.find((session) => session.id === remoteId),
+      state.sessionUi[remoteId],
+    );
+    if (!identity) throw new Error("sidecar fixture has no remote identity");
+    const started = state.startSidecar(localId, localId, remoteId, identity);
+    if (!started.ok) throw new Error(started.reason);
+    useAppStore.getState().initAiStream(localId, "agent", "sidecar-request");
+    return { result, localId, remoteId };
+  }
+
+  it("cancels the shared owner and both PTY waiters when either PTY exits", async () => {
+    const { localId, remoteId } = await createLinkedPair();
+    const onRemoteEvent = ptyEventHandlers.get(remoteId);
+    expect(onRemoteEvent).toBeDefined();
+
+    onRemoteEvent?.({ type: "Exit", exit_code: 255 });
+    await Promise.resolve();
+
+    expect(abortSessionMock.mock.calls).toEqual([
+      [localId, "closed"],
+      [remoteId, "closed"],
+    ]);
+    expect(aiCancelMock).toHaveBeenCalledWith("sidecar-request");
+    expect(useAppStore.getState().aiStreams[localId]).toMatchObject({
+      status: "idle",
+      requestId: null,
+      generationId: null,
+    });
+    expect(useAppStore.getState().sessions.find((session) => session.id === remoteId)).toMatchObject({
+      exited: true,
+      exitCode: 255,
+    });
+    expect(useAppStore.getState().sidecarForSession(localId)?.degraded).toEqual({
+      role: "remote",
+      reason: "shell_exited",
+    });
+  });
+
+  it("awaits cancellation, then preserves the closed target and its scrollback as degraded", async () => {
+    const { result, localId, remoteId } = await createLinkedPair();
+    let releaseCancellation!: () => void;
+    aiCancelMock.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { releaseCancellation = resolve; }),
+    );
+
+    const closing = result.current.closeSession(remoteId);
+
+    expect(useAppStore.getState().aiStreams[localId].requestId).toBeNull();
+    expect(abortSessionMock.mock.calls).toEqual([
+      [localId, "closed"],
+      [remoteId, "closed"],
+    ]);
+    expect(ptyKillMock).not.toHaveBeenCalled();
+
+    releaseCancellation();
+    await closing;
+
+    expect(ptyKillMock).toHaveBeenCalledWith(remoteId);
+    expect(useAppStore.getState().sessions.map((session) => session.id)).toEqual([
+      localId,
+      remoteId,
+    ]);
+    expect(useAppStore.getState().sessions.find((session) => session.id === remoteId)).toMatchObject({
+      exited: true,
+    });
+    expect(useAppStore.getState().sidecarForSession(localId)?.degraded).toEqual({
+      role: "remote",
+      reason: "shell_exited",
+    });
+    // A linked close is a degraded-workspace transition, not ordinary teardown:
+    // destroying xterm here would also destroy the scrollback the user needs to
+    // diagnose and replace the failed target.
+    expect(releaseWebglMock).not.toHaveBeenCalled();
+    expect(disposeTermMock).not.toHaveBeenCalled();
+    expect(archiveOnCloseMock).not.toHaveBeenCalled();
+  });
 });

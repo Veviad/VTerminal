@@ -23,6 +23,7 @@ vi.mock("../lib/ptyExec", () => ({
 }));
 
 import { chatArchiveId, hasConversation, startNewChat } from "../lib/newChat";
+import { captureSidecarRemoteIdentity } from "../lib/sidecar";
 import { emptyAiStream, emptySessionUi, useAppStore } from "../stores/appStore";
 import type { AiMessage, ArchiveSessionInput, ChatMessage, Session } from "../lib/types";
 
@@ -74,11 +75,41 @@ function seed(session: Session, over: Partial<ReturnType<typeof emptyAiStream>> 
         ...over,
       },
     },
+    sidecars: {},
     restoreScrollbackLines: 1000,
     scrollbackLines: 10000,
     restoreSessionsOnStart: true,
     archiveEnabled: true,
   });
+}
+
+function seedSidecar(over: Partial<ReturnType<typeof emptyAiStream>> = {}) {
+  const ownerId = "sess-1-0";
+  const remoteId = "sess-remote";
+  seed(makeSession(ownerId));
+  const store = useAppStore.getState();
+  store.addSession(makeSession(remoteId, { hostId: "host-prod", hostLabel: "Production" }), false);
+  useAppStore.getState().updateSessionUi(remoteId, {
+    remote: { kind: "ssh", target: "deploy@prod" },
+    nestedBlockId: "ssh-prod",
+    runningBlockId: "ssh-prod",
+    remoteHost: { id: "host-prod", label: "Production", color: null },
+  });
+  const live = useAppStore.getState();
+  const identity = captureSidecarRemoteIdentity(
+    live.sessions.find((session) => session.id === remoteId),
+    live.sessionUi[remoteId],
+  );
+  if (!identity) throw new Error("sidecar fixture has no SSH identity");
+  const started = live.startSidecar(ownerId, ownerId, remoteId, identity);
+  if (!started.ok) throw new Error(started.reason);
+  useAppStore.setState((state) => ({
+    aiStreams: {
+      ...state.aiStreams,
+      [ownerId]: { ...state.aiStreams[ownerId], ...over },
+    },
+  }));
+  return { ownerId, remoteId };
 }
 
 const rowsOf = (call: number) => archivePutManyMock.mock.calls[call][0];
@@ -180,6 +211,46 @@ describe("startNewChat", () => {
     expect(abortSessionMock).toHaveBeenCalledWith("sess-1-0", "cancelled");
     expect(aiCancelMock).toHaveBeenCalledWith("req-9");
     expect(useAppStore.getState().aiStreams["sess-1-0"].requestId).toBeNull();
+  });
+
+  it("resolves a companion tab to the owner, cancels both waiters, and ends only the pairing", async () => {
+    const { ownerId, remoteId } = seedSidecar({
+      status: "streaming",
+      requestId: "sidecar-request",
+      generationId: "sidecar-request",
+    });
+
+    await expect(startNewChat(remoteId)).resolves.toBe(true);
+
+    expect(abortSessionMock.mock.calls).toEqual([
+      [ownerId, "cancelled"],
+      [remoteId, "cancelled"],
+    ]);
+    expect(aiCancelMock).toHaveBeenCalledWith("sidecar-request");
+    expect(split().session_id).toMatch(new RegExp(`^${ownerId}#`));
+    expect(blanked().session_id).toBe(ownerId);
+    expect(useAppStore.getState().sidecars).toEqual({});
+    // Ending Sidecar is presentation/conversation state only: both live PTYs
+    // remain open and the companion's own hidden conversation remains intact.
+    expect(useAppStore.getState().sessions.map((session) => session.id)).toEqual([
+      ownerId,
+      remoteId,
+    ]);
+    expect(useAppStore.getState().aiStreams[ownerId].messages).toEqual([]);
+    expect(useAppStore.getState().aiStreams[remoteId].messages).toEqual([]);
+  });
+
+  it("fences the Done-to-agent-result gap for a linked conversation", async () => {
+    const { remoteId } = seedSidecar({
+      status: "idle",
+      requestId: null,
+      generationId: "late-agent-result",
+    });
+
+    await startNewChat(remoteId);
+
+    expect(useAppStore.getState().sidecars).toEqual({});
+    expect(useAppStore.getState().aiStreams["sess-1-0"].generationId).toBeNull();
   });
 
   it("archives a partial answer that was still streaming", async () => {

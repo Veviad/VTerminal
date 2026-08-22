@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import * as api from "../lib/tauri";
-import { useAppStore } from "../stores/appStore";
+import { useAppStore, type CommandTargetMeta } from "../stores/appStore";
 import { getTerm } from "../lib/termRegistry";
 import { readLineRange, readScreenTail } from "../lib/terminalSnapshot";
 import { abortSession, runInTerminal, type PtyExecOutcome } from "../lib/ptyExec";
@@ -18,9 +18,18 @@ import {
 } from "../lib/attachInput";
 import { S } from "../lib/strings";
 import { autoRuns } from "../lib/permissionMode";
-import type { AiMessage, Block, StreamEvent, TerminalContext } from "../lib/types";
+import type {
+  AgentTargetRole,
+  AiMessage,
+  Block,
+  SidecarAgentTargets,
+  StreamEvent,
+  TerminalContext,
+} from "../lib/types";
 import { normalizeKnowledgeBucketRef } from "../lib/knowledge";
 import { defaultShell, localOsLabel } from "../lib/platform";
+import { sessionIdForRole } from "../lib/sidecar";
+import { collapseHome, resolveSessionTitle } from "../lib/sessionTitle";
 
 let requestCounter = 1;
 
@@ -341,63 +350,107 @@ export function useAiStream() {
    *  a Run/Skip/Stop card (or auto-accepted when the toggle is armed). */
   const startAgent = useCallback(async (sessionId: string, goal: string) => {
     const store = useAppStore.getState();
-    if (isSessionBusy(sessionId)) return;
+    const ownerSessionId = store.resolveAiOwner(sessionId);
+    if (isSessionBusy(ownerSessionId)) return;
+    const initialSidecar = store.sidecarForSession(ownerSessionId);
+    if (initialSidecar && store.refreshSidecarHealth(ownerSessionId)?.status !== "active") return;
     const requestId = newRequestId();
     // Like ask mode, own the session before attachment persistence yields. This
     // makes a shutdown fence authoritative even while no backend request exists.
-    store.initAiStream(sessionId, "agent", requestId);
+    store.initAiStream(ownerSessionId, "agent", requestId);
     let staged: Awaited<ReturnType<typeof persistAttachments>>;
     try {
       staged = await persistAttachments(
-        sessionId,
-        store.aiStreams[sessionId]?.pendingAttachments ?? [],
+        ownerSessionId,
+        store.aiStreams[ownerSessionId]?.pendingAttachments ?? [],
       );
     } catch (err) {
-      if (ownsActiveRequest(sessionId, requestId)) {
-        useAppStore.getState().finishAiStream(sessionId, String(err), undefined, requestId);
+      if (ownsActiveRequest(ownerSessionId, requestId)) {
+        useAppStore
+          .getState()
+          .finishAiStream(ownerSessionId, String(err), undefined, requestId);
       }
       return;
     }
-    if (!ownsActiveRequest(sessionId, requestId)) return;
+    if (!ownsActiveRequest(ownerSessionId, requestId)) return;
+
+    // Pairing is conversation-scoped and may be ended by New Chat, a target
+    // disconnect, or a tab close while attachment preflight is awaiting disk.
+    // Never silently turn an intended two-target run into a single-target one.
+    const liveStore = useAppStore.getState();
+    const liveSidecar = liveStore.sidecarForSession(ownerSessionId);
+    if (
+      initialSidecar &&
+      (!liveSidecar ||
+        liveSidecar.localSessionId !== initialSidecar.localSessionId ||
+        liveSidecar.remoteSessionId !== initialSidecar.remoteSessionId)
+    ) {
+      liveStore.finishAiStream(
+        ownerSessionId,
+        "Sidecar targets changed before the agent started.",
+        undefined,
+        requestId,
+      );
+      return;
+    }
+    if (liveSidecar && liveStore.refreshSidecarHealth(ownerSessionId)?.status !== "active") {
+      liveStore.finishAiStream(
+        ownerSessionId,
+        "Sidecar target is no longer available.",
+        undefined,
+        requestId,
+      );
+      return;
+    }
+
     const outgoing = buildOutgoing(goal, staged);
-    store.pushAiMessage(sessionId, {
+    liveStore.pushAiMessage(ownerSessionId, {
       id: `msg-${Date.now()}`,
       role: "user",
       content: outgoing.prompt,
       attachments: staged.length > 0 ? staged : undefined,
       createdAt: new Date().toISOString(),
     });
-    if (staged.length > 0) store.clearPendingAttachments(sessionId);
+    if (staged.length > 0) liveStore.clearPendingAttachments(ownerSessionId);
     // Read at dispatch time, not captured earlier: a reopened session's archived
     // transcript is written into the store asynchronously, and this is what turns
     // agent mode from single-shot into an actual conversation.
-    const history = useAppStore.getState().aiStreams[sessionId]?.modelTranscript ?? [];
+    const history = useAppStore.getState().aiStreams[ownerSessionId]?.modelTranscript ?? [];
     // Read at dispatch time for the same reason as `history`: the user may attach or
     // detach a bucket between turns, and each turn is a fresh run whose tool vector is
     // decided from this list.
-    const activeStream = useAppStore.getState().aiStreams[sessionId];
+    const activeStream = useAppStore.getState().aiStreams[ownerSessionId];
     const docBuckets =
       activeStream?.attachedBucketRefs ??
       (activeStream?.attachedBucketIds ?? []).map(normalizeKnowledgeBucketRef);
+    const sidecarTargets: SidecarAgentTargets | undefined = liveSidecar
+      ? {
+          local: buildTerminalContext(liveSidecar.localSessionId),
+          remote: buildTerminalContext(liveSidecar.remoteSessionId),
+        }
+      : undefined;
     try {
       const transcript = await api.agentStart(
         requestId,
         outgoing.prompt,
-        buildTerminalContext(sessionId),
+        buildTerminalContext(ownerSessionId),
         history,
         outgoing.images,
         docBuckets,
-        (e) => dispatchPanelEvent(sessionId, requestId, e),
+        (e) => dispatchPanelEvent(ownerSessionId, requestId, e),
+        sidecarTargets,
       );
       // Done/Paused clears requestId before agentStart resolves. generationId
       // intentionally survives that event, but is replaced by a new run and
       // cleared by exit/cancel fences.
       useAppStore
         .getState()
-        .setModelTranscriptForGeneration(sessionId, requestId, transcript);
+        .setModelTranscriptForGeneration(ownerSessionId, requestId, transcript);
     } catch (err) {
-      if (ownsActiveRequest(sessionId, requestId)) {
-        useAppStore.getState().finishAiStream(sessionId, String(err), undefined, requestId);
+      if (ownsActiveRequest(ownerSessionId, requestId)) {
+        useAppStore
+          .getState()
+          .finishAiStream(ownerSessionId, String(err), undefined, requestId);
       }
     }
   }, []);
@@ -438,24 +491,26 @@ export function useAiStream() {
     async (sessionId: string, text: string) => {
       const body = text.trim();
       if (!body) return;
-      const stream = useAppStore.getState().aiStreams[sessionId];
+      const initialStore = useAppStore.getState();
+      const ownerSessionId = initialStore.resolveAiOwner(sessionId);
+      const stream = initialStore.aiStreams[ownerSessionId];
       // Nothing to steer — this is an ordinary Send. Covers the race where the
       // run ended between the panel rendering and the user hitting Enter.
       if (!stream?.requestId || stream.mode !== "agent") {
-        void startAgent(sessionId, body);
+        void startAgent(ownerSessionId, body);
         return;
       }
       const steerId = newSteerId();
       const generationId = stream.generationId;
-      useAppStore.getState().queueSteer(sessionId, steerId, body);
+      useAppStore.getState().queueSteer(ownerSessionId, steerId, body);
       try {
         await api.agentSteer(stream.requestId, steerId, body);
       } catch {
         // The run ended between the check and the call, or the backend refused
         // it (too long, too many queued). The message stays in the transcript
         // flagged undelivered with its own Send button, rather than vanishing.
-        if (generationId && ownsGeneration(sessionId, generationId)) {
-          useAppStore.getState().markSteerUndelivered(sessionId, steerId);
+        if (generationId && ownsGeneration(ownerSessionId, generationId)) {
+          useAppStore.getState().markSteerUndelivered(ownerSessionId, steerId);
         }
       }
     },
@@ -464,13 +519,15 @@ export function useAiStream() {
 
   const respondToProposal = useCallback(
     async (sessionId: string, decision: "run" | "skip" | "stop", editedCommand?: string) => {
-      const stream = useAppStore.getState().aiStreams[sessionId];
+      const initialStore = useAppStore.getState();
+      const ownerSessionId = initialStore.resolveAiOwner(sessionId);
+      const stream = initialStore.aiStreams[ownerSessionId];
       const proposal = stream?.pendingProposal;
       if (!proposal) return;
       if (decision === "skip") {
-        useAppStore.getState().setPendingProposal(sessionId, null, "streaming");
+        useAppStore.getState().setPendingProposal(ownerSessionId, null, "streaming");
       } else if (decision === "stop") {
-        useAppStore.getState().setPendingProposal(sessionId, null, "streaming");
+        useAppStore.getState().setPendingProposal(ownerSessionId, null, "streaming");
       }
       await api.respondToApproval(proposal.approvalId, decision, editedCommand).catch(() => {});
     },
@@ -478,19 +535,27 @@ export function useAiStream() {
   );
 
   const cancel = useCallback(async (sessionId: string) => {
-    const stream = useAppStore.getState().aiStreams[sessionId];
+    const initialStore = useAppStore.getState();
+    const ownerSessionId = initialStore.resolveAiOwner(sessionId);
+    const stream = initialStore.aiStreams[ownerSessionId];
+    const binding = initialStore.sidecarForSession(ownerSessionId);
     // Release a command we are still awaiting in the terminal. This never
     // interrupts the command itself — it is running in the user's own shell,
     // in front of them, and killing it is their decision.
-    abortSession(sessionId, "cancelled");
+    if (binding) {
+      abortSession(binding.localSessionId, "cancelled");
+      abortSession(binding.remoteSessionId, "cancelled");
+    } else {
+      abortSession(ownerSessionId, "cancelled");
+    }
     if (stream?.requestId) {
       const requestId = stream.requestId;
       // Retire ownership synchronously. aiCancel can be delayed, and during
       // preflight there may not even be a registered backend operation yet.
       // Waiting for a Cancelled event would let that old continuation resume or
       // overwrite a new run started in the meantime.
-      useAppStore.getState().finishAiStream(sessionId);
-      markTranscriptDirty(sessionId);
+      useAppStore.getState().finishAiStream(ownerSessionId);
+      markTranscriptDirty(ownerSessionId);
       await api.aiCancel(requestId).catch(() => {});
     }
   }, []);
@@ -508,7 +573,9 @@ export function useAiStream() {
 }
 
 function isSessionBusy(sessionId: string): boolean {
-  const status = useAppStore.getState().aiStreams[sessionId]?.status;
+  const store = useAppStore.getState();
+  const ownerSessionId = store.resolveAiOwner(sessionId);
+  const status = store.aiStreams[ownerSessionId]?.status;
   return status === "streaming" || status === "awaiting_approval" || status === "executing";
 }
 
@@ -519,6 +586,108 @@ function ownsGeneration(sessionId: string, generationId: string): boolean {
 function ownsActiveRequest(sessionId: string, requestId: string): boolean {
   const stream = useAppStore.getState().aiStreams[sessionId];
   return stream?.generationId === requestId && stream.requestId === requestId;
+}
+
+type TargetedCommandEvent = {
+  target_role?: AgentTargetRole;
+  target_session_id?: string;
+};
+
+type CommandTargetResolution =
+  | { ok: true; sessionId: string; meta?: CommandTargetMeta }
+  | { ok: false; reason: string };
+
+/** Resolve backend metadata only through the live conversation binding. Focus,
+ * tab order, and labels are presentation state and can never redirect a run. */
+function resolveCommandTarget(
+  ownerSessionId: string,
+  event: TargetedCommandEvent,
+): CommandTargetResolution {
+  const store = useAppStore.getState();
+  const binding = store.sidecarForSession(ownerSessionId);
+  if (!binding) {
+    if (event.target_role !== undefined || event.target_session_id !== undefined) {
+      return { ok: false, reason: "The Sidecar binding ended before command dispatch." };
+    }
+    return { ok: true, sessionId: ownerSessionId };
+  }
+
+  const health = store.refreshSidecarHealth(ownerSessionId);
+  const current = useAppStore.getState().sidecarForSession(ownerSessionId);
+  if (!current || health?.status !== "active") {
+    return { ok: false, reason: "A Sidecar target is disconnected or changed identity." };
+  }
+  if (!event.target_role || !event.target_session_id) {
+    return { ok: false, reason: "The agent did not identify a Sidecar command target." };
+  }
+
+  const expectedSessionId = sessionIdForRole(current, event.target_role);
+  if (event.target_session_id !== expectedSessionId) {
+    return { ok: false, reason: "The agent command target does not match the Sidecar binding." };
+  }
+  const entry = getTerm(expectedSessionId);
+  if (!entry || entry.disposed) {
+    store.markSidecarDegraded(ownerSessionId, {
+      role: event.target_role,
+      reason: "terminal_unavailable",
+    });
+    return { ok: false, reason: "The selected Sidecar terminal is no longer available." };
+  }
+
+  const targetSession = store.sessions.find((session) => session.id === expectedSessionId);
+  const targetUi = store.sessionUi[expectedSessionId];
+  const label =
+    event.target_role === "remote"
+      ? current.remoteIdentity.label
+      : targetUi?.cwd
+        ? collapseHome(targetUi.cwd)
+        : targetSession
+          ? resolveSessionTitle(targetSession, targetUi)
+          : expectedSessionId;
+  return {
+    ok: true,
+    sessionId: expectedSessionId,
+    meta: { role: event.target_role, sessionId: expectedSessionId, label },
+  };
+}
+
+function canDispatchToTarget(
+  ownerSessionId: string,
+  requestId: string,
+  event: TargetedCommandEvent,
+  expectedSessionId: string,
+): boolean {
+  const store = useAppStore.getState();
+  if (store.aiStreams[ownerSessionId]?.requestId !== requestId) return false;
+  const target = resolveCommandTarget(ownerSessionId, event);
+  return target.ok && target.sessionId === expectedSessionId;
+}
+
+function rejectTargetedRun(
+  ownerSessionId: string,
+  requestId: string,
+  reason: string,
+  approvalId?: string,
+): void {
+  if (approvalId) void api.respondToApproval(approvalId, "stop").catch(() => {});
+  const store = useAppStore.getState();
+  if (store.aiStreams[ownerSessionId]?.requestId !== requestId) return;
+  store.finishAiStream(ownerSessionId, `Sidecar safety check stopped this run: ${reason}`);
+  markTranscriptDirty(ownerSessionId);
+  void api.aiCancel(requestId).catch(() => {});
+}
+
+function rejectTerminalDispatch(
+  ownerSessionId: string,
+  requestId: string,
+  approvalId: string,
+  reason: string,
+): void {
+  const result = `Nothing was executed: ${reason}`;
+  void api
+    .submitCommandResult(approvalId, null, result, 0, "target_changed")
+    .catch(() => {});
+  rejectTargetedRun(ownerSessionId, requestId, reason);
 }
 
 function dispatchPanelEvent(sessionId: string, requestId: string, e: StreamEvent): void {
@@ -539,7 +708,15 @@ function dispatchPanelEvent(sessionId: string, requestId: string, e: StreamEvent
       store.appendThinking(sessionId, e.content);
       break;
     case "CommandProposal": {
-      const mode = store.aiStreams[sessionId]?.permissionMode ?? "ask";
+      const target = resolveCommandTarget(sessionId, e);
+      if (!target.ok) {
+        rejectTargetedRun(sessionId, requestId, target.reason, e.approval_id);
+        break;
+      }
+      const binding = useAppStore.getState().sidecarForSession(sessionId);
+      const mode = target.meta && binding
+        ? binding.permissions[target.meta.role]
+        : (store.aiStreams[sessionId]?.permissionMode ?? "ask");
       const verdict = { readOnly: e.read_only, network: e.network };
       if (autoRuns(mode, verdict)) {
         // Auto-run is frontend sugar over the same gate: respond instantly. The
@@ -556,27 +733,67 @@ function dispatchPanelEvent(sessionId: string, requestId: string, e: StreamEvent
             explanation: e.explanation,
             readOnly: e.read_only,
             network: e.network,
+            ...(target.meta
+              ? {
+                  targetRole: target.meta.role,
+                  targetSessionId: target.meta.sessionId,
+                }
+              : {}),
           },
           "awaiting_approval",
         );
       }
       break;
     }
-    case "CommandBlocked":
-      store.noteBlockedCommand(sessionId, e.command, e.reason);
+    case "CommandBlocked": {
+      const target = resolveCommandTarget(sessionId, e);
+      if (!target.ok) {
+        rejectTargetedRun(sessionId, requestId, target.reason);
+        break;
+      }
+      store.noteBlockedCommand(sessionId, e.command, e.reason, target.meta);
       break;
-    case "CommandStarted":
-      store.beginCommand(sessionId, e.approval_id, e.command, e.explanation);
+    }
+    case "CommandStarted": {
+      const target = resolveCommandTarget(sessionId, e);
+      if (!target.ok) {
+        rejectTargetedRun(sessionId, requestId, target.reason, e.approval_id);
+        break;
+      }
+      store.beginCommand(
+        sessionId,
+        e.approval_id,
+        e.command,
+        e.explanation,
+        target.meta,
+      );
       break;
+    }
     case "RunInTerminal": {
-      // A stale run must never drive a different tab's shell.
-      if (e.session_id && e.session_id !== sessionId) break;
-      store.beginCommand(sessionId, e.approval_id, e.command, e.explanation);
+      const target = resolveCommandTarget(sessionId, e);
+      if (!target.ok || e.session_id !== target.sessionId) {
+        const reason = target.ok
+          ? "The backend selected a terminal outside the approved Sidecar binding."
+          : target.reason;
+        rejectTerminalDispatch(sessionId, requestId, e.approval_id, reason);
+        break;
+      }
+      store.beginCommand(
+        sessionId,
+        e.approval_id,
+        e.command,
+        e.explanation,
+        target.meta,
+      );
       // Fire-and-forget: this dispatcher is the Channel callback and must return
       // synchronously. The command is awaited on its own timeline and reported
       // back through submitCommandResult exactly once.
-      void runInTerminal(sessionId, e.approval_id, e.command, {
+      void runInTerminal(target.sessionId, e.approval_id, e.command, {
         timeoutMs: e.timeout_secs * 1000,
+        // Revalidate after prompt probing and immediately before the one PTY
+        // write. Pane focus is deliberately irrelevant; immutable session ids
+        // and the live binding are the authority.
+        canWrite: () => canDispatchToTarget(sessionId, requestId, e, target.sessionId),
       })
         .then((outcome) => {
           const s = useAppStore.getState();
@@ -604,9 +821,15 @@ function dispatchPanelEvent(sessionId: string, requestId: string, e: StreamEvent
     case "CommandOutput":
       store.appendCommandOutput(sessionId, e.approval_id, e.chunk);
       break;
-    case "CommandResult":
+    case "CommandResult": {
+      const target = resolveCommandTarget(sessionId, e);
+      if (!target.ok) {
+        rejectTargetedRun(sessionId, requestId, target.reason, e.approval_id);
+        break;
+      }
       store.finishCommand(sessionId, e.approval_id, e.exit_code);
       break;
+    }
     case "Started":
       // Previously dropped on the floor, which is why switching models
       // relabelled the whole scrollback: attribution has to be recorded when

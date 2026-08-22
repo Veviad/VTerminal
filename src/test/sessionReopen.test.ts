@@ -162,3 +162,56 @@ describe("reopenSession attachment ownership", () => {
     expect(hydrateAttachmentsMock).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("reopenSession command provenance", () => {
+  it("restores archived Sidecar labels without reviving an old PTY binding", async () => {
+    const commandDetail: ArchiveDetail = {
+      summary: {
+        ...detail.summary,
+        message_count: 1,
+        agent_command_count: 1,
+        first_prompt: null,
+      },
+      messages: [
+        {
+          id: "source:0",
+          sort_order: 0,
+          role: "assistant",
+          kind: "command",
+          content: "",
+          thinking: null,
+          command: {
+            command: "docker compose up -d api",
+            output: "Container api Started",
+            exit_code: 0,
+            status: "done",
+            note: null,
+            target_role: "remote",
+            target_label: "deploy@prod-01",
+          },
+          attachments: [],
+          created_at: "2026-08-01T00:00:01.000Z",
+        },
+      ],
+    };
+    archiveGetMock.mockResolvedValueOnce(commandDetail);
+
+    await expect(reopenSession("source", createSession)).resolves.toBe("replacement-1");
+
+    const restored = useAppStore.getState().aiStreams["replacement-1"].messages[0].command;
+    expect(restored).toMatchObject({
+      targetRole: "remote",
+      targetLabel: "deploy@prod-01",
+    });
+    expect(restored).not.toHaveProperty("targetSessionId");
+
+    // Reopen immediately registers a live replacement archive. Provenance must
+    // survive that second serialization too, rather than disappearing after
+    // one reopen/close cycle.
+    const replacement = archivePutMock.mock.calls[0][0] as ArchiveSessionInput;
+    expect(replacement.messages?.[0].command).toMatchObject({
+      target_role: "remote",
+      target_label: "deploy@prod-01",
+    });
+  });
+});

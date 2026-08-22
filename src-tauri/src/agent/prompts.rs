@@ -37,6 +37,16 @@ Be especially careful when the session is remote: it may be a production host.\n
 - When the goal is achieved (or cannot be), call finish with a short summary of what happened.\n\
 - Do not invent output you have not seen. Keep prose between steps to one or two sentences.";
 
+/// Appended only when one conversation is linked to a local and an SSH PTY.
+/// Code, not prose, enforces the required target and immutable session routing;
+/// these instructions teach the model how to use that capability coherently.
+pub const AGENT_SIDECAR: &str = "Sidecar target selection:\n\
+- This run has exactly two separate execution targets named `local` and `remote`. Every run_command call MUST set `target` to one of those exact names.\n\
+- Select the target deliberately from the purpose of that command. Use local for local credentials and tools (for example `gh`); use remote for facts and changes on the SSH host.\n\
+- A path, working directory, git branch, credential, environment variable, process, or earlier command result belongs ONLY to its labelled target. Never assume it exists on the other target and never claim that a command affected both.\n\
+- Read the `target:` line in every tool result before reasoning from its output. If information must be applied elsewhere, run a separate command on that other target.\n\
+- Never transfer credentials, environment variables, or files between targets. Never enter another environment with ssh, mosh, et, docker/podman/nerdctl exec/attach/run, kubectl/oc exec, vagrant ssh, or VM/container shell helpers; linked runs refuse those commands before approval.";
+
 /// Appended to `AGENT` when the model has no web tool of its own — which today
 /// is every model, and after the native tier lands is still every non-Anthropic
 /// one. Kept separate from `AGENT` rather than folded into it because a model
