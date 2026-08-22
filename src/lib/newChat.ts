@@ -74,7 +74,8 @@ export function streamHasConversation(stream: AiStreamState | undefined): boolea
 }
 
 export function hasConversation(sessionId: string): boolean {
-  return streamHasConversation(useAppStore.getState().aiStreams[sessionId]);
+  const store = useAppStore.getState();
+  return streamHasConversation(store.aiStreams[store.resolveAiOwner(sessionId)]);
 }
 
 /**
@@ -86,19 +87,34 @@ export function hasConversation(sessionId: string): boolean {
 export function startNewChat(sessionId: string): Promise<boolean> {
   return trackArchiveMutation(async () => {
     const store = useAppStore.getState();
-    const session = store.sessions.find((s) => s.id === sessionId);
+    const ownerSessionId = store.resolveAiOwner(sessionId);
+    const binding = store.sidecarForSession(sessionId);
+    const targetSessionIds = binding
+      ? [binding.localSessionId, binding.remoteSessionId]
+      : [ownerSessionId];
+    const session = store.sessions.find((s) => s.id === ownerSessionId);
     if (!session) return false;
-    const stream = store.aiStreams[sessionId];
-    if (!stream || !hasConversation(sessionId)) return false;
+    const stream = store.aiStreams[ownerSessionId];
+    if (!stream || !hasConversation(ownerSessionId)) return false;
 
     // Stop anything in flight first, exactly as the panel's Stop button does.
-    // Releasing the PTY job never interrupts the command itself — it is running in
-    // the user's own shell, in front of them. Late stream events are then fenced by
-    // dispatchPanelEvent's request-ownership check, because the clear below nulls
-    // `requestId`.
-    abortSession(sessionId, "cancelled");
+    // Releasing a PTY job never interrupts the command itself — it is running in
+    // the user's own shell, in front of them. The synchronous finish/fence below
+    // retires ownership before cancellation or archival can yield.
+    for (const targetSessionId of new Set(targetSessionIds)) {
+      abortSession(targetSessionId, "cancelled");
+    }
     if (stream.requestId) {
+      // Retire ownership synchronously, before waiting for cancellation. This
+      // prevents a late sidecar round from acting on either terminal while the
+      // archive write is pending, and folds partial output for the row below.
+      useAppStore.getState().finishAiStream(ownerSessionId);
       await api.aiCancel(stream.requestId).catch(() => {});
+    } else {
+      // A Done event clears requestId before agentStart returns its transcript.
+      // New Chat is still a hard conversation fence in that narrow gap.
+      useAppStore.getState().flushAiStreaming(ownerSessionId);
+      useAppStore.getState().fenceAiGeneration(ownerSessionId);
     }
     // Fold whatever had already streamed into a real message. `aiCancel` resolving
     // does not mean the Cancelled event has been dispatched yet, and a partial
@@ -106,12 +122,12 @@ export function startNewChat(sessionId: string): Promise<boolean> {
     // this and cancelling mid-answer silently drops that text from the saved copy.
     // A no-op when the buffers are empty, and the late Cancelled event's own flush
     // is then a no-op too.
-    useAppStore.getState().flushAiStreaming(sessionId);
+    useAppStore.getState().flushAiStreaming(ownerSessionId);
 
     if (archiveWillKeepChats()) {
       // One build, two rows. buildArchiveRow snapshots live state synchronously
       // into plain objects, so nothing here races the clear that follows.
-      const base = buildArchiveRow(sessionId, {
+      const base = buildArchiveRow(ownerSessionId, {
         isOpen: false,
         closeReason: "closed",
         withScrollback: true,
@@ -121,7 +137,7 @@ export function startNewChat(sessionId: string): Promise<boolean> {
 
       const split = {
         ...base,
-        session_id: chatArchiveId(sessionId),
+        session_id: chatArchiveId(ownerSessionId),
         // The chat began when the first thing was said, not when the tab opened —
         // otherwise every chat split off a long-lived tab claims the same start.
         opened_at: stream.messages[0]?.createdAt ?? base.opened_at,
@@ -131,7 +147,7 @@ export function startNewChat(sessionId: string): Promise<boolean> {
       };
       const blanked = {
         ...base,
-        session_id: sessionId,
+        session_id: ownerSessionId,
         is_open: true,
         close_reason: null,
         // No blob: the live tab's screen is unchanged and its stored one is fine.
@@ -149,17 +165,19 @@ export function startNewChat(sessionId: string): Promise<boolean> {
       } catch (err) {
         // Keep the conversation. Losing it to a database error would be strictly
         // worse than a click that reports why it did nothing.
-        console.warn(`archiving the chat of ${sessionId} failed:`, err);
-        useAppStore.getState().finishAiStream(sessionId, S.aiPanel.newChatFailed);
+        console.warn(`archiving the chat of ${ownerSessionId} failed:`, err);
+        useAppStore.getState().finishAiStream(ownerSessionId, S.aiPanel.newChatFailed);
         return false;
       }
     }
 
-    useAppStore.getState().newAiConversation(sessionId);
+    // newAiConversation also removes the transient binding. Neither target PTY
+    // is closed or re-spawned; ending Sidecar is purely a conversation boundary.
+    useAppStore.getState().newAiConversation(ownerSessionId);
     // The split row inherited the supersede, so the tab must stop claiming it:
     // its next close is the end of a NEW thread of work.
     if (session.archivedFrom) {
-      useAppStore.getState().updateSession(sessionId, { archivedFrom: null });
+      useAppStore.getState().updateSession(ownerSessionId, { archivedFrom: null });
     }
     return true;
   }, false);

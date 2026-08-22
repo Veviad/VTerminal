@@ -1,17 +1,19 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Loader2, Pencil, Plus, Sparkles, X } from "lucide-react";
+import { Link2, Loader2, Pencil, Plus, Server, Sparkles, Terminal, X } from "lucide-react";
 import { useAppStore } from "../../stores/appStore";
 import { useSessions } from "../../hooks/useSessions";
 import { resolveSessionTitle } from "../../lib/sessionTitle";
 import { isNaming, nameSession } from "../../lib/sessionNaming";
 import { S } from "../../lib/strings";
 import type { Session } from "../../lib/types";
+import { roleForSession, sidecarForSession } from "../../lib/sidecar";
 
 export function TabStrip() {
   const sessions = useAppStore((s) => s.sessions);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
   const setActiveSession = useAppStore((s) => s.setActiveSession);
   const sessionUi = useAppStore((s) => s.sessionUi);
+  const sidecars = useAppStore((s) => s.sidecars);
   const renamingSessionId = useAppStore((s) => s.renamingSessionId);
   const setRenamingSession = useAppStore((s) => s.setRenamingSession);
   const { createSession, closeSession } = useSessions();
@@ -23,6 +25,11 @@ export function TabStrip() {
     <div className="flex min-w-0 items-center rounded-lg bg-bg-secondary p-0.5 border border-border-subtle">
       {sessions.map((session) => {
         const active = session.id === activeSessionId;
+        const binding = sidecarForSession(sidecars, session.id);
+        const activeBinding = activeSessionId ? sidecarForSession(sidecars, activeSessionId) : null;
+        const linkedRole = binding ? roleForSession(binding, session.id) : null;
+        const inActiveWorkspace =
+          Boolean(binding) && binding?.ownerSessionId === activeBinding?.ownerSessionId;
         const ui = sessionUi[session.id];
         const running = ui?.runningBlockId != null;
         const lastBlock = ui?.blocks[ui.blocks.length - 1];
@@ -48,6 +55,8 @@ export function TabStrip() {
               className={`group flex min-w-0 items-center gap-1.5 rounded-md px-3 py-1 text-[12px] font-medium transition-all duration-150 ${
                 active
                   ? "bg-bg-hover text-text-primary shadow-sm"
+                  : inActiveWorkspace
+                    ? "bg-accent/5 text-text-secondary ring-1 ring-inset ring-accent/20"
                   : "text-text-muted hover:text-text-secondary"
               }`}
             >
@@ -56,6 +65,17 @@ export function TabStrip() {
               )}
               {failed && (
                 <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-error" />
+              )}
+              {linkedRole && (
+                <span
+                  className={`flex shrink-0 items-center gap-0.5 ${
+                    linkedRole === "remote" ? "text-warning" : "text-accent"
+                  }`}
+                  title={`${linkedRole === "remote" ? "SSH" : "Local"} Sidecar target`}
+                >
+                  <Link2 size={9} />
+                  {linkedRole === "remote" ? <Server size={9} /> : <Terminal size={9} />}
+                </span>
               )}
               {connected && (
                 <span
@@ -97,7 +117,11 @@ export function TabStrip() {
                   void closeSession(session.id);
                 }}
                 className="rounded p-0.5 opacity-0 transition-opacity duration-100 hover:bg-bg-elevated group-hover:opacity-100"
-                title={S.header.closeTab}
+                title={
+                  binding
+                    ? "Close target and preserve Sidecar scrollback"
+                    : S.header.closeTab
+                }
               >
                 <X size={11} />
               </span>

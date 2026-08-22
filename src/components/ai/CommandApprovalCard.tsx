@@ -7,6 +7,7 @@ export function CommandApprovalCard({
   explanation,
   target,
   remote,
+  targetRole = remote ? "remote" : "local",
   queuedSteers = 0,
   askedBecause = null,
   onRespond,
@@ -16,6 +17,8 @@ export function CommandApprovalCard({
   /** Where this will run — a remote host, or the local cwd. */
   target: string | null;
   remote: boolean;
+  /** Explicit in sidecar mode; inferred from `remote` for single-session cards. */
+  targetRole?: "local" | "remote";
   /** Why this card is up even though an auto mode is armed. Null when the mode
    *  asks about everything, where no explanation is owed. Without it the "Reads"
    *  mode looks broken every time it correctly stops for a write. */
@@ -33,6 +36,11 @@ export function CommandApprovalCard({
   const [responded, setResponded] = useState(false);
   const changed = edited.trim() !== command.trim();
   const empty = edited.trim() === "";
+  const targetLabel = target ?? (targetRole === "remote" ? "remote shell" : S.aiPanel.localShell);
+  const runLabel =
+    targetRole === "remote"
+      ? `Run on ${targetLabel.replace(/^ssh\s+/, "")}`
+      : "Run locally";
 
   const respond = (decision: "run" | "skip" | "stop", editedCommand?: string) => {
     if (responded) return;
@@ -41,18 +49,26 @@ export function CommandApprovalCard({
   };
 
   return (
-    <div className={`rounded-lg border border-accent/40 bg-bg-card p-3 ${responded ? "opacity-80" : ""}`}>
+    <div
+      className={`rounded-lg border bg-bg-card p-3 ${
+        targetRole === "remote" ? "border-warning/50" : "border-accent/40"
+      } ${responded ? "opacity-80" : ""}`}
+      aria-label={`${targetRole === "remote" ? "Remote" : "Local"} command approval for ${targetLabel}`}
+    >
       {/* Where it lands. Commands now run in the real terminal — which may be
           SSH'd into a production host — so this is a safety affordance, not
           decoration. */}
       <div
         className={`mb-2 flex items-center gap-1.5 text-[10px] ${
-          remote ? "text-warning" : "text-text-muted"
+          targetRole === "remote" ? "text-warning" : "text-accent"
         }`}
       >
-        {remote ? <ServerCog size={11} /> : <Terminal size={11} />}
-        <span>{S.aiPanel.runsIn}</span>
-        <span className="truncate font-mono">{target ?? S.aiPanel.localShell}</span>
+        {targetRole === "remote" ? <ServerCog size={11} /> : <Terminal size={11} />}
+        <span className="font-semibold uppercase tracking-wide">
+          {targetRole === "remote" ? "Remote" : "Local"}
+        </span>
+        <span aria-hidden="true">·</span>
+        <span className="truncate font-mono">{targetLabel}</span>
       </div>
       {askedBecause && (
         <p className="mb-2 text-[10px] text-text-muted">{S.aiPanel.askedBecause[askedBecause]}</p>
@@ -89,7 +105,7 @@ export function CommandApprovalCard({
           className="flex items-center gap-1.5 rounded-md bg-accent px-3 py-1 text-[12px] font-medium text-bg-primary transition-colors duration-150 hover:bg-accent-hover disabled:opacity-60"
         >
           <Play size={11} />
-          {S.aiPanel.run}
+          {runLabel}
         </button>
         <button
           onClick={() => respond("skip")}

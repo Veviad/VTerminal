@@ -97,6 +97,8 @@ pub struct ArchivedCommand {
     pub exit_code: Option<i32>,
     pub status: String,
     pub note: Option<String>,
+    pub target_role: Option<String>,
+    pub target_label: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -143,6 +145,10 @@ pub struct ArchiveCommandInput {
     pub exit_code: Option<i32>,
     pub status: String,
     pub note: Option<String>,
+    #[serde(default)]
+    pub target_role: Option<String>,
+    #[serde(default)]
+    pub target_label: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -302,7 +308,7 @@ pub fn get(conn: &Connection, session_id: &str) -> Result<Option<ArchiveDetail>,
     let mut stmt = conn
         .prepare(
             "SELECT id, sort_order, role, kind, content, thinking, cmd_command, cmd_output,
-                    cmd_exit_code, cmd_status, cmd_note, created_at
+                    cmd_exit_code, cmd_status, cmd_note, cmd_target_role, cmd_target_label, created_at
                FROM archived_messages WHERE session_id = ?1 ORDER BY sort_order ASC",
         )
         .map_err(|e| e.to_string())?;
@@ -321,6 +327,8 @@ pub fn get(conn: &Connection, session_id: &str) -> Result<Option<ArchiveDetail>,
                         .get::<_, Option<String>>(9)?
                         .unwrap_or_else(|| "done".into()),
                     note: row.get(10)?,
+                    target_role: row.get(11)?,
+                    target_label: row.get(12)?,
                 }),
                 _ => None,
             };
@@ -333,7 +341,7 @@ pub fn get(conn: &Connection, session_id: &str) -> Result<Option<ArchiveDetail>,
                 thinking: row.get(5)?,
                 command,
                 attachments: Vec::new(),
-                created_at: row.get(11)?,
+                created_at: row.get(13)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -600,7 +608,7 @@ pub fn put_many(
                     Some(k @ ("command" | "compaction")) => k,
                     _ => "text",
                 };
-                let (cmd, out, exit, status, note) = match &m.command {
+                let (cmd, out, exit, status, note, target_role, target_label) = match &m.command {
                     Some(c) => (
                         Some(head(&c.command, MAX_MESSAGE_CONTENT)),
                         Some(tail(&c.output, MAX_COMMAND_OUTPUT)),
@@ -610,14 +618,20 @@ pub fn put_many(
                             _ => "done",
                         }),
                         c.note.clone(),
+                        match c.target_role.as_deref() {
+                            Some(role @ ("local" | "remote")) => Some(role),
+                            _ => None,
+                        },
+                        c.target_label.as_deref().map(|label| head(label, 256)),
                     ),
-                    None => (None, None, None, None, None),
+                    None => (None, None, None, None, None, None, None),
                 };
                 tx.execute(
                     "INSERT INTO archived_messages
                         (id, session_id, sort_order, role, kind, content, thinking,
-                         cmd_command, cmd_output, cmd_exit_code, cmd_status, cmd_note, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                         cmd_command, cmd_output, cmd_exit_code, cmd_status, cmd_note,
+                         cmd_target_role, cmd_target_label, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                     params![
                         // Message ids are only unique per session on the frontend
                         // ("msg-<ms>-<len>" can repeat across tabs), and this
@@ -634,6 +648,8 @@ pub fn put_many(
                         exit,
                         status,
                         note,
+                        target_role,
+                        target_label,
                         m.created_at,
                     ],
                 )
@@ -991,6 +1007,8 @@ mod tests {
                 exit_code: Some(0),
                 status: "done".into(),
                 note: None,
+                target_role: None,
+                target_label: None,
             }),
             attachments: None,
             created_at: "2026-08-01T00:00:00+00:00".into(),
@@ -1102,7 +1120,11 @@ mod tests {
     fn a_command_card_round_trips_with_its_exit_code_and_status() {
         let mut conn = mem();
         let mut r = row("a");
-        r.messages = Some(vec![card(7)]);
+        let mut linked = card(7);
+        let linked_command = linked.command.as_mut().unwrap();
+        linked_command.target_role = Some("remote".into());
+        linked_command.target_label = Some("deploy@prod-01".into());
+        r.messages = Some(vec![linked]);
         put(&mut conn, &r, KEEP_ALL).unwrap();
 
         let detail = get(&conn, "a").unwrap().unwrap();
@@ -1111,6 +1133,8 @@ mod tests {
         assert_eq!(cmd.command, "ls -la /7");
         assert_eq!(cmd.exit_code, Some(0));
         assert_eq!(cmd.status, "done");
+        assert_eq!(cmd.target_role.as_deref(), Some("remote"));
+        assert_eq!(cmd.target_label.as_deref(), Some("deploy@prod-01"));
     }
 
     #[test]

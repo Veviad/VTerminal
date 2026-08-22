@@ -210,6 +210,62 @@ describe("AiPanel renders", () => {
     expect(screen.getByText(/asking: this reaches the network/i)).toBeTruthy();
   });
 
+  it("keeps local and remote destinations visible on completed command cards", () => {
+    useAppStore.setState({
+      sessions: [session("s1")],
+      sidecars: {},
+      aiStreams: {
+        s1: {
+          ...emptyAiStream(),
+          mode: "agent",
+          messages: [
+            {
+              id: "cmd-local",
+              role: "assistant",
+              kind: "command",
+              content: "",
+              createdAt: "2026-08-22T00:00:00.000Z",
+              command: {
+                command: "gh issue view 42",
+                output: "Issue 42",
+                exitCode: 0,
+                status: "done",
+                targetRole: "local",
+                targetSessionId: "s1",
+                targetLabel: "~/code/project",
+              },
+            },
+            {
+              id: "cmd-remote",
+              role: "assistant",
+              kind: "command",
+              content: "",
+              createdAt: "2026-08-22T00:01:00.000Z",
+              command: {
+                command: "docker compose config",
+                output: "valid",
+                exitCode: 0,
+                status: "done",
+                targetRole: "remote",
+                targetSessionId: "remote",
+                targetLabel: "Production",
+              },
+            },
+          ],
+        },
+      },
+    });
+
+    render(<AiPanel sessionId="s1" />);
+
+    expect(
+      screen.getByLabelText("Local command destination ~/code/project"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("Remote command destination Production"),
+    ).toBeInTheDocument();
+  });
+
   it("renders the key hint instead of the load hint for an API model", () => {
     useAppStore.setState({
       catalog: [cloudEntry()],

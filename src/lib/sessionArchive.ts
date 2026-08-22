@@ -59,6 +59,8 @@ export function toArchiveMessages(messages: AiMessage[]): ArchiveMessageInput[] 
           exit_code: m.command.exitCode,
           status: m.command.status,
           note: m.command.note ?? null,
+          target_role: m.command.targetRole ?? null,
+          target_label: m.command.targetLabel ?? null,
         }
       : null,
     // Metadata and the disk path only. `data`/`text` are deliberately absent:

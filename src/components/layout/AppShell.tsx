@@ -13,10 +13,13 @@ import { Kbd } from "../ui/Kbd";
 import { shortcutFor } from "../../lib/keymap";
 import { RunbooksWorkspace } from "../runbooks";
 import { useRunbookStore } from "../../stores/runbookStore";
+import { resolveAiOwner, sidecarForSession } from "../../lib/sidecar";
+import { SidecarWorkspace } from "../sidecar/SidecarWorkspace";
 
 export function AppShell() {
   const sessions = useAppStore((s) => s.sessions);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
+  const sidecars = useAppStore((s) => s.sidecars);
   const settingsLoaded = useAppStore((s) => s.settingsLoaded);
   const paletteOpen = useAppStore((s) => s.paletteOpen);
   const sessionBrowserOpen = useAppStore((s) => s.sessionBrowserOpen);
@@ -24,15 +27,23 @@ export function AppShell() {
   const runbooksEnabled = useAppStore((s) => s.runbooksEnabled);
   const runbooksOpen = useRunbookStore((s) => s.workspaceOpen);
   useGlobalShortcuts();
+  const sidecar = activeSessionId ? sidecarForSession(sidecars, activeSessionId) : null;
+  const aiSessionId = activeSessionId ? resolveAiOwner(sidecars, activeSessionId) : null;
+  const linkedIds = sidecar
+    ? new Set([sidecar.localSessionId, sidecar.remoteSessionId])
+    : null;
 
   return (
     <div className="flex h-full flex-col bg-bg-primary">
       <Header />
       <div className="relative flex min-h-0 flex-1">
         <main className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-          {sessions.map((s) => (
-            <TerminalPane key={s.id} sessionId={s.id} active={s.id === activeSessionId} />
-          ))}
+          {sessions.map((s) =>
+            linkedIds?.has(s.id) ? null : (
+              <TerminalPane key={s.id} sessionId={s.id} active={s.id === activeSessionId} />
+            ),
+          )}
+          {sidecar && <SidecarWorkspace binding={sidecar} />}
           {sessions.length === 0 && <EmptyState />}
         </main>
         {/* Gated on settingsLoaded, not on the open flag: the store defaults to
@@ -41,7 +52,7 @@ export function AppShell() {
         {settingsLoaded && runbooksEnabled && runbooksOpen ? (
           <RunbooksWorkspace sessionId={activeSessionId} />
         ) : (
-          settingsLoaded && <AiPanel sessionId={activeSessionId} />
+          settingsLoaded && <AiPanel sessionId={aiSessionId} />
         )}
         {/* Settings is an overlay, NOT an early return — terminals must stay mounted. */}
         {settingsOpen && (

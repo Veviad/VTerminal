@@ -46,6 +46,9 @@ pub fn run(conn: &Connection) -> Result<(), String> {
     if version < 10 {
         crate::runbooks::db::migrate_v10(conn)?;
     }
+    if version < 11 {
+        migrate_v11(conn)?;
+    }
     crate::runbooks::db::ensure_v6_runtime_indexes(conn)?;
 
     Ok(())
@@ -384,6 +387,22 @@ fn migrate_v7(conn: &Connection) -> Result<(), String> {
     .map_err(|e| format!("migration v7 failed: {e}"))
 }
 
+fn migrate_v11(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        BEGIN;
+        -- Sidecar command cards keep their execution destination after the live
+        -- pairing is gone. Nullable keeps every pre-sidecar archive valid.
+        ALTER TABLE archived_messages ADD COLUMN cmd_target_role TEXT
+            CHECK (cmd_target_role IS NULL OR cmd_target_role IN ('local','remote'));
+        ALTER TABLE archived_messages ADD COLUMN cmd_target_label TEXT;
+        INSERT INTO schema_version (version) VALUES (11);
+        COMMIT;
+        "#,
+    )
+    .map_err(|e| format!("migration v11 failed: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;
@@ -410,7 +429,71 @@ mod tests {
         let first = version(&conn);
         super::run(&conn).unwrap();
         assert_eq!(version(&conn), first);
-        assert_eq!(first, 10);
+        assert_eq!(first, 11);
+    }
+
+    #[test]
+    fn v11_preserves_old_cards_and_adds_checked_sidecar_provenance() {
+        let conn = mem();
+        conn.execute_batch("CREATE TABLE schema_version (version INTEGER PRIMARY KEY);")
+            .unwrap();
+        super::migrate_v1(&conn).unwrap();
+        super::migrate_v2(&conn).unwrap();
+        super::migrate_v3(&conn).unwrap();
+        super::migrate_v4(&conn).unwrap();
+        super::migrate_v5(&conn).unwrap();
+        crate::runbooks::db::migrate_v6(&conn).unwrap();
+        super::migrate_v7(&conn).unwrap();
+        crate::runbooks::db::migrate_v8(&conn).unwrap();
+        crate::runbooks::db::migrate_v9(&conn).unwrap();
+        crate::runbooks::db::migrate_v10(&conn).unwrap();
+        assert_eq!(version(&conn), 10);
+
+        // A real pre-Sidecar command row, deliberately inserted before the new
+        // columns exist. The migration must preserve it and backfill NULLs.
+        conn.execute_batch(
+            r#"
+            INSERT INTO archived_sessions
+                (session_id, title, shell, cwd, cols, rows, opened_at, closed_at,
+                 updated_at, is_open)
+            VALUES ('s1', 't', '/bin/zsh', NULL, 80, 24, '2026-01-01T00:00:00Z',
+                    '2026-01-01T00:01:00Z', '2026-01-01T00:01:00Z', 0);
+            INSERT INTO archived_messages
+                (id, session_id, sort_order, role, kind, content, cmd_command,
+                 cmd_output, cmd_exit_code, cmd_status, created_at)
+            VALUES ('s1:0', 's1', 0, 'assistant', 'command', '', 'pwd', '/srv', 0,
+                    'done', '2026-01-01T00:00:01Z');
+            "#,
+        )
+        .unwrap();
+
+        super::run(&conn).unwrap();
+        assert_eq!(version(&conn), 11);
+        let migrated: (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT cmd_command, cmd_target_role, cmd_target_label
+                   FROM archived_messages WHERE id = 's1:0'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(migrated, ("pwd".into(), None, None));
+
+        conn.execute(
+            "UPDATE archived_messages
+                SET cmd_target_role = 'remote', cmd_target_label = 'deploy@prod-01'
+              WHERE id = 's1:0'",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "UPDATE archived_messages SET cmd_target_role = 'somewhere' WHERE id = 's1:0'",
+                [],
+            )
+            .is_err(),
+            "the role CHECK must reject values the frontend cannot render"
+        );
     }
 
     /// The migration chain is append-only, so this asserts the shape a v4
@@ -498,7 +581,7 @@ mod tests {
         )
         .unwrap();
         super::run(&conn).unwrap();
-        assert_eq!(version(&conn), 10);
+        assert_eq!(version(&conn), 11);
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM command_history", [], |r| r.get(0))
             .unwrap();
@@ -510,6 +593,14 @@ mod tests {
         let conn = mem();
         conn.execute_batch("CREATE TABLE schema_version (version INTEGER PRIMARY KEY);")
             .unwrap();
+        // A database at v6 necessarily passed through the app-owned v1-v5
+        // migrations too. Keeping the fixture faithful matters now that v11
+        // extends the archive table created by v4.
+        super::migrate_v1(&conn).unwrap();
+        super::migrate_v2(&conn).unwrap();
+        super::migrate_v3(&conn).unwrap();
+        super::migrate_v4(&conn).unwrap();
+        super::migrate_v5(&conn).unwrap();
         crate::runbooks::db::migrate_v6(&conn).unwrap();
         conn.execute(
             "INSERT INTO runbook_sources
@@ -523,7 +614,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 10);
+        assert_eq!(version(&conn), 11);
         let migrated: (String, i64, Option<i64>, String, String) = conn
             .query_row(
                 "SELECT source_kind, hidden, builtin_order, created_at, updated_at
@@ -564,7 +655,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 10);
+        assert_eq!(version(&conn), 11);
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(runbook_drafts)")
             .unwrap()
@@ -598,7 +689,7 @@ mod tests {
         super::run(&conn).unwrap();
 
         // Upgrades run the whole chain, so this lands on the current head.
-        assert_eq!(version(&conn), 10);
+        assert_eq!(version(&conn), 11);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()
@@ -644,7 +735,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 10);
+        assert_eq!(version(&conn), 11);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()

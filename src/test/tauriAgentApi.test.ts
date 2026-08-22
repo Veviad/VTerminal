@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { KnowledgeBucketRef, TerminalContext } from "../lib/types";
+import type {
+  KnowledgeBucketRef,
+  SidecarAgentTargets,
+  TerminalContext,
+} from "../lib/types";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 
@@ -44,7 +48,61 @@ describe("agent API", () => {
     expect(args).toMatchObject({
       requestId: "request-1",
       docBuckets,
+      sidecarTargets: null,
     });
     expect(args).not.toHaveProperty("doc_buckets");
+  });
+
+  it("sends an immutable local and SSH target pair only for Sidecar agent runs", async () => {
+    invokeMock.mockResolvedValue([]);
+    const local: TerminalContext = {
+      session_id: "local-session",
+      cwd: "/Users/test/project",
+      shell: "/bin/zsh",
+      git_branch: "feature/sidecar",
+      os: "macos",
+      recent_blocks: [],
+      remote: null,
+      screen_tail: "$ gh issue view 42",
+      shell_integration: true,
+    };
+    const remote: TerminalContext = {
+      session_id: "remote-session",
+      cwd: null,
+      shell: "/bin/zsh",
+      git_branch: null,
+      os: "unknown (remote host)",
+      recent_blocks: [],
+      remote: { kind: "ssh", target: "deploy@prod.example" },
+      screen_tail: "deploy@prod:~$",
+      shell_integration: false,
+    };
+    const sidecarTargets: SidecarAgentTargets = { local, remote };
+
+    await agentStart(
+      "request-sidecar",
+      "Inspect locally, then update remotely",
+      local,
+      [],
+      [],
+      [],
+      vi.fn(),
+      sidecarTargets,
+    );
+
+    expect(invokeMock).toHaveBeenCalledOnce();
+    const [command, args] = invokeMock.mock.calls[0];
+    expect(command).toBe("agent_start");
+    expect(args).toMatchObject({
+      requestId: "request-sidecar",
+      context: local,
+      sidecarTargets: {
+        local: { session_id: "local-session", remote: null },
+        remote: {
+          session_id: "remote-session",
+          remote: { kind: "ssh", target: "deploy@prod.example" },
+        },
+      },
+    });
   });
 });

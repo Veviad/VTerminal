@@ -12,6 +12,24 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+/// Stable model/UI names for the two terminals in a linked Sidecar run.
+#[cfg_attr(not(feature = "local-llm"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentTargetRole {
+    Local,
+    Remote,
+}
+
+impl AgentTargetRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Remote => "remote",
+        }
+    }
+}
+
 /// Wire events for AI streaming (tagged union, Cowork idiom).
 #[cfg_attr(not(feature = "local-llm"), allow(dead_code))]
 #[derive(Clone, Serialize)]
@@ -45,6 +63,12 @@ pub enum StreamEvent {
         read_only: bool,
         /// Reaches the network, as far as the command text shows.
         network: bool,
+        /// Present only in Sidecar mode. Together these freeze the destination
+        /// before approval, independently of whichever tab is later focused.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_role: Option<AgentTargetRole>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_session_id: Option<String>,
     },
     /// Policy refused a command outright — it was never proposed and never ran.
     ///
@@ -54,6 +78,10 @@ pub enum StreamEvent {
     CommandBlocked {
         command: String,
         reason: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_role: Option<AgentTargetRole>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_session_id: Option<String>,
     },
     CommandStarted {
         approval_id: String,
@@ -62,6 +90,10 @@ pub enum StreamEvent {
         /// approval card, so this event is the only place its one-sentence
         /// justification can reach the transcript.
         explanation: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_role: Option<AgentTargetRole>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_session_id: Option<String>,
     },
     /// Ask the FRONTEND to run this in the session's live PTY. The backend never
     /// sees PTY bytes (all OSC parsing is frontend-side), so it cannot detect
@@ -73,6 +105,10 @@ pub enum StreamEvent {
         timeout_secs: u64,
         /// See `CommandStarted::explanation`.
         explanation: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_role: Option<AgentTargetRole>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_session_id: Option<String>,
     },
     CommandOutput {
         approval_id: String,
@@ -87,6 +123,10 @@ pub enum StreamEvent {
         duration_ms: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_role: Option<AgentTargetRole>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_session_id: Option<String>,
     },
     /// The loop just appended these queued steering messages to the transcript.
     /// The frontend clears its "queued" badge on this and on nothing else — a
