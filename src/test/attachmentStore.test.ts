@@ -57,11 +57,21 @@ describe("pending attachments", () => {
   it("caps at MAX_ATTACHMENTS and says how many it dropped", () => {
     const s = useAppStore.getState();
     const many = Array.from({ length: MAX_ATTACHMENTS + 2 }, (_, i) => image(`a${i}`));
-    s.attachFilesToAi(SID, many);
+    const accepted = s.attachFilesToAi(SID, many);
 
     expect(pending()).toHaveLength(MAX_ATTACHMENTS);
+    expect(accepted.map((attachment) => attachment.id)).toEqual(
+      many.slice(0, MAX_ATTACHMENTS).map((attachment) => attachment.id),
+    );
     // Silently swallowing files the user dropped is the failure mode this guards.
     expect(attachError()).toMatch(/2 files not added/);
+  });
+
+  it("returns no accepted attachments for a session that no longer exists", () => {
+    const accepted = useAppStore.getState().attachFilesToAi("closed-session", [image("a")]);
+
+    expect(accepted).toEqual([]);
+    expect(useAppStore.getState().aiStreams).not.toHaveProperty("closed-session");
   });
 
   it("clears the limit message when the user makes room", () => {

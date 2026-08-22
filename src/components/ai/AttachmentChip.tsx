@@ -13,9 +13,11 @@ import type { Attachment } from "../../lib/types";
 export function AttachmentChip({
   attachment,
   onRemove,
+  onShowAsText,
 }: {
   attachment: Attachment;
   onRemove: () => void;
+  onShowAsText?: () => void;
 }) {
   const thumb = attachment.kind === "image" ? thumbnailSrc(attachment) : null;
   return (
@@ -38,9 +40,22 @@ export function AttachmentChip({
       {attachment.truncated && (
         <span className="shrink-0 text-text-muted">{S.attachments.truncated}</span>
       )}
+      {onShowAsText && (
+        <button
+          type="button"
+          onClick={onShowAsText}
+          title={S.attachments.showAsTextNamed(attachment.name)}
+          aria-label={S.attachments.showAsTextNamed(attachment.name)}
+          className="shrink-0 rounded-full px-1 py-0.5 text-accent transition-colors duration-100 hover:bg-bg-elevated hover:text-accent-hover"
+        >
+          {S.attachments.showAsText}
+        </button>
+      )}
       <button
+        type="button"
         onClick={onRemove}
-        title={S.attachments.remove}
+        title={S.attachments.removeNamed(attachment.name)}
+        aria-label={S.attachments.removeNamed(attachment.name)}
         className="shrink-0 rounded-full p-0.5 transition-colors duration-100 hover:bg-bg-elevated hover:text-text-primary"
       >
         <X size={9} />

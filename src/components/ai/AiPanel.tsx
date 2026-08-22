@@ -36,6 +36,7 @@ import { ownRecordValue } from "../../lib/records";
 import { useAiStream } from "../../hooks/useAiStream";
 import { useDismissibleLayer } from "../../hooks/useDismissibleLayer";
 import { useAutoGrow } from "../../hooks/useAutoGrow";
+import { useClipboardStaging } from "../../hooks/useClipboardStaging";
 import { AiMessageView } from "./AiMessageView";
 import { BlockContextChip } from "./BlockContextChip";
 import { BucketChip, BucketPicker } from "./BucketPicker";
@@ -62,7 +63,6 @@ import {
   sameKnowledgeBucket,
 } from "../../lib/knowledge";
 import {
-  inputsFromClipboard,
   inputsFromFileList,
   splitFoldedBlocks,
   stageInputs,
@@ -159,13 +159,11 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const setSidecarFocusedSession = useAppStore((s) => s.setSidecarFocusedSession);
   const { ask, startAgent, continueRun, steer, respondToProposal, cancel } = useAiStream();
   const chatIsKept = useAppStore(selectArchiveWillKeepChats);
-  const [input, setInput] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);
   const [sidecarMenuOpen, setSidecarMenuOpen] = useState(false);
   const [replacingTarget, setReplacingTarget] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const asideRef = useRef<HTMLElement>(null);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [panelHeight, setPanelHeight] = useState(0);
   const [panelWidth, setPanelWidth] = useState(0);
@@ -236,8 +234,6 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   // window, so a window resize changes our width without changing the ratio. The
   // re-fit still has to happen — rewrapping changes the line count without
   // changing a character.
-  useAutoGrow(inputRef, composerMax, [input, panelWidth]);
-
   const activeEntry = catalog.find((m) => m.id === activeModelId);
   const mode: AiMode = stream?.mode ?? "ask";
   const messages = stream?.messages ?? [];
@@ -334,22 +330,41 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   // Agent mode is steerable mid-run; ask mode is one provider call with no round
   // boundary to inject into, so it stays locked while it streams.
   const steering = busy && agentMode;
+  const clipboardStaging = useClipboardStaging({ sessionId, steering, pendingAttachments });
+  const { input, inputRef, pasteAnnouncement, pastedTextStaging } = clipboardStaging;
+  useAutoGrow(inputRef, composerMax, [input, panelWidth]);
   const queuedSteers = stream?.steerQueue.length ?? 0;
+  const hasInlineInput = input.trim().length > 0;
+  // Text attachments become a non-empty fenced prompt in `buildOutgoing`, so
+  // they can stand alone. An image does not: keep the established requirement
+  // for a typed prompt rather than risk an empty text part on a provider.
+  const hasStandaloneTextAttachment = pendingAttachments.some(
+    (attachment) => attachment.kind === "text" && !!attachment.text?.trim(),
+  );
+  const hasIdlePayload = hasInlineInput || hasStandaloneTextAttachment;
 
   const submit = () => {
-    if (!sessionId || !input.trim() || !aiReady || sidecar?.degraded) return;
+    if (!sessionId || !aiReady || sidecar?.degraded) return;
+    // A large paste has already been accepted (the native paste was prevented),
+    // but its Blob may not have reached pendingAttachments yet. Sending during
+    // that gap would strand the paste on the following turn.
+    if (clipboardStaging.isPastedTextStaging()) return;
     // Blocked, never silently stripped: an answer about an image the model never
     // received is indistinguishable from an answer about one it did.
     if (imagesBlocked) return;
     if (busy) {
-      if (!steering) return;
+      // Pending attachments belong to the NEXT ordinary turn. The steering API
+      // accepts text only, so a chip must never make this Send button look ready.
+      if (!steering || !hasInlineInput) return;
       void steer(sessionId, input.trim());
     } else if (agentMode) {
+      if (!hasIdlePayload) return;
       void startAgent(sessionId, input.trim());
     } else {
+      if (!hasIdlePayload) return;
       void ask(sessionId, input.trim());
     }
-    setInput("");
+    clipboardStaging.clearInput();
   };
 
   // Collapsed keeps the panel MOUNTED behind a rail rather than unmounting it:
@@ -433,7 +448,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
                 return;
               }
               setConfirmClear(false);
-              setInput("");
+              clipboardStaging.clearInput();
               void startNewChat(sessionId);
             }}
             onBlur={() => setConfirmClear(false)}
@@ -789,6 +804,13 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
         </div>
       )}
 
+      {/* A visual chip is not enough feedback for someone using a screen reader.
+          Announce conversion/rematerialization without moving focus away from the
+          textarea; aria-atomic keeps the filename and line count together. */}
+      <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {pasteAnnouncement}
+      </span>
+
       {/* Attached blocks and staged files share one strip: both are "context for
           the next turn", and two stacked rows would eat the message list. */}
       {(attachedBlocks.length > 0 ||
@@ -821,6 +843,13 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
               key={a.id}
               attachment={a}
               onRemove={() => detachFileFromAi(sessionId, a.id)}
+              onShowAsText={
+                a.origin === "pasted-text" && a.kind === "text" && typeof a.text === "string"
+                  ? () => {
+                      clipboardStaging.showAttachmentAsText(a);
+                    }
+                  : undefined
+              }
             />
           ))}
           {/* Progress outranks the error line visually by being calm: this is work
@@ -866,12 +895,14 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
           <textarea
             ref={inputRef}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onPaste={(e) => {
-              const inputs = inputsFromClipboard(e.clipboardData?.items ?? null);
-              if (inputs.length === 0) return; // ordinary text paste
-              e.preventDefault();
-              if (sessionId) void stageInputs(sessionId, inputs);
+            onChange={(event) => {
+              clipboardStaging.handleInputChange(event);
+            }}
+            onSelect={(event) => {
+              clipboardStaging.handleInputSelection(event);
+            }}
+            onPaste={(event) => {
+              clipboardStaging.handlePaste(event);
             }}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
@@ -908,7 +939,14 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
           {(!busy || steering) && (
             <button
               onClick={submit}
-              disabled={!input.trim() || !aiReady || imagesBlocked || Boolean(sidecar?.degraded)}
+              disabled={
+                pastedTextStaging ||
+                !aiReady ||
+                imagesBlocked ||
+                Boolean(sidecar?.degraded) ||
+                (steering ? !hasInlineInput : !hasIdlePayload)
+              }
+              aria-label={steering ? S.aiPanel.steerHint : S.aiPanel.send}
               title={
                 imagesBlocked
                   ? S.attachments.noVision(activeEntry?.label ?? "This model")

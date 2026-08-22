@@ -434,9 +434,9 @@ export interface AppState {
   detachBlockFromAi(sessionId: string, blockId: string): void;
   attachBucketToAi(sessionId: string, bucket: string | KnowledgeBucketRef): void;
   detachBucketFromAi(sessionId: string, bucket: string | KnowledgeBucketRef): void;
-  /** Stage files for the next turn. Silently caps at `MAX_ATTACHMENTS` and sets
-   *  `attachError` when it does — dropping files without saying so is worse. */
-  attachFilesToAi(sessionId: string, attachments: Attachment[]): void;
+  /** Stage files for the next turn, return the accepted subset, and set
+   *  `attachError` when the limit drops any — silently dropping is worse. */
+  attachFilesToAi(sessionId: string, attachments: Attachment[]): Attachment[];
   detachFileFromAi(sessionId: string, attachmentId: string): void;
   /** Called by the send path AFTER the files are on the outgoing message. */
   clearPendingAttachments(sessionId: string): void;
@@ -1504,19 +1504,22 @@ export const useAppStore = create<AppState>((set, get) => ({
       }),
     ),
 
-  attachFilesToAi: (sessionId, attachments) =>
+  attachFilesToAi: (sessionId, attachments) => {
+    let accepted: Attachment[] = [];
     set((state) =>
       withAiStream(state, sessionId, (s) => {
         const room = MAX_ATTACHMENTS - s.pendingAttachments.length;
-        const taken = attachments.slice(0, Math.max(0, room));
-        const dropped = attachments.length - taken.length;
+        accepted = attachments.slice(0, Math.max(0, room));
+        const dropped = attachments.length - accepted.length;
         return {
           ...s,
-          pendingAttachments: [...s.pendingAttachments, ...taken],
+          pendingAttachments: [...s.pendingAttachments, ...accepted],
           attachError: dropped > 0 ? attachLimitMessage(dropped) : s.attachError,
         };
       }),
-    ),
+    );
+    return accepted;
+  },
 
   detachFileFromAi: (sessionId, attachmentId) =>
     set((state) =>

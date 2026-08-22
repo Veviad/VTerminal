@@ -134,6 +134,7 @@ export const S = {
      *  told, not just what the panel says. */
     continueGoal: "Continue from where you stopped.",
     cancel: "Cancel",
+    send: "Send",
     run: "Run",
     skip: "Skip",
     stop: "Stop",
@@ -237,6 +238,12 @@ export const S = {
     attach: "Attach files",
     dropHere: "Drop files to attach",
     remove: "Remove",
+    removeNamed: (name: string) => `Remove ${name}`,
+    showAsText: "Show as text",
+    showAsTextNamed: (name: string) => `Show ${name} as text`,
+    pastedTextAttached: (name: string, lines: number) =>
+      `${name} attached from pasted text, ${lines} line${lines === 1 ? "" : "s"}`,
+    pastedTextInserted: (name: string) => `${name} inserted into the message as text`,
     truncated: "trimmed to the last part",
     limit: (dropped: number, max: number) =>
       `${dropped} file${dropped === 1 ? "" : "s"} not added — ${max} is the limit per message`,
