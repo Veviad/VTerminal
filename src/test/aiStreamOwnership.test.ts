@@ -22,7 +22,10 @@ const api = vi.hoisted(() => ({
   knowledgeSearchDetailed: vi.fn(),
 }));
 
-const persistence = vi.hoisted(() => ({ markTranscriptDirty: vi.fn() }));
+const persistence = vi.hoisted(() => ({
+  markTranscriptCheckpoint: vi.fn(),
+  markTranscriptDirty: vi.fn(),
+}));
 const pty = vi.hoisted(() => ({
   abortSession: vi.fn(),
   runInTerminal: vi.fn(),
@@ -244,12 +247,78 @@ describe("AI generation ownership", () => {
     expect(useAppStore.getState().aiStreams[SID].modelTranscript).toEqual(transcript);
   });
 
+  it("stores and persists a checkpoint without settling the active run", async () => {
+    const backend = deferred<ChatMessage[]>();
+    let onEvent!: (event: StreamEvent) => void;
+    api.agentStart.mockImplementationOnce((...args: unknown[]) => {
+      onEvent = args[6] as (event: StreamEvent) => void;
+      return backend.promise;
+    });
+    const { result } = renderHook(() => useAiStream());
+
+    let run!: Promise<void>;
+    act(() => {
+      run = result.current.startAgent(SID, "inspect the project");
+    });
+    await flushPreflight();
+
+    const checkpoint: ChatMessage[] = [
+      { role: "user", content: "inspect the project" },
+      { role: "assistant", content: "working" },
+    ];
+    act(() => onEvent({ type: "Checkpoint", sequence: 1, transcript: checkpoint }));
+
+    const stream = useAppStore.getState().aiStreams[SID];
+    expect(stream.modelTranscript).toEqual(checkpoint);
+    expect(stream.status).toBe("streaming");
+    expect(stream.requestId).not.toBeNull();
+    expect(persistence.markTranscriptCheckpoint).toHaveBeenCalledWith(SID);
+
+    act(() => onEvent({ type: "Done", prompt_tokens: 1, completion_tokens: 1 }));
+    backend.resolve(checkpoint);
+    await act(async () => run);
+  });
+
+  it("keeps a failed run's returned transcript after the Error event settles it", async () => {
+    const backend = deferred<ChatMessage[]>();
+    let onEvent!: (event: StreamEvent) => void;
+    api.agentStart.mockImplementationOnce((...args: unknown[]) => {
+      onEvent = args[6] as (event: StreamEvent) => void;
+      return backend.promise;
+    });
+    const { result } = renderHook(() => useAiStream());
+
+    let run!: Promise<void>;
+    act(() => {
+      run = result.current.startAgent(SID, "run then fail");
+    });
+    await flushPreflight();
+
+    act(() => onEvent({ type: "Error", message: "provider failed" }));
+    expect(useAppStore.getState().aiStreams[SID].status).toBe("error");
+
+    const transcript: ChatMessage[] = [
+      { role: "user", content: "run then fail" },
+      { role: "assistant", content: "", tool_calls: [{ id: "c1", name: "run_command", arguments: "{}" }] },
+      { role: "tool", content: "exit code: 0", tool_call_id: "c1" },
+    ];
+    backend.resolve(transcript);
+    await act(async () => run);
+
+    expect(useAppStore.getState().aiStreams[SID].modelTranscript).toEqual(transcript);
+    expect(persistence.markTranscriptDirty).toHaveBeenCalledWith(SID);
+  });
+
   it("ignores an old agent result after an exit fence and a rollback/new run", async () => {
     const oldBackend = deferred<ChatMessage[]>();
     const newBackend = deferred<ChatMessage[]>();
+    let oldEvent!: (event: StreamEvent) => void;
     let newEvent!: (event: StreamEvent) => void;
     api.agentStart
-      .mockImplementationOnce(() => oldBackend.promise)
+      .mockImplementationOnce((...args: unknown[]) => {
+        oldEvent = args[6] as (event: StreamEvent) => void;
+        return oldBackend.promise;
+      })
       .mockImplementationOnce((...args: unknown[]) => {
         newEvent = args[6] as (event: StreamEvent) => void;
         return newBackend.promise;
@@ -274,6 +343,14 @@ describe("AI generation ownership", () => {
     await flushPreflight();
     const newGeneration = useAppStore.getState().aiStreams[SID].generationId;
     expect(newGeneration).not.toBe(oldGeneration);
+
+    oldEvent({
+      type: "Checkpoint",
+      sequence: 99,
+      transcript: [{ role: "assistant", content: "stale checkpoint" }],
+    });
+    expect(useAppStore.getState().aiStreams[SID].modelTranscript).toEqual([]);
+    expect(persistence.markTranscriptCheckpoint).not.toHaveBeenCalled();
 
     oldBackend.resolve([{ role: "assistant", content: "stale transcript" }]);
     await act(async () => oldRun);

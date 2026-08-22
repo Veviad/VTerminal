@@ -238,7 +238,14 @@ Because `local-llm` is a feature gate, `cargo check` alone skips the entire loca
 cd src-tauri && cargo check && cargo check --features local-llm
 ```
 
-Headless smoke examples live in `src-tauri/examples/` and exercise inference, the agent loop, the vision sidecar, and shutdown behaviour against a real GGUF.
+The deterministic Agent harness runs the real multi-round loop against a scripted provider and approval driver, including command execution, policy refusal, cancellation, pause/resume and provider-failure recovery:
+
+```bash
+cd src-tauri
+cargo test --locked --test agent_harness
+```
+
+It runs in normal CI and asserts over the captured event trajectory. Headless smoke examples live in `src-tauri/examples/` and remain the optional model-quality layer: they exercise inference, the agent loop, the vision sidecar, and shutdown behaviour against a real GGUF.
 
 The project page at [vterminal.veviad.com](https://vterminal.veviad.com) is hand-written static HTML in `docs/`. GitHub Pages runs the dependency-free renderer in `scripts/site-release/` at deploy time to inject the greatest published SemVer release, download links, stars and application-download counts into a staging copy; the browser makes no GitHub API request. Preview the generic fallbacks with `npx vite docs`, or render the checked-in fixture into a fresh temporary path with `node scripts/site-release/render.mjs --source docs --output "$(mktemp -d)/site" --fixture scripts/site-release/fixtures/releases.json`.
 

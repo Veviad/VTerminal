@@ -173,6 +173,10 @@ export type StreamEvent =
    *  the ONLY thing that clears a message's "queued" badge — one that never gets
    *  a SteerDelivered is one the model never saw. */
   | { type: "SteerDelivered"; ids: string[] }
+  /** Storage-safe model history emitted only at stable round boundaries. It has
+   *  tool-call ids/results needed for continuation, but no system prompt or
+   *  image bytes. Opaque for the same reason as ChatMessage below. */
+  | { type: "Checkpoint"; sequence: number; transcript: ChatMessage[] }
   | { type: "Done"; prompt_tokens: number; completion_tokens: number }
   /** The loop stopped at a guard rail instead of finishing. NOT an error: the
    *  transcript is intact and resumable, so this renders as a calm banner with a
