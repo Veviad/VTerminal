@@ -633,6 +633,34 @@ pub fn respond_to_approval(
     )
 }
 
+fn agent_terminal_event(outcome: &crate::agent::run::AgentRunOutcome) -> StreamEvent {
+    match &outcome.termination {
+        crate::agent::run::AgentTermination::Completed => StreamEvent::Done {
+            prompt_tokens: outcome.prompt_tokens,
+            completion_tokens: outcome.completion_tokens,
+        },
+        crate::agent::run::AgentTermination::Paused {
+            reason,
+            steps,
+            limit,
+            context_used,
+            context_limit,
+        } => StreamEvent::Paused {
+            reason: *reason,
+            steps: *steps,
+            limit: *limit,
+            prompt_tokens: outcome.prompt_tokens,
+            completion_tokens: outcome.completion_tokens,
+            context_used: *context_used,
+            context_limit: *context_limit,
+        },
+        crate::agent::run::AgentTermination::Cancelled => StreamEvent::Cancelled,
+        crate::agent::run::AgentTermination::Failed { message, .. } => StreamEvent::Error {
+            message: message.clone(),
+        },
+    }
+}
+
 /// Run one agent turn, returning the model-visible transcript it produced.
 ///
 /// The returned array is what the caller passes back as `history` on the next
@@ -820,10 +848,10 @@ pub async fn agent_start(
 
     let _ = on_event.send(StreamEvent::Started {
         request_id: request_id.clone(),
-        model: model_id,
+        model: model_id.clone(),
     });
 
-    let result = crate::agent::run::run_agent(
+    let outcome = crate::agent::run::run_agent(
         provider.as_ref(),
         config,
         system_prompt,
@@ -847,24 +875,21 @@ pub async fn agent_start(
     pty_exec.drain_for_request(&request_id);
     steers.drain_for_request(&request_id);
 
-    if let Err(e) = &result {
-        if e != "cancelled" {
-            let _ = on_event.send(StreamEvent::Error { message: e.clone() });
-        } else {
-            let _ = on_event.send(StreamEvent::Cancelled);
-        }
-    }
-    // Strip the system message on the way out: it embeds THIS turn's rendered
-    // terminal context, which is stale the moment the turn ends. `run_agent`
-    // always builds a fresh one, so carrying it would be both useless and — via
-    // Anthropic's system-message concatenation — a way for a stored transcript to
-    // append to a later system prompt.
-    result.map(|messages| {
-        messages
-            .into_iter()
-            .filter(|m| m.role != crate::provider::Role::System)
-            .collect()
-    })
+    let _ = on_event.send(agent_terminal_event(&outcome));
+
+    // Metadata only. Do not add goal text, commands, output, document passages,
+    // paths or provider error bodies here: this line goes to the durable app log.
+    log::info!(
+        target: "vterminal::agent",
+        "{}",
+        outcome.metadata_log_line(&request_id, &model_id),
+    );
+
+    // Active-run failures resolve with this checkpointed transcript after their
+    // Error event. The frontend can therefore persist and resume the work that
+    // happened before the failure. Only provider-resolution/preflight failures
+    // above reject the IPC call.
+    Ok(outcome.transcript)
 }
 
 /// Strips `<think>…</think>` spans from a streamed delta sequence — hybrid
@@ -1100,6 +1125,52 @@ mod context_window_tests {
             context_window_for(ProviderId::Mistral, 131_072, 32_768),
             131_072
         );
+    }
+}
+
+#[cfg(test)]
+mod agent_terminal_event_tests {
+    use super::agent_terminal_event;
+    use crate::agent::run::{AgentFailureKind, AgentRunOutcome, AgentRunStats, AgentTermination};
+    use crate::agent::PauseReason;
+
+    fn outcome(termination: AgentTermination) -> AgentRunOutcome {
+        AgentRunOutcome {
+            transcript: Vec::new(),
+            termination,
+            prompt_tokens: 21,
+            completion_tokens: 8,
+            stats: AgentRunStats::default(),
+            elapsed_ms: 5,
+        }
+    }
+
+    #[test]
+    fn a_failure_maps_to_one_error_event_without_logging_policy_here() {
+        let event = agent_terminal_event(&outcome(AgentTermination::Failed {
+            kind: AgentFailureKind::Provider,
+            message: "provider unavailable".into(),
+        }));
+        let json = serde_json::to_value(event).unwrap();
+        assert_eq!(json["type"], "Error");
+        assert_eq!(json["message"], "provider unavailable");
+    }
+
+    #[test]
+    fn a_pause_keeps_its_reason_limits_and_usage() {
+        let event = agent_terminal_event(&outcome(AgentTermination::Paused {
+            reason: PauseReason::ContextLimit,
+            steps: 4,
+            limit: 10,
+            context_used: 28_000,
+            context_limit: 32_768,
+        }));
+        let json = serde_json::to_value(event).unwrap();
+        assert_eq!(json["type"], "Paused");
+        assert_eq!(json["reason"], "context_limit");
+        assert_eq!(json["prompt_tokens"], 21);
+        assert_eq!(json["completion_tokens"], 8);
+        assert_eq!(json["context_used"], 28_000);
     }
 }
 
