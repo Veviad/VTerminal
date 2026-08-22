@@ -72,6 +72,11 @@ let onBlur: (() => void) | null = null;
 const dirtyScrollback = new Set<string>();
 /** Sessions whose AI transcript has changed since it was last archived. */
 const dirtyTranscript = new Set<string>();
+/** Agent checkpoints are sparse (one per completed round), so they bypass the
+ *  slow transcript timer. A set coalesces a newer checkpoint that arrives while
+ *  the previous archive IPC is still in flight. */
+const dirtyAgentCheckpoints = new Set<string>();
+let agentCheckpointDrain: Promise<void> | null = null;
 let transcriptTimer: ReturnType<typeof setTimeout> | null = null;
 let transcriptMaxTimer: ReturnType<typeof setTimeout> | null = null;
 /** Serialized on the last active-tab switch away, round-robin cursor. */
@@ -167,6 +172,48 @@ export function markTranscriptDirty(sessionId: string): void {
   if (!persistenceActive()) return;
   dirtyTranscript.add(sessionId);
   scheduleTranscript();
+}
+
+/** Persist a stable Agent round immediately.
+ *
+ * Unlike streamed text, checkpoints arrive only after the backend has completed
+ * a model/tool boundary. Writing each newest boundary is cheap and closes the
+ * crash window where a command changed the machine but its model-visible result
+ * existed only in webview memory.
+ */
+export function markTranscriptCheckpoint(sessionId: string): void {
+  if (!persistenceActive()) return;
+  dirtyAgentCheckpoints.add(sessionId);
+  startAgentCheckpointDrain();
+}
+
+function startAgentCheckpointDrain(): void {
+  if (!persistenceActive() || agentCheckpointDrain) return;
+
+  let operation: Promise<void>;
+  operation = (async () => {
+    while (persistenceActive() && dirtyAgentCheckpoints.size > 0) {
+      const ready = [...dirtyAgentCheckpoints];
+      dirtyAgentCheckpoints.clear();
+      for (const sessionId of ready) {
+        const saved = await archiveTranscriptOnly(sessionId);
+        // A failed immediate checkpoint gets one bounded retry on the existing
+        // slow transcript timer. Do not re-add it to this drain: that would spin
+        // against a persistent disk/IPC failure and starve later sessions.
+        if (!saved && persistenceActive()) {
+          dirtyTranscript.add(sessionId);
+          scheduleTranscript();
+        }
+      }
+    }
+  })().finally(() => {
+    if (agentCheckpointDrain === operation) agentCheckpointDrain = null;
+    if (persistenceActive() && dirtyAgentCheckpoints.size > 0) {
+      startAgentCheckpointDrain();
+    }
+  });
+  agentCheckpointDrain = operation;
+  startBackgroundWrite(operation);
 }
 
 function buildSnapshot(withScrollback: Set<string>): {
@@ -653,6 +700,7 @@ function attachActivitySources(scheduleInitialWrite: boolean): void {
   if (scheduleInitialWrite) scheduleMeta();
   if (dirtyScrollback.size > 0) scheduleBlob();
   if (dirtyTranscript.size > 0) scheduleTranscript();
+  if (dirtyAgentCheckpoints.size > 0) startAgentCheckpointDrain();
 
   sweepTimer = setInterval(() => {
     if (!persistenceActive()) return;
@@ -790,6 +838,7 @@ export function stopPersistence(): void {
   unlistenQuit = null;
   dirtyScrollback.clear();
   dirtyTranscript.clear();
+  dirtyAgentCheckpoints.clear();
   pausedForExit = false;
   exitPrepared = false;
   exitMarkedClean = false;
@@ -807,6 +856,7 @@ export function __resetPersistenceForTests(): void {
   sweepCursor = 0;
   routineFlushInFlight = null;
   routineFlushInFlightStrict = false;
+  agentCheckpointDrain = null;
   exitPreparation = null;
   cleanExitCommit = null;
   exitMarkedClean = false;

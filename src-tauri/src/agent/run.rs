@@ -114,7 +114,171 @@ pub struct AgentConfig {
     pub exec_target: ExecTarget,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentFailureKind {
+    Provider,
+    ApprovalTimeout,
+    OutputLimit,
+    ToolCalling,
+}
+
+impl AgentFailureKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Provider => "provider_error",
+            Self::ApprovalTimeout => "approval_timeout",
+            Self::OutputLimit => "output_limit",
+            Self::ToolCalling => "tool_calling_unavailable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentTermination {
+    Completed,
+    Paused {
+        reason: PauseReason,
+        steps: u32,
+        limit: u32,
+        context_used: u32,
+        context_limit: u32,
+    },
+    Cancelled,
+    Failed {
+        kind: AgentFailureKind,
+        message: String,
+    },
+}
+
+impl AgentTermination {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Paused {
+                reason: PauseReason::StepLimit,
+                ..
+            } => "step_limit",
+            Self::Paused {
+                reason: PauseReason::ContextLimit,
+                ..
+            } => "context_limit",
+            Self::Cancelled => "cancelled",
+            Self::Failed { kind, .. } => kind.as_str(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AgentRunStats {
+    pub model_rounds: u32,
+    pub tool_calls: u32,
+    pub command_proposals: u32,
+    pub commands_executed: u32,
+    pub commands_skipped: u32,
+    pub commands_blocked: u32,
+}
+
+#[derive(Debug)]
+pub struct AgentRunOutcome {
+    /// Bounded, provider-valid continuation state. Never contains the system
+    /// prompt or image bytes, even though the live loop used both.
+    pub transcript: Vec<ChatMessage>,
+    pub termination: AgentTermination,
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub stats: AgentRunStats,
+    pub elapsed_ms: u64,
+}
+
+impl AgentRunOutcome {
+    /// One privacy-bounded diagnostic record. Deliberately formatted here so a
+    /// future logging change has a unit-testable boundary and cannot casually
+    /// interpolate the transcript or a provider error body.
+    pub fn metadata_log_line(&self, request_id: &str, model: &str) -> String {
+        format!(
+            "request={} model={} termination={} elapsed_ms={} rounds={} tool_calls={} proposals={} executed={} skipped={} blocked={} prompt_tokens={} completion_tokens={}",
+            request_id,
+            model,
+            self.termination.as_str(),
+            self.elapsed_ms,
+            self.stats.model_rounds,
+            self.stats.tool_calls,
+            self.stats.command_proposals,
+            self.stats.commands_executed,
+            self.stats.commands_skipped,
+            self.stats.commands_blocked,
+            self.prompt_tokens,
+            self.completion_tokens,
+        )
+    }
+}
+
 const APPROVAL_TIMEOUT_SECS: u64 = 600;
+
+struct CheckpointState {
+    sequence: u32,
+    dirty: bool,
+    transcript: Vec<ChatMessage>,
+}
+
+impl CheckpointState {
+    fn new() -> Self {
+        Self {
+            sequence: 0,
+            dirty: true,
+            transcript: Vec::new(),
+        }
+    }
+
+    fn mark_changed(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Snapshot only after the live transcript changed. The cached copy serves
+    /// both the final outcome and repeated termination paths, avoiding another
+    /// full history clone when a provider error or pause changed no messages.
+    fn emit(&mut self, messages: &[ChatMessage], on_event: &Channel<StreamEvent>) {
+        if !self.dirty {
+            return;
+        }
+        self.sequence = self.sequence.saturating_add(1);
+        let transcript = crate::agent::history::storage_snapshot(messages);
+        let _ = on_event.send(StreamEvent::Checkpoint {
+            sequence: self.sequence,
+            transcript: transcript.clone(),
+        });
+        self.transcript = transcript;
+        self.dirty = false;
+    }
+
+    fn finish(
+        &mut self,
+        messages: &[ChatMessage],
+        on_event: &Channel<StreamEvent>,
+    ) -> Vec<ChatMessage> {
+        self.emit(messages, on_event);
+        std::mem::take(&mut self.transcript)
+    }
+}
+
+fn finish_outcome(
+    messages: Vec<ChatMessage>,
+    termination: AgentTermination,
+    usage: (u32, u32),
+    stats: AgentRunStats,
+    started: std::time::Instant,
+    checkpoints: &mut CheckpointState,
+    on_event: &Channel<StreamEvent>,
+) -> AgentRunOutcome {
+    AgentRunOutcome {
+        transcript: checkpoints.finish(&messages, on_event),
+        termination,
+        prompt_tokens: usage.0,
+        completion_tokens: usage.1,
+        stats,
+        elapsed_ms: started.elapsed().as_millis() as u64,
+    }
+}
 
 /// The tools offered for one run.
 ///
@@ -318,7 +482,369 @@ async fn one_round(
     }
 }
 
-/// Drive the agent loop, returning the transcript it built.
+struct ToolCallContext<'a> {
+    config: &'a AgentConfig,
+    round_tools: &'a [ToolDef],
+    approvals: &'a ApprovalState,
+    pty_exec: &'a PtyExecState,
+    steers: &'a SteerState,
+    app: Option<&'a tauri::AppHandle<tauri::Wry>>,
+    docs: Option<&'a crate::docs::db::DocsDb>,
+    cancel: &'a tokio::sync::watch::Receiver<bool>,
+    on_event: &'a Channel<StreamEvent>,
+}
+
+struct ToolBatchState<'a> {
+    messages: &'a mut Vec<ChatMessage>,
+    stats: &'a mut AgentRunStats,
+    approval_counter: &'a mut u32,
+    network_blocked_count: &'a mut u32,
+}
+
+enum ToolBatchResult {
+    Continue,
+    Terminate(AgentTermination),
+}
+
+/// Execute one complete assistant tool batch. Returning a termination reason
+/// keeps outcome construction and checkpoint ownership in `run_agent`, while
+/// this function owns command/search dispatch and the approval lifecycle.
+async fn process_tool_calls(
+    calls: Vec<ToolCall>,
+    context: ToolCallContext<'_>,
+    state: ToolBatchState<'_>,
+) -> ToolBatchResult {
+    let ToolCallContext {
+        config,
+        round_tools,
+        approvals,
+        pty_exec,
+        steers,
+        app,
+        docs,
+        cancel,
+        on_event,
+    } = context;
+    let ToolBatchState {
+        messages,
+        stats,
+        approval_counter,
+        network_blocked_count,
+    } = state;
+
+    for call in calls {
+        if *cancel.borrow() {
+            return ToolBatchResult::Terminate(AgentTermination::Cancelled);
+        }
+        match call.name.as_str() {
+            "finish" => {
+                let summary = serde_json::from_str::<serde_json::Value>(&call.arguments)
+                    .ok()
+                    .and_then(|v| v.get("summary").and_then(|s| s.as_str()).map(String::from))
+                    .unwrap_or_default();
+                if !summary.is_empty() {
+                    let _ = on_event.send(StreamEvent::Delta {
+                        content: format!("\n\n{summary}"),
+                    });
+                }
+                if steers.has_pending(&config.request_id) {
+                    messages.push(tool_result(
+                        &call.id,
+                        "Not finished yet — the user sent a follow-up message while you were wrapping up. It follows; keep going.",
+                    ));
+                    continue;
+                }
+                return ToolBatchResult::Terminate(AgentTermination::Completed);
+            }
+            "run_command" => {
+                let parsed: Result<serde_json::Value, _> = serde_json::from_str(&call.arguments);
+                let (command, explanation) = match &parsed {
+                    Ok(v) => (
+                        v.get("command")
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        v.get("explanation")
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    ),
+                    Err(_) => (String::new(), String::new()),
+                };
+                if command.trim().is_empty() {
+                    messages.push(tool_result(
+                        &call.id,
+                        "Error: run_command arguments were not valid JSON with a non-empty \"command\" string. Try again.",
+                    ));
+                    continue;
+                }
+
+                let requested_target = parsed
+                    .as_ref()
+                    .ok()
+                    .and_then(|v| v.get("target"))
+                    .and_then(|target| target.as_str());
+                let command_target =
+                    match config.exec_target.resolve_command_target(requested_target) {
+                        Ok(target) => target,
+                        Err(message) => {
+                            messages.push(tool_result(&call.id, &message));
+                            continue;
+                        }
+                    };
+                let class = super::policy::classify(&command);
+
+                if config.exec_target.is_sidecar()
+                    && super::policy::is_environment_transition(&command)
+                {
+                    stats.commands_blocked = stats.commands_blocked.saturating_add(1);
+                    let reason = "Sidecar targets are user-established; the agent cannot enter another SSH, container, or VM shell";
+                    let _ = on_event.send(StreamEvent::CommandBlocked {
+                        command: command.clone(),
+                        reason: reason.into(),
+                        target_role: command_target.role,
+                        target_session_id: command_target.session_id.clone(),
+                    });
+                    messages.push(command_tool_result(
+                        &call.id,
+                        &command_target,
+                        &format!(
+                            "Blocked: {reason}. Nothing was executed. Use the existing local or remote target directly; do not retry with another environment-transition command."
+                        ),
+                    ));
+                    continue;
+                }
+
+                if super::policy::blocks_network(&class, config.web_access) {
+                    stats.commands_blocked = stats.commands_blocked.saturating_add(1);
+                    *network_blocked_count = network_blocked_count.saturating_add(1);
+                    let _ = on_event.send(StreamEvent::CommandBlocked {
+                        command: command.clone(),
+                        reason: "internet access is off for the agent".into(),
+                        target_role: command_target.role,
+                        target_session_id: command_target.session_id.clone(),
+                    });
+                    messages.push(command_tool_result(
+                        &call.id,
+                        &command_target,
+                        &network_refusal(*network_blocked_count),
+                    ));
+                    continue;
+                }
+
+                *approval_counter = approval_counter.saturating_add(1);
+                stats.command_proposals = stats.command_proposals.saturating_add(1);
+                let approval_id = format!("{}-ap{}", config.request_id, approval_counter);
+                let rx = approvals.register(&approval_id, &config.request_id);
+                let _ = on_event.send(StreamEvent::CommandProposal {
+                    approval_id: approval_id.clone(),
+                    command: command.clone(),
+                    explanation: explanation.clone(),
+                    read_only: class.read_only,
+                    network: class.network,
+                    target_role: command_target.role,
+                    target_session_id: command_target.session_id.clone(),
+                });
+
+                let mut cancel_watch = cancel.clone();
+                let response = tokio::select! {
+                    r = rx => r,
+                    _ = cancel_watch.changed() => {
+                        approvals.drain_for_request(&config.request_id);
+                        return ToolBatchResult::Terminate(AgentTermination::Cancelled);
+                    }
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(APPROVAL_TIMEOUT_SECS)) => {
+                        approvals.drain_for_request(&config.request_id);
+                        return ToolBatchResult::Terminate(AgentTermination::Failed {
+                            kind: AgentFailureKind::ApprovalTimeout,
+                            message: "approval timed out — agent run ended".into(),
+                        });
+                    }
+                };
+                let Ok(response) = response else {
+                    return ToolBatchResult::Terminate(AgentTermination::Cancelled);
+                };
+
+                match response.decision {
+                    ApprovalDecision::Stop => {
+                        return ToolBatchResult::Terminate(AgentTermination::Cancelled);
+                    }
+                    ApprovalDecision::Skip => {
+                        stats.commands_skipped = stats.commands_skipped.saturating_add(1);
+                        messages.push(command_tool_result(
+                            &call.id,
+                            &command_target,
+                            "User skipped this command. Do not propose it again; find another way or finish.",
+                        ));
+                    }
+                    ApprovalDecision::Run => {
+                        if response
+                            .edited_command
+                            .as_ref()
+                            .is_some_and(|c| c.trim().is_empty())
+                        {
+                            stats.commands_skipped = stats.commands_skipped.saturating_add(1);
+                            messages.push(command_tool_result(
+                                &call.id,
+                                &command_target,
+                                "User cleared the command instead of running it. Treat as skipped.",
+                            ));
+                            continue;
+                        }
+                        let edited = response
+                            .edited_command
+                            .filter(|c| c.trim() != command.trim());
+                        let was_edited = edited.is_some();
+                        let final_command = edited.unwrap_or(command);
+                        stats.commands_executed = stats.commands_executed.saturating_add(1);
+                        let result = match &config.exec_target {
+                            ExecTarget::Pty { .. } | ExecTarget::Sidecar { .. } => {
+                                let session_id = command_target
+                                    .session_id
+                                    .as_deref()
+                                    .expect("PTY command target always has a session id");
+                                super::pty_exec::run_in_terminal(
+                                    session_id,
+                                    command_target.role,
+                                    &final_command,
+                                    &explanation,
+                                    &approval_id,
+                                    &config.request_id,
+                                    config.command_timeout_secs,
+                                    pty_exec,
+                                    cancel.clone(),
+                                    on_event,
+                                )
+                                .await
+                            }
+                            ExecTarget::Subprocess => {
+                                let _ = on_event.send(StreamEvent::CommandStarted {
+                                    approval_id: approval_id.clone(),
+                                    command: final_command.clone(),
+                                    explanation: explanation.clone(),
+                                    target_role: command_target.role,
+                                    target_session_id: command_target.session_id.clone(),
+                                });
+                                exec::run_command(
+                                    &config.shell,
+                                    config.cwd.as_deref(),
+                                    &final_command,
+                                    &approval_id,
+                                    config.command_timeout_secs,
+                                    cancel.clone(),
+                                    on_event,
+                                )
+                                .await
+                            }
+                        };
+                        match result {
+                            Ok(r) if r.cancelled => {
+                                return ToolBatchResult::Terminate(AgentTermination::Cancelled);
+                            }
+                            Ok(r) => {
+                                let edit_note = if was_edited {
+                                    format!(
+                                        "note: the user edited the command to: {final_command}\n"
+                                    )
+                                } else {
+                                    String::new()
+                                };
+                                messages.push(command_tool_result(
+                                    &call.id,
+                                    &command_target,
+                                    &format!(
+                                        "{edit_note}exit code: {}\noutput (tail):\n{}",
+                                        r.exit_code,
+                                        if r.output_tail.is_empty() {
+                                            "(no output)"
+                                        } else {
+                                            &r.output_tail
+                                        }
+                                    ),
+                                ));
+                            }
+                            Err(e) => {
+                                let _ = on_event.send(StreamEvent::CommandResult {
+                                    approval_id: approval_id.clone(),
+                                    exit_code: None,
+                                    duration_ms: 0,
+                                    error: Some(e.clone()),
+                                    target_role: command_target.role,
+                                    target_session_id: command_target.session_id.clone(),
+                                });
+                                messages.push(command_tool_result(
+                                    &call.id,
+                                    &command_target,
+                                    &format!("Failed to execute: {e}"),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            "search_docs" => {
+                let parsed = serde_json::from_str::<serde_json::Value>(&call.arguments).ok();
+                let query = parsed
+                    .as_ref()
+                    .and_then(|v| v.get("query"))
+                    .and_then(|q| q.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if query.trim().is_empty() {
+                    messages.push(tool_result(
+                        &call.id,
+                        "Error: search_docs needs a non-empty \"query\" string. Try again.",
+                    ));
+                    continue;
+                }
+                let max_results = parsed
+                    .as_ref()
+                    .and_then(|v| v.get("max_results"))
+                    .and_then(|v| {
+                        v.as_u64()
+                            .or_else(|| v.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
+                    })
+                    .unwrap_or(crate::docs::search::DEFAULT_LIMIT as u64)
+                    .clamp(1, crate::docs::search::MAX_LIMIT as u64)
+                    as usize;
+
+                let rendered = match (app, docs) {
+                    (Some(app), Some(docs)) => {
+                        match crate::knowledge::search::search_knowledge(
+                            app,
+                            docs,
+                            &config.doc_buckets,
+                            &query,
+                            max_results,
+                        )
+                        .await
+                        {
+                            Ok(response) => {
+                                crate::knowledge::search::render_search_response(&query, &response)
+                            }
+                            Err(error) => format!("Error: the knowledge search failed: {error}"),
+                        }
+                    }
+                    _ => "Error: the knowledge service is unavailable in this run.".to_string(),
+                };
+                messages.push(tool_result(&call.id, &rendered));
+            }
+            other => {
+                messages.push(tool_result(
+                    &call.id,
+                    &format!(
+                        "Error: unknown tool \"{other}\". Available tools: {}.",
+                        tool_names(round_tools)
+                    ),
+                ));
+            }
+        }
+    }
+
+    ToolBatchResult::Continue
+}
+
+/// Drive the agent loop, returning its recoverable transcript and typed outcome.
 ///
 /// The transcript is the return value because it is the ONLY place the model's own
 /// view of the run exists — the frontend's `AiMessage[]` is a different, lossier
@@ -355,7 +881,8 @@ pub async fn run_agent(
     docs: Option<&crate::docs::db::DocsDb>,
     cancel: tokio::sync::watch::Receiver<bool>,
     on_event: &Channel<StreamEvent>,
-) -> Result<Vec<ChatMessage>, String> {
+) -> AgentRunOutcome {
+    let started = std::time::Instant::now();
     // The system prompt is always the FRESH one, never whatever the history
     // carried: a stored prompt embeds the old session's rendered context and the
     // safety policy, neither of which may come from disk. `normalize` strips any
@@ -366,15 +893,17 @@ pub async fn run_agent(
     messages.extend(history);
     messages.push(ChatMessage::user_with_images(goal, goal_images));
     // `normalize` strips images from every HISTORY turn but never from the goal,
-    // so this turn's screenshot is the only one that reaches the model — and the
-    // transcript this function returns carries none, which is what keeps the
-    // archive free of base64.
+    // so this turn's screenshot is the only one that reaches the model. Checkpoint
+    // copies remove it before crossing IPC or reaching the archive.
     crate::agent::history::normalize(&mut messages);
+    let mut checkpoints = CheckpointState::new();
+    checkpoints.emit(&messages, on_event);
     // Built once, reused verbatim every round: it is inside the cached prefix.
     let round_tools = tools(&config);
     let mut total_usage = (0u32, 0u32);
     let mut approval_counter = 0u32;
-    let mut blocked_count = 0u32;
+    let mut network_blocked_count = 0u32;
+    let mut stats = AgentRunStats::default();
     let mut saw_any_tool_call = false;
 
     let mut iteration: u32 = 0;
@@ -402,13 +931,20 @@ pub async fn run_agent(
 
     loop {
         if *cancel.borrow() {
-            let _ = on_event.send(StreamEvent::Cancelled);
-            return Ok(messages);
+            return finish_outcome(
+                messages,
+                AgentTermination::Cancelled,
+                total_usage,
+                stats,
+                started,
+                &mut checkpoints,
+                on_event,
+            );
         }
 
         // THE ONLY LEGAL PLACE TO APPEND A USER TURN — see `append_steers`.
-        // Every arm of the `for call in calls` loop below either returns or
-        // pushes a tool_result, so `messages` is tool-pair-complete here.
+        // Every arm of `process_tool_calls` either terminates or pushes a
+        // tool_result, so `messages` is tool-pair-complete here.
         //
         // Ahead of the step check, not after it, so a message typed during the
         // last round still buys the round that acts on it. But only when the
@@ -422,6 +958,7 @@ pub async fn run_agent(
             if !queued.is_empty() {
                 let ids: Vec<String> = queued.iter().map(|s| s.id.clone()).collect();
                 append_steers(&mut messages, &queued);
+                checkpoints.mark_changed();
                 budget = extended;
                 let _ = on_event.send(StreamEvent::SteerDelivered { ids });
             }
@@ -448,7 +985,8 @@ pub async fn run_agent(
             effort: config.effort,
             web_access: config.web_access,
         };
-        let (calls, text, usage, finish) = one_round(
+        stats.model_rounds = stats.model_rounds.saturating_add(1);
+        let round = one_round(
             provider,
             messages.clone(),
             round_tools.clone(),
@@ -456,11 +994,36 @@ pub async fn run_agent(
             cancel.clone(),
             on_event,
         )
-        .await
-        .map_err(|e| match e {
-            ProviderError::Cancelled => "cancelled".to_string(),
-            other => other.to_string(),
-        })?;
+        .await;
+        let (calls, text, usage, finish) = match round {
+            Ok(round) => round,
+            Err(ProviderError::Cancelled) => {
+                return finish_outcome(
+                    messages,
+                    AgentTermination::Cancelled,
+                    total_usage,
+                    stats,
+                    started,
+                    &mut checkpoints,
+                    on_event,
+                );
+            }
+            Err(error) => {
+                return finish_outcome(
+                    messages,
+                    AgentTermination::Failed {
+                        kind: AgentFailureKind::Provider,
+                        message: error.to_string(),
+                    },
+                    total_usage,
+                    stats,
+                    started,
+                    &mut checkpoints,
+                    on_event,
+                );
+            }
+        };
+        stats.tool_calls = stats.tool_calls.saturating_add(calls.len() as u32);
         // Each round is billed its own input tokens, so this is a sum. Taking
         // the max here under-reported a 10-round run by roughly 5x.
         total_usage.0 += usage.0;
@@ -474,36 +1037,58 @@ pub async fn run_agent(
             // thinking trace ate the whole budget. Ending silently looks like
             // a hang to the user; say what happened.
             if finish == FinishReason::Length && text.trim().is_empty() {
-                let _ = on_event.send(StreamEvent::Error {
-                    message: "The response hit the token limit before producing any output — retry, or turn off extended thinking (brain icon).".into(),
-                });
-                return Ok(messages);
+                return finish_outcome(
+                    messages,
+                    AgentTermination::Failed {
+                        kind: AgentFailureKind::OutputLimit,
+                        message: "The response hit the token limit before producing any output — retry, or turn off extended thinking (brain icon).".into(),
+                    },
+                    total_usage,
+                    stats,
+                    started,
+                    &mut checkpoints,
+                    on_event,
+                );
             }
             // Plain text answer. If the model NEVER used tools, its template
             // probably lacks the tools block — tell the user instead of looping.
             if !saw_any_tool_call && finish == FinishReason::Stop && text.trim().is_empty() {
-                let _ = on_event.send(StreamEvent::Error {
-                    message: "The loaded model did not produce tool calls — its chat template may not support tool calling. Try a larger model from Settings → Models.".into(),
-                });
-                return Ok(messages);
+                return finish_outcome(
+                    messages,
+                    AgentTermination::Failed {
+                        kind: AgentFailureKind::ToolCalling,
+                        message: "The loaded model did not produce tool calls — its chat template may not support tool calling. Try a larger model from Settings → Models.".into(),
+                    },
+                    total_usage,
+                    stats,
+                    started,
+                    &mut checkpoints,
+                    on_event,
+                );
             }
             // Record the answer before deciding whether to stop. This used to be
             // dropped, which silently cost the NEXT turn the model's own final
             // reply — and a steer cannot be appended after an assistant turn that
             // is not in the transcript.
             messages.push(ChatMessage::assistant(text));
+            checkpoints.mark_changed();
             // The user typed while this answer was streaming. Keep the run alive
             // and let the top of the loop deliver it, rather than stranding the
             // message on a run that just ended.
             if steers.has_pending(&config.request_id) {
+                checkpoints.emit(&messages, on_event);
                 iteration += 1;
                 continue;
             }
-            let _ = on_event.send(StreamEvent::Done {
-                prompt_tokens: total_usage.0,
-                completion_tokens: total_usage.1,
-            });
-            return Ok(messages);
+            return finish_outcome(
+                messages,
+                AgentTermination::Completed,
+                total_usage,
+                stats,
+                started,
+                &mut checkpoints,
+                on_event,
+            );
         }
         saw_any_tool_call = true;
 
@@ -515,384 +1100,66 @@ pub async fn run_agent(
             tool_call_id: None,
             images: None,
         });
+        checkpoints.mark_changed();
 
-        for call in calls {
-            if *cancel.borrow() {
-                let _ = on_event.send(StreamEvent::Cancelled);
-                return Ok(messages);
-            }
-            match call.name.as_str() {
-                "finish" => {
-                    let summary = serde_json::from_str::<serde_json::Value>(&call.arguments)
-                        .ok()
-                        .and_then(|v| v.get("summary").and_then(|s| s.as_str()).map(String::from))
-                        .unwrap_or_default();
-                    if !summary.is_empty() {
-                        let _ = on_event.send(StreamEvent::Delta {
-                            content: format!("\n\n{summary}"),
-                        });
-                    }
-                    // The user typed while the model was wrapping up. Answer the
-                    // finish call so the transcript stays tool-pair-complete, then
-                    // let the top of the loop deliver the steer instead of ending
-                    // a run the user is still talking to.
-                    if steers.has_pending(&config.request_id) {
-                        messages.push(tool_result(
-                            &call.id,
-                            "Not finished yet — the user sent a follow-up message while you were wrapping up. It follows; keep going.",
-                        ));
-                        continue;
-                    }
-                    let _ = on_event.send(StreamEvent::Done {
-                        prompt_tokens: total_usage.0,
-                        completion_tokens: total_usage.1,
-                    });
-                    return Ok(messages);
-                }
-                "run_command" => {
-                    let parsed: Result<serde_json::Value, _> =
-                        serde_json::from_str(&call.arguments);
-                    let (command, explanation) = match &parsed {
-                        Ok(v) => (
-                            v.get("command")
-                                .and_then(|c| c.as_str())
-                                .unwrap_or("")
-                                .to_string(),
-                            v.get("explanation")
-                                .and_then(|c| c.as_str())
-                                .unwrap_or("")
-                                .to_string(),
-                        ),
-                        Err(_) => (String::new(), String::new()),
-                    };
-                    if command.trim().is_empty() {
-                        // Malformed args → model-visible error, let it retry.
-                        messages.push(tool_result(
-                            &call.id,
-                            "Error: run_command arguments were not valid JSON with a non-empty \"command\" string. Try again.",
-                        ));
-                        continue;
-                    }
-
-                    let requested_target = parsed
-                        .as_ref()
-                        .ok()
-                        .and_then(|v| v.get("target"))
-                        .and_then(|target| target.as_str());
-                    let command_target =
-                        match config.exec_target.resolve_command_target(requested_target) {
-                            Ok(target) => target,
-                            Err(message) => {
-                                // A missing/unknown Sidecar role is a model error,
-                                // not a user approval decision. Explain it in the
-                                // tool result and let the model repair its call.
-                                messages.push(tool_result(&call.id, &message));
-                                continue;
-                            }
-                        };
-
-                    let class = super::policy::classify(&command);
-
-                    // A linked target must remain the environment its role says
-                    // it is. Refuse model-authored nesting before the approval
-                    // exists; a command the user edits later remains their own
-                    // explicit action, consistent with the existing edit rule.
-                    if config.exec_target.is_sidecar()
-                        && super::policy::is_environment_transition(&command)
-                    {
-                        let reason = "Sidecar targets are user-established; the agent cannot enter another SSH, container, or VM shell";
-                        let _ = on_event.send(StreamEvent::CommandBlocked {
-                            command: command.clone(),
-                            reason: reason.into(),
-                            target_role: command_target.role,
-                            target_session_id: command_target.session_id.clone(),
-                        });
-                        messages.push(command_tool_result(
-                            &call.id,
-                            &command_target,
-                            &format!(
-                                "Blocked: {reason}. Nothing was executed. Use the existing local or remote target directly; do not retry with another environment-transition command."
-                            ),
-                        ));
-                        continue;
-                    }
-
-                    // Refuse BEFORE the gate exists. Checking downstream would
-                    // draw an approval card for a command that cannot run, take
-                    // the click, and only then refuse — so the one position
-                    // where this can be honest is here, before the proposal.
-                    if super::policy::blocks_network(&class, config.web_access) {
-                        blocked_count += 1;
-                        let _ = on_event.send(StreamEvent::CommandBlocked {
-                            command: command.clone(),
-                            reason: "internet access is off for the agent".into(),
-                            target_role: command_target.role,
-                            target_session_id: command_target.session_id.clone(),
-                        });
-                        messages.push(command_tool_result(
-                            &call.id,
-                            &command_target,
-                            &network_refusal(blocked_count),
-                        ));
-                        continue;
-                    }
-
-                    approval_counter += 1;
-                    let approval_id = format!("{}-ap{}", config.request_id, approval_counter);
-                    let rx = approvals.register(&approval_id, &config.request_id);
-                    let _ = on_event.send(StreamEvent::CommandProposal {
-                        approval_id: approval_id.clone(),
-                        command: command.clone(),
-                        explanation: explanation.clone(),
-                        read_only: class.read_only,
-                        network: class.network,
-                        target_role: command_target.role,
-                        target_session_id: command_target.session_id.clone(),
-                    });
-
-                    let mut cancel_watch = cancel.clone();
-                    let response = tokio::select! {
-                        r = rx => r,
-                        _ = cancel_watch.changed() => {
-                            approvals.drain_for_request(&config.request_id);
-                            let _ = on_event.send(StreamEvent::Cancelled);
-                            return Ok(messages);
-                        }
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(APPROVAL_TIMEOUT_SECS)) => {
-                            approvals.drain_for_request(&config.request_id);
-                            let _ = on_event.send(StreamEvent::Error {
-                                message: "approval timed out — agent run ended".into(),
-                            });
-                            return Ok(messages);
-                        }
-                    };
-                    let Ok(response) = response else {
-                        // Sender dropped (drained by cancel) → stop.
-                        let _ = on_event.send(StreamEvent::Cancelled);
-                        return Ok(messages);
-                    };
-
-                    match response.decision {
-                        ApprovalDecision::Stop => {
-                            let _ = on_event.send(StreamEvent::Cancelled);
-                            return Ok(messages);
-                        }
-                        ApprovalDecision::Skip => {
-                            messages.push(command_tool_result(
-                                &call.id,
-                                &command_target,
-                                "User skipped this command. Do not propose it again; find another way or finish.",
-                            ));
-                        }
-                        ApprovalDecision::Run => {
-                            // An explicitly EMPTY edit means "don't run this" —
-                            // silently falling back to the original (possibly
-                            // distrusted) command would betray the approval UI.
-                            if response
-                                .edited_command
-                                .as_ref()
-                                .is_some_and(|c| c.trim().is_empty())
-                            {
-                                messages.push(command_tool_result(
-                                    &call.id,
-                                    &command_target,
-                                    "User cleared the command instead of running it. Treat as skipped.",
-                                ));
-                                continue;
-                            }
-                            // An edited command is deliberately NOT re-classified.
-                            // The classification above governs what the MODEL
-                            // proposed; this text is the user's own, typed on a
-                            // gesture they just made, which is the same line
-                            // CLAUDE.md already draws for palette history and
-                            // saved-host connects. Note the edit box is only
-                            // reachable for a command that already passed the
-                            // network gate — a refused one never draws a card.
-                            let edited = response
-                                .edited_command
-                                .filter(|c| c.trim() != command.trim());
-                            let was_edited = edited.is_some();
-                            let final_command = edited.unwrap_or(command);
-                            let result = match &config.exec_target {
-                                ExecTarget::Pty { .. } | ExecTarget::Sidecar { .. } => {
-                                    let session_id = command_target
-                                        .session_id
-                                        .as_deref()
-                                        .expect("PTY command target always has a session id");
-                                    // The frontend draws the card when it starts
-                                    // typing, so no CommandStarted here.
-                                    super::pty_exec::run_in_terminal(
-                                        session_id,
-                                        command_target.role,
-                                        &final_command,
-                                        &explanation,
-                                        &approval_id,
-                                        &config.request_id,
-                                        config.command_timeout_secs,
-                                        pty_exec,
-                                        cancel.clone(),
-                                        on_event,
-                                    )
-                                    .await
-                                }
-                                ExecTarget::Subprocess => {
-                                    let _ = on_event.send(StreamEvent::CommandStarted {
-                                        approval_id: approval_id.clone(),
-                                        command: final_command.clone(),
-                                        explanation: explanation.clone(),
-                                        target_role: command_target.role,
-                                        target_session_id: command_target.session_id.clone(),
-                                    });
-                                    exec::run_command(
-                                        &config.shell,
-                                        config.cwd.as_deref(),
-                                        &final_command,
-                                        &approval_id,
-                                        config.command_timeout_secs,
-                                        cancel.clone(),
-                                        on_event,
-                                    )
-                                    .await
-                                }
-                            };
-                            match result {
-                                Ok(r) if r.cancelled => {
-                                    let _ = on_event.send(StreamEvent::Cancelled);
-                                    return Ok(messages);
-                                }
-                                Ok(r) => {
-                                    // The model must ground follow-ups in what
-                                    // ACTUALLY ran, not what it proposed.
-                                    let edit_note = if was_edited {
-                                        format!("note: the user edited the command to: {final_command}\n")
-                                    } else {
-                                        String::new()
-                                    };
-                                    messages.push(command_tool_result(
-                                        &call.id,
-                                        &command_target,
-                                        &format!(
-                                            "{edit_note}exit code: {}\noutput (tail):\n{}",
-                                            r.exit_code,
-                                            if r.output_tail.is_empty() {
-                                                "(no output)"
-                                            } else {
-                                                &r.output_tail
-                                            }
-                                        ),
-                                    ));
-                                }
-                                Err(e) => {
-                                    // Spawn failed — the UI already drew the
-                                    // command card via CommandStarted; close it.
-                                    let _ = on_event.send(StreamEvent::CommandResult {
-                                        approval_id: approval_id.clone(),
-                                        exit_code: None,
-                                        duration_ms: 0,
-                                        error: Some(e.clone()),
-                                        target_role: command_target.role,
-                                        target_session_id: command_target.session_id.clone(),
-                                    });
-                                    messages.push(command_tool_result(
-                                        &call.id,
-                                        &command_target,
-                                        &format!("Failed to execute: {e}"),
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
-                "search_docs" => {
-                    let parsed = serde_json::from_str::<serde_json::Value>(&call.arguments).ok();
-                    let query = parsed
-                        .as_ref()
-                        .and_then(|v| v.get("query"))
-                        .and_then(|q| q.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    if query.trim().is_empty() {
-                        messages.push(tool_result(
-                            &call.id,
-                            "Error: search_docs needs a non-empty \"query\" string. Try again.",
-                        ));
-                        continue;
-                    }
-                    // `max_results` is declared as a string because a local GGUF sends
-                    // XML parameter values as literal text, but a cloud model will
-                    // honour the `integer`-looking description and send a number. Both
-                    // shapes are accepted; anything else falls back to the default
-                    // rather than failing a round over a formatting detail.
-                    let max_results = parsed
-                        .as_ref()
-                        .and_then(|v| v.get("max_results"))
-                        .and_then(|v| {
-                            v.as_u64()
-                                .or_else(|| v.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
-                        })
-                        .unwrap_or(crate::docs::search::DEFAULT_LIMIT as u64)
-                        .clamp(1, crate::docs::search::MAX_LIMIT as u64)
-                        as usize;
-
-                    let rendered = match (app, docs) {
-                        (Some(app), Some(docs)) => {
-                            match crate::knowledge::search::search_knowledge(
-                                app,
-                                docs,
-                                &config.doc_buckets,
-                                &query,
-                                max_results,
-                            )
-                            .await
-                            {
-                                // Every local or remote passage is source-labelled and
-                                // dynamically fenced; failed providers remain visible as
-                                // partial-search warnings.
-                                Ok(response) => crate::knowledge::search::render_search_response(
-                                    &query, &response,
-                                ),
-                                Err(error) => {
-                                    format!("Error: the knowledge search failed: {error}")
-                                }
-                            }
-                        }
-                        _ => "Error: the knowledge service is unavailable in this run.".to_string(),
-                    };
-                    messages.push(tool_result(&call.id, &rendered));
-                }
-                other => {
-                    // The available-tools list is DERIVED from the vector actually
-                    // sent, not written out by hand: the previous hardcoded string
-                    // would have gone stale the moment `search_docs` was added, and
-                    // told the model a tool it had just been offered did not exist.
-                    messages.push(tool_result(
-                        &call.id,
-                        &format!(
-                            "Error: unknown tool \"{other}\". Available tools: {}.",
-                            tool_names(&round_tools)
-                        ),
-                    ));
-                }
-            }
+        let tool_batch = process_tool_calls(
+            calls,
+            ToolCallContext {
+                config: &config,
+                round_tools: &round_tools,
+                approvals,
+                pty_exec,
+                steers,
+                app,
+                docs,
+                cancel: &cancel,
+                on_event,
+            },
+            ToolBatchState {
+                messages: &mut messages,
+                stats: &mut stats,
+                approval_counter: &mut approval_counter,
+                network_blocked_count: &mut network_blocked_count,
+            },
+        )
+        .await;
+        if let ToolBatchResult::Terminate(termination) = tool_batch {
+            return finish_outcome(
+                messages,
+                termination,
+                total_usage,
+                stats,
+                started,
+                &mut checkpoints,
+                on_event,
+            );
         }
 
+        // The assistant turn and every tool result from this batch are now
+        // complete. Persist only at this boundary; checkpointing inside the loop
+        // could archive one result while sibling calls were still unanswered.
+        checkpoints.emit(&messages, on_event);
         iteration += 1;
     }
 
-    let _ = on_event.send(StreamEvent::Paused {
-        reason: pause_reason,
-        steps: iteration,
-        // The CONFIGURED value, deliberately not `budget`: a steer extends the
-        // budget up to 3x, and reporting the extended number named a limit the
-        // user could not find in Settings. `steps` may therefore exceed `limit`,
-        // and the frontend explains the gap.
-        limit: config.max_iterations,
-        prompt_tokens: total_usage.0,
-        completion_tokens: total_usage.1,
-        context_used: last_prompt_tokens,
-        context_limit: config.context_tokens,
-    });
-    Ok(messages)
+    finish_outcome(
+        messages,
+        AgentTermination::Paused {
+            reason: pause_reason,
+            steps: iteration,
+            // The CONFIGURED value, deliberately not `budget`: a steer extends
+            // the budget up to 3x, and reporting the extended number named a
+            // limit the user could not find in Settings.
+            limit: config.max_iterations,
+            context_used: last_prompt_tokens,
+            context_limit: config.context_tokens,
+        },
+        total_usage,
+        stats,
+        started,
+        &mut checkpoints,
+        on_event,
+    )
 }
 
 /// Append the user's mid-run messages as ONE user turn.
@@ -1427,6 +1694,35 @@ mod tests {
         assert_eq!(json["limit"], 10);
         assert_eq!(json["context_used"], 24_000);
         assert_eq!(json["context_limit"], 32_768);
+    }
+
+    #[test]
+    fn metadata_log_line_excludes_transcript_and_error_content() {
+        let secret = "PRIVATE-PROMPT-COMMAND-OUTPUT";
+        let outcome = AgentRunOutcome {
+            transcript: vec![ChatMessage::user(secret)],
+            termination: AgentTermination::Failed {
+                kind: AgentFailureKind::Provider,
+                message: secret.into(),
+            },
+            prompt_tokens: 12,
+            completion_tokens: 3,
+            stats: AgentRunStats {
+                model_rounds: 2,
+                tool_calls: 1,
+                command_proposals: 1,
+                commands_executed: 1,
+                commands_skipped: 0,
+                commands_blocked: 0,
+            },
+            elapsed_ms: 45,
+        };
+
+        let line = outcome.metadata_log_line("request-1", "model-1");
+        assert!(!line.contains(secret));
+        assert!(line.contains("termination=provider_error"));
+        assert!(line.contains("rounds=2"));
+        assert!(line.contains("executed=1"));
     }
 
     #[test]
