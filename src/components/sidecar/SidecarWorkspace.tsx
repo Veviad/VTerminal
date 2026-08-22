@@ -192,7 +192,13 @@ function SidecarPane({
         </span>
       </button>
       {session ? (
-        <TerminalPane sessionId={sessionId} active={focused} visible showComposer={false} />
+        <TerminalPane
+          sessionId={sessionId}
+          active={focused}
+          visible
+          showComposer={false}
+          rendererActive
+        />
       ) : (
         <div className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-[11px] text-text-muted">
           {S.aiPanel.sidecar.degradedHint}

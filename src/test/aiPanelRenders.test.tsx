@@ -234,7 +234,7 @@ describe("AiPanel renders", () => {
 
   /** A card standing while "Reads" is armed has to say why, or the mode reads as
    *  broken every time it correctly stops for a write. */
-  it("explains a card that Reads mode declined to auto-run", () => {
+  it("explains a card that Reads mode declined because it is not proven read-only", () => {
     useAppStore.setState({
       sessions: [session("s1")],
       aiStreams: {
@@ -246,16 +246,18 @@ describe("AiPanel renders", () => {
           permissionMode: "auto_read",
           pendingProposal: {
             approvalId: "ap1",
-            command: "curl https://example.com",
-            explanation: "fetch the page",
-            readOnly: true,
+            command: "curl -X POST https://example.com",
+            explanation: "submit data",
+            readOnly: false,
             network: true,
           },
         },
       },
     });
     render(<AiPanel sessionId="s1" />);
-    expect(screen.getByText(/asking: this reaches the network/i)).toBeTruthy();
+    expect(
+      screen.getByText(/asking: this may change state or could not be verified as read-only/i),
+    ).toBeTruthy();
   });
 
   it("keeps local and remote destinations visible on completed command cards", () => {
