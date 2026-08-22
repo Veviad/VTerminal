@@ -243,10 +243,17 @@ describe("large pasted text", () => {
     const input = inputFromClipboardText(raw, 2);
     expect(input).not.toBeNull();
 
-    await stageInputs(session.id, [input!]);
+    const accepted = await stageInputs(session.id, [input!]);
 
     expect(useAppStore.getState().aiStreams[session.id].pendingAttachments[0]).toMatchObject({
       kind: "text",
+      name: "pasted-text-2.txt",
+      origin: "pasted-text",
+      lineCount: 6,
+      text: raw,
+    });
+    expect(accepted).toHaveLength(1);
+    expect(accepted[0]).toMatchObject({
       name: "pasted-text-2.txt",
       origin: "pasted-text",
       lineCount: 6,

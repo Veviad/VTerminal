@@ -170,8 +170,8 @@ export function describeIngestFailure(f: IngestFailure): string {
  *  holds a decoded bitmap plus two encodes in memory, and six 25MB sources in
  *  flight at once is how a webview gets killed.
  */
-export async function stageInputs(sessionId: string, inputs: PendingInput[]): Promise<void> {
-  if (inputs.length === 0) return;
+export async function stageInputs(sessionId: string, inputs: PendingInput[]): Promise<Attachment[]> {
+  if (inputs.length === 0) return [];
   const store = useAppStore.getState();
   const ok: Attachment[] = [];
   let firstFailure: IngestFailure | null = null;
@@ -206,8 +206,9 @@ export async function stageInputs(sessionId: string, inputs: PendingInput[]): Pr
   // limit message because the user can do something about it. Only the FIRST
   // reason: six errors in a 10px line is not something anyone reads.
   store.setAttachError(sessionId, null);
-  if (ok.length > 0) store.attachFilesToAi(sessionId, ok);
+  const accepted = ok.length > 0 ? store.attachFilesToAi(sessionId, ok) : [];
   if (firstFailure) store.setAttachError(sessionId, describeIngestFailure(firstFailure));
+  return accepted;
 }
 
 /** A fence long enough to survive the content it wraps.
