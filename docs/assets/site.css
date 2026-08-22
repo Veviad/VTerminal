@@ -1170,6 +1170,152 @@ a:hover {
   content: "";
 }
 
+/* ------------------------------------------------------ release highlights */
+
+.release-highlights-section {
+  position: relative;
+  overflow: hidden;
+}
+
+.release-highlights-section::before {
+  position: absolute;
+  top: -19rem;
+  left: 50%;
+  width: 48rem;
+  height: 32rem;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(16, 185, 129, 0.11), transparent 68%);
+  content: "";
+  pointer-events: none;
+  translate: -50% 0;
+}
+
+.release-highlights-header {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(18rem, 0.85fr);
+  align-items: end;
+  gap: clamp(2rem, 6vw, 5rem);
+  margin-bottom: 2.5rem;
+}
+
+.release-highlights-header .section-lead {
+  margin: 0;
+}
+
+.release-highlights-grid {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1.25rem;
+}
+
+.release-highlight-card {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(145deg, var(--bg-card), var(--bg-2));
+  padding: clamp(1.5rem, 3vw, 2.1rem);
+}
+
+.release-highlight-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.35rem;
+}
+
+.release-highlight-icon {
+  display: grid;
+  width: 2.75rem;
+  height: 2.75rem;
+  place-items: center;
+  border: 1px solid rgba(16, 185, 129, 0.24);
+  border-radius: 0.85rem;
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.release-highlight-tag {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text-3);
+  font-family: var(--mono);
+  font-size: 0.69rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 0.35rem 0.65rem;
+}
+
+.release-highlight-card h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: clamp(1.35rem, 2.8vw, 1.8rem);
+  letter-spacing: -0.025em;
+  line-height: 1.18;
+}
+
+.release-highlight-card > p {
+  margin: 0.8rem 0 0;
+  color: var(--text-2);
+  font-size: 0.94rem;
+}
+
+.release-highlight-card code {
+  font-size: 0.9em;
+}
+
+.release-highlight-list {
+  display: grid;
+  gap: 0.65rem;
+  margin: 1.4rem 0 1.65rem;
+  color: var(--text-2);
+  font-size: 0.86rem;
+  list-style: none;
+  padding: 0;
+}
+
+.release-highlight-list li {
+  display: grid;
+  grid-template-columns: 0.55rem minmax(0, 1fr);
+  gap: 0.65rem;
+}
+
+.release-highlight-list li::before {
+  width: 0.4rem;
+  height: 0.4rem;
+  margin-top: 0.48rem;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 4px rgba(16, 185, 129, 0.1);
+  content: "";
+}
+
+.release-highlight-link {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 0.45rem;
+  margin-top: auto;
+  color: var(--accent);
+  font-size: 0.86rem;
+  font-weight: 760;
+  text-decoration: none;
+}
+
+.release-highlight-link .ui-icon {
+  width: 1rem;
+  height: 1rem;
+  transition: translate 0.16s ease;
+}
+
+.release-highlight-link:hover .ui-icon {
+  translate: 0.2rem 0;
+}
+
 /* -------------------------------------------------------------------- why */
 
 .why-section {
@@ -2787,9 +2933,15 @@ code {
   .assistant-layout,
   .install-layout,
   .knowledge-heading,
+  .release-highlights-header,
   .runbooks-heading,
   .why-layout {
     grid-template-columns: 1fr;
+  }
+
+  .release-highlights-header {
+    align-items: start;
+    gap: 1.25rem;
   }
 
   .why-layout {
@@ -2820,6 +2972,7 @@ code {
 
   .feature-grid,
   .knowledge-grid,
+  .release-highlights-grid,
   .security-grid {
     grid-template-columns: 1fr;
   }

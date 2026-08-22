@@ -529,6 +529,91 @@
         </ul>
       </aside>
 
+      <section
+        class="section section-soft release-highlights-section"
+        id="release-highlights"
+        aria-labelledby="release-highlights-title"
+      >
+        <div class="shell">
+          <header class="release-highlights-header">
+            <div>
+              <p class="eyebrow">New in 0.3.1</p>
+              <h2
+                class="section-heading section-heading-wide"
+                id="release-highlights-title"
+              >
+                Two Terminals for the Agent. Less Text in Your Composer.
+              </h2>
+            </div>
+            <p class="section-lead">
+              This release adds a safety-first Local + SSH Sidecar workspace and
+              turns substantial clipboard text into clean, reversible context
+              attachments.
+            </p>
+          </header>
+
+          <div class="release-highlights-grid">
+            <article class="release-highlight-card">
+              <div class="release-highlight-meta">
+                <span class="release-highlight-icon" aria-hidden="true">
+                  <svg class="ui-icon"><use href="#i-branch" /></svg>
+                </span>
+                <span class="release-highlight-tag">PR #40</span>
+              </div>
+              <h3>One Agent, Local + SSH</h3>
+              <p>
+                Pair one local shell with one live SSH session in a responsive
+                split workspace. Every proposed command names its Local or
+                Remote target before it can run.
+              </p>
+              <ul class="release-highlight-list">
+                <li>Independent, Confirm-first permissions for each target</li>
+                <li>Focus, resize, swap, replace, reconnect, and recover</li>
+                <li>No automatic credential, environment, or file transfer</li>
+              </ul>
+              <a
+                class="release-highlight-link"
+                href="https://github.com/Veviad/VTerminal/pull/40"
+              >
+                Explore the Sidecar agent
+                <svg class="ui-icon" aria-hidden="true">
+                  <use href="#i-arrow-right" />
+                </svg>
+              </a>
+            </article>
+
+            <article class="release-highlight-card">
+              <div class="release-highlight-meta">
+                <span class="release-highlight-icon" aria-hidden="true">
+                  <svg class="ui-icon"><use href="#i-chat" /></svg>
+                </span>
+                <span class="release-highlight-tag">PR #41</span>
+              </div>
+              <h3>Large Pastes, Clean Composer</h3>
+              <p>
+                Substantial plain-text pastes become ordered virtual
+                <code>.txt</code> attachments instead of flooding the composer,
+                with no image conversion or OCR in the way.
+              </p>
+              <ul class="release-highlight-list">
+                <li>The exact clipboard text and paste order are preserved</li>
+                <li>Remove each paste or restore it with <strong>Show as text</strong></li>
+                <li>Small pastes and active-agent steering stay inline</li>
+              </ul>
+              <a
+                class="release-highlight-link"
+                href="https://github.com/Veviad/VTerminal/pull/41"
+              >
+                Explore text attachments
+                <svg class="ui-icon" aria-hidden="true">
+                  <use href="#i-arrow-right" />
+                </svg>
+              </a>
+            </article>
+          </div>
+        </div>
+      </section>
+
       <section class="section why-section" id="why" aria-labelledby="why-title">
         <div class="why-layout shell">
           <div class="why-intro">
