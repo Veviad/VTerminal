@@ -11,21 +11,25 @@ export function TerminalPane({
   active,
   visible = active,
   showComposer = true,
+  rendererActive = active,
 }: {
   sessionId: string;
-  /** Owns keyboard focus and the sole WebGL renderer. */
+  /** Owns keyboard focus. */
   active: boolean;
   /** Sidecar keeps two panes visible while only one is active. */
   visible?: boolean;
   /** A linked workspace has one shared Agent panel, not two inline composers. */
   showComposer?: boolean;
+  /** Owns a WebGL renderer. Sidecar keeps both visible panes rendered so focus
+   *  changes cannot swap one pane between WebGL and DOM font rasterization. */
+  rendererActive?: boolean;
 }) {
   const session = useAppStore((s) => s.sessions.find((x) => x.id === sessionId));
 
   return (
     <div className={visible ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
       <div className="relative min-h-0 flex-1 bg-bg-terminal">
-        <TerminalView sessionId={sessionId} active={active} />
+        <TerminalView sessionId={sessionId} active={active} rendererActive={rendererActive} />
         <BlockGutter sessionId={sessionId} />
         <TerminalSearchBar sessionId={sessionId} />
         {!session?.exited && <ReconnectBar sessionId={sessionId} />}

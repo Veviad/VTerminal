@@ -7,7 +7,7 @@ import * as api from "../../lib/tauri";
 import { getTerm } from "../../lib/termRegistry";
 import { THEMES } from "../../lib/themes";
 import { canConnectHere, connectToHost } from "../../lib/sshConnect";
-import { nameSession } from "../../lib/sessionNaming";
+import { renameSessionWithAi } from "../../lib/sessionNaming";
 import { isUsable } from "../../lib/selectModel";
 import { toggleAiPanel } from "../../lib/aiPanel";
 import { describeSshTarget } from "../../lib/ssh";
@@ -93,7 +93,14 @@ export function CommandPalette() {
         label: S.tabs.renameWithAi,
         run: () => {
           const s = live();
-          if (s.activeSessionId) nameSession(s.activeSessionId, { force: true });
+          if (s.activeSessionId) {
+            // The palette closes as soon as an item runs, so the tab-menu error
+            // line is not available here. Keep the failure in diagnostics; the
+            // context-menu action provides the interactive retry/error surface.
+            void renameSessionWithAi(s.activeSessionId).catch((reason) => {
+              console.warn("AI tab rename failed:", reason);
+            });
+          }
         },
       },
       {

@@ -1,11 +1,13 @@
 /**
  * AI tab naming.
  *
- * Two entry points, one code path: an explicit "Rename with AI" (force) and an
+ * Two entry points, one code path: an explicit "Rename with AI" and an
  * opportunistic auto-name after the first AI exchange in a tab. The rules that
  * matter:
  *
- *  - A human's rename is final. `userTitle` set → we never touch that tab again.
+ *  - Automatic naming never replaces a human title. An explicit AI rename is
+ *    itself a user choice, so it may replace the title that was visible when
+ *    the user clicked it.
  *  - Never compete with the user's own request. The local model serves one
  *    generation at a time, so a naming call while that tab is streaming would
  *    make the visible answer slower. We SKIP rather than queue.
@@ -81,7 +83,7 @@ export function statusAllowsNaming(status: AiStreamState["status"] | undefined):
   return !status || status === "idle" || status === "error" || status === "paused";
 }
 
-function canName(sessionId: string, force: boolean): boolean {
+function canAutoName(sessionId: string): boolean {
   const state = useAppStore.getState();
   const session = state.sessions.find((s) => s.id === sessionId);
   if (!session) return false;
@@ -95,16 +97,32 @@ function canName(sessionId: string, force: boolean): boolean {
   if (inFlight.has(sessionId)) return false;
   // Don't make the user's own generation wait behind a cosmetic one.
   if (!statusAllowsNaming(state.aiStreams[sessionId]?.status)) return false;
-  if (force) return true;
   if (autoNamed.has(sessionId) || session.aiTitle) return false;
   const commands = state.sessionUi[sessionId]?.blocks.filter((b) => b.command.trim()).length ?? 0;
   return commands >= MIN_COMMANDS_FOR_AUTO;
 }
 
-async function run(sessionId: string, force: boolean): Promise<void> {
-  if (!canName(sessionId, force)) return;
+async function run(sessionId: string, explicit: boolean): Promise<void> {
+  const initial = useAppStore.getState();
+  const session = initial.sessions.find((candidate) => candidate.id === sessionId);
+  if (!explicit && !canAutoName(sessionId)) return;
+  if (explicit) {
+    if (!session) throw new Error("This terminal tab is no longer open.");
+    if (!initial.aiReady()) throw new Error("The selected AI model is not ready.");
+    if (inFlight.has(sessionId)) throw new Error("This tab is already being named.");
+    if (!statusAllowsNaming(initial.aiStreams[sessionId]?.status)) {
+      throw new Error("Wait for the current AI response to finish, then try again.");
+    }
+  }
   const digest = buildDigest(sessionId);
-  if (!digest) return;
+  if (!digest) {
+    if (explicit) {
+      throw new Error("Run a command or ask AI first so there is enough context to name this tab.");
+    }
+    return;
+  }
+
+  const initialUserTitle = session?.userTitle ?? null;
 
   inFlight.add(sessionId);
   // The spinner lives in module state, which zustand does not track — nudge the
@@ -112,15 +130,28 @@ async function run(sessionId: string, force: boolean): Promise<void> {
   useAppStore.getState().updateSession(sessionId, {});
   try {
     const title = await api.aiNameSession(`title-${sessionId}-${++requestSeq}`, digest);
-    autoNamed.add(sessionId);
+    if (!explicit) autoNamed.add(sessionId);
     const store = useAppStore.getState();
-    // The tab may have been closed, or renamed by hand, while we were waiting.
+    // The tab may have been closed, or renamed again, while we were waiting.
     const live = store.sessions.find((s) => s.id === sessionId);
-    if (!live || live.userTitle) return;
-    if (title.trim()) store.updateSession(sessionId, { aiTitle: title.trim() });
+    if (!live) return;
+    if (explicit) {
+      if (live.userTitle !== initialUserTitle) {
+        throw new Error("The tab was renamed while AI was working; your newer name was kept.");
+      }
+      if (title.trim()) {
+        // An explicit AI rename is user-directed and therefore belongs at the
+        // same precedence as a typed rename. This is what lets it replace a
+        // saved-host/SSH label while the Sidecar headers retain host identity.
+        store.updateSession(sessionId, { userTitle: title.trim(), aiTitle: null });
+      }
+    } else if (!live.userTitle && title.trim()) {
+      store.updateSession(sessionId, { aiTitle: title.trim() });
+    }
   } catch (err) {
-    // A failed cosmetic rename is not worth interrupting anyone over; the tab
-    // keeps its derived label.
+    if (explicit) throw err;
+    // A failed automatic cosmetic rename is not worth interrupting anyone over;
+    // the tab keeps its derived label. Explicit requests surface the error.
     console.warn(`naming tab ${sessionId} failed:`, err);
   } finally {
     inFlight.delete(sessionId);
@@ -130,19 +161,12 @@ async function run(sessionId: string, force: boolean): Promise<void> {
 
 /**
  * Name a tab from its context.
- * @param force explicit user request — bypasses the "already named" and
- *              "enough history" gates, but never the `userTitle` rule.
+ * Automatic entry point. Explicit requests use `renameSessionWithAi` below so
+ * their success/failure can remain visible in the tab menu.
  */
-export function nameSession(sessionId: string, opts: { force?: boolean } = {}): void {
-  const force = opts.force ?? false;
+export function nameSession(sessionId: string): void {
   const existing = debounceTimers.get(sessionId);
   if (existing !== undefined) clearTimeout(existing);
-  // An explicit click should feel immediate; auto-naming coalesces.
-  if (force) {
-    debounceTimers.delete(sessionId);
-    void run(sessionId, true);
-    return;
-  }
   debounceTimers.set(
     sessionId,
     setTimeout(() => {
@@ -150,6 +174,17 @@ export function nameSession(sessionId: string, opts: { force?: boolean } = {}): 
       void run(sessionId, false);
     }, DEBOUNCE_MS),
   );
+}
+
+/** Explicit menu action. It bypasses automatic-naming preferences and existing
+ *  titles, starts immediately, and rejects with a user-displayable reason. */
+export async function renameSessionWithAi(sessionId: string): Promise<void> {
+  const existing = debounceTimers.get(sessionId);
+  if (existing !== undefined) {
+    clearTimeout(existing);
+    debounceTimers.delete(sessionId);
+  }
+  await run(sessionId, true);
 }
 
 /** Called on tab close so a pending timer cannot fire against a dead session. */
