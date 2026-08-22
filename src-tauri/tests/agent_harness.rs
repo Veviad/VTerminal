@@ -1,3 +1,12 @@
+//! Deterministic end-to-end coverage for the captured POSIX subprocess path.
+//!
+//! The fixtures deliberately use `/bin/zsh`, `printf`, `curl`, and POSIX exit
+//! semantics. Windows production runs captured commands through WSL, but this
+//! host-side integration binary is not a Windows/WSL contract test and cannot
+//! be loaded reliably on the Windows runner. Keep the portable agent internals
+//! covered by their unit tests there and run this subprocess harness on Unix.
+#![cfg(unix)]
+
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 

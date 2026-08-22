@@ -17,6 +17,7 @@
 //! | `git status`     | yes       | no      |
 //! | `git pull`       | no        | yes     |
 //! | `git ls-remote`  | yes       | yes     |
+//! | `gh api repos/x` | yes       | yes     |
 //! | `npm outdated`   | yes       | yes     |
 //! | `curl -o f url`  | no        | yes     |
 //! | `rm -rf build`   | no        | no      |
@@ -169,9 +170,11 @@ const fn reads_verbs_or_bare(verbs: &'static [&'static str]) -> ReadRule {
 /// `print > "file"`), `less`/`man`/`top` (TUIs that `prompts::AGENT` already
 /// bans), `env`/`command` (`env FOO=1 rm -rf x` runs), `cargo check|build`
 /// (write `target/` and run build scripts, i.e. arbitrary code), `npm run|test`
-/// and `npx` (execute arbitrary package scripts), and every network tool —
+/// and `npx` (execute arbitrary package scripts), and opaque network tools —
 /// `curl -o`/`-O`/`-T`/`-d` writes and uploads, so curl is not "read-only" in
-/// any useful sense even before the network axis weighs in.
+/// any useful sense. `gh` is handled by a dedicated shape parser below because
+/// its resource + action pairs cannot be expressed by this one-verb table
+/// without accidentally allowing `gh pr merge`.
 ///
 /// `git branch|tag|config|remote|stash|worktree` are also absent on purpose:
 /// each reads with no argument and writes with one (`git branch` lists,
@@ -860,6 +863,153 @@ fn verbs_match(verbs: &Verbs, verb: &str) -> bool {
     }
 }
 
+/// A conservative allowlist for authenticated GitHub reads.
+///
+/// `gh` is networked on the orthogonal axis for every invocation. This helper
+/// answers only whether the command is proven non-mutating, which allows Reads
+/// mode to run GET/list/view operations while web-access-off still blocks them.
+/// Unknown extensions and shapes fail closed.
+fn gh_is_read_only(segment: &str) -> bool {
+    let words = tokenize(segment);
+    let Some(head) = words.first() else {
+        return false;
+    };
+    if !head
+        .rsplit('/')
+        .next()
+        .unwrap_or(head)
+        .eq_ignore_ascii_case("gh")
+    {
+        return false;
+    }
+    let args = &words[1..];
+    let Some(group) = args.first().map(String::as_str) else {
+        return false;
+    };
+
+    if group == "api" {
+        return gh_api_is_read_only(&args[1..]);
+    }
+
+    // Global flags before the group are deliberately not decoded. A command
+    // the parser cannot identify exactly costs one approval instead of gaining
+    // unattended authority.
+    if group.starts_with('-') {
+        return false;
+    }
+    let action = args.get(1).map(String::as_str).unwrap_or("");
+    if action.starts_with('-') || args.iter().any(|arg| arg == "--web") {
+        return false;
+    }
+
+    matches!(
+        (group, action),
+        ("auth", "status")
+            | ("issue", "list" | "status" | "view")
+            | ("pr", "checks" | "diff" | "list" | "status" | "view")
+            | ("repo", "list" | "view")
+            | ("release", "list" | "view")
+            | ("run", "list" | "view")
+            | ("workflow", "list" | "view")
+            | ("label", "list")
+            | ("search", "code" | "commits" | "issues" | "prs" | "repos")
+    )
+}
+
+/// `gh api` defaults to GET, but body fields silently switch it to POST and
+/// GraphQL always uses POST for both queries and mutations. Only unambiguous
+/// REST GET shapes qualify. Headers are rejected too because
+/// `X-HTTP-Method-Override` can turn an apparent GET into a mutation.
+fn gh_api_is_read_only(args: &[String]) -> bool {
+    let mut endpoint: Option<&str> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        // Do not interpret anything after an option terminator. Treating flags
+        // after `--` as positional values would weaken this allowlist whenever
+        // the GitHub CLI adds a permissive argument shape.
+        if arg == "--" {
+            return false;
+        }
+        if arg == "--method" || arg == "-X" {
+            let Some(method) = args.get(i + 1) else {
+                return false;
+            };
+            if !method.eq_ignore_ascii_case("GET") {
+                return false;
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(method) = arg.strip_prefix("--method=") {
+            if !method.eq_ignore_ascii_case("GET") {
+                return false;
+            }
+            i += 1;
+            continue;
+        }
+        if let Some(method) = arg.strip_prefix("-X").filter(|value| !value.is_empty()) {
+            if !method.eq_ignore_ascii_case("GET") {
+                return false;
+            }
+            i += 1;
+            continue;
+        }
+        if [
+            "--field",
+            "-F",
+            "--raw-field",
+            "-f",
+            "--input",
+            "--header",
+            "-H",
+        ]
+        .contains(&arg)
+            || [
+                "--field=",
+                "--raw-field=",
+                "--input=",
+                "--header=",
+                "-F",
+                "-f",
+                "-H",
+            ]
+            .iter()
+            .any(|prefix| arg.starts_with(prefix))
+        {
+            return false;
+        }
+        if ["--hostname", "--cache", "--jq", "--template"].contains(&arg) {
+            if args.get(i + 1).is_none() {
+                return false;
+            }
+            i += 2;
+            continue;
+        }
+        if [
+            "--paginate",
+            "--slurp",
+            "--include",
+            "--verbose",
+            "--silent",
+        ]
+        .contains(&arg)
+        {
+            i += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            return false;
+        }
+        if endpoint.replace(arg).is_some() {
+            return false;
+        }
+        i += 1;
+    }
+
+    endpoint.is_some_and(|value| value != "graphql")
+}
+
 fn segment_is_read_only(seg: &Segment) -> bool {
     if writes_file(&seg.bare) {
         return false;
@@ -871,6 +1021,9 @@ fn segment_is_read_only(seg: &Segment) -> bool {
     // `sudo`. Neither is worth modelling for a click.
     if head.wrapped {
         return false;
+    }
+    if head.name == "gh" {
+        return gh_is_read_only(&seg.text);
     }
     let Some((_, rule)) = READ_ONLY.iter().find(|(name, _)| *name == head.name) else {
         return false;
@@ -1035,6 +1188,14 @@ mod tests {
             "ls > /dev/null",
             "df -h; du -sh .",
             "stat f && file f",
+            "gh api repos/Veviad/VTerminal/issues/42",
+            "gh api --method GET repos/Veviad/VTerminal/pulls --paginate | jq length",
+            "gh issue view 42 --repo Veviad/VTerminal --comments",
+            "gh pr list --repo Veviad/VTerminal --json number,title",
+            "gh pr diff 42",
+            "gh repo view Veviad/VTerminal",
+            "gh run view 123 --log",
+            "gh search issues sidecar --repo Veviad/VTerminal",
         ] {
             assert!(read_only(cmd), "should be read-only: {cmd}");
         }
@@ -1079,6 +1240,19 @@ mod tests {
             "ls &",
             "cat <<EOF",
             "ls | sh",
+            "gh api repos/Veviad/VTerminal/issues -f title=x",
+            "gh api --method POST repos/Veviad/VTerminal/issues",
+            "gh api -XDELETE repos/Veviad/VTerminal/issues/42",
+            "gh api repos/Veviad/VTerminal/issues -- -f title=x",
+            "gh api -- repos/Veviad/VTerminal/issues",
+            "gh api graphql -f query='{ viewer { login } }'",
+            "gh api repos/Veviad/VTerminal/issues -H 'X-HTTP-Method-Override: DELETE'",
+            "gh issue create --title x --body y",
+            "gh issue edit 42 --title x",
+            "gh pr merge 42",
+            "gh pr view 42 --web",
+            "gh extension-command something",
+            "gh --repo Veviad/VTerminal issue view 42",
         ] {
             assert!(!read_only(cmd), "must not be read-only: {cmd}");
         }
@@ -1161,6 +1335,13 @@ mod tests {
             CommandClass {
                 read_only: false,
                 network: false
+            }
+        );
+        assert_eq!(
+            classify("gh api repos/Veviad/VTerminal/issues/42"),
+            CommandClass {
+                read_only: true,
+                network: true
             }
         );
     }

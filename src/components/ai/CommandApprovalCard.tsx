@@ -22,7 +22,7 @@ export function CommandApprovalCard({
   /** Why this card is up even though an auto mode is armed. Null when the mode
    *  asks about everything, where no explanation is owed. Without it the "Reads"
    *  mode looks broken every time it correctly stops for a write. */
-  askedBecause?: "network" | "writes" | null;
+  askedBecause?: "writes" | null;
   /** Messages the user typed while this card was up. The loop is parked on this
    *  gate and only appends them once the round ends, so the wait is real and has
    *  to be visible — otherwise it reads as the app ignoring them. */
