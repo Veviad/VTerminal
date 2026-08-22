@@ -5,7 +5,10 @@ import { getTerm } from "../lib/termRegistry";
 import { readLineRange, readScreenTail } from "../lib/terminalSnapshot";
 import { abortSession, runInTerminal, type PtyExecOutcome } from "../lib/ptyExec";
 import { nameSession } from "../lib/sessionNaming";
-import { markTranscriptDirty } from "../lib/sessionPersistence";
+import {
+  markTranscriptCheckpoint,
+  markTranscriptDirty,
+} from "../lib/sessionPersistence";
 import { setAiPanelOpen } from "../lib/aiPanel";
 import {
   DOC_INJECT_LIMIT,
@@ -707,6 +710,12 @@ function dispatchPanelEvent(sessionId: string, requestId: string, e: StreamEvent
       // The only thing that clears a "queued" badge: the loop has appended
       // these to the transcript, so the model is about to see them.
       store.markSteersDelivered(sessionId, e.ids);
+      break;
+    case "Checkpoint":
+      // Rust has already removed system messages/images and repaired tool pairs.
+      // Keep the array opaque and persist it without changing any visible state.
+      store.setModelTranscriptForGeneration(sessionId, requestId, e.transcript);
+      markTranscriptCheckpoint(sessionId);
       break;
     case "ThinkingDelta":
       store.appendThinking(sessionId, e.content);

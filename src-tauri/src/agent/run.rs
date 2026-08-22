@@ -114,7 +114,139 @@ pub struct AgentConfig {
     pub exec_target: ExecTarget,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentFailureKind {
+    Provider,
+    ApprovalTimeout,
+    OutputLimit,
+    ToolCalling,
+}
+
+impl AgentFailureKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Provider => "provider_error",
+            Self::ApprovalTimeout => "approval_timeout",
+            Self::OutputLimit => "output_limit",
+            Self::ToolCalling => "tool_calling_unavailable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentTermination {
+    Completed,
+    Paused {
+        reason: PauseReason,
+        steps: u32,
+        limit: u32,
+        context_used: u32,
+        context_limit: u32,
+    },
+    Cancelled,
+    Failed {
+        kind: AgentFailureKind,
+        message: String,
+    },
+}
+
+impl AgentTermination {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Paused {
+                reason: PauseReason::StepLimit,
+                ..
+            } => "step_limit",
+            Self::Paused {
+                reason: PauseReason::ContextLimit,
+                ..
+            } => "context_limit",
+            Self::Cancelled => "cancelled",
+            Self::Failed { kind, .. } => kind.as_str(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AgentRunStats {
+    pub model_rounds: u32,
+    pub tool_calls: u32,
+    pub command_proposals: u32,
+    pub commands_executed: u32,
+    pub commands_skipped: u32,
+    pub commands_blocked: u32,
+}
+
+#[derive(Debug)]
+pub struct AgentRunOutcome {
+    /// Bounded, provider-valid continuation state. Never contains the system
+    /// prompt or image bytes, even though the live loop used both.
+    pub transcript: Vec<ChatMessage>,
+    pub termination: AgentTermination,
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub stats: AgentRunStats,
+    pub elapsed_ms: u64,
+}
+
+impl AgentRunOutcome {
+    /// One privacy-bounded diagnostic record. Deliberately formatted here so a
+    /// future logging change has a unit-testable boundary and cannot casually
+    /// interpolate the transcript or a provider error body.
+    pub fn metadata_log_line(&self, request_id: &str, model: &str) -> String {
+        format!(
+            "request={} model={} termination={} elapsed_ms={} rounds={} tool_calls={} proposals={} executed={} skipped={} blocked={} prompt_tokens={} completion_tokens={}",
+            request_id,
+            model,
+            self.termination.as_str(),
+            self.elapsed_ms,
+            self.stats.model_rounds,
+            self.stats.tool_calls,
+            self.stats.command_proposals,
+            self.stats.commands_executed,
+            self.stats.commands_skipped,
+            self.stats.commands_blocked,
+            self.prompt_tokens,
+            self.completion_tokens,
+        )
+    }
+}
+
 const APPROVAL_TIMEOUT_SECS: u64 = 600;
+
+fn emit_checkpoint(
+    messages: &[ChatMessage],
+    sequence: &mut u32,
+    on_event: &Channel<StreamEvent>,
+) -> Vec<ChatMessage> {
+    *sequence = sequence.saturating_add(1);
+    let transcript = crate::agent::history::storage_snapshot(messages);
+    let _ = on_event.send(StreamEvent::Checkpoint {
+        sequence: *sequence,
+        transcript: transcript.clone(),
+    });
+    transcript
+}
+
+fn finish_outcome(
+    messages: Vec<ChatMessage>,
+    termination: AgentTermination,
+    usage: (u32, u32),
+    stats: AgentRunStats,
+    started: std::time::Instant,
+    checkpoint_sequence: &mut u32,
+    on_event: &Channel<StreamEvent>,
+) -> AgentRunOutcome {
+    AgentRunOutcome {
+        transcript: emit_checkpoint(&messages, checkpoint_sequence, on_event),
+        termination,
+        prompt_tokens: usage.0,
+        completion_tokens: usage.1,
+        stats,
+        elapsed_ms: started.elapsed().as_millis() as u64,
+    }
+}
 
 /// The tools offered for one run.
 ///
@@ -318,7 +450,7 @@ async fn one_round(
     }
 }
 
-/// Drive the agent loop, returning the transcript it built.
+/// Drive the agent loop, returning its recoverable transcript and typed outcome.
 ///
 /// The transcript is the return value because it is the ONLY place the model's own
 /// view of the run exists — the frontend's `AiMessage[]` is a different, lossier
@@ -355,7 +487,8 @@ pub async fn run_agent(
     docs: Option<&crate::docs::db::DocsDb>,
     cancel: tokio::sync::watch::Receiver<bool>,
     on_event: &Channel<StreamEvent>,
-) -> Result<Vec<ChatMessage>, String> {
+) -> AgentRunOutcome {
+    let started = std::time::Instant::now();
     // The system prompt is always the FRESH one, never whatever the history
     // carried: a stored prompt embeds the old session's rendered context and the
     // safety policy, neither of which may come from disk. `normalize` strips any
@@ -366,15 +499,17 @@ pub async fn run_agent(
     messages.extend(history);
     messages.push(ChatMessage::user_with_images(goal, goal_images));
     // `normalize` strips images from every HISTORY turn but never from the goal,
-    // so this turn's screenshot is the only one that reaches the model — and the
-    // transcript this function returns carries none, which is what keeps the
-    // archive free of base64.
+    // so this turn's screenshot is the only one that reaches the model. Checkpoint
+    // copies remove it before crossing IPC or reaching the archive.
     crate::agent::history::normalize(&mut messages);
+    let mut checkpoint_sequence = 0u32;
+    emit_checkpoint(&messages, &mut checkpoint_sequence, on_event);
     // Built once, reused verbatim every round: it is inside the cached prefix.
     let round_tools = tools(&config);
     let mut total_usage = (0u32, 0u32);
     let mut approval_counter = 0u32;
-    let mut blocked_count = 0u32;
+    let mut network_blocked_count = 0u32;
+    let mut stats = AgentRunStats::default();
     let mut saw_any_tool_call = false;
 
     let mut iteration: u32 = 0;
@@ -402,8 +537,15 @@ pub async fn run_agent(
 
     loop {
         if *cancel.borrow() {
-            let _ = on_event.send(StreamEvent::Cancelled);
-            return Ok(messages);
+            return finish_outcome(
+                messages,
+                AgentTermination::Cancelled,
+                total_usage,
+                stats,
+                started,
+                &mut checkpoint_sequence,
+                on_event,
+            );
         }
 
         // THE ONLY LEGAL PLACE TO APPEND A USER TURN — see `append_steers`.
@@ -448,7 +590,8 @@ pub async fn run_agent(
             effort: config.effort,
             web_access: config.web_access,
         };
-        let (calls, text, usage, finish) = one_round(
+        stats.model_rounds = stats.model_rounds.saturating_add(1);
+        let round = one_round(
             provider,
             messages.clone(),
             round_tools.clone(),
@@ -456,11 +599,36 @@ pub async fn run_agent(
             cancel.clone(),
             on_event,
         )
-        .await
-        .map_err(|e| match e {
-            ProviderError::Cancelled => "cancelled".to_string(),
-            other => other.to_string(),
-        })?;
+        .await;
+        let (calls, text, usage, finish) = match round {
+            Ok(round) => round,
+            Err(ProviderError::Cancelled) => {
+                return finish_outcome(
+                    messages,
+                    AgentTermination::Cancelled,
+                    total_usage,
+                    stats,
+                    started,
+                    &mut checkpoint_sequence,
+                    on_event,
+                );
+            }
+            Err(error) => {
+                return finish_outcome(
+                    messages,
+                    AgentTermination::Failed {
+                        kind: AgentFailureKind::Provider,
+                        message: error.to_string(),
+                    },
+                    total_usage,
+                    stats,
+                    started,
+                    &mut checkpoint_sequence,
+                    on_event,
+                );
+            }
+        };
+        stats.tool_calls = stats.tool_calls.saturating_add(calls.len() as u32);
         // Each round is billed its own input tokens, so this is a sum. Taking
         // the max here under-reported a 10-round run by roughly 5x.
         total_usage.0 += usage.0;
@@ -474,18 +642,34 @@ pub async fn run_agent(
             // thinking trace ate the whole budget. Ending silently looks like
             // a hang to the user; say what happened.
             if finish == FinishReason::Length && text.trim().is_empty() {
-                let _ = on_event.send(StreamEvent::Error {
-                    message: "The response hit the token limit before producing any output — retry, or turn off extended thinking (brain icon).".into(),
-                });
-                return Ok(messages);
+                return finish_outcome(
+                    messages,
+                    AgentTermination::Failed {
+                        kind: AgentFailureKind::OutputLimit,
+                        message: "The response hit the token limit before producing any output — retry, or turn off extended thinking (brain icon).".into(),
+                    },
+                    total_usage,
+                    stats,
+                    started,
+                    &mut checkpoint_sequence,
+                    on_event,
+                );
             }
             // Plain text answer. If the model NEVER used tools, its template
             // probably lacks the tools block — tell the user instead of looping.
             if !saw_any_tool_call && finish == FinishReason::Stop && text.trim().is_empty() {
-                let _ = on_event.send(StreamEvent::Error {
-                    message: "The loaded model did not produce tool calls — its chat template may not support tool calling. Try a larger model from Settings → Models.".into(),
-                });
-                return Ok(messages);
+                return finish_outcome(
+                    messages,
+                    AgentTermination::Failed {
+                        kind: AgentFailureKind::ToolCalling,
+                        message: "The loaded model did not produce tool calls — its chat template may not support tool calling. Try a larger model from Settings → Models.".into(),
+                    },
+                    total_usage,
+                    stats,
+                    started,
+                    &mut checkpoint_sequence,
+                    on_event,
+                );
             }
             // Record the answer before deciding whether to stop. This used to be
             // dropped, which silently cost the NEXT turn the model's own final
@@ -496,14 +680,19 @@ pub async fn run_agent(
             // and let the top of the loop deliver it, rather than stranding the
             // message on a run that just ended.
             if steers.has_pending(&config.request_id) {
+                emit_checkpoint(&messages, &mut checkpoint_sequence, on_event);
                 iteration += 1;
                 continue;
             }
-            let _ = on_event.send(StreamEvent::Done {
-                prompt_tokens: total_usage.0,
-                completion_tokens: total_usage.1,
-            });
-            return Ok(messages);
+            return finish_outcome(
+                messages,
+                AgentTermination::Completed,
+                total_usage,
+                stats,
+                started,
+                &mut checkpoint_sequence,
+                on_event,
+            );
         }
         saw_any_tool_call = true;
 
@@ -518,8 +707,15 @@ pub async fn run_agent(
 
         for call in calls {
             if *cancel.borrow() {
-                let _ = on_event.send(StreamEvent::Cancelled);
-                return Ok(messages);
+                return finish_outcome(
+                    messages,
+                    AgentTermination::Cancelled,
+                    total_usage,
+                    stats,
+                    started,
+                    &mut checkpoint_sequence,
+                    on_event,
+                );
             }
             match call.name.as_str() {
                 "finish" => {
@@ -543,11 +739,15 @@ pub async fn run_agent(
                         ));
                         continue;
                     }
-                    let _ = on_event.send(StreamEvent::Done {
-                        prompt_tokens: total_usage.0,
-                        completion_tokens: total_usage.1,
-                    });
-                    return Ok(messages);
+                    return finish_outcome(
+                        messages,
+                        AgentTermination::Completed,
+                        total_usage,
+                        stats,
+                        started,
+                        &mut checkpoint_sequence,
+                        on_event,
+                    );
                 }
                 "run_command" => {
                     let parsed: Result<serde_json::Value, _> =
@@ -600,6 +800,7 @@ pub async fn run_agent(
                     if config.exec_target.is_sidecar()
                         && super::policy::is_environment_transition(&command)
                     {
+                        stats.commands_blocked = stats.commands_blocked.saturating_add(1);
                         let reason = "Sidecar targets are user-established; the agent cannot enter another SSH, container, or VM shell";
                         let _ = on_event.send(StreamEvent::CommandBlocked {
                             command: command.clone(),
@@ -622,7 +823,8 @@ pub async fn run_agent(
                     // the click, and only then refuse — so the one position
                     // where this can be honest is here, before the proposal.
                     if super::policy::blocks_network(&class, config.web_access) {
-                        blocked_count += 1;
+                        stats.commands_blocked = stats.commands_blocked.saturating_add(1);
+                        network_blocked_count = network_blocked_count.saturating_add(1);
                         let _ = on_event.send(StreamEvent::CommandBlocked {
                             command: command.clone(),
                             reason: "internet access is off for the agent".into(),
@@ -632,12 +834,13 @@ pub async fn run_agent(
                         messages.push(command_tool_result(
                             &call.id,
                             &command_target,
-                            &network_refusal(blocked_count),
+                            &network_refusal(network_blocked_count),
                         ));
                         continue;
                     }
 
                     approval_counter += 1;
+                    stats.command_proposals = stats.command_proposals.saturating_add(1);
                     let approval_id = format!("{}-ap{}", config.request_id, approval_counter);
                     let rx = approvals.register(&approval_id, &config.request_id);
                     let _ = on_event.send(StreamEvent::CommandProposal {
@@ -655,29 +858,59 @@ pub async fn run_agent(
                         r = rx => r,
                         _ = cancel_watch.changed() => {
                             approvals.drain_for_request(&config.request_id);
-                            let _ = on_event.send(StreamEvent::Cancelled);
-                            return Ok(messages);
+                            return finish_outcome(
+                                messages,
+                                AgentTermination::Cancelled,
+                                total_usage,
+                                stats,
+                                started,
+                                &mut checkpoint_sequence,
+                                on_event,
+                            );
                         }
                         _ = tokio::time::sleep(std::time::Duration::from_secs(APPROVAL_TIMEOUT_SECS)) => {
                             approvals.drain_for_request(&config.request_id);
-                            let _ = on_event.send(StreamEvent::Error {
-                                message: "approval timed out — agent run ended".into(),
-                            });
-                            return Ok(messages);
+                            return finish_outcome(
+                                messages,
+                                AgentTermination::Failed {
+                                    kind: AgentFailureKind::ApprovalTimeout,
+                                    message: "approval timed out — agent run ended".into(),
+                                },
+                                total_usage,
+                                stats,
+                                started,
+                                &mut checkpoint_sequence,
+                                on_event,
+                            );
                         }
                     };
                     let Ok(response) = response else {
                         // Sender dropped (drained by cancel) → stop.
-                        let _ = on_event.send(StreamEvent::Cancelled);
-                        return Ok(messages);
+                        return finish_outcome(
+                            messages,
+                            AgentTermination::Cancelled,
+                            total_usage,
+                            stats,
+                            started,
+                            &mut checkpoint_sequence,
+                            on_event,
+                        );
                     };
 
                     match response.decision {
                         ApprovalDecision::Stop => {
-                            let _ = on_event.send(StreamEvent::Cancelled);
-                            return Ok(messages);
+                            return finish_outcome(
+                                messages,
+                                AgentTermination::Cancelled,
+                                total_usage,
+                                stats,
+                                started,
+                                &mut checkpoint_sequence,
+                                on_event,
+                            );
                         }
                         ApprovalDecision::Skip => {
+                            stats.commands_skipped = stats.commands_skipped.saturating_add(1);
                             messages.push(command_tool_result(
                                 &call.id,
                                 &command_target,
@@ -693,6 +926,7 @@ pub async fn run_agent(
                                 .as_ref()
                                 .is_some_and(|c| c.trim().is_empty())
                             {
+                                stats.commands_skipped = stats.commands_skipped.saturating_add(1);
                                 messages.push(command_tool_result(
                                     &call.id,
                                     &command_target,
@@ -713,6 +947,7 @@ pub async fn run_agent(
                                 .filter(|c| c.trim() != command.trim());
                             let was_edited = edited.is_some();
                             let final_command = edited.unwrap_or(command);
+                            stats.commands_executed = stats.commands_executed.saturating_add(1);
                             let result = match &config.exec_target {
                                 ExecTarget::Pty { .. } | ExecTarget::Sidecar { .. } => {
                                     let session_id = command_target
@@ -757,8 +992,15 @@ pub async fn run_agent(
                             };
                             match result {
                                 Ok(r) if r.cancelled => {
-                                    let _ = on_event.send(StreamEvent::Cancelled);
-                                    return Ok(messages);
+                                    return finish_outcome(
+                                        messages,
+                                        AgentTermination::Cancelled,
+                                        total_usage,
+                                        stats,
+                                        started,
+                                        &mut checkpoint_sequence,
+                                        on_event,
+                                    );
                                 }
                                 Ok(r) => {
                                     // The model must ground follow-ups in what
@@ -876,23 +1118,31 @@ pub async fn run_agent(
             }
         }
 
+        // The assistant turn and every tool result from this batch are now
+        // complete. Persist only at this boundary; checkpointing inside the loop
+        // could archive one result while sibling calls were still unanswered.
+        emit_checkpoint(&messages, &mut checkpoint_sequence, on_event);
         iteration += 1;
     }
 
-    let _ = on_event.send(StreamEvent::Paused {
-        reason: pause_reason,
-        steps: iteration,
-        // The CONFIGURED value, deliberately not `budget`: a steer extends the
-        // budget up to 3x, and reporting the extended number named a limit the
-        // user could not find in Settings. `steps` may therefore exceed `limit`,
-        // and the frontend explains the gap.
-        limit: config.max_iterations,
-        prompt_tokens: total_usage.0,
-        completion_tokens: total_usage.1,
-        context_used: last_prompt_tokens,
-        context_limit: config.context_tokens,
-    });
-    Ok(messages)
+    finish_outcome(
+        messages,
+        AgentTermination::Paused {
+            reason: pause_reason,
+            steps: iteration,
+            // The CONFIGURED value, deliberately not `budget`: a steer extends
+            // the budget up to 3x, and reporting the extended number named a
+            // limit the user could not find in Settings.
+            limit: config.max_iterations,
+            context_used: last_prompt_tokens,
+            context_limit: config.context_tokens,
+        },
+        total_usage,
+        stats,
+        started,
+        &mut checkpoint_sequence,
+        on_event,
+    )
 }
 
 /// Append the user's mid-run messages as ONE user turn.
@@ -1427,6 +1677,35 @@ mod tests {
         assert_eq!(json["limit"], 10);
         assert_eq!(json["context_used"], 24_000);
         assert_eq!(json["context_limit"], 32_768);
+    }
+
+    #[test]
+    fn metadata_log_line_excludes_transcript_and_error_content() {
+        let secret = "PRIVATE-PROMPT-COMMAND-OUTPUT";
+        let outcome = AgentRunOutcome {
+            transcript: vec![ChatMessage::user(secret)],
+            termination: AgentTermination::Failed {
+                kind: AgentFailureKind::Provider,
+                message: secret.into(),
+            },
+            prompt_tokens: 12,
+            completion_tokens: 3,
+            stats: AgentRunStats {
+                model_rounds: 2,
+                tool_calls: 1,
+                command_proposals: 1,
+                commands_executed: 1,
+                commands_skipped: 0,
+                commands_blocked: 0,
+            },
+            elapsed_ms: 45,
+        };
+
+        let line = outcome.metadata_log_line("request-1", "model-1");
+        assert!(!line.contains(secret));
+        assert!(line.contains("termination=provider_error"));
+        assert!(line.contains("rounds=2"));
+        assert!(line.contains("executed=1"));
     }
 
     #[test]

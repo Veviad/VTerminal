@@ -135,6 +135,15 @@ pub enum StreamEvent {
     SteerDelivered {
         ids: Vec<String>,
     },
+    /// Storage-safe model history at a stable round boundary.
+    ///
+    /// This is deliberately separate from the display transcript. It contains
+    /// tool-call ids/results needed for continuation, but no system message or
+    /// image bytes. The frontend persists it without rendering or editing it.
+    Checkpoint {
+        sequence: u32,
+        transcript: Vec<crate::provider::ChatMessage>,
+    },
     Done {
         prompt_tokens: u32,
         completion_tokens: u32,
@@ -142,11 +151,11 @@ pub enum StreamEvent {
     /// The loop stopped at a LIMIT, not because the model finished.
     ///
     /// Deliberately not `Error`: the transcript is intact and already resumable
-    /// (the cap path returns `Ok(messages)`, so `agent_start` resolves and the
-    /// frontend stores it as `modelTranscript`), which makes this a checkpoint
-    /// the user extends with one click rather than a failure. It also carries the
-    /// run's usage, because no `Done` fires on this path and the counters would
-    /// otherwise be silently lost.
+    /// (the typed outcome carries the storage-safe checkpoint, so `agent_start`
+    /// resolves and the frontend stores it as `modelTranscript`), which makes
+    /// this a checkpoint the user extends with one click rather than a failure.
+    /// It also carries the run's usage, because no `Done` fires on this path and
+    /// the counters would otherwise be silently lost.
     Paused {
         reason: PauseReason,
         /// Steps actually taken.

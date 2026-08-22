@@ -36,12 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let approvals_for_channel = Arc::clone(&approvals);
     let saw_proposal = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let saw_result = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let saw_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let (p, r, d) = (
-        Arc::clone(&saw_proposal),
-        Arc::clone(&saw_result),
-        Arc::clone(&saw_done),
-    );
+    let (p, r) = (Arc::clone(&saw_proposal), Arc::clone(&saw_result));
 
     // The "user": logs every event and auto-approves every proposal.
     let on_event: Channel<vterminal_lib::agent::StreamEvent> =
@@ -95,31 +90,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         v.get("exit_code").and_then(|c| c.as_i64()).unwrap_or(-1)
                     );
                     r.store(true, std::sync::atomic::Ordering::SeqCst);
-                }
-                Some("Done") => {
-                    d.store(true, std::sync::atomic::Ordering::SeqCst);
-                }
-                // A guard rail, not a failure. Printed distinctly from Error
-                // because that is the whole point of the variant — and without an
-                // arm here the catch-all below would swallow it, making a paused
-                // run look like one that simply stopped.
-                Some("Paused") => {
-                    eprintln!(
-                        "\n[paused] reason={} steps={} limit={} context={}/{}",
-                        v.get("reason").and_then(|c| c.as_str()).unwrap_or(""),
-                        v.get("steps").and_then(|c| c.as_i64()).unwrap_or(-1),
-                        v.get("limit").and_then(|c| c.as_i64()).unwrap_or(-1),
-                        v.get("context_used").and_then(|c| c.as_i64()).unwrap_or(-1),
-                        v.get("context_limit")
-                            .and_then(|c| c.as_i64())
-                            .unwrap_or(-1),
-                    );
-                }
-                Some("Error") => {
-                    eprintln!(
-                        "\n[error] {}",
-                        v.get("message").and_then(|c| c.as_str()).unwrap_or("")
-                    );
                 }
                 _ => {}
             }
@@ -190,7 +160,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // and be registered or the loop's per-round drain finds no queue at all.
     let steers = vterminal_lib::agent::SteerState::default();
     steers.register(&config.request_id);
-    let transcript = run::run_agent(
+    let outcome = run::run_agent(
         &provider,
         config,
         system_prompt,
@@ -211,8 +181,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cancel_rx,
         &on_event,
     )
-    .await
-    .map_err(|e| format!("agent loop failed: {e}"))?;
+    .await;
+    let completed = matches!(outcome.termination, run::AgentTermination::Completed);
+    let transcript = outcome.transcript;
 
     eprintln!("\n---");
     // The transcript is what makes a run continuable; a run that produced tool
@@ -229,8 +200,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result_ok = saw_result.load(std::sync::atomic::Ordering::SeqCst);
     let file_content = std::fs::read_to_string(target).unwrap_or_default();
     eprintln!(
-        "proposals: {proposal_ok} · executed: {result_ok} · done: {} · file: {:?}",
-        saw_done.load(std::sync::atomic::Ordering::SeqCst),
+        "proposals: {proposal_ok} · executed: {result_ok} · done: {completed} · file: {:?}",
         file_content.trim()
     );
     assert!(
@@ -238,6 +208,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "expected at least one CommandProposal (tool calling through the GGUF template)"
     );
     assert!(result_ok, "expected at least one executed command");
+    assert!(completed, "expected the agent run to complete");
     assert!(
         file_content.trim().contains("hello"),
         "expected the agent to create {target} containing hello"

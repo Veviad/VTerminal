@@ -94,6 +94,7 @@ import {
   __waitForQuitForTests,
   flushAll,
   markScrollbackDirty,
+  markTranscriptCheckpoint,
   markTranscriptDirty,
   preparePersistenceForExit,
   resumePersistenceAfterFailedExit,
@@ -521,6 +522,47 @@ describe("transactional exit persistence", () => {
     await vi.advanceTimersByTimeAsync(30_000);
     expect(archivePutMock).toHaveBeenCalledTimes(1);
     expect(archivePutManyMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("writes Agent checkpoints immediately and follows an in-flight write with the newest one", async () => {
+    useAppStore.setState({
+      aiStreams: {
+        a: {
+          ...emptyAiStream(),
+          messages: [
+            {
+              id: "m1",
+              role: "user",
+              content: "checkpoint me",
+              createdAt: "2026-08-14T12:00:00.000Z",
+            },
+          ],
+          modelTranscript: [{ role: "user", content: "checkpoint one" }],
+        },
+      },
+    });
+    const firstWrite = deferred<void>();
+    archivePutMock.mockReturnValueOnce(firstWrite.promise);
+
+    startPersistence();
+    markTranscriptCheckpoint("a");
+    expect(archivePutMock).toHaveBeenCalledTimes(1);
+
+    useAppStore.getState().setModelTranscript("a", [
+      { role: "user", content: "checkpoint two" },
+    ]);
+    markTranscriptCheckpoint("a");
+    expect(archivePutMock).toHaveBeenCalledTimes(1);
+
+    firstWrite.resolve();
+    for (let i = 0; i < 10 && archivePutMock.mock.calls.length < 2; i += 1) {
+      await Promise.resolve();
+    }
+
+    expect(archivePutMock).toHaveBeenCalledTimes(2);
+    expect(archivePutMock.mock.calls[1][0].model_transcript).toEqual([
+      { role: "user", content: "checkpoint two" },
+    ]);
   });
 
   it("waits for a tab-close archive IPC even after its UI budget expires", async () => {
