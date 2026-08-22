@@ -196,18 +196,8 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   // Agent mode is steerable mid-run; ask mode is one provider call with no round
   // boundary to inject into, so it stays locked while it streams.
   const steering = busy && agentMode;
-  const {
-    input,
-    inputRef,
-    pasteAnnouncement,
-    pastedTextStaging,
-    isPastedTextStaging,
-    clearInput,
-    handleInputChange,
-    handleInputSelection,
-    handlePaste,
-    showAttachmentAsText,
-  } = useClipboardStaging({ sessionId, steering, pendingAttachments });
+  const clipboardStaging = useClipboardStaging({ sessionId, steering, pendingAttachments });
+  const { input, inputRef, pasteAnnouncement, pastedTextStaging } = clipboardStaging;
   useAutoGrow(inputRef, composerMax, [input, panelWidth]);
   const queuedSteers = stream?.steerQueue.length ?? 0;
   const hasInlineInput = input.trim().length > 0;
@@ -224,7 +214,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
     // A large paste has already been accepted (the native paste was prevented),
     // but its Blob may not have reached pendingAttachments yet. Sending during
     // that gap would strand the paste on the following turn.
-    if (isPastedTextStaging()) return;
+    if (clipboardStaging.isPastedTextStaging()) return;
     // Blocked, never silently stripped: an answer about an image the model never
     // received is indistinguishable from an answer about one it did.
     if (imagesBlocked) return;
@@ -240,7 +230,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
       if (!hasIdlePayload) return;
       void ask(sessionId, input.trim());
     }
-    clearInput();
+    clipboardStaging.clearInput();
   };
 
   // Collapsed keeps the panel MOUNTED behind a rail rather than unmounting it:
@@ -315,7 +305,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
                 return;
               }
               setConfirmClear(false);
-              clearInput();
+              clipboardStaging.clearInput();
               void startNewChat(sessionId);
             }}
             onBlur={() => setConfirmClear(false)}
@@ -563,7 +553,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
               onShowAsText={
                 a.origin === "pasted-text" && a.kind === "text" && typeof a.text === "string"
                   ? () => {
-                      showAttachmentAsText(a);
+                      clipboardStaging.showAttachmentAsText(a);
                     }
                   : undefined
               }
@@ -612,9 +602,15 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
           <textarea
             ref={inputRef}
             value={input}
-            onChange={handleInputChange}
-            onSelect={handleInputSelection}
-            onPaste={handlePaste}
+            onChange={(event) => {
+              clipboardStaging.handleInputChange(event);
+            }}
+            onSelect={(event) => {
+              clipboardStaging.handleInputSelection(event);
+            }}
+            onPaste={(event) => {
+              clipboardStaging.handlePaste(event);
+            }}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();

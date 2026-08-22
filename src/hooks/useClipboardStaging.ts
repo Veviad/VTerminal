@@ -23,12 +23,12 @@ interface ClipboardStaging {
   inputRef: RefObject<HTMLTextAreaElement | null>;
   pasteAnnouncement: string;
   pastedTextStaging: boolean;
-  isPastedTextStaging(): boolean;
-  clearInput(): void;
-  handleInputChange(event: ChangeEvent<HTMLTextAreaElement>): void;
-  handleInputSelection(event: SyntheticEvent<HTMLTextAreaElement>): void;
-  handlePaste(event: ClipboardEvent<HTMLTextAreaElement>): void;
-  showAttachmentAsText(attachment: Attachment): void;
+  isPastedTextStaging: () => boolean;
+  clearInput: () => void;
+  handleInputChange: (event: ChangeEvent<HTMLTextAreaElement>) => void;
+  handleInputSelection: (event: SyntheticEvent<HTMLTextAreaElement>) => void;
+  handlePaste: (event: ClipboardEvent<HTMLTextAreaElement>) => void;
+  showAttachmentAsText: (attachment: Attachment) => void;
 }
 
 function maxPastedTextSequence(attachments: readonly Attachment[]): number {
