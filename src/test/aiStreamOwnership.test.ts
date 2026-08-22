@@ -59,6 +59,17 @@ function session(): Session {
   };
 }
 
+function pastedText(body: string): Attachment {
+  return {
+    id: "pasted-text-1",
+    kind: "text",
+    name: "pasted-text-1.txt",
+    mediaType: "text/plain",
+    bytes: new TextEncoder().encode(body).length,
+    text: body,
+  };
+}
+
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
   let reject!: (reason?: unknown) => void;
@@ -102,6 +113,46 @@ beforeEach(() => {
 });
 
 describe("AI generation ownership", () => {
+  it("sends an attachment-only Ask turn with the complete fenced text", async () => {
+    const body = "START-OF-PASTE\n```embedded fence```\nEND-OF-PASTE";
+    const attachment = pastedText(body);
+    useAppStore.getState().attachFilesToAi(SID, [attachment]);
+    const { result } = renderHook(() => useAiStream());
+
+    await act(async () => result.current.ask(SID, ""));
+
+    const expected = `Attached file — pasted-text-1.txt:\n\`\`\`\`\n${body}\n\`\`\`\``;
+    expect(api.aiAsk).toHaveBeenCalledOnce();
+    expect(api.aiAsk.mock.calls[0][1]).toBe(expected);
+    const stream = useAppStore.getState().aiStreams[SID];
+    expect(stream.messages[0]).toMatchObject({
+      role: "user",
+      content: expected,
+      attachments: [attachment],
+    });
+    expect(stream.pendingAttachments).toEqual([]);
+  });
+
+  it("sends an attachment-only Agent goal with the complete fenced text", async () => {
+    const body = "START-OF-PASTE\nagent context\nEND-OF-PASTE";
+    const attachment = pastedText(body);
+    useAppStore.getState().attachFilesToAi(SID, [attachment]);
+    const { result } = renderHook(() => useAiStream());
+
+    await act(async () => result.current.startAgent(SID, ""));
+
+    const expected = `Attached file — pasted-text-1.txt:\n\`\`\`\n${body}\n\`\`\``;
+    expect(api.agentStart).toHaveBeenCalledOnce();
+    expect(api.agentStart.mock.calls[0][1]).toBe(expected);
+    const stream = useAppStore.getState().aiStreams[SID];
+    expect(stream.messages[0]).toMatchObject({
+      role: "user",
+      content: expected,
+      attachments: [attachment],
+    });
+    expect(stream.pendingAttachments).toEqual([]);
+  });
+
   it("forwards attached Qdrant buckets when starting an agent run", async () => {
     const bucket: KnowledgeBucketRef = {
       source: "qdrant",

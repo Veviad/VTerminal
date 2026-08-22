@@ -1,8 +1,9 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { emptyAiStream, useAppStore } from "../stores/appStore";
 import { AiPanel } from "../components/ai/AiPanel";
 import { S } from "../lib/strings";
+import * as api from "../lib/tauri";
 import type { CatalogEntry, Session } from "../lib/types";
 
 // The AI panel is unmounted entirely when `settingsLoaded` is false, so a bug in
@@ -54,6 +55,50 @@ function session(id: string): Session {
 // jsdom implements no scroll geometry; the panel autoscrolls on mount.
 Element.prototype.scrollTo = vi.fn();
 
+function pasteClipboard(
+  target: HTMLElement,
+  text: string,
+  items: Array<Pick<DataTransferItem, "kind" | "getAsFile">> = [
+    { kind: "string", getAsFile: () => null },
+  ],
+): ClipboardEvent {
+  const event = new Event("paste", { bubbles: true, cancelable: true }) as ClipboardEvent;
+  Object.defineProperty(event, "clipboardData", {
+    value: {
+      items: items as unknown as DataTransferItemList,
+      getData: (type: string) => (type === "text/plain" ? text : ""),
+    },
+  });
+  fireEvent(target, event);
+  return event;
+}
+
+function qualifyingPaste(prefix: string): string {
+  return Array.from({ length: 6 }, (_, i) => `${prefix} ${i + 1} ${"x".repeat(180)}`).join("\n");
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+function utf8Buffer(text: string): ArrayBuffer {
+  return new TextEncoder().encode(text).buffer as ArrayBuffer;
+}
+
+function seedReadyPanel(over: Partial<ReturnType<typeof emptyAiStream>> = {}): void {
+  useAppStore.setState({
+    sessions: [session("s1")],
+    catalog: [cloudEntry()],
+    activeModelId: "anthropic/claude-sonnet-5",
+    hasApiKey: { anthropic: true },
+    aiStreams: { s1: { ...emptyAiStream(), ...over } },
+  });
+}
+
 describe("AiPanel renders", () => {
   beforeEach(() => {
     useAppStore.setState({
@@ -70,6 +115,8 @@ describe("AiPanel renders", () => {
       aiStreams: {},
     });
   });
+
+  afterEach(() => vi.restoreAllMocks());
 
   it("renders with an API model selected and a key present", () => {
     useAppStore.setState({
@@ -281,6 +328,231 @@ describe("AiPanel renders", () => {
     expect(screen.getByText("shot.png")).toBeTruthy();
   });
 
+  it("leaves a short clipboard text paste to the native textarea path", () => {
+    seedReadyPanel();
+    render(<AiPanel sessionId="s1" />);
+    const box = screen.getByPlaceholderText(/Ask about your terminal/i);
+
+    const event = pasteClipboard(box, "one\ntwo\nthree\nfour\nfive\n");
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(useAppStore.getState().aiStreams.s1.pendingAttachments).toEqual([]);
+  });
+
+  it("turns rapid large text pastes into distinct ordered attachments and announces success", async () => {
+    seedReadyPanel();
+    render(<AiPanel sessionId="s1" />);
+    const box = screen.getByPlaceholderText(/Ask about your terminal/i);
+    const first = qualifyingPaste("first");
+    const second = qualifyingPaste("second");
+
+    expect(pasteClipboard(box, first).defaultPrevented).toBe(true);
+    expect(pasteClipboard(box, second).defaultPrevented).toBe(true);
+
+    await waitFor(() => {
+      expect(
+        useAppStore.getState().aiStreams.s1.pendingAttachments.map((attachment) => [
+          attachment.name,
+          attachment.text,
+        ]),
+      ).toEqual([
+        ["pasted-text-1.txt", first],
+        ["pasted-text-2.txt", second],
+      ]);
+    });
+    expect(box).toHaveValue("");
+    expect(screen.getByRole("status")).toHaveTextContent(
+      /pasted-text-2\.txt attached from pasted text, 6 lines/i,
+    );
+    expect(
+      screen.getByRole("button", { name: "Show pasted-text-1.txt as text" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Remove pasted-text-1.txt" }),
+    ).toBeTruthy();
+  });
+
+  it("does not announce an old session paste after the panel switches sessions", async () => {
+    useAppStore.setState({
+      sessions: [session("s1"), session("s2")],
+      catalog: [cloudEntry()],
+      activeModelId: "anthropic/claude-sonnet-5",
+      hasApiKey: { anthropic: true },
+      aiStreams: { s1: emptyAiStream(), s2: emptyAiStream() },
+    });
+    const body = qualifyingPaste("old session");
+    const ingestion = deferred<ArrayBuffer>();
+    vi.spyOn(Blob.prototype, "arrayBuffer").mockReturnValueOnce(ingestion.promise);
+    const view = render(<AiPanel sessionId="s1" />);
+    const box = screen.getByPlaceholderText(/Ask about your terminal/i);
+
+    expect(pasteClipboard(box, body).defaultPrevented).toBe(true);
+    view.rerender(<AiPanel sessionId="s2" />);
+    const secondBox = screen.getByPlaceholderText(/Ask about your terminal/i);
+    fireEvent.change(secondBox, { target: { value: "question for session two" } });
+    // Session one's in-flight Blob must not disable an unrelated composer.
+    expect(screen.getByRole("button", { name: "Send" })).toHaveProperty("disabled", false);
+
+    await act(async () => {
+      ingestion.resolve(utf8Buffer(body));
+      await ingestion.promise;
+    });
+
+    await waitFor(() => {
+      expect(useAppStore.getState().aiStreams.s1.pendingAttachments).toHaveLength(1);
+    });
+    expect(useAppStore.getState().aiStreams.s2.pendingAttachments).toEqual([]);
+    expect(screen.getByRole("status").textContent).toBe("");
+  });
+
+  it.each(["ask", "agent"] as const)(
+    "waits for a large pasted attachment before submitting an existing %s prompt",
+    async (mode) => {
+      seedReadyPanel({ mode });
+      const sendSpy =
+        mode === "ask"
+          ? vi.spyOn(api, "aiAsk").mockResolvedValue(undefined)
+          : vi.spyOn(api, "agentStart").mockResolvedValue([]);
+      const body = qualifyingPaste(`${mode} deferred`);
+      const ingestion = deferred<ArrayBuffer>();
+      vi.spyOn(Blob.prototype, "arrayBuffer").mockReturnValueOnce(ingestion.promise);
+      render(<AiPanel sessionId="s1" />);
+      const box = screen.getByPlaceholderText(
+        mode === "ask" ? /Ask about your terminal/i : /Describe a goal/i,
+      );
+      fireEvent.change(box, { target: { value: "analyze this" } });
+
+      expect(pasteClipboard(box, body).defaultPrevented).toBe(true);
+      expect(screen.getByRole("button", { name: "Send" })).toHaveProperty("disabled", true);
+      fireEvent.keyDown(box, { key: "Enter" });
+      expect(sendSpy).not.toHaveBeenCalled();
+
+      await act(async () => {
+        ingestion.resolve(utf8Buffer(body));
+        await ingestion.promise;
+      });
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Send" })).toHaveProperty("disabled", false);
+      });
+
+      fireEvent.keyDown(box, { key: "Enter" });
+      const expected =
+        `analyze this\n\nAttached file — pasted-text-1.txt:\n\`\`\`\n${body}\n\`\`\``;
+      await waitFor(() => expect(sendSpy).toHaveBeenCalledOnce());
+      expect(sendSpy.mock.calls[0][1]).toBe(expected);
+      expect(useAppStore.getState().aiStreams.s1.messages[0]).toMatchObject({
+        role: "user",
+        content: expected,
+      });
+      expect(useAppStore.getState().aiStreams.s1.pendingAttachments).toEqual([]);
+    },
+  );
+
+  it("prefers a clipboard file over its large plain-text fallback", async () => {
+    seedReadyPanel();
+    render(<AiPanel sessionId="s1" />);
+    const box = screen.getByPlaceholderText(/Ask about your terminal/i);
+    const file = new File(["the file body"], "notes.txt", { type: "text/plain" });
+    const event = pasteClipboard(
+      box,
+      qualifyingPaste("fallback"),
+      [
+        { kind: "string", getAsFile: () => null },
+        { kind: "file", getAsFile: () => file },
+      ],
+    );
+
+    expect(event.defaultPrevented).toBe(true);
+    await waitFor(() => {
+      expect(
+        useAppStore.getState().aiStreams.s1.pendingAttachments.map((attachment) =>
+          attachment.name,
+        ),
+      ).toEqual(["notes.txt"]);
+    });
+    expect(useAppStore.getState().aiStreams.s1.pendingAttachments[0].origin).toBeUndefined();
+  });
+
+  it("keeps a large text paste native while composing an active steer", () => {
+    seedReadyPanel({ mode: "agent", status: "streaming", requestId: "req-1" });
+    render(<AiPanel sessionId="s1" />);
+    const box = screen.getByPlaceholderText(/Redirect the agent/i);
+
+    const event = pasteClipboard(box, qualifyingPaste("steer"));
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(useAppStore.getState().aiStreams.s1.pendingAttachments).toEqual([]);
+  });
+
+  it("allows a non-empty text attachment to send alone but still requires text for an image", () => {
+    seedReadyPanel({
+      pendingAttachments: [
+        {
+          id: "text-1",
+          kind: "text",
+          name: "notes.txt",
+          mediaType: "text/plain",
+          bytes: 5,
+          text: "hello",
+        },
+      ],
+    });
+    const first = render(<AiPanel sessionId="s1" />);
+    expect(screen.getByRole("button", { name: "Send" })).toHaveProperty("disabled", false);
+    first.unmount();
+
+    seedReadyPanel({
+      pendingAttachments: [
+        {
+          id: "image-1",
+          kind: "image",
+          name: "screen.png",
+          mediaType: "image/png",
+          bytes: 4,
+          data: "QQ==",
+        },
+      ],
+    });
+    render(<AiPanel sessionId="s1" />);
+    expect(screen.getByRole("button", { name: "Send" })).toHaveProperty("disabled", true);
+  });
+
+  it("shows pasted attachment text at the last selection, removes the chip, and restores the caret", async () => {
+    const body = "one\ntwo\nthree\nfour\nfive\nsix";
+    seedReadyPanel({
+      pendingAttachments: [
+        {
+          id: "paste-1",
+          kind: "text",
+          name: "pasted-text-1.txt",
+          mediaType: "text/plain",
+          bytes: new TextEncoder().encode(body).length,
+          text: body,
+          origin: "pasted-text",
+          lineCount: 6,
+        },
+      ],
+    });
+    render(<AiPanel sessionId="s1" />);
+    const box = screen.getByPlaceholderText(/Ask about your terminal/i) as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "before TARGET after" } });
+    box.focus();
+    box.setSelectionRange(7, 13);
+    fireEvent.select(box);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Show pasted-text-1.txt as text" }),
+    );
+
+    await waitFor(() => expect(box).toHaveValue(`before ${body} after`));
+    expect(useAppStore.getState().aiStreams.s1.pendingAttachments).toEqual([]);
+    expect(document.activeElement).toBe(box);
+    expect(box.selectionStart).toBe(7 + body.length);
+    expect(box.selectionEnd).toBe(7 + body.length);
+    expect(screen.getByRole("status")).toHaveTextContent(
+      /pasted-text-1\.txt inserted into the message as text/i,
+    );
+  });
 
   /** The transcript/attached-file text is machinery the MODEL needed. It must not
    *  dominate the user's own message — collapsed by default, expandable on click. */

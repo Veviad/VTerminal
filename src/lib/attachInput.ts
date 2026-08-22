@@ -19,6 +19,84 @@ import type { Attachment, DocSearchPreview, ImagePart, KnowledgeSearchHit } from
 export interface PendingInput {
   blob: Blob;
   name: string;
+  /** Distinguishes text promoted out of the composer from a user-picked file. */
+  origin?: "pasted-text";
+  /** Logical lines in the original clipboard text, before attachment truncation. */
+  lineCount?: number;
+}
+
+/** Five ordinary lines stay easy to edit in the composer. Past that, require a
+ *  meaningful amount of text before replacing the paste with an attachment. */
+export const PASTED_TEXT_INLINE_LINES = 5;
+export const PASTED_TEXT_MULTILINE_CODE_POINTS = 1_000;
+/** A huge minified log/JSON payload should not flood the composer just because it
+ *  happens to contain no newlines. */
+export const PASTED_TEXT_ALWAYS_ATTACH_CODE_POINTS = 10_000;
+
+export interface ClipboardTextClassification {
+  logicalLines: number;
+  /** Unicode code points, not UTF-16 code units (`"\ud83d\ude00".length === 2`). */
+  codePoints: number;
+  shouldAttach: boolean;
+}
+
+function countLogicalLines(text: string): number {
+  // Ignore terminal line endings without trimming any other whitespace. A copied
+  // line ending is a separator, not an additional empty logical line.
+  let end = text.length;
+  while (end > 0 && (text[end - 1] === "\n" || text[end - 1] === "\r")) end--;
+  if (end === 0) return 0;
+
+  let lines = 1;
+  for (let i = 0; i < end; i++) {
+    if (text[i] === "\r") {
+      lines++;
+      // CRLF is one logical line ending; bare CR is one as well.
+      if (i + 1 < end && text[i + 1] === "\n") i++;
+    } else if (text[i] === "\n") {
+      lines++;
+    }
+  }
+  return lines;
+}
+
+/** Classify clipboard text without changing the bytes that will eventually be sent.
+ *
+ *  CRLF and bare CR are line endings just like LF. Terminal line endings do not
+ *  create phantom blank lines: copying five newline-terminated lines is still a
+ *  five-line paste. This normalization is counting-only; `inputFromClipboardText`
+ *  puts the caller's exact string in the Blob.
+ */
+export function classifyClipboardText(text: string): ClipboardTextClassification {
+  const logicalLines = countLogicalLines(text);
+  // A for-of walks code points without allocating an Array proportional to a
+  // potentially multi-megabyte paste.
+  let codePoints = 0;
+  for (const _point of text) codePoints++;
+  return {
+    logicalLines,
+    codePoints,
+    shouldAttach:
+      (logicalLines > PASTED_TEXT_INLINE_LINES &&
+        codePoints >= PASTED_TEXT_MULTILINE_CODE_POINTS) ||
+      codePoints >= PASTED_TEXT_ALWAYS_ATTACH_CODE_POINTS,
+  };
+}
+
+/** Promote a large plain-text paste into the same ingestion pipeline as a file.
+ *  Returns null when the browser should perform its ordinary textarea paste. */
+export function inputFromClipboardText(text: string, sequence = 1): PendingInput | null {
+  const classification = classifyClipboardText(text);
+  if (!classification.shouldAttach) return null;
+  const safeSequence = Number.isFinite(sequence) ? Math.max(1, Math.floor(sequence)) : 1;
+  return {
+    // Preserve CRLF, terminal newlines and every other character exactly. The Blob
+    // type is display metadata; ingestBlob validates the actual UTF-8 bytes.
+    blob: new Blob([text], { type: "text/plain;charset=utf-8" }),
+    name: `pasted-text-${safeSequence}.txt`,
+    origin: "pasted-text",
+    lineCount: classification.logicalLines,
+  };
 }
 
 /** HTML5 drop or a `<input type="file">` change. */
@@ -47,6 +125,22 @@ export function inputsFromClipboard(data: DataTransferItemList | null): PendingI
     out.push({ blob: file, name: file.name || `pasted-${out.length + 1}.${ext}` });
   }
   return out;
+}
+
+/** One clipboard decision with file precedence.
+ *
+ *  Browsers commonly expose a copied image as both a file item and fallback
+ *  text/HTML. Prefer the real file so one paste never creates two attachments.
+ */
+export function inputsFromClipboardPaste(
+  data: DataTransferItemList | null,
+  plainText: string,
+  textSequence = 1,
+): PendingInput[] {
+  const files = inputsFromClipboard(data);
+  if (files.length > 0) return files;
+  const text = inputFromClipboardText(plainText, textSequence);
+  return text ? [text] : [];
 }
 
 export function describeIngestFailure(f: IngestFailure): string {
@@ -85,7 +179,11 @@ export async function stageInputs(sessionId: string, inputs: PendingInput[]): Pr
   for (const input of inputs) {
     const result = await ingestBlob(input.blob, input.name);
     if (result.ok) {
-      ok.push(result.attachment);
+      ok.push({
+        ...result.attachment,
+        ...(input.origin ? { origin: input.origin } : {}),
+        ...(input.lineCount !== undefined ? { lineCount: input.lineCount } : {}),
+      });
       continue;
     }
     // A scanned PDF is not a dead end when an on-device reader is loaded: render its

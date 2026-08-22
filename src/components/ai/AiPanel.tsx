@@ -55,6 +55,7 @@ import {
   sameKnowledgeBucket,
 } from "../../lib/knowledge";
 import {
+  inputFromClipboardText,
   inputsFromClipboard,
   inputsFromFileList,
   splitFoldedBlocks,
@@ -110,6 +111,18 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const asideRef = useRef<HTMLElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const currentSessionRef = useRef(sessionId);
+  currentSessionRef.current = sessionId;
+  const lastSelectionRef = useRef({ start: 0, end: 0 });
+  const restoreCaretRef = useRef<number | null>(null);
+  const pastedTextSequenceRef = useRef(new Map<string, number>());
+  const pastedTextStageQueueRef = useRef(new Map<string, Promise<void>>());
+  // The ref is the synchronous submit fence; the mirrored state makes the
+  // current session's Send button visibly disabled while Blob ingestion runs.
+  // Counts are per session so switching tabs never carries the fence across.
+  const pastedTextStageCountRef = useRef(new Map<string, number>());
+  const [pastedTextStageCounts, setPastedTextStageCounts] = useState<Record<string, number>>({});
+  const [pasteAnnouncement, setPasteAnnouncement] = useState("");
   const [panelHeight, setPanelHeight] = useState(0);
   const [panelWidth, setPanelWidth] = useState(0);
   // Depth, not a boolean: dragenter/dragleave fire for every child element the
@@ -175,6 +188,18 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [messages.length, streamingContent, thinkingContent, pendingProposal]);
 
+  // "Show as text" updates the controlled value first, then restores focus and
+  // the caret after React has committed that value to the textarea. Doing this
+  // directly in the click handler races the render and WebKit resets the caret.
+  useEffect(() => {
+    const caret = restoreCaretRef.current;
+    if (caret === null) return;
+    restoreCaretRef.current = null;
+    inputRef.current?.focus();
+    inputRef.current?.setSelectionRange(caret, caret);
+    lastSelectionRef.current = { start: caret, end: caret };
+  }, [input, pendingAttachments.length]);
+
   // Feeds `composerMax` and the composer's re-fit. Both axes: height for the
   // former, width for the latter, and only width changes on a window resize now
   // that the ratio is resolved by CSS. Re-runs on `collapsed` because the rail
@@ -194,28 +219,78 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
 
   // One panel serves every tab, so an armed confirmation would otherwise follow
   // the user to the next one and discard a conversation they never clicked on.
-  useEffect(() => setConfirmClear(false), [sessionId]);
+  useEffect(() => {
+    setConfirmClear(false);
+    setPasteAnnouncement("");
+    lastSelectionRef.current = { start: 0, end: 0 };
+  }, [sessionId]);
 
   const agentMode = mode === "agent";
   // Agent mode is steerable mid-run; ask mode is one provider call with no round
   // boundary to inject into, so it stays locked while it streams.
   const steering = busy && agentMode;
   const queuedSteers = stream?.steerQueue.length ?? 0;
+  const hasInlineInput = input.trim().length > 0;
+  // Text attachments become a non-empty fenced prompt in `buildOutgoing`, so
+  // they can stand alone. An image does not: keep the established requirement
+  // for a typed prompt rather than risk an empty text part on a provider.
+  const hasStandaloneTextAttachment = pendingAttachments.some(
+    (attachment) => attachment.kind === "text" && !!attachment.text?.trim(),
+  );
+  const hasIdlePayload = hasInlineInput || hasStandaloneTextAttachment;
+  const pastedTextStaging = sessionId
+    ? (pastedTextStageCounts[sessionId] ?? 0) > 0
+    : false;
+
+  const adjustPastedTextStageCount = (targetSessionId: string, delta: 1 | -1) => {
+    const next = Math.max(
+      0,
+      (pastedTextStageCountRef.current.get(targetSessionId) ?? 0) + delta,
+    );
+    if (next === 0) pastedTextStageCountRef.current.delete(targetSessionId);
+    else pastedTextStageCountRef.current.set(targetSessionId, next);
+    setPastedTextStageCounts((current) => {
+      if (next > 0) return { ...current, [targetSessionId]: next };
+      const { [targetSessionId]: _finished, ...rest } = current;
+      return rest;
+    });
+  };
 
   const submit = () => {
-    if (!sessionId || !input.trim() || !aiReady) return;
+    if (!sessionId || !aiReady) return;
+    // A large paste has already been accepted (the native paste was prevented),
+    // but its Blob may not have reached pendingAttachments yet. Sending during
+    // that gap would strand the paste on the following turn.
+    if ((pastedTextStageCountRef.current.get(sessionId) ?? 0) > 0) return;
     // Blocked, never silently stripped: an answer about an image the model never
     // received is indistinguishable from an answer about one it did.
     if (imagesBlocked) return;
     if (busy) {
-      if (!steering) return;
+      // Pending attachments belong to the NEXT ordinary turn. The steering API
+      // accepts text only, so a chip must never make this Send button look ready.
+      if (!steering || !hasInlineInput) return;
       void steer(sessionId, input.trim());
     } else if (agentMode) {
+      if (!hasIdlePayload) return;
       void startAgent(sessionId, input.trim());
     } else {
+      if (!hasIdlePayload) return;
       void ask(sessionId, input.trim());
     }
     setInput("");
+    lastSelectionRef.current = { start: 0, end: 0 };
+  };
+
+  const showAttachmentAsText = (attachment: Attachment) => {
+    if (!sessionId || typeof attachment.text !== "string") return;
+    const start = Math.min(lastSelectionRef.current.start, input.length);
+    const end = Math.min(Math.max(start, lastSelectionRef.current.end), input.length);
+    const next = input.slice(0, start) + attachment.text + input.slice(end);
+    const caret = start + attachment.text.length;
+    restoreCaretRef.current = caret;
+    detachFileFromAi(sessionId, attachment.id);
+    setInput(next);
+    setPasteAnnouncement(S.attachments.pastedTextInserted(attachment.name));
   };
 
   // Collapsed keeps the panel MOUNTED behind a rail rather than unmounting it:
@@ -496,6 +571,13 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
         </div>
       )}
 
+      {/* A visual chip is not enough feedback for someone using a screen reader.
+          Announce conversion/rematerialization without moving focus away from the
+          textarea; aria-atomic keeps the filename and line count together. */}
+      <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {pasteAnnouncement}
+      </span>
+
       {/* Attached blocks and staged files share one strip: both are "context for
           the next turn", and two stacked rows would eat the message list. */}
       {(attachedBlocks.length > 0 ||
@@ -528,6 +610,11 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
               key={a.id}
               attachment={a}
               onRemove={() => detachFileFromAi(sessionId, a.id)}
+              onShowAsText={
+                a.origin === "pasted-text" && a.kind === "text" && typeof a.text === "string"
+                  ? () => showAttachmentAsText(a)
+                  : undefined
+              }
             />
           ))}
           {/* Progress outranks the error line visually by being calm: this is work
@@ -573,12 +660,88 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
           <textarea
             ref={inputRef}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              setInput(e.target.value);
+              lastSelectionRef.current = {
+                start: e.currentTarget.selectionStart,
+                end: e.currentTarget.selectionEnd,
+              };
+            }}
+            onSelect={(e) => {
+              lastSelectionRef.current = {
+                start: e.currentTarget.selectionStart,
+                end: e.currentTarget.selectionEnd,
+              };
+            }}
             onPaste={(e) => {
               const inputs = inputsFromClipboard(e.clipboardData?.items ?? null);
-              if (inputs.length === 0) return; // ordinary text paste
+              // Some clipboard producers expose both a file and a text fallback.
+              // The file is the richer representation and keeps the established
+              // screenshot-paste path authoritative.
+              if (inputs.length > 0) {
+                e.preventDefault();
+                if (sessionId) void stageInputs(sessionId, inputs);
+                return;
+              }
+
+              // A running agent accepts steering TEXT only. Converting here would
+              // stage a chip for a later run while silently omitting it from the
+              // steer the user is composing, so native paste wins in that state.
+              if (!sessionId || steering) return;
+              const text = e.clipboardData?.getData("text/plain") ?? "";
+
+              const stagedMax = pendingAttachments.reduce((max, attachment) => {
+                if (attachment.origin !== "pasted-text") return max;
+                const found = /^pasted-text-(\d+)\.txt$/.exec(attachment.name);
+                return found ? Math.max(max, Number(found[1])) : max;
+              }, 0);
+              const previous = pastedTextSequenceRef.current.get(sessionId) ?? 0;
+              const sequence = Math.max(previous, stagedMax) + 1;
+              const pasted = inputFromClipboardText(text, sequence);
+              if (!pasted) return;
+              pastedTextSequenceRef.current.set(sessionId, sequence);
+
               e.preventDefault();
-              if (sessionId) void stageInputs(sessionId, inputs);
+              adjustPastedTextStageCount(sessionId, 1);
+              lastSelectionRef.current = {
+                start: e.currentTarget.selectionStart,
+                end: e.currentTarget.selectionEnd,
+              };
+              // Blob normalization is async. Serialize pasted-text batches per
+              // session so two rapid pastes cannot append as #2 then #1 merely
+              // because the second Blob resolved first.
+              const prior = pastedTextStageQueueRef.current.get(sessionId) ?? Promise.resolve();
+              const queued = prior.catch(() => {}).then(async () => {
+                try {
+                  await stageInputs(sessionId, [pasted]);
+                } catch {
+                  return;
+                }
+                const attached = useAppStore
+                  .getState()
+                  .aiStreams[sessionId]?.pendingAttachments.some(
+                    (attachment) =>
+                      attachment.origin === "pasted-text" && attachment.name === pasted.name,
+                  );
+                if (attached && currentSessionRef.current === sessionId) {
+                  setPasteAnnouncement(
+                    S.attachments.pastedTextAttached(
+                      pasted.name,
+                      pasted.lineCount ?? 0,
+                    ),
+                  );
+                }
+              });
+              pastedTextStageQueueRef.current.set(sessionId, queued);
+              const finishQueuedPaste = () => {
+                if (pastedTextStageQueueRef.current.get(sessionId) === queued) {
+                  pastedTextStageQueueRef.current.delete(sessionId);
+                }
+                adjustPastedTextStageCount(sessionId, -1);
+              };
+              // Both arms consume a rejection, so a failed normalization cannot
+              // leave either an unhandled promise or a permanently disabled Send.
+              void queued.then(finishQueuedPaste, finishQueuedPaste);
             }}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
@@ -615,7 +778,13 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
           {(!busy || steering) && (
             <button
               onClick={submit}
-              disabled={!input.trim() || !aiReady || imagesBlocked}
+              disabled={
+                pastedTextStaging ||
+                !aiReady ||
+                imagesBlocked ||
+                (steering ? !hasInlineInput : !hasIdlePayload)
+              }
+              aria-label={steering ? S.aiPanel.steerHint : S.aiPanel.send}
               title={
                 imagesBlocked
                   ? S.attachments.noVision(activeEntry?.label ?? "This model")

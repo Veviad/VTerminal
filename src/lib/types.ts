@@ -310,6 +310,10 @@ export interface Attachment {
   kind: "image" | "text";
   name: string;
   mediaType: string;
+  /** Present only when composer text was promoted to an attachment on paste. */
+  origin?: "pasted-text";
+  /** Logical lines in that original paste; terminal newlines do not add lines. */
+  lineCount?: number;
   /** Size AFTER normalization (downscale + re-encode), not the file on disk. */
   bytes: number;
   /** Images: base64, no `data:` prefix. Absent on a transcript restored from the

@@ -2,17 +2,21 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DOC_INJECT_MAX_CHARS,
   buildOutgoing,
+  classifyClipboardText,
   foldRetrievedPassages,
+  inputFromClipboardText,
   inputsFromClipboard,
+  inputsFromClipboardPaste,
   inputsFromFileList,
   ocrAvailable,
   splitFoldedBlocks,
+  stageInputs,
   stripDocBlocks,
   transcribeImages,
 } from "../lib/attachInput";
-import { useAppStore } from "../stores/appStore";
+import { emptyAiStream, useAppStore } from "../stores/appStore";
 import * as api from "../lib/tauri";
-import type { Attachment, DocSearchPreview, KnowledgeSearchHit } from "../lib/types";
+import type { Attachment, DocSearchPreview, KnowledgeSearchHit, Session } from "../lib/types";
 
 vi.mock("../lib/tauri", () => ({ visionDescribe: vi.fn() }));
 
@@ -22,6 +26,13 @@ function image(id: string, data = "QQ=="): Attachment {
 
 function text(id: string, body: string): Attachment {
   return { id, kind: "text", name: `${id}.log`, mediaType: "text/plain", bytes: body.length, text: body };
+}
+
+/** ASCII fixture with an exact Unicode-code-point count and logical line count. */
+function textOfSize(logicalLines: number, codePoints: number): string {
+  const prefix = "x\n".repeat(Math.max(0, logicalLines - 1));
+  if (codePoints < prefix.length + 1) throw new Error("fixture is too small for its lines");
+  return prefix + "x".repeat(codePoints - prefix.length);
 }
 
 describe("buildOutgoing", () => {
@@ -111,6 +122,136 @@ describe("input extraction", () => {
     const list = { ...items, length: 1 } as unknown as DataTransferItemList;
     expect(inputsFromClipboard(list)).toEqual([]);
     expect(inputsFromClipboard(null)).toEqual([]);
+  });
+
+  it("gives clipboard files precedence over a large plain-text fallback", () => {
+    const file = new File(["image"], "shot.png", { type: "image/png" });
+    const items = [
+      { kind: "string", getAsFile: () => null },
+      { kind: "file", getAsFile: () => file },
+    ];
+    const list = { ...items, length: items.length } as unknown as DataTransferItemList;
+
+    const out = inputsFromClipboardPaste(list, "x".repeat(10_000), 4);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ name: "shot.png" });
+    expect(out[0].origin).toBeUndefined();
+  });
+});
+
+describe("large pasted text", () => {
+  it("keeps short multiline text inline on both sides of the 1,000-point threshold", () => {
+    expect(classifyClipboardText(textOfSize(6, 999))).toMatchObject({
+      logicalLines: 6,
+      codePoints: 999,
+      shouldAttach: false,
+    });
+    expect(classifyClipboardText(textOfSize(6, 1_000))).toMatchObject({
+      logicalLines: 6,
+      codePoints: 1_000,
+      shouldAttach: true,
+    });
+  });
+
+  it("keeps five logical lines below the absolute threshold and attaches above it", () => {
+    const text = textOfSize(5, 9_997) + "\r\n\r\n";
+    const result = classifyClipboardText(text);
+    expect(result.logicalLines).toBe(5);
+    expect(result.codePoints).toBe(10_001);
+    // The absolute code-point arm is intentionally independent of line count.
+    expect(result.shouldAttach).toBe(true);
+
+    const belowAbsolute = textOfSize(5, 9_995) + "\r\n";
+    expect(classifyClipboardText(belowAbsolute)).toMatchObject({
+      logicalLines: 5,
+      codePoints: 9_997,
+      shouldAttach: false,
+    });
+  });
+
+  it("attaches a huge single line at exactly 10,000 code points", () => {
+    expect(classifyClipboardText("x".repeat(9_999)).shouldAttach).toBe(false);
+    expect(classifyClipboardText("x".repeat(10_000))).toEqual({
+      logicalLines: 1,
+      codePoints: 10_000,
+      shouldAttach: true,
+    });
+  });
+
+  it("counts Unicode code points rather than UTF-16 code units", () => {
+    const emoji = "\ud83d\ude00".repeat(5_000);
+    expect(emoji.length).toBe(10_000);
+    expect(classifyClipboardText(emoji)).toEqual({
+      logicalLines: 1,
+      codePoints: 5_000,
+      shouldAttach: false,
+    });
+    expect(classifyClipboardText("\ud83d\ude00".repeat(10_000)).shouldAttach).toBe(true);
+  });
+
+  it("normalizes CRLF and bare CR only for logical-line counting", () => {
+    const raw = "one\r\ntwo\rthree\nfour\r\nfive\r\n";
+    expect(classifyClipboardText(raw)).toMatchObject({ logicalLines: 5, shouldAttach: false });
+  });
+
+  it("creates a named text input while preserving the exact raw clipboard body", async () => {
+    const raw = textOfSize(6, 1_000).replaceAll("\n", "\r\n") + "\r\n";
+    const input = inputFromClipboardText(raw, 3);
+    expect(input).toMatchObject({
+      name: "pasted-text-3.txt",
+      origin: "pasted-text",
+      lineCount: 6,
+    });
+    expect(input?.blob.type).toBe("text/plain;charset=utf-8");
+    expect(await input?.blob.text()).toBe(raw);
+  });
+
+  it("returns null when native textarea paste should remain in charge", () => {
+    expect(inputFromClipboardText("one\ntwo\nthree\nfour\nfive", 1)).toBeNull();
+  });
+
+  it("uses the text path only when the clipboard has no file", () => {
+    const strings = [{ kind: "string", getAsFile: () => null }];
+    const list = { ...strings, length: strings.length } as unknown as DataTransferItemList;
+    expect(inputsFromClipboardPaste(list, textOfSize(6, 1_000), 7)[0]).toMatchObject({
+      name: "pasted-text-7.txt",
+      origin: "pasted-text",
+      lineCount: 6,
+    });
+    expect(inputsFromClipboardPaste(list, "small paste", 8)).toEqual([]);
+  });
+
+  it("propagates pasted-text metadata through normalization into the staged attachment", async () => {
+    const session: Session = {
+      id: "paste-session",
+      shell: "/bin/zsh",
+      cwd: null,
+      createdAt: "2026-08-22T00:00:00.000Z",
+      exited: false,
+      exitCode: null,
+      hostId: null,
+      hostLabel: null,
+      userTitle: null,
+      aiTitle: null,
+      ordinal: 1,
+    };
+    useAppStore.setState({
+      sessions: [session],
+      aiStreams: { [session.id]: emptyAiStream() },
+    });
+    const raw = textOfSize(6, 1_000);
+    const input = inputFromClipboardText(raw, 2);
+    expect(input).not.toBeNull();
+
+    await stageInputs(session.id, [input!]);
+
+    expect(useAppStore.getState().aiStreams[session.id].pendingAttachments[0]).toMatchObject({
+      kind: "text",
+      name: "pasted-text-2.txt",
+      origin: "pasted-text",
+      lineCount: 6,
+      text: raw,
+    });
   });
 });
 
