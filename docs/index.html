@@ -529,6 +529,168 @@
         </ul>
       </aside>
 
+      <section
+        class="section section-soft release-highlights-section"
+        id="release-highlights"
+        aria-labelledby="release-highlights-title"
+      >
+        <div class="shell">
+          <header class="release-highlights-header">
+            <div>
+              <p class="eyebrow">New in 0.3.2</p>
+              <h2
+                class="section-heading section-heading-wide"
+                id="release-highlights-title"
+              >
+                Agent Runs Resume. Sidecar Terminals Stay Put.
+              </h2>
+            </div>
+            <p class="section-lead">
+              This release preserves safe Agent progress across pauses and
+              provider failures, while making the Local + SSH Sidecar steadier
+              and read-only automation more precise.
+            </p>
+          </header>
+
+          <div class="release-highlights-grid">
+            <article class="release-highlight-card">
+              <div class="release-highlight-meta">
+                <span class="release-highlight-icon" aria-hidden="true">
+                  <svg class="ui-icon"><use href="#i-robot" /></svg>
+                </span>
+                <span class="release-highlight-tag">PR #45</span>
+              </div>
+              <h3>Agent Runs Keep Their Place</h3>
+              <p>
+                Bounded, storage-safe checkpoints now preserve the latest
+                resumable transcript after stable model and tool rounds,
+                including when a provider fails after commands have run.
+              </p>
+              <ul class="release-highlight-list">
+                <li>Completed command outcomes stay paired with their tool calls</li>
+                <li>Pause, cancel, completion, and failure have typed outcomes</li>
+                <li>Durable diagnostics retain metadata, not prompts or terminal data</li>
+              </ul>
+              <a
+                class="release-highlight-link"
+                href="https://github.com/Veviad/VTerminal/pull/45"
+              >
+                Explore resumable Agent runs
+                <svg class="ui-icon" aria-hidden="true">
+                  <use href="#i-arrow-right" />
+                </svg>
+              </a>
+            </article>
+
+            <article class="release-highlight-card">
+              <div class="release-highlight-meta">
+                <span class="release-highlight-icon" aria-hidden="true">
+                  <svg class="ui-icon"><use href="#i-terminal" /></svg>
+                </span>
+                <span class="release-highlight-tag">PR #44</span>
+              </div>
+              <h3>Stable Sidecar, Stricter Reads</h3>
+              <p>
+                Both visible Sidecar terminals retain stable renderers, while
+                proven read-only network commands can flow through Reads mode
+                without weakening the independent web-access gate.
+              </p>
+              <ul class="release-highlight-list">
+                <li>Local and SSH panes stay visually stable through focus changes</li>
+                <li>Rename with AI replaces manual or SSH-derived labels explicitly</li>
+                <li>GitHub writes, GraphQL, bodies, and unknown shapes still stop</li>
+              </ul>
+              <a
+                class="release-highlight-link"
+                href="https://github.com/Veviad/VTerminal/pull/44"
+              >
+                Explore Sidecar and Reads improvements
+                <svg class="ui-icon" aria-hidden="true">
+                  <use href="#i-arrow-right" />
+                </svg>
+              </a>
+            </article>
+          </div>
+
+          <header class="release-highlights-header release-highlights-history">
+            <div>
+              <p class="eyebrow">New in 0.3.1</p>
+              <h2
+                class="section-heading section-heading-wide"
+                id="release-highlights-031-title"
+              >
+                Two Terminals for the Agent. Less Text in Your Composer.
+              </h2>
+            </div>
+            <p class="section-lead">
+              This release adds a safety-first Local + SSH Sidecar workspace and
+              turns substantial clipboard text into clean, reversible context
+              attachments.
+            </p>
+          </header>
+
+          <div class="release-highlights-grid">
+            <article class="release-highlight-card">
+              <div class="release-highlight-meta">
+                <span class="release-highlight-icon" aria-hidden="true">
+                  <svg class="ui-icon"><use href="#i-branch" /></svg>
+                </span>
+                <span class="release-highlight-tag">PR #40</span>
+              </div>
+              <h3>One Agent, Local + SSH</h3>
+              <p>
+                Pair one local shell with one live SSH session in a responsive
+                split workspace. Every proposed command names its Local or
+                Remote target before it can run.
+              </p>
+              <ul class="release-highlight-list">
+                <li>Independent, Confirm-first permissions for each target</li>
+                <li>Focus, resize, swap, replace, reconnect, and recover</li>
+                <li>No automatic credential, environment, or file transfer</li>
+              </ul>
+              <a
+                class="release-highlight-link"
+                href="https://github.com/Veviad/VTerminal/pull/40"
+              >
+                Explore the Sidecar agent
+                <svg class="ui-icon" aria-hidden="true">
+                  <use href="#i-arrow-right" />
+                </svg>
+              </a>
+            </article>
+
+            <article class="release-highlight-card">
+              <div class="release-highlight-meta">
+                <span class="release-highlight-icon" aria-hidden="true">
+                  <svg class="ui-icon"><use href="#i-chat" /></svg>
+                </span>
+                <span class="release-highlight-tag">PR #41</span>
+              </div>
+              <h3>Large Pastes, Clean Composer</h3>
+              <p>
+                Substantial plain-text pastes become ordered virtual
+                <code>.txt</code> attachments instead of flooding the composer,
+                with no image conversion or OCR in the way.
+              </p>
+              <ul class="release-highlight-list">
+                <li>The exact clipboard text and paste order are preserved</li>
+                <li>Remove each paste or restore it with <strong>Show as text</strong></li>
+                <li>Small pastes and active-agent steering stay inline</li>
+              </ul>
+              <a
+                class="release-highlight-link"
+                href="https://github.com/Veviad/VTerminal/pull/41"
+              >
+                Explore text attachments
+                <svg class="ui-icon" aria-hidden="true">
+                  <use href="#i-arrow-right" />
+                </svg>
+              </a>
+            </article>
+          </div>
+        </div>
+      </section>
+
       <section class="section why-section" id="why" aria-labelledby="why-title">
         <div class="why-layout shell">
           <div class="why-intro">
