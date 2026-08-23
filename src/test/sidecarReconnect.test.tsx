@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   connectToHost: vi.fn(async () => "remote" as string | null),
   connectToSshTarget: vi.fn(async () => "remote" as string | null),
   createSession: vi.fn(async () => "new-session"),
+  sshHostsGet: vi.fn(),
 }));
 
 vi.mock("../lib/sshConnect", () => ({
@@ -23,7 +24,7 @@ vi.mock("../components/terminal/TerminalPane", () => ({
 
 vi.mock("../lib/tauri", () => ({
   aiCancel: vi.fn(async () => undefined),
-  sshHostsGet: vi.fn(),
+  sshHostsGet: mocks.sshHostsGet,
 }));
 
 import { SidecarWorkspace } from "../components/sidecar/SidecarWorkspace";
@@ -63,10 +64,39 @@ const binding: SidecarBinding = {
   degraded: { role: "remote", reason: "remote_disconnected" },
 };
 
+const savedHost = {
+  id: "saved-prod",
+  label: "Production",
+  hostname: "prod-01",
+  username: "deploy",
+  port: 2222,
+  identity_file: "~/.ssh/prod",
+  jump_host: null,
+  extra_args: null,
+  remote_dir: null,
+  post_connect: null,
+  tag: null,
+  color: null,
+  source: "manual" as const,
+  config_alias: null,
+  use_count: 0,
+  last_used_at: null,
+  created_at: "2026-08-23T00:00:00.000Z",
+  updated_at: "2026-08-23T00:00:00.000Z",
+};
+
+function savedBinding(): SidecarBinding {
+  return {
+    ...binding,
+    remoteIdentity: { ...binding.remoteIdentity, hostId: savedHost.id },
+  };
+}
+
 describe("Sidecar SSH reconnect", () => {
   beforeEach(() => {
     mocks.connectToHost.mockClear();
     mocks.connectToSshTarget.mockClear();
+    mocks.sshHostsGet.mockReset();
     useAppStore.setState({
       sessions,
       activeSessionId: "local",
@@ -77,6 +107,55 @@ describe("Sidecar SSH reconnect", () => {
       },
       aiStreams: {},
     });
+  });
+
+  it("waits for a saved host lookup and reconnects with its full configuration", async () => {
+    let resolveHost: (host: typeof savedHost) => void = () => {};
+    mocks.sshHostsGet.mockReturnValue(
+      new Promise<typeof savedHost>((resolve) => {
+        resolveHost = resolve;
+      }),
+    );
+    const saved = savedBinding();
+    useAppStore.setState({ sidecars: { local: saved } });
+    render(<SidecarWorkspace binding={saved} />);
+
+    const reconnect = screen.getByRole("button", { name: "Reconnect" });
+    expect(reconnect).toBeDisabled();
+    fireEvent.click(reconnect);
+    expect(mocks.connectToHost).not.toHaveBeenCalled();
+    expect(mocks.connectToSshTarget).not.toHaveBeenCalled();
+
+    resolveHost(savedHost);
+    await waitFor(() => {
+      expect(reconnect).toBeEnabled();
+    });
+    fireEvent.click(reconnect);
+
+    expect(mocks.connectToHost).toHaveBeenCalledWith(
+      savedHost,
+      "current-tab",
+      mocks.createSession,
+      "remote",
+    );
+    expect(mocks.connectToSshTarget).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the frozen target only after a missing saved-host lookup finishes", async () => {
+    mocks.sshHostsGet.mockRejectedValue(new Error("saved host deleted"));
+    const saved = savedBinding();
+    useAppStore.setState({ sidecars: { local: saved } });
+    render(<SidecarWorkspace binding={saved} />);
+
+    const reconnect = screen.getByRole("button", { name: "Reconnect" });
+    expect(reconnect).toBeDisabled();
+    await waitFor(() => {
+      expect(reconnect).toBeEnabled();
+    });
+    fireEvent.click(reconnect);
+
+    expect(mocks.connectToSshTarget).toHaveBeenCalledWith("deploy@prod-01", "remote");
+    expect(mocks.connectToHost).not.toHaveBeenCalled();
   });
 
   it("reconnects an ad-hoc target in the remote pane and recovers the binding", async () => {

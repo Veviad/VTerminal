@@ -15,7 +15,7 @@ import { S } from "../../lib/strings";
 import { canConnectHere, connectToHost, connectToSshTarget } from "../../lib/sshConnect";
 import { useAppStore } from "../../stores/appStore";
 import { useSessions } from "../../hooks/useSessions";
-import type { SshHost } from "../../lib/types";
+import { useSshHost } from "../../hooks/useSshHost";
 import { TerminalPane } from "../terminal/TerminalPane";
 
 const STACK_AT_PX = 640;
@@ -127,10 +127,9 @@ export function SidecarWorkspace({ binding }: { binding: SidecarBinding }) {
 function SidecarReconnectButton({ binding }: { binding: SidecarBinding }) {
   const degradation = binding.degraded;
   const remoteSessionId = binding.remoteSessionId;
-  const remoteUi = useAppStore((state) => state.sessionUi[remoteSessionId]);
+  const remoteUi = useAppStore((state) => ownRecordValue(state.sessionUi, remoteSessionId));
   const replaceTarget = useAppStore((state) => state.replaceSidecarTarget);
   const { createSession } = useSessions();
-  const [host, setHost] = useState<SshHost | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [expectedIdentity, setExpectedIdentity] = useState<SidecarRemoteIdentity | null>(null);
 
@@ -138,24 +137,8 @@ function SidecarReconnectButton({ binding }: { binding: SidecarBinding }) {
     degradation?.role === "remote" &&
     degradation.reason === "remote_disconnected" &&
     Boolean(binding.remoteIdentity.hostId || binding.remoteIdentity.target);
-
-  useEffect(() => {
-    const hostId = binding.remoteIdentity.hostId;
-    if (!canReconnect || !hostId) {
-      setHost(null);
-      return;
-    }
-    let cancelled = false;
-    void api
-      .sshHostsGet(hostId)
-      .then((found) => {
-        if (!cancelled) setHost(found);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [binding.remoteIdentity.hostId, canReconnect]);
+  const hostId = canReconnect ? binding.remoteIdentity.hostId : null;
+  const { host, loading: hostLoading } = useSshHost(hostId);
 
   // The reconnect click is the explicit review boundary required by Sidecar.
   // Once shell integration proves the same SSH identity is live again, replace
@@ -183,7 +166,7 @@ function SidecarReconnectButton({ binding }: { binding: SidecarBinding }) {
   if (!canReconnect) return null;
   const gate = canConnectHere(remoteSessionId);
   const target = binding.remoteIdentity.target;
-  const ready = Boolean(host || target);
+  const ready = !hostLoading && Boolean(host || target);
 
   return (
     <button

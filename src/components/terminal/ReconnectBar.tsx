@@ -1,12 +1,12 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Server } from "lucide-react";
-import * as api from "../../lib/tauri";
 import { useAppStore } from "../../stores/appStore";
 import { useSessions } from "../../hooks/useSessions";
+import { useSshHost } from "../../hooks/useSshHost";
 import { canConnectHere, connectToHost } from "../../lib/sshConnect";
+import { ownRecordValue } from "../../lib/records";
 import { describeSshTarget } from "../../lib/ssh";
 import { S } from "../../lib/strings";
-import type { SshHost } from "../../lib/types";
 
 /**
  * Shown when a tab belongs to a saved host but is NOT currently connected —
@@ -24,31 +24,14 @@ export function ReconnectBar({ sessionId }: { sessionId: string }) {
   // safety gate is (correctly) closed. The following prompt changes `phase`
   // without changing `remote`; subscribing only to `remote` left this render
   // stale and the button disabled forever.
-  const sessionUi = useAppStore((s) => s.sessionUi[sessionId]);
+  const sessionUi = useAppStore((s) => ownRecordValue(s.sessionUi, sessionId));
   const remote = sessionUi?.remote;
   const { createSession } = useSessions();
-  const [host, setHost] = useState<SshHost | null>(null);
   const [busy, setBusy] = useState(false);
 
   const hostId = session?.hostId ?? null;
   const show = Boolean(hostId) && !remote && !session?.exited;
-
-  useEffect(() => {
-    if (!show || !hostId) {
-      setHost(null);
-      return;
-    }
-    let cancelled = false;
-    void api
-      .sshHostsGet(hostId)
-      .then((found) => {
-        if (!cancelled) setHost(found);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [show, hostId]);
+  const { host } = useSshHost(show ? hostId : null);
 
   // The host row may have been deleted since; nothing to reconnect to then.
   if (!show || !host) return null;
@@ -65,9 +48,9 @@ export function ReconnectBar({ sessionId }: { sessionId: string }) {
       <button
         onClick={() => {
           setBusy(true);
-          void connectToHost(host, "current-tab", createSession, sessionId).finally(() =>
-            setBusy(false),
-          );
+          void connectToHost(host, "current-tab", createSession, sessionId).finally(() => {
+            setBusy(false);
+          });
         }}
         disabled={busy || !gate.ok}
         title={gate.ok ? undefined : gate.reason}
