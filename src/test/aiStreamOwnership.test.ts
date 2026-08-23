@@ -520,12 +520,12 @@ describe("AI Sidecar routing", () => {
         session_id: REMOTE_SID,
         cwd: null,
         git_branch: null,
-        remote: { kind: "ssh", target: "deploy@prod-01" },
+        remote: { kind: "ssh", target: "deploy@prod-01", host_id: "saved-prod" },
       }),
     });
   });
 
-  it("applies auto-run permission to the proposed target only", async () => {
+  it("never lets the frontend auto-click a backend approval proposal", async () => {
     installSidecar();
     useAppStore.getState().setSidecarPermission(SID, "local", "auto_all");
     // Remote deliberately remains `ask`.
@@ -549,25 +549,11 @@ describe("AI Sidecar routing", () => {
         target_session_id: SID,
       });
     });
-    expect(api.respondToApproval).toHaveBeenCalledWith("local-read", "run");
-
-    act(() => {
-      onEvent({
-        type: "CommandProposal",
-        approval_id: "remote-read",
-        command: "cat compose.yml",
-        explanation: "Inspect the deployed Compose file",
-        read_only: true,
-        network: false,
-        target_role: "remote",
-        target_session_id: REMOTE_SID,
-      });
-    });
-    expect(api.respondToApproval).toHaveBeenCalledTimes(1);
+    expect(api.respondToApproval).not.toHaveBeenCalled();
     expect(useAppStore.getState().aiStreams[SID].pendingProposal).toMatchObject({
-      approvalId: "remote-read",
-      targetRole: "remote",
-      targetSessionId: REMOTE_SID,
+      approvalId: "local-read",
+      targetRole: "local",
+      targetSessionId: SID,
     });
   });
 

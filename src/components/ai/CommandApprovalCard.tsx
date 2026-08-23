@@ -10,6 +10,7 @@ export function CommandApprovalCard({
   targetRole = remote ? "remote" : "local",
   queuedSteers = 0,
   askedBecause = null,
+  onRemember,
   onRespond,
 }: {
   command: string;
@@ -22,7 +23,8 @@ export function CommandApprovalCard({
   /** Why this card is up even though an auto mode is armed. Null when the mode
    *  asks about everything, where no explanation is owed. Without it the "Reads"
    *  mode looks broken every time it correctly stops for a write. */
-  askedBecause?: "writes" | null;
+  askedBecause?: string | null;
+  onRemember?: (effect: "allow" | "ask" | "deny") => void;
   /** Messages the user typed while this card was up. The loop is parked on this
    *  gate and only appends them once the round ends, so the wait is real and has
    *  to be visible — otherwise it reads as the app ignoring them. */
@@ -71,7 +73,9 @@ export function CommandApprovalCard({
         <span className="truncate font-mono">{targetLabel}</span>
       </div>
       {askedBecause && (
-        <p className="mb-2 text-[10px] text-text-muted">{S.aiPanel.askedBecause[askedBecause]}</p>
+        <p className="mb-2 text-[10px] text-text-muted">
+          {askedBecause === "writes" ? S.aiPanel.askedBecause.writes : `asking: ${askedBecause}`}
+        </p>
       )}
       {editing ? (
         <textarea
@@ -125,6 +129,18 @@ export function CommandApprovalCard({
         </button>
         {changed && !empty && <span className="text-[10px] text-warning">edited</span>}
       </div>
+      {onRemember && !responded && (
+        <details className="mt-2 text-[10px] text-text-muted">
+          <summary className="cursor-pointer select-none hover:text-text-secondary">
+            Remember policy for this exact argv shape
+          </summary>
+          <div className="mt-1 flex gap-1">
+            <button type="button" className="rounded border border-border-subtle px-2 py-1 hover:bg-bg-hover" onClick={() => { onRemember("allow"); }}>Always allow</button>
+            <button type="button" className="rounded border border-border-subtle px-2 py-1 hover:bg-bg-hover" onClick={() => { onRemember("ask"); }}>Always ask</button>
+            <button type="button" className="rounded border border-error/40 px-2 py-1 text-error hover:bg-error-subtle" onClick={() => { onRemember("deny"); }}>Deny</button>
+          </div>
+        </details>
+      )}
       {/* Skip & send is the escape hatch from the wait: it resolves the gate the
           user is looking at, which ends the round, which is what lets the loop
           deliver their message. Still their decision — nothing auto-skips. */}

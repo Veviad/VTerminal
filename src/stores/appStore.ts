@@ -130,15 +130,15 @@ export interface AiStreamState {
    *  deliberately NOT a synthetic message, which would be fed back to the model
    *  as if the user had said it. */
   restoredAt: string | null;
-  /** `readOnly` / `network` are the BACKEND's verdict on this command
-   *  (`agent::policy`), carried so `autoRuns` can be re-evaluated when the mode
-   *  changes while this card is up, and so the card can say why it is asking. */
+  /** Backend assessment for a command that still requires a real click. */
   pendingProposal: {
     approvalId: string;
     command: string;
     explanation: string;
     readOnly: boolean;
     network: boolean;
+    assessment?: import("../lib/types").CommandAssessment;
+    askReason?: string;
     targetRole?: AgentTargetRole;
     targetSessionId?: string;
   } | null;
@@ -512,6 +512,7 @@ export interface AppState {
   visionAutoLoadOnStart: boolean;
   agentMaxIterations: number;
   agentCommandTimeoutSecs: number;
+  agentCommandPolicyRules: import("../lib/types").CommandPolicyRule[];
   aiWebAccess: boolean;
   autoUpdateEnabled: boolean;
   /** Document buckets, EXPERIMENTAL. A mirror of the setting for rendering only —
@@ -725,7 +726,7 @@ function permissionReset(
   ownerSessionId: string,
 ): Record<string, AiStreamState> {
   const stream = ownRecordValue(aiStreams, ownerSessionId);
-  if (stream?.permissionMode !== "auto_read" && stream?.permissionMode !== "auto_all") {
+  if (!stream || stream.permissionMode === "ask") {
     return aiStreams;
   }
   return withRecordValue<AiStreamState>(aiStreams, ownerSessionId, {
@@ -1617,6 +1618,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   visionAutoLoadOnStart: true,
   agentMaxIterations: 10,
   agentCommandTimeoutSecs: 120,
+  agentCommandPolicyRules: [],
   aiWebAccess: true,
   autoUpdateEnabled: false,
   docsEnabled: false,

@@ -48,7 +48,7 @@ import {
   streamHasConversation,
 } from "../../lib/newChat";
 import { interruptJob } from "../../lib/ptyExec";
-import { askReason, autoRuns, PERMISSION_MODES } from "../../lib/permissionMode";
+import { askReason, PERMISSION_MODES } from "../../lib/permissionMode";
 import { relativeTime } from "../../lib/relativeTime";
 import { S } from "../../lib/strings";
 import { shortcutFor } from "../../lib/keymap";
@@ -108,6 +108,12 @@ const PERMISSION_OPTIONS = [
     value: "auto_read",
     label: S.aiPanel.permission.auto_read,
     title: S.aiPanel.permissionHint.auto_read,
+    tone: "accent",
+  },
+  {
+    value: "auto_smart",
+    label: S.aiPanel.permission.auto_smart,
+    title: S.aiPanel.permissionHint.auto_smart,
     tone: "accent",
   },
   {
@@ -605,12 +611,8 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
               options={PERMISSION_OPTIONS}
               onChange={(next) => {
                 useAppStore.getState().setPermissionMode(sessionId, next);
-                // Switching to a mode that WOULD have auto-run the card already
-                // on screen must run it — the control promises that. Unlike the
-                // boolean it replaces, the promise is now command-dependent, so
-                // arming "Reads" over an `rm -rf` card correctly leaves it up.
-                if (pendingProposal && autoRuns(next, pendingProposal)) {
-                  void respondToProposal(sessionId, "run");
+                if (stream?.requestId) {
+                  void api.agentSetPermissionMode(stream.requestId, next).catch(() => {});
                 }
               }}
               ariaLabel={S.aiPanel.permissionLabel}
@@ -663,11 +665,8 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
           }
           onPermission={(role, next) => {
             setSidecarPermission(sidecar.ownerSessionId, role, next);
-            if (
-              pendingProposal?.targetRole === role &&
-              autoRuns(next, pendingProposal)
-            ) {
-              void respondToProposal(sidecar.ownerSessionId, "run");
+            if (stream?.requestId) {
+              void api.agentSetPermissionMode(stream.requestId, next, role).catch(() => {});
             }
           }}
         />
@@ -681,6 +680,11 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
       {agentMode && !sidecar && permissionMode === "auto_read" && (
         <div className="shrink-0 border-b border-border-subtle px-3 py-1 text-[10px] text-text-muted">
           {S.aiPanel.autoReadNote}
+        </div>
+      )}
+      {agentMode && !sidecar && permissionMode === "auto_smart" && (
+        <div className="shrink-0 border-b border-border-subtle px-3 py-1 text-[10px] text-text-muted">
+          {S.aiPanel.autoSmartNote}
         </div>
       )}
       {agentMode && sidecar?.permissions.remote === "auto_all" && (
@@ -743,7 +747,20 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             queuedSteers={queuedSteers}
             // Why this is asking despite an armed auto mode. Null in Confirm,
             // where no explanation is owed.
-            askedBecause={askReason(proposalPermissionMode, pendingProposal)}
+            askedBecause={pendingProposal.askReason ?? askReason(proposalPermissionMode, pendingProposal)}
+            onRemember={(effect) => {
+              const activeSession = Object.entries(sessionUi)
+                .find(([id]) => id === sessionId)?.[1];
+              const remoteTarget = proposalRole === "remote" && sidecar
+                ? sidecar.remoteIdentity.hostId ?? sidecar.remoteIdentity.target
+                : activeSession?.remoteHost?.id ?? remote?.target;
+              const scope = proposalRole === "remote" || remote
+                ? `remote:${remoteTarget ?? "unknown"}`
+                : "local";
+              void api.rememberCommandPolicyRule(pendingProposal.command, effect, scope)
+                .then((rules) => useAppStore.setState({ agentCommandPolicyRules: rules }))
+                .catch(() => {});
+            }}
             onRespond={(decision, edited) => void respondToProposal(sessionId, decision, edited)}
           />
         )}

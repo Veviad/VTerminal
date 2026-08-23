@@ -107,13 +107,33 @@ export type PtyEvent =
 
 export type AgentTargetRole = "local" | "remote";
 
+export type CommandEffect = "semantic_read" | "state_change" | "sensitive_read" | "unknown";
+export interface CommandAssessment {
+  effect: CommandEffect;
+  network: boolean;
+  network_unknown: boolean;
+  privileged: boolean;
+  opaque: boolean;
+  source: "deterministic" | "model" | "rule" | "fallback";
+  reason: string;
+  matched_rule_id?: string;
+}
+
+export interface CommandPolicyRule {
+  id: string;
+  effect: "allow" | "ask" | "deny";
+  scope: string;
+  argv: string[];
+  enabled: boolean;
+  description: string;
+}
+
 export type StreamEvent =
   | { type: "Started"; request_id: string; model: string }
   | { type: "Delta"; content: string }
   | { type: "ThinkingDelta"; content: string }
-  /** `read_only` / `network` are `agent::policy`'s verdict on the command text.
-   *  The backend classifies, the frontend owns the permission mode and applies
-   *  `autoRuns` — see lib/permissionMode.ts. */
+  /** The backend has already applied mode, rules, and classification. Receiving
+   *  this event means a real operator decision is required. */
   | {
       type: "CommandProposal";
       approval_id: string;
@@ -121,6 +141,8 @@ export type StreamEvent =
       explanation: string;
       read_only: boolean;
       network: boolean;
+      assessment?: CommandAssessment;
+      ask_reason?: string;
       /** Present only for a linked Sidecar run. */
       target_role?: AgentTargetRole;
       target_session_id?: string;
@@ -214,6 +236,8 @@ export interface BlockSummary {
 export interface RemoteContext {
   kind: string;
   target: string | null;
+  /** Stable saved-host identity when this connection came from the host list. */
+  host_id?: string | null;
 }
 
 export interface TerminalContext {
@@ -853,6 +877,7 @@ export interface Settings {
   ai_panel_width: number;
   agent_max_iterations: number;
   agent_command_timeout_secs: number;
+  agent_command_policy_rules?: CommandPolicyRule[];
   /** Whether the AI may reach the web at all: gates the server-side fetch tool
    *  for models that have one, picks the agent/ask web prompt tier, and makes
    *  `agent::policy` refuse network commands before they are proposed. */
@@ -1261,6 +1286,7 @@ export interface SettingsPatch {
   ai_panel_ratio: number;
   agent_max_iterations: number;
   agent_command_timeout_secs: number;
+  agent_command_policy_rules: CommandPolicyRule[];
   ai_web_access: boolean;
   auto_update_enabled: boolean;
   docs_enabled: boolean;

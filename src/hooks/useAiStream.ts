@@ -20,7 +20,6 @@ import {
   transcribeImages,
 } from "../lib/attachInput";
 import { S } from "../lib/strings";
-import { autoRuns } from "../lib/permissionMode";
 import type {
   AgentTargetRole,
   AiMessage,
@@ -104,7 +103,7 @@ export function buildTerminalContext(sessionId: string): TerminalContext {
     git_branch: remote ? null : (ui?.gitBranch ?? null),
     os: remote ? "unknown (remote host)" : localOsLabel(),
     recent_blocks: recentBlocks,
-    remote,
+    remote: remote ? { ...remote, host_id: ui?.remoteHost?.id ?? null } : null,
     screen_tail: readScreenTail(sessionId),
     shell_integration: (ui?.integrationActive ?? false) && !remote,
   };
@@ -434,6 +433,17 @@ export function useAiStream() {
           remote: buildTerminalContext(liveSidecar.remoteSessionId),
         }
       : undefined;
+    const permissionModes = liveSidecar
+      ? {
+          single: "ask" as const,
+          local: liveSidecar.permissions.local,
+          remote: liveSidecar.permissions.remote,
+        }
+      : {
+          single: activeStream?.permissionMode ?? ("ask" as const),
+          local: "ask" as const,
+          remote: "ask" as const,
+        };
     try {
       const transcript = await api.agentStart(
         requestId,
@@ -446,6 +456,7 @@ export function useAiStream() {
           dispatchPanelEvent(ownerSessionId, requestId, e);
         },
         sidecarTargets,
+        permissionModes,
       );
       // Done/Paused clears requestId before agentStart resolves. generationId
       // intentionally survives that event, but is replaced by a new run and
@@ -726,22 +737,10 @@ function dispatchPanelEvent(sessionId: string, requestId: string, e: StreamEvent
         rejectTargetedRun(sessionId, requestId, target.reason, e.approval_id);
         break;
       }
-      const binding = useAppStore.getState().sidecarForSession(sessionId);
-      const mode =
-        target.meta && binding
-          ? target.meta.role === "local"
-            ? binding.permissions.local
-            : binding.permissions.remote
-          : (ownRecordValue(store.aiStreams, sessionId)?.permissionMode ?? "ask");
-      const verdict = { readOnly: e.read_only, network: e.network };
-      if (autoRuns(mode, verdict)) {
-        // Auto-run is frontend sugar over the same gate: respond instantly. The
-        // command still surfaces, and its explanation is not lost — the backend
-        // repeats it on RunInTerminal / CommandStarted, which is the only event
-        // an auto-run command reaches the transcript through.
-        void api.respondToApproval(e.approval_id, "run").catch(() => {});
-      } else {
-        store.setPendingProposal(
+      // The backend owns auto-dispatch. Any command that reaches this event has
+      // already been evaluated as requiring a real operator decision; the
+      // frontend must never reinterpret the fields and auto-click the gate.
+      store.setPendingProposal(
           sessionId,
           {
             approvalId: e.approval_id,
@@ -749,6 +748,8 @@ function dispatchPanelEvent(sessionId: string, requestId: string, e: StreamEvent
             explanation: e.explanation,
             readOnly: e.read_only,
             network: e.network,
+            ...(e.assessment ? { assessment: e.assessment } : {}),
+            ...(e.ask_reason ? { askReason: e.ask_reason } : {}),
             ...(target.meta
               ? {
                   targetRole: target.meta.role,
@@ -758,7 +759,6 @@ function dispatchPanelEvent(sessionId: string, requestId: string, e: StreamEvent
           },
           "awaiting_approval",
         );
-      }
       break;
     }
     case "CommandBlocked": {

@@ -54,6 +54,82 @@
 //! which is the same line `CLAUDE.md` already draws for palette history and
 //! saved-host connects.
 
+use serde::{Deserialize, Serialize};
+
+/// The intended effect of a command. `SemanticRead` permits incidental cache or
+/// metadata refreshes; it means the operation's purpose is inspection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandEffect {
+    SemanticRead,
+    StateChange,
+    SensitiveRead,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssessmentSource {
+    Deterministic,
+    Model,
+    Rule,
+    Fallback,
+}
+
+/// Structured policy result shipped to the UI and consumed by the backend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandAssessment {
+    pub effect: CommandEffect,
+    pub network: bool,
+    pub network_unknown: bool,
+    pub privileged: bool,
+    pub opaque: bool,
+    pub source: AssessmentSource,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_rule_id: Option<String>,
+}
+
+impl CommandAssessment {
+    pub fn read_only(&self) -> bool {
+        self.effect == CommandEffect::SemanticRead && !self.privileged && !self.opaque
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyRuleEffect {
+    Allow,
+    Ask,
+    Deny,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandPolicyRule {
+    pub id: String,
+    pub effect: PolicyRuleEffect,
+    /// `local`, or `remote:<saved-host-id>`. Session-only rules stay in the UI.
+    pub scope: String,
+    /// Parsed argv pattern. `*` matches one argument and `**` the remainder.
+    pub argv: Vec<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub description: String,
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleDecision {
+    None,
+    Allow,
+    Ask,
+    Deny,
+}
+
 /// What we could prove about a proposed command.
 #[cfg_attr(not(feature = "local-llm"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +162,208 @@ pub fn classify(command: &str) -> CommandClass {
         read_only: segments.iter().all(segment_is_read_only),
         network: segments.iter().any(segment_is_network),
     }
+}
+
+/// Deterministic first pass. Unknown tools remain unknown instead of growing an
+/// unbounded per-CLI table; Smart mode may classify them independently later.
+pub fn assess(command: &str) -> CommandAssessment {
+    let class = classify(command);
+    let opaque = split_segments(command).is_none() || is_opaque(command);
+    let privileged = is_privileged(command);
+    let sensitive = is_sensitive_read(command);
+    let effect = if sensitive {
+        CommandEffect::SensitiveRead
+    } else if opaque {
+        CommandEffect::Unknown
+    } else if class.read_only {
+        CommandEffect::SemanticRead
+    } else if is_known_state_change(command) {
+        CommandEffect::StateChange
+    } else {
+        CommandEffect::Unknown
+    };
+    let reason = match effect {
+        CommandEffect::SemanticRead => "known inspection command",
+        CommandEffect::StateChange => "command has a known state-changing effect",
+        CommandEffect::SensitiveRead => "command may reveal credential or secret values",
+        CommandEffect::Unknown if opaque => "command contains opaque or dynamic shell execution",
+        CommandEffect::Unknown => "command effect is not known deterministically",
+    };
+    CommandAssessment {
+        effect,
+        network: class.network,
+        network_unknown: effect == CommandEffect::Unknown && !class.network,
+        privileged,
+        opaque,
+        source: AssessmentSource::Deterministic,
+        reason: reason.into(),
+        matched_rule_id: None,
+    }
+}
+
+fn is_opaque(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+    [
+        "eval ",
+        "sh -c",
+        "bash -c",
+        "zsh -c",
+        "python -c",
+        "python3 -c",
+        "node -e",
+        "ruby -e",
+        "perl -e",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn is_privileged(command: &str) -> bool {
+    split_segments(command).is_some_and(|segments| {
+        segments.iter().any(|segment| {
+            for word in tokenize(&segment.text) {
+                let base = word
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&word)
+                    .to_ascii_lowercase();
+                if matches!(base.as_str(), "sudo" | "doas" | "pkexec") {
+                    return true;
+                }
+                let assignment = word.split_once('=').is_some_and(|(name, _)| {
+                    !name.is_empty()
+                        && name
+                            .chars()
+                            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                });
+                if !assignment && !WRAPPERS.contains(&base.as_str()) {
+                    break;
+                }
+            }
+            false
+        })
+    })
+}
+
+fn is_sensitive_read(command: &str) -> bool {
+    let words = split_segments(command)
+        .map(|segments| {
+            segments
+                .into_iter()
+                .flat_map(|s| tokenize(&s.text))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let lower = words
+        .iter()
+        .map(|w| w.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let sensitive_path = lower.iter().any(|word| {
+        word == ".env"
+            || word.ends_with("/.env")
+            || word.contains("/.ssh/id_")
+            || word.contains("credentials")
+            || word.contains("keychain")
+            || word.contains(".netrc")
+            || word.contains(".npmrc")
+    });
+    let secret_output = lower.windows(2).any(|w| {
+        matches!(
+            (w[0].as_str(), w[1].as_str()),
+            ("gh", "auth") | ("security", "find-generic-password")
+        )
+    }) && lower.iter().any(|w| w == "token" || w == "-w");
+    let environment_dump = lower
+        .first()
+        .is_some_and(|w| matches!(w.as_str(), "env" | "printenv"));
+    sensitive_path || secret_output || environment_dump
+}
+
+fn is_known_state_change(command: &str) -> bool {
+    if split_segments(command).is_some_and(|segments| segments.iter().any(|s| writes_file(&s.bare)))
+    {
+        return true;
+    }
+    let mutating = [
+        "rm", "mv", "cp", "mkdir", "rmdir", "touch", "chmod", "chown", "kill", "pkill", "reboot",
+        "shutdown",
+    ];
+    split_segments(command).is_some_and(|segments| {
+        segments
+            .iter()
+            .any(|s| head_of(&s.text).is_some_and(|h| mutating.contains(&h.name.as_str())))
+    })
+}
+
+fn argv_matches(pattern: &[String], argv: &[String]) -> bool {
+    fn rec(pattern: &[String], argv: &[String]) -> bool {
+        match pattern.split_first() {
+            None => argv.is_empty(),
+            Some((head, tail)) if head == "**" => {
+                rec(tail, argv) || (!argv.is_empty() && rec(pattern, &argv[1..]))
+            }
+            Some((head, tail)) if head == "*" => !argv.is_empty() && rec(tail, &argv[1..]),
+            Some((head, tail)) => argv.first() == Some(head) && rec(tail, &argv[1..]),
+        }
+    }
+    rec(pattern, argv)
+}
+
+/// Rules match parsed argv per segment. A compound command needs an allow for
+/// every segment; ask/deny on any segment wins globally.
+pub fn evaluate_rules(
+    command: &str,
+    scope: &str,
+    rules: &[CommandPolicyRule],
+) -> (RuleDecision, Option<String>) {
+    let Some(segments) = split_segments(command).filter(|s| !s.is_empty()) else {
+        return (RuleDecision::None, None);
+    };
+    let mut every_allowed = true;
+    let mut allow_id = None;
+    let mut ask_id = None;
+    for segment in segments {
+        let argv = tokenize(&segment.text);
+        let matching = rules
+            .iter()
+            .filter(|rule| rule.enabled && rule.scope == scope && argv_matches(&rule.argv, &argv));
+        let mut segment_allowed = false;
+        for rule in matching {
+            match rule.effect {
+                PolicyRuleEffect::Deny => return (RuleDecision::Deny, Some(rule.id.clone())),
+                PolicyRuleEffect::Ask => ask_id = Some(rule.id.clone()),
+                PolicyRuleEffect::Allow => {
+                    segment_allowed = true;
+                    allow_id = Some(rule.id.clone());
+                }
+            }
+        }
+        every_allowed &= segment_allowed;
+    }
+    if ask_id.is_some() {
+        return (RuleDecision::Ask, ask_id);
+    }
+    if every_allowed {
+        (RuleDecision::Allow, allow_id)
+    } else {
+        (RuleDecision::None, None)
+    }
+}
+
+pub fn exact_argv_patterns(command: &str) -> Result<Vec<Vec<String>>, String> {
+    let segments = split_segments(command)
+        .filter(|segments| !segments.is_empty())
+        .ok_or_else(|| {
+            "dynamic or malformed shell commands cannot be remembered as argv rules".to_string()
+        })?;
+    let patterns = segments
+        .into_iter()
+        .map(|segment| tokenize(&segment.text))
+        .collect::<Vec<_>>();
+    if patterns.iter().any(Vec::is_empty) {
+        return Err("command contains an empty segment".into());
+    }
+    Ok(patterns)
 }
 
 /// Whether this command must be refused outright rather than proposed.
@@ -688,8 +966,8 @@ fn split_segments(command: &str) -> Option<Vec<Segment>> {
                 if chars.peek() == Some(&'&') {
                     chars.next();
                     boundary!();
-                } else if bare.trim_end().ends_with('>') {
-                    // `2>&1` is fd plumbing, not job control.
+                } else if bare.trim_end().ends_with('>') || bare.trim_end().ends_with('<') {
+                    // `2>&1` / `0<&3` are fd plumbing, not job control.
                     text.push(ch);
                     bare.push(ch);
                 } else {
@@ -749,12 +1027,15 @@ fn writes_file(bare: &str) -> bool {
     false
 }
 
-/// Split on whitespace, honouring simple quoting. Mirrors `tokenizeCommand` in
-/// `lib/nesting.ts` so the two halves of the app agree on what a word is.
+/// Split on whitespace, honouring simple quoting. Unquoted descriptor routing
+/// is shell structure rather than a program argument, so it is removed here
+/// once for every semantic classifier. Quoted or malformed lookalikes remain
+/// words and therefore keep the fail-closed answer of strict parsers.
 fn tokenize(segment: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = String::new();
     let mut quote: Option<char> = None;
+    let mut quoted = false;
     for ch in segment.trim().chars() {
         if let Some(q) = quote {
             if ch == q {
@@ -766,17 +1047,23 @@ fn tokenize(segment: &str) -> Vec<String> {
         }
         if ch == '\'' || ch == '"' {
             quote = Some(ch);
+            quoted = true;
             continue;
         }
         if ch.is_whitespace() {
             if !current.is_empty() {
-                out.push(std::mem::take(&mut current));
+                if quoted || !is_fd_duplication(&current) {
+                    out.push(std::mem::take(&mut current));
+                } else {
+                    current.clear();
+                }
             }
+            quoted = false;
             continue;
         }
         current.push(ch);
     }
-    if !current.is_empty() {
+    if !current.is_empty() && (quoted || !is_fd_duplication(&current)) {
         out.push(current);
     }
     out
@@ -898,7 +1185,12 @@ fn gh_is_read_only(segment: &str) -> bool {
         return false;
     }
     let action = args.get(1).map(String::as_str).unwrap_or("");
-    if action.starts_with('-') || args.iter().any(|arg| arg == "--web") {
+    if action.starts_with('-')
+        || args.iter().any(|arg| arg == "--web" || arg == "-w")
+        || (group == "auth"
+            && action == "status"
+            && args.iter().any(|arg| arg == "--show-token" || arg == "-t"))
+    {
         return false;
     }
 
@@ -914,6 +1206,19 @@ fn gh_is_read_only(segment: &str) -> bool {
             | ("label", "list")
             | ("search", "code" | "commits" | "issues" | "prs" | "repos")
     )
+}
+
+/// An exact shell file-descriptor duplication token such as `2>&1`, `0<&3`,
+/// or `1>&-`.
+/// These only route or close an existing descriptor; they never name a file.
+/// Keep the grammar exact so malformed lookalikes cannot disappear from the
+/// semantic argument stream.
+fn is_fd_duplication(arg: &str) -> bool {
+    let Some((source, target)) = arg.split_once(">&").or_else(|| arg.split_once("<&")) else {
+        return false;
+    };
+    (source.is_empty() || source.chars().all(|ch| ch.is_ascii_digit()))
+        && (target == "-" || (!target.is_empty() && target.chars().all(|ch| ch.is_ascii_digit())))
 }
 
 /// `gh api` defaults to GET, but body fields silently switch it to POST and
@@ -979,7 +1284,18 @@ fn gh_api_is_read_only(args: &[String]) -> bool {
         {
             return false;
         }
-        if ["--hostname", "--cache", "--jq", "--template"].contains(&arg) {
+        if [
+            "--hostname",
+            "--cache",
+            "--jq",
+            "-q",
+            "--template",
+            "-t",
+            "--preview",
+            "-p",
+        ]
+        .contains(&arg)
+        {
             if args.get(i + 1).is_none() {
                 return false;
             }
@@ -987,9 +1303,25 @@ fn gh_api_is_read_only(args: &[String]) -> bool {
             continue;
         }
         if [
+            "--hostname=",
+            "--cache=",
+            "--jq=",
+            "--template=",
+            "--preview=",
+        ]
+        .iter()
+        .any(|prefix| {
+            arg.strip_prefix(prefix)
+                .is_some_and(|value| !value.is_empty())
+        }) {
+            i += 1;
+            continue;
+        }
+        if [
             "--paginate",
             "--slurp",
             "--include",
+            "-i",
             "--verbose",
             "--silent",
         ]
@@ -1202,6 +1534,85 @@ mod tests {
     }
 
     #[test]
+    fn github_read_families_accept_shell_fd_routing() {
+        // This is a grammar invariant, not a command-string allowlist: every
+        // supported GitHub read family must keep its classification when the
+        // shell routes or closes a descriptor around it.
+        let reads = [
+            "gh auth status",
+            "gh issue list --repo Veviad/VTerminal",
+            "gh issue status --repo Veviad/VTerminal",
+            "gh issue view 42 --repo Veviad/VTerminal",
+            "gh pr checks 44 --repo Veviad/VTerminal",
+            "gh pr diff 44 --repo Veviad/VTerminal",
+            "gh pr list --repo Veviad/VTerminal",
+            "gh pr status --repo Veviad/VTerminal",
+            "gh pr view 44 --repo Veviad/VTerminal",
+            "gh repo list Veviad",
+            "gh repo view Veviad/VTerminal",
+            "gh release list --repo Veviad/VTerminal",
+            "gh release view v0.3.2 --repo Veviad/VTerminal",
+            "gh run list --repo Veviad/VTerminal",
+            "gh run view 123 --repo Veviad/VTerminal",
+            "gh workflow list --repo Veviad/VTerminal",
+            "gh workflow view CI --repo Veviad/VTerminal",
+            "gh label list --repo Veviad/VTerminal",
+            "gh search code policy --repo Veviad/VTerminal",
+            "gh search commits policy --repo Veviad/VTerminal",
+            "gh search issues policy --repo Veviad/VTerminal",
+            "gh search prs policy --repo Veviad/VTerminal",
+            "gh search repos veviad --limit 20 --json fullName,url",
+            "gh api user/orgs --jq '.[].login'",
+            "gh api orgs/Veviad/packages?package_type=container -q '.[].name'",
+            "gh api repos/Veviad/VTerminal/releases --method=GET --paginate --slurp",
+            "gh api repos/Veviad/VTerminal --hostname=github.com --cache=1h --jq=.name --template='{{.}}' --preview=nebula",
+            "gh api -i -p nebula repos/Veviad/VTerminal -t '{{.name}}'",
+        ];
+        for cmd in reads {
+            for routing in ["2>&1", "1>&2", "3>&-", ">&1", "0<&3", "<&0"] {
+                let routed = format!("{cmd} {routing}");
+                assert!(read_only(&routed), "should remain read-only: {routed}");
+            }
+        }
+
+        let chained = reads
+            .iter()
+            .map(|cmd| format!("{cmd} 2>&1"))
+            .collect::<Vec<_>>()
+            .join("; echo '---'; ");
+        assert!(read_only(&chained), "read-only chain should auto-run");
+    }
+
+    #[test]
+    fn shell_fd_routing_never_turns_github_mutations_into_reads() {
+        for cmd in [
+            "gh api repos/Veviad/VTerminal/issues -f title=x",
+            "gh api --method POST repos/Veviad/VTerminal/issues",
+            "gh api -XDELETE repos/Veviad/VTerminal/issues/42",
+            "gh issue create --title x --body y",
+            "gh issue edit 42 --title x",
+            "gh pr merge 42",
+        ] {
+            for routing in ["2>&1", "1>&2", "3>&-", ">&1", "0<&3", "<&0"] {
+                let routed = format!("{cmd} {routing}");
+                assert!(!read_only(&routed), "must remain approval-gated: {routed}");
+            }
+        }
+    }
+
+    #[test]
+    fn descriptor_routing_is_removed_by_the_shared_shell_tokenizer() {
+        assert_eq!(
+            tokenize("tool before 2>&1 0<&3 after"),
+            ["tool", "before", "after"]
+        );
+        assert_eq!(
+            tokenize("tool '2>&1' \"0<&3\" 2>&1oops"),
+            ["tool", "2>&1", "0<&3", "2>&1oops"]
+        );
+    }
+
+    #[test]
     fn fails_closed_on_anything_that_could_write() {
         for cmd in [
             "rm -rf build",
@@ -1245,12 +1656,17 @@ mod tests {
             "gh api -XDELETE repos/Veviad/VTerminal/issues/42",
             "gh api repos/Veviad/VTerminal/issues -- -f title=x",
             "gh api -- repos/Veviad/VTerminal/issues",
+            "gh api user/orgs 2>&1oops",
+            "gh api user/orgs '2>&1'",
             "gh api graphql -f query='{ viewer { login } }'",
             "gh api repos/Veviad/VTerminal/issues -H 'X-HTTP-Method-Override: DELETE'",
             "gh issue create --title x --body y",
             "gh issue edit 42 --title x",
             "gh pr merge 42",
             "gh pr view 42 --web",
+            "gh pr view 42 -w",
+            "gh auth status --show-token",
+            "gh auth status -t",
             "gh extension-command something",
             "gh --repo Veviad/VTerminal issue view 42",
         ] {
@@ -1548,5 +1964,81 @@ mod tests {
                 "should remain available in Sidecar mode: {cmd}"
             );
         }
+    }
+
+    #[test]
+    fn structured_assessment_separates_reads_secrets_and_opaque_commands() {
+        assert_eq!(assess("ls -la").effect, CommandEffect::SemanticRead);
+        assert_eq!(assess("cat .env").effect, CommandEffect::SensitiveRead);
+        assert_eq!(assess("printenv").effect, CommandEffect::SensitiveRead);
+        assert!(assess("sudo cat /etc/hosts").privileged);
+        assert!(assess("env LANG=C sudo cat /etc/hosts").privileged);
+        assert!(assess("sh -c 'ls'").opaque);
+        assert_eq!(
+            assess("acme inspect project").effect,
+            CommandEffect::Unknown
+        );
+    }
+
+    #[test]
+    fn argv_rules_use_token_boundaries_and_strongest_effect() {
+        let rules = vec![
+            CommandPolicyRule {
+                id: "ask".into(),
+                effect: PolicyRuleEffect::Ask,
+                scope: "local".into(),
+                argv: vec!["gh".into(), "repo".into(), "view".into(), "**".into()],
+                enabled: true,
+                description: String::new(),
+            },
+            CommandPolicyRule {
+                id: "allow".into(),
+                effect: PolicyRuleEffect::Allow,
+                scope: "local".into(),
+                argv: vec!["gh".into(), "repo".into(), "view".into(), "*".into()],
+                enabled: true,
+                description: String::new(),
+            },
+            CommandPolicyRule {
+                id: "deny".into(),
+                effect: PolicyRuleEffect::Deny,
+                scope: "local".into(),
+                argv: vec!["gh".into(), "repo".into(), "view".into(), "secret".into()],
+                enabled: true,
+                description: String::new(),
+            },
+        ];
+        assert_eq!(
+            evaluate_rules("gh repo view Veviad/app", "local", &rules).0,
+            RuleDecision::Ask
+        );
+        assert_eq!(
+            evaluate_rules("gh repo view secret", "local", &rules),
+            (RuleDecision::Deny, Some("deny".into()))
+        );
+        assert_eq!(
+            evaluate_rules("gh repo view secret", "remote:prod", &rules).0,
+            RuleDecision::None
+        );
+    }
+
+    #[test]
+    fn compound_allow_requires_every_segment_and_exact_patterns_strip_fd_plumbing() {
+        let rules = vec![CommandPolicyRule {
+            id: "read".into(),
+            effect: PolicyRuleEffect::Allow,
+            scope: "local".into(),
+            argv: vec!["tool".into(), "**".into()],
+            enabled: true,
+            description: String::new(),
+        }];
+        assert_eq!(
+            evaluate_rules("tool inspect; echo done", "local", &rules).0,
+            RuleDecision::None
+        );
+        assert_eq!(
+            exact_argv_patterns("gh repo view x 2>&1").unwrap(),
+            vec![vec!["gh", "repo", "view", "x"]]
+        );
     }
 }

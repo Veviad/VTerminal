@@ -12,6 +12,86 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionMode {
+    #[default]
+    Ask,
+    AutoRead,
+    AutoSmart,
+    AutoAll,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct AgentPermissionModes {
+    #[serde(default)]
+    pub single: PermissionMode,
+    #[serde(default)]
+    pub local: PermissionMode,
+    #[serde(default)]
+    pub remote: PermissionMode,
+}
+
+impl Default for AgentPermissionModes {
+    fn default() -> Self {
+        Self {
+            single: PermissionMode::Ask,
+            local: PermissionMode::Ask,
+            remote: PermissionMode::Ask,
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct AgentPermissionState {
+    modes: Mutex<HashMap<String, AgentPermissionModes>>,
+}
+
+impl AgentPermissionState {
+    pub fn register(&self, request_id: &str, modes: AgentPermissionModes) {
+        if let Ok(mut map) = self.modes.lock() {
+            map.insert(request_id.into(), modes);
+        }
+    }
+
+    pub fn mode(&self, request_id: &str, role: Option<AgentTargetRole>) -> PermissionMode {
+        self.modes
+            .lock()
+            .ok()
+            .and_then(|map| map.get(request_id).copied())
+            .map(|modes| match role {
+                Some(AgentTargetRole::Local) => modes.local,
+                Some(AgentTargetRole::Remote) => modes.remote,
+                None => modes.single,
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn set(
+        &self,
+        request_id: &str,
+        role: Option<AgentTargetRole>,
+        mode: PermissionMode,
+    ) -> Result<(), String> {
+        let mut map = self.modes.lock().map_err(|_| "permission state poisoned")?;
+        let modes = map
+            .get_mut(request_id)
+            .ok_or_else(|| "agent run is no longer active".to_string())?;
+        match role {
+            Some(AgentTargetRole::Local) => modes.local = mode,
+            Some(AgentTargetRole::Remote) => modes.remote = mode,
+            None => modes.single = mode,
+        }
+        Ok(())
+    }
+
+    pub fn finish(&self, request_id: &str) {
+        if let Ok(mut map) = self.modes.lock() {
+            map.remove(request_id);
+        }
+    }
+}
+
 /// Stable model/UI names for the two terminals in a linked Sidecar run.
 #[cfg_attr(not(feature = "local-llm"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -48,13 +128,9 @@ pub enum StreamEvent {
     },
     /// Agent proposes a command; nothing runs until respond_to_approval.
     ///
-    /// `read_only` / `network` are `agent::policy`'s verdict on the command text.
-    /// They ride the event because the frontend owns the permission MODE while
-    /// the backend owns the CLASSIFICATION — so the frontend applies its rule
-    /// (`autoRuns` in `hooks/useAiStream.ts`) to numbers it did not compute, and
-    /// the card can say why it is asking despite an auto mode. Both are
-    /// deliberately shipped raw rather than pre-combined into one `auto_ok`
-    /// flag: only the frontend knows which mode is active.
+    /// Emitted only after backend mode/rule/classification evaluation concludes
+    /// that a real operator decision is required. The legacy booleans remain on
+    /// the wire while the UI migrates to the structured assessment.
     CommandProposal {
         approval_id: String,
         command: String,
@@ -63,6 +139,8 @@ pub enum StreamEvent {
         read_only: bool,
         /// Reaches the network, as far as the command text shows.
         network: bool,
+        assessment: policy::CommandAssessment,
+        ask_reason: String,
         /// Present only in Sidecar mode. Together these freeze the destination
         /// before approval, independently of whichever tab is later focused.
         #[serde(skip_serializing_if = "Option::is_none")]

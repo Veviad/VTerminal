@@ -17,7 +17,7 @@ vi.mock("../lib/tauri", () => ({
   getSettings: vi.fn(() => Promise.resolve({})),
 }));
 
-const { AgentSection } = await import("../components/settings/AgentSection");
+const { AgentSection, formatArgvPattern, parseArgvPattern } = await import("../components/settings/AgentSection");
 
 describe("AgentSection — internet access", () => {
   beforeEach(() => {
@@ -26,6 +26,7 @@ describe("AgentSection — internet access", () => {
       aiWebAccess: true,
       agentMaxIterations: 10,
       agentCommandTimeoutSecs: 120,
+      agentCommandPolicyRules: [],
     });
   });
 
@@ -54,5 +55,36 @@ describe("AgentSection — internet access", () => {
    *  one place the app lies about a security boundary. */
   it("keeps the best-effort caveat in the hint", () => {
     expect(S.settings.agent.webAccessHint).toMatch(/best-effort/i);
+  });
+
+  it("round-trips argv patterns containing spaces", () => {
+    const argv = ["gh", "api", "repos/My Org/project", "**"];
+    expect(parseArgvPattern(formatArgvPattern(argv))).toEqual(argv);
+  });
+
+  it("commits a quoted argv pattern only after editing finishes", async () => {
+    useAppStore.setState({
+      agentCommandPolicyRules: [{
+        id: "rule-1",
+        effect: "ask",
+        scope: "local",
+        argv: ["gh", "api", "**"],
+        enabled: true,
+        description: "",
+      }],
+    });
+    render(<AgentSection />);
+    const input = screen.getByRole("textbox", { name: "Argv pattern" });
+
+    fireEvent.change(input, { target: { value: 'gh api "repos/My Org/project" **' } });
+    expect(saveSettings).not.toHaveBeenCalled();
+    fireEvent.blur(input);
+
+    await waitFor(() => expect(saveSettings).toHaveBeenCalledWith({
+      agent_command_policy_rules: [expect.objectContaining({
+        id: "rule-1",
+        argv: ["gh", "api", "repos/My Org/project", "**"],
+      })],
+    }));
   });
 });

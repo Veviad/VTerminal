@@ -1,6 +1,7 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 import type {
   ApprovalDecision,
+  AgentTargetRole,
   ArchiveDetail,
   ArchiveSessionInput,
   ArchiveSummary,
@@ -55,6 +56,7 @@ import type {
   WorkspaceRestore,
   WorkspaceSnapshotInput,
 } from "./types";
+import type { PermissionMode } from "./permissionMode";
 import { localBucketDescriptor, normalizeKnowledgeBucketRef } from "./knowledge";
 import { trackArchiveWrite, trackExitArchiveWrite } from "./archiveWriteTracker";
 
@@ -234,6 +236,9 @@ export async function agentStart(
   onEvent: (e: StreamEvent) => void,
   /** Optional immutable local/SSH target pair for a linked Agent turn. */
   sidecarTargets?: SidecarAgentTargets,
+  permissionModes: { single: PermissionMode; local: PermissionMode; remote: PermissionMode } = {
+    single: "ask", local: "ask", remote: "ask",
+  },
 ): Promise<ChatMessage[]> {
   const channel = new Channel<StreamEvent>();
   channel.onmessage = onEvent;
@@ -249,6 +254,7 @@ export async function agentStart(
       // `doc_buckets` here silently deserializes the optional Rust argument as
       // `None`, which removes `search_docs` from the agent's tool vector.
       docBuckets,
+      permissionModes,
       sidecarTargets: sidecarTargets ?? null,
       onEvent: channel,
     });
@@ -256,6 +262,16 @@ export async function agentStart(
     aiChannels.delete(requestId);
   }
 }
+
+export const agentSetPermissionMode = (
+  requestId: string,
+  mode: PermissionMode,
+  targetRole?: AgentTargetRole,
+) => invoke<void>("agent_set_permission_mode", {
+  request_id: requestId,
+  target_role: targetRole ?? null,
+  mode,
+});
 
 export const respondToApproval = (
   approvalId: string,
@@ -557,6 +573,16 @@ export const getSettings = () => invoke<Settings>("get_settings");
 
 export const saveSettings = (patch: Partial<SettingsPatch>) =>
   invoke<void>("save_settings", { ...patch });
+
+export const rememberCommandPolicyRule = (
+  command: string,
+  effect: "allow" | "ask" | "deny",
+  scope: string,
+) => invoke<import("./types").CommandPolicyRule[]>("remember_command_policy_rule", {
+  command,
+  effect,
+  scope,
+});
 
 export interface SystemInfo {
   total_ram_bytes: number;

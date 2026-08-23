@@ -109,6 +109,7 @@ pub fn run() {
             app.manage(pty::PtyManager::default());
             app.manage(agent::AiState::default());
             app.manage(agent::ApprovalState::default());
+            app.manage(agent::AgentPermissionState::default());
             app.manage(agent::PtyExecState::default());
             app.manage(agent::SteerState::default());
             app.manage(models::DownloadState::default());
@@ -352,8 +353,10 @@ pub fn run() {
             commands::ai::ai_cancel,
             commands::ai::agent_start,
             commands::ai::respond_to_approval,
+            commands::ai::agent_set_permission_mode,
             commands::ai::agent_steer,
             commands::ai::submit_command_result,
+            commands::settings::remember_command_policy_rule,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

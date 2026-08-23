@@ -202,6 +202,9 @@ async fn run_scenario_with_context(
         context_tokens,
         command_timeout_secs: 5,
         web_access,
+        policy_rules: vec![],
+        policy_scope_single: "local".into(),
+        policy_scope_remote: "remote:test".into(),
         doc_buckets: vec![],
         exec_target: ExecTarget::Subprocess,
     };
@@ -218,6 +221,7 @@ async fn run_scenario_with_context(
         vec![],
         history,
         approvals.as_ref(),
+        None,
         &pty_exec,
         &steers,
         None,

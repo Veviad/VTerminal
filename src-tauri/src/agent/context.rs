@@ -26,6 +26,8 @@ pub struct TerminalContext {
 pub struct RemoteContext {
     pub kind: String,
     pub target: Option<String>,
+    #[serde(default)]
+    pub host_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -293,6 +295,7 @@ mod tests {
             remote: Some(RemoteContext {
                 kind: "ssh".into(),
                 target: Some("prod-01".into()),
+                host_id: None,
             }),
             ..base()
         };
@@ -329,6 +332,7 @@ mod tests {
         let r = RemoteContext {
             kind: "docker".into(),
             target: None,
+            host_id: None,
         };
         assert_eq!(r.describe(), "docker");
     }
@@ -343,6 +347,7 @@ mod tests {
                 remote: Some(RemoteContext {
                     kind: "ssh".into(),
                     target: Some("deploy@prod-01".into()),
+                    host_id: None,
                 }),
                 ..base()
             },

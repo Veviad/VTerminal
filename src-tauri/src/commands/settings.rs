@@ -105,6 +105,7 @@ pub fn get_settings(app: tauri::AppHandle<Wry>) -> Result<Value, String> {
         "ai_panel_width": get("ai_panel_width", json!(420)),
         "agent_max_iterations": get("agent_max_iterations", json!(10)),
         "agent_command_timeout_secs": get("agent_command_timeout_secs", json!(120)),
+        "agent_command_policy_rules": get("agent_command_policy_rules", json!([])),
         // Read since the web tiers landed (commands::ai) but never writable, so
         // it was pinned at this default. Default stays `true`: flipping it would
         // silently take the web away from every existing install on upgrade.
@@ -130,6 +131,32 @@ pub fn get_settings(app: tauri::AppHandle<Wry>) -> Result<Value, String> {
         "runbooks_output_recording": get("runbooks_output_recording", json!("runbook")),
         "log_level": get("log_level", json!("info")),
     }))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn remember_command_policy_rule(
+    app: tauri::AppHandle<Wry>,
+    command: String,
+    effect: crate::agent::policy::PolicyRuleEffect,
+    scope: String,
+) -> Result<Vec<crate::agent::policy::CommandPolicyRule>, String> {
+    let mut rules = read_command_policy_rules(&app);
+    let patterns = crate::agent::policy::exact_argv_patterns(&command)?;
+    for argv in patterns {
+        rules.push(crate::agent::policy::CommandPolicyRule {
+            id: format!("rule-{}", uuid::Uuid::new_v4()),
+            effect,
+            scope: scope.clone(),
+            argv,
+            enabled: true,
+            description: "Saved from an agent approval".into(),
+        });
+    }
+    validate_command_policy_rules(&rules)?;
+    let store = app.store(STORE_NAME).map_err(|error| error.to_string())?;
+    store.set("agent_command_policy_rules", json!(rules));
+    store.save().map_err(|error| error.to_string())?;
+    Ok(rules)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -171,6 +198,7 @@ pub fn save_settings(
     ai_panel_ratio: Option<f64>,
     agent_max_iterations: Option<u32>,
     agent_command_timeout_secs: Option<u32>,
+    agent_command_policy_rules: Option<Vec<crate::agent::policy::CommandPolicyRule>>,
     ai_web_access: Option<bool>,
     auto_update_enabled: Option<bool>,
     docs_enabled: Option<bool>,
@@ -344,6 +372,10 @@ pub fn save_settings(
     }
     if let Some(v) = agent_command_timeout_secs {
         store.set("agent_command_timeout_secs", json!(v.clamp(5, 3600)));
+    }
+    if let Some(rules) = agent_command_policy_rules {
+        validate_command_policy_rules(&rules)?;
+        store.set("agent_command_policy_rules", json!(rules));
     }
     if let Some(v) = ai_web_access {
         store.set("ai_web_access", json!(v));
@@ -942,6 +974,101 @@ pub fn read_u32(app: &tauri::AppHandle<Wry>, key: &str, default: u32) -> u32 {
         .and_then(|v| v.as_u64())
         .map(|v| v as u32)
         .unwrap_or(default)
+}
+
+pub fn read_command_policy_rules(
+    app: &tauri::AppHandle<Wry>,
+) -> Vec<crate::agent::policy::CommandPolicyRule> {
+    app.store(STORE_NAME)
+        .ok()
+        .and_then(|store| store.get("agent_command_policy_rules"))
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default()
+}
+
+fn validate_command_policy_rules(
+    rules: &[crate::agent::policy::CommandPolicyRule],
+) -> Result<(), String> {
+    if rules.len() > 200 {
+        return Err("at most 200 command policy rules are allowed".into());
+    }
+    for rule in rules {
+        if rule.id.trim().is_empty()
+            || rule.id.len() > 80
+            || rule.argv.is_empty()
+            || rule.argv.len() > 64
+        {
+            return Err("invalid command policy rule".into());
+        }
+        let valid_scope = rule.scope == "local"
+            || rule
+                .scope
+                .strip_prefix("remote:")
+                .is_some_and(|host| !host.trim().is_empty() && host.len() <= 256);
+        if !valid_scope {
+            return Err(format!("invalid command policy scope: {}", rule.scope));
+        }
+        if rule.argv.iter().any(|token| token.len() > 512) {
+            return Err("command policy token is too long".into());
+        }
+        if rule.description.len() > 512 {
+            return Err("command policy description is too long".into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod command_policy_tests {
+    use super::validate_command_policy_rules;
+    use crate::agent::policy::{CommandPolicyRule, PolicyRuleEffect};
+
+    fn rule(scope: &str) -> CommandPolicyRule {
+        CommandPolicyRule {
+            id: "rule-test".into(),
+            effect: PolicyRuleEffect::Ask,
+            scope: scope.into(),
+            argv: vec!["future-cli".into(), "**".into()],
+            enabled: true,
+            description: "test rule".into(),
+        }
+    }
+
+    #[test]
+    fn command_policy_rules_accept_supported_local_and_remote_scopes() {
+        assert!(validate_command_policy_rules(&[rule("local")]).is_ok());
+        assert!(validate_command_policy_rules(&[rule("remote:saved-host-id")]).is_ok());
+    }
+
+    #[test]
+    fn command_policy_rules_reject_empty_remote_host_scopes() {
+        let error = validate_command_policy_rules(&[rule("remote:")]).unwrap_err();
+        assert!(error.contains("invalid command policy scope"));
+    }
+
+    #[test]
+    fn command_policy_rules_enforce_the_shared_count_limit() {
+        assert!(validate_command_policy_rules(&vec![rule("local"); 200]).is_ok());
+        let error = validate_command_policy_rules(&vec![rule("local"); 201]).unwrap_err();
+        assert_eq!(error, "at most 200 command policy rules are allowed");
+    }
+
+    #[test]
+    fn command_policy_rules_bound_user_controlled_text() {
+        let mut long_token = rule("local");
+        long_token.argv = vec!["x".repeat(513)];
+        assert_eq!(
+            validate_command_policy_rules(&[long_token]).unwrap_err(),
+            "command policy token is too long"
+        );
+
+        let mut long_description = rule("local");
+        long_description.description = "x".repeat(513);
+        assert_eq!(
+            validate_command_policy_rules(&[long_description]).unwrap_err(),
+            "command policy description is too long"
+        );
+    }
 }
 
 #[cfg(test)]
