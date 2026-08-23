@@ -581,6 +581,11 @@ a:hover {
   font-size: 0.74rem;
 }
 
+.release-date strong {
+  color: var(--text-2);
+  font-weight: 750;
+}
+
 .hero-download-meta a {
   color: var(--text-2);
   text-decoration: underline;
