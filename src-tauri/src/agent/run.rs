@@ -39,6 +39,19 @@ struct CommandTarget {
     session_id: Option<String>,
 }
 
+impl CommandTarget {
+    /// Sidecar routing metadata is an all-or-nothing wire contract. A normal
+    /// PTY still needs its session id for backend dispatch, but exposing that
+    /// id without a role makes the frontend correctly treat the event as a
+    /// stale or malformed Sidecar command.
+    fn event_metadata(&self) -> (Option<AgentTargetRole>, Option<String>) {
+        match self.role {
+            Some(role) => (Some(role), self.session_id.clone()),
+            None => (None, None),
+        }
+    }
+}
+
 impl ExecTarget {
     fn is_sidecar(&self) -> bool {
         matches!(self, Self::Sidecar { .. })
@@ -675,11 +688,12 @@ fn record_command_blocked(
     target: &CommandTarget,
 ) {
     stats.commands_blocked = stats.commands_blocked.saturating_add(1);
+    let (target_role, target_session_id) = target.event_metadata();
     let _ = on_event.send(StreamEvent::CommandBlocked {
         command: command.into(),
         reason: reason.into(),
-        target_role: target.role,
-        target_session_id: target.session_id.clone(),
+        target_role,
+        target_session_id,
     });
 }
 
@@ -872,6 +886,7 @@ async fn process_tool_calls(
                             "the command could not be verified as a semantic read"
                         };
                     let rx = approvals.register(&approval_id, &config.request_id);
+                    let (target_role, target_session_id) = command_target.event_metadata();
                     let _ = on_event.send(StreamEvent::CommandProposal {
                         approval_id: approval_id.clone(),
                         command: command.clone(),
@@ -880,8 +895,8 @@ async fn process_tool_calls(
                         network: assessment.network,
                         assessment: assessment.clone(),
                         ask_reason: ask_reason.into(),
-                        target_role: command_target.role,
-                        target_session_id: command_target.session_id.clone(),
+                        target_role,
+                        target_session_id,
                     });
                     let mut cancel_watch = cancel.clone();
                     let received = tokio::select! {
@@ -957,12 +972,14 @@ async fn process_tool_calls(
                                 .await
                             }
                             ExecTarget::Subprocess => {
+                                let (target_role, target_session_id) =
+                                    command_target.event_metadata();
                                 let _ = on_event.send(StreamEvent::CommandStarted {
                                     approval_id: approval_id.clone(),
                                     command: final_command.clone(),
                                     explanation: explanation.clone(),
-                                    target_role: command_target.role,
-                                    target_session_id: command_target.session_id.clone(),
+                                    target_role,
+                                    target_session_id,
                                 });
                                 exec::run_command(
                                     &config.shell,
@@ -1003,13 +1020,15 @@ async fn process_tool_calls(
                                 ));
                             }
                             Err(e) => {
+                                let (target_role, target_session_id) =
+                                    command_target.event_metadata();
                                 let _ = on_event.send(StreamEvent::CommandResult {
                                     approval_id: approval_id.clone(),
                                     exit_code: None,
                                     duration_ms: 0,
                                     error: Some(e.clone()),
-                                    target_role: command_target.role,
-                                    target_session_id: command_target.session_id.clone(),
+                                    target_role,
+                                    target_session_id,
                                 });
                                 messages.push(command_tool_result(
                                     &call.id,
@@ -1799,6 +1818,11 @@ mod tests {
 
     #[test]
     fn sidecar_command_events_carry_role_and_session_while_single_events_omit_them() {
+        let linked_target = sidecar_config()
+            .exec_target
+            .resolve_command_target(Some("remote"))
+            .unwrap();
+        let (linked_role, linked_session_id) = linked_target.event_metadata();
         let linked = serde_json::to_value(StreamEvent::CommandProposal {
             approval_id: "a1".into(),
             command: "pwd".into(),
@@ -1807,13 +1831,20 @@ mod tests {
             network: false,
             assessment: super::super::policy::assess("pwd"),
             ask_reason: "test".into(),
-            target_role: Some(AgentTargetRole::Remote),
-            target_session_id: Some("session-remote".into()),
+            target_role: linked_role,
+            target_session_id: linked_session_id,
         })
         .unwrap();
         assert_eq!(linked["target_role"], "remote");
         assert_eq!(linked["target_session_id"], "session-remote");
 
+        let single_target = ExecTarget::Pty {
+            session_id: "single-session".into(),
+        }
+        .resolve_command_target(None)
+        .unwrap();
+        assert_eq!(single_target.session_id.as_deref(), Some("single-session"));
+        let (single_role, single_session_id) = single_target.event_metadata();
         let single = serde_json::to_value(StreamEvent::CommandProposal {
             approval_id: "a2".into(),
             command: "pwd".into(),
@@ -1822,8 +1853,8 @@ mod tests {
             network: false,
             assessment: super::super::policy::assess("pwd"),
             ask_reason: "test".into(),
-            target_role: None,
-            target_session_id: None,
+            target_role: single_role,
+            target_session_id: single_session_id,
         })
         .unwrap();
         assert!(single.get("target_role").is_none());
