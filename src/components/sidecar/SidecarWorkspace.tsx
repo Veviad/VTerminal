@@ -1,13 +1,21 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link2Off, Server, Terminal, Unplug } from "lucide-react";
 import * as api from "../../lib/tauri";
 import { setAiPanelOpen } from "../../lib/aiPanel";
 import { abortSession } from "../../lib/ptyExec";
 import { ownRecordValue } from "../../lib/records";
-import { sessionIdForRole, type AgentTargetRole, type SidecarBinding } from "../../lib/sidecar";
+import {
+  sessionIdForRole,
+  type AgentTargetRole,
+  type SidecarBinding,
+  type SidecarRemoteIdentity,
+} from "../../lib/sidecar";
 import { collapseHome, resolveSessionTitle } from "../../lib/sessionTitle";
 import { S } from "../../lib/strings";
+import { canConnectHere, connectToHost, connectToSshTarget } from "../../lib/sshConnect";
 import { useAppStore } from "../../stores/appStore";
+import { useSessions } from "../../hooks/useSessions";
+import { useSshHost } from "../../hooks/useSshHost";
 import { TerminalPane } from "../terminal/TerminalPane";
 
 const STACK_AT_PX = 640;
@@ -90,6 +98,7 @@ export function SidecarWorkspace({ binding }: { binding: SidecarBinding }) {
         <div className="pointer-events-auto absolute inset-x-2 top-10 z-30 flex flex-wrap items-center justify-center gap-2 rounded-md border border-warning/50 bg-bg-elevated/95 px-3 py-2 text-[11px] text-warning shadow-lg">
           <Unplug size={12} />
           <span>{S.aiPanel.sidecar.degradedHint}</span>
+          <SidecarReconnectButton binding={binding} />
           <button
             onClick={() => {
               setAiPanelOpen(true);
@@ -112,6 +121,85 @@ export function SidecarWorkspace({ binding }: { binding: SidecarBinding }) {
         </div>
       )}
     </div>
+  );
+}
+
+function SidecarReconnectButton({ binding }: { binding: SidecarBinding }) {
+  const degradation = binding.degraded;
+  const remoteSessionId = binding.remoteSessionId;
+  const remoteUi = useAppStore((state) => ownRecordValue(state.sessionUi, remoteSessionId));
+  const replaceTarget = useAppStore((state) => state.replaceSidecarTarget);
+  const { createSession } = useSessions();
+  const [connecting, setConnecting] = useState(false);
+  const [expectedIdentity, setExpectedIdentity] = useState<SidecarRemoteIdentity | null>(null);
+
+  const canReconnect =
+    degradation?.role === "remote" &&
+    degradation.reason === "remote_disconnected" &&
+    Boolean(binding.remoteIdentity.hostId || binding.remoteIdentity.target);
+  const hostId = canReconnect ? binding.remoteIdentity.hostId : null;
+  const { host, loading: hostLoading } = useSshHost(hostId);
+
+  // The reconnect click is the explicit review boundary required by Sidecar.
+  // Once shell integration proves the same SSH identity is live again, replace
+  // the target with itself to clear sticky degradation and reset permissions.
+  useEffect(() => {
+    if (!connecting || !expectedIdentity || !remoteUi?.remote) return;
+    replaceTarget(
+      binding.ownerSessionId,
+      "remote",
+      remoteSessionId,
+      expectedIdentity,
+    );
+    setConnecting(false);
+    setExpectedIdentity(null);
+  }, [
+    binding.ownerSessionId,
+    binding.remoteIdentity,
+    connecting,
+    expectedIdentity,
+    remoteSessionId,
+    remoteUi?.remote,
+    replaceTarget,
+  ]);
+
+  if (!canReconnect) return null;
+  const gate = canConnectHere(remoteSessionId);
+  const target = binding.remoteIdentity.target;
+  const ready = !hostLoading && Boolean(host || target);
+
+  return (
+    <button
+      onClick={() => {
+        setConnecting(true);
+        // A deleted saved-host row can still fall back to the frozen parsed
+        // target. In that case verification must use the target, not the stale
+        // host id that can no longer be re-established by a saved-host launch.
+        setExpectedIdentity(
+          host
+            ? binding.remoteIdentity
+            : target
+              ? { ...binding.remoteIdentity, hostId: null }
+              : null,
+        );
+        const reconnect = host
+          ? connectToHost(host, "current-tab", createSession, remoteSessionId)
+          : target
+            ? connectToSshTarget(target, remoteSessionId)
+            : Promise.resolve(null);
+        void reconnect.then((sessionId) => {
+          if (!sessionId) {
+            setConnecting(false);
+            setExpectedIdentity(null);
+          }
+        });
+      }}
+      disabled={connecting || !ready || !gate.ok}
+      title={gate.ok ? undefined : gate.reason}
+      className="rounded border border-warning/40 px-2 py-0.5 hover:bg-warning/10 disabled:cursor-not-allowed disabled:opacity-60"
+    >
+      {connecting ? S.aiPanel.sidecar.reconnecting : S.aiPanel.sidecar.reconnect}
+    </button>
   );
 }
 

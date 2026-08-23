@@ -14,7 +14,7 @@ import { useAppStore } from "../stores/appStore";
 import { getTerm } from "./termRegistry";
 import { isBusy } from "./ptyExec";
 import { sanitizeCommand } from "./ptyExecShell";
-import { buildSshCommand } from "./ssh";
+import { buildSshCommand, shQuote } from "./ssh";
 import type { LaunchSpec, SshHost } from "./types";
 
 export type ConnectTarget = "current-tab" | "new-tab";
@@ -112,6 +112,7 @@ export async function connectToHost(
   hostRow: SshHost,
   target: ConnectTarget,
   createSession: (spec?: LaunchSpec) => Promise<string>,
+  currentSessionId?: string,
 ): Promise<string | null> {
   const gated = sanitizeCommand(buildSshCommand(hostRow));
   if (!gated.ok) {
@@ -138,7 +139,7 @@ export async function connectToHost(
     return sessionId;
   }
 
-  const sessionId = useAppStore.getState().activeSessionId;
+  const sessionId = currentSessionId ?? useAppStore.getState().activeSessionId;
   // Re-checked at write time, not just at render time: the palette computed its
   // gate when it opened, and a command may have started since.
   const gate = canConnectHere(sessionId);
@@ -160,4 +161,27 @@ export async function connectToHost(
     return null;
   }
   return sessionId;
+}
+
+/** Re-enter an ad-hoc SSH target whose original command was not launched from
+ * the saved-host list. Sidecar freezes the parsed target, but deliberately does
+ * not retain arbitrary command text; quoting the target makes this a safe,
+ * minimal `ssh host` reconnect instead of replaying an untrusted shell line. */
+export async function connectToSshTarget(
+  target: string,
+  sessionId: string,
+): Promise<string | null> {
+  const command = sanitizeCommand(`ssh ${shQuote(target.trim())}`);
+  if (!command.ok) return null;
+
+  const gate = canConnectHere(sessionId);
+  if (!gate.ok) return null;
+
+  try {
+    await api.ptyWrite(sessionId, `${command.command}\r`);
+    return sessionId;
+  } catch (err) {
+    console.error(`reconnect write failed (${sessionId}):`, err);
+    return null;
+  }
 }
