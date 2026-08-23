@@ -75,6 +75,24 @@ fn web_fetch_tool() -> Value {
     })
 }
 
+/// Anthropic's direct/basic query search. Chat deliberately pairs this with
+/// basic fetch so results can be followed without enabling code execution.
+fn web_search_tool() -> Value {
+    json!({
+        "type": "web_search_20250305",
+        "name": "web_search",
+        "max_uses": 8,
+    })
+}
+
+fn web_citation(value: &Value) -> Option<crate::provider::WebCitation> {
+    Some(crate::provider::WebCitation {
+        url: value["url"].as_str()?.to_string(),
+        title: value["title"].as_str().unwrap_or_default().to_string(),
+        cited_text: value["cited_text"].as_str().unwrap_or_default().to_string(),
+    })
+}
+
 /// The `tools` array and the `tool_choice` that goes with it, or `None` when
 /// this turn offers no tools at all.
 ///
@@ -99,8 +117,12 @@ fn build_tools(
 
     // A server tool is not a `ToolDef`: no schema, never dispatched here, and
     // Anthropic runs it inside this very request.
-    let web = params.web_access && model.native_web_fetch;
-    if web {
+    let fetch = params.web.allows_fetch() && model.native_web_fetch;
+    let search = params.web.allows_search() && fetch && model.native_web_search;
+    if search {
+        wire.push(web_search_tool());
+    }
+    if fetch {
         wire.push(web_fetch_tool());
     }
     if wire.is_empty() {
@@ -113,7 +135,7 @@ fn build_tools(
         // dispatch, and sending `none` there would disable the web tool we just
         // added — enabling and disabling web in the same request.
         Some(json!({"type": "none"}))
-    } else if web && client_tools {
+    } else if (search || fetch) && client_tools {
         // Claude may call a server tool and a client tool in the SAME parallel
         // group. That returns `stop_reason: "tool_use"` with a `server_tool_use`
         // block carrying no result, which has to be echoed back verbatim or the
@@ -394,6 +416,11 @@ impl Provider for AnthropicProvider {
                                     .push_str(delta["partial_json"].as_str().unwrap_or_default());
                             }
                         }
+                        "citations_delta" => {
+                            if let Some(citation) = web_citation(&delta["citation"]) {
+                                out.push(ProviderEvent::WebCitation(citation));
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -511,7 +538,11 @@ mod tests {
             max_tokens: None,
             tool_choice,
             effort: Effort::Off,
-            web_access,
+            web: if web_access {
+                crate::provider::WebToolPolicy::FetchOnly
+            } else {
+                crate::provider::WebToolPolicy::Disabled
+            },
         }
     }
 
@@ -547,6 +578,34 @@ mod tests {
         assert!(web.get("description").is_none());
         // Above 1, or the agent can never follow a link off the fetched page.
         assert!(web["max_uses"].as_u64().unwrap() > 1);
+    }
+
+    #[test]
+    fn chat_web_search_is_paired_with_basic_fetch() {
+        let mut p = params(true, ToolChoiceMode::None);
+        p.web = crate::provider::WebToolPolicy::SearchAndFetch;
+        let (wire, choice) = build_tools(&[], &p, opus()).expect("paired server tools");
+        assert_eq!(wire.len(), 2);
+        assert!(wire
+            .iter()
+            .any(|tool| tool["type"] == "web_search_20250305"));
+        assert!(wire.iter().any(|tool| tool["type"] == "web_fetch_20250910"));
+        assert_eq!(choice, None);
+    }
+
+    #[test]
+    fn provider_web_citations_are_kept_structured() {
+        let citation = web_citation(&json!({
+            "type": "web_search_result_location",
+            "url": "https://example.com/research",
+            "title": "Research result",
+            "cited_text": "A grounded passage",
+        }))
+        .expect("citation with a URL");
+        assert_eq!(citation.url, "https://example.com/research");
+        assert_eq!(citation.title, "Research result");
+        assert_eq!(citation.cited_text, "A grounded passage");
+        assert!(web_citation(&json!({"title": "missing URL"})).is_none());
     }
 
     /// The trap that would make web silently "not work" in Ask mode: that mode

@@ -43,15 +43,17 @@ Modern AI terminals tend to be Electron apps that phone home for every completio
 - **Explain & fix** — one click on a failed block streams a diagnosis and a corrected command
 - **Ask** — a chat panel with your blocks, output, and files as context
 - **Agent mode** — multi-step runs that propose commands, execute them in your *visible* terminal, and read the real output
+- **Chat workspace** — a terminal-free, full-width conversation workspace with durable threads, files and images, Knowledge, supported native web search/fetch with sources, generated titles, and archive controls
 - **Resumable Agent runs** — bounded checkpoints preserve the latest safe transcript after completed model/tool rounds, including when a run pauses or a provider fails after commands have run
 - **Per-model reasoning effort** — `off → low → medium → high → max`, showing only the rungs each model actually accepts
 - **Image & file attachments** — drag, paste, or pick. An optional on-device vision sidecar transcribes screenshots so even a non-vision chat model can use them.
-- **Knowledge buckets** — attach local SQLite document buckets and compatible Qdrant collections to one Ask or Agent request, with UI-first ingestion and source-qualified citations.
+- **Knowledge buckets** — attach local SQLite document buckets and compatible Qdrant collections to Ask, Agent, or durable Chat conversations, with UI-first ingestion and source-qualified citations.
 - **Reusable Runbooks** *(experimental and disabled by default)* — versioned YAML checklists with immutable run snapshots, per-action approvals, visible-terminal execution, evidence, and canonical JSON/Markdown reports. See [the authoring guide](docs/RUNBOOKS.md).
 
 **Interface**
 - Six themes — Veviad Developer UI (default), Veviad UI, Midnight, Nord, Solarized Dark, Light — each with a matched terminal ANSI palette
 - Command palette (⌘K on macOS, Ctrl+Shift+K on Windows), persistent command history, and model switching
+- Persistent Terminal/Chat workspace switching; terminal panes remain alive while Chat uses the full content area
 - Stable Local + SSH Sidecar renderers, plus explicit **Rename with AI** for replacing manual or SSH-derived tab labels
 - Resizable AI panel that keeps its proportion when you resize the window
 

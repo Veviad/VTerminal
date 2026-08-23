@@ -62,6 +62,8 @@ function settings(runbooksEnabled: boolean, overrides: Partial<Settings> = {}): 
     archive_max_sessions: 50,
     archive_max_age_days: 30,
     ai_panel_open: true,
+    workspace_mode: "terminal",
+    active_chat_id: null,
     ai_panel_ratio: 0.3,
     ai_panel_width: 420,
     agent_max_iterations: 10,

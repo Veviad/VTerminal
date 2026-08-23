@@ -304,7 +304,7 @@ pub struct HistoryMessage {
 /// they existed, for the same reason `prompts::ASK` forbids predicting a command's
 /// output. The panel blocks Send in this case, so reaching here means the model
 /// was switched between typing and sending — a real race, not a hypothetical.
-fn gate_images(
+pub(crate) fn gate_images(
     model: &CatalogModel,
     images: Vec<crate::provider::ImagePart>,
 ) -> (Vec<crate::provider::ImagePart>, Option<String>) {
@@ -336,7 +336,7 @@ fn gate_images(
 }
 
 /// Fold a gate note into the user's own text, note last so the question leads.
-fn with_note(prompt: String, note: Option<String>) -> String {
+pub(crate) fn with_note(prompt: String, note: Option<String>) -> String {
     match note {
         None => prompt,
         Some(note) if prompt.trim().is_empty() => note,
@@ -444,7 +444,7 @@ pub async fn ai_ask(
 /// or reject it. Kept separate from the command so it is unit-testable without a
 /// loaded model, and applied unconditionally — a label goes straight into the UI,
 /// so "the prompt said not to" is not a guarantee.
-fn sanitize_title(raw: &str) -> Result<String, String> {
+pub(crate) fn sanitize_title(raw: &str) -> Result<String, String> {
     // First non-empty line only: a chatty model puts the label first and then
     // explains itself.
     let line = raw
@@ -521,7 +521,7 @@ pub async fn ai_name_session(
         tool_choice: ToolChoiceMode::None,
         effort: Effort::Off,
         // Naming a tab is cosmetic and must stay cheap: never worth a fetch.
-        web_access: false,
+        web: crate::provider::WebToolPolicy::Disabled,
     };
 
     let stream_task = tokio::spawn(async move {
@@ -1030,9 +1030,14 @@ async fn run_chat(
         max_tokens,
         tool_choice: ToolChoiceMode::None,
         effort,
-        web_access: allow_web
+        web: if allow_web
             && web_model
-            && crate::commands::settings::read_bool(app, "ai_web_access", true),
+            && crate::commands::settings::read_bool(app, "ai_web_access", true)
+        {
+            crate::provider::WebToolPolicy::FetchOnly
+        } else {
+            crate::provider::WebToolPolicy::Disabled
+        },
     };
 
     let stream_task = tokio::spawn(async move {
@@ -1054,12 +1059,19 @@ async fn run_chat(
             ProviderEvent::ReasoningDelta(delta) => {
                 let _ = on_event.send(StreamEvent::ThinkingDelta { content: delta });
             }
+            ProviderEvent::WebCitation(citation) => {
+                let _ = on_event.send(StreamEvent::WebCitation {
+                    url: citation.url,
+                    title: citation.title,
+                    cited_text: citation.cited_text,
+                });
+            }
             ProviderEvent::Usage {
                 prompt_tokens,
                 completion_tokens,
             } => usage = (prompt_tokens, completion_tokens),
             ProviderEvent::Done { .. } => break,
-            ProviderEvent::ToolCalls(_) => {} // ask/explain/suggest expose no tools
+            ProviderEvent::ToolCalls(_) => {} // ask/explain/suggest expose no client tools
         }
     }
     let tail = filter.flush();

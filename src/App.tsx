@@ -13,6 +13,7 @@ import { useUpdateStore } from "./stores/updateStore";
 import { isWindows } from "./lib/platform";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { listen } from "@tauri-apps/api/event";
+import { useChatStore } from "./stores/chatStore";
 
 /** A run that gets this far is treated as good, resetting the crash-loop guard. */
 const HEALTHY_AFTER_MS = 5_000;
@@ -73,6 +74,15 @@ export default function App() {
       try {
         const settings = await loadSettings();
         applyTheme(settings.theme);
+        // Chat owns separate durable state and must never become a new failure
+        // gate for terminal restoration. A damaged Chat row degrades to the
+        // Terminal workspace while the user's existing shells still restore.
+        try {
+          await useChatStore.getState().initialize(settings.workspace_mode, settings.active_chat_id);
+        } catch (error) {
+          console.error("Chat workspace restore failed:", error);
+          useChatStore.setState({ initialized: true, workspaceMode: "terminal" });
+        }
         // The model catalog gates the whole AI surface (see aiReady), so it has
         // to be present from boot — not only once the user opens Settings.
         void Promise.all([api.modelsCatalog(), api.getModelEffort()])

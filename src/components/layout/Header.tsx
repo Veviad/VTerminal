@@ -7,6 +7,8 @@ import { TabStrip } from "./TabStrip";
 import { S } from "../../lib/strings";
 import { RunbookStatusIndicator } from "../runbooks";
 import { selectLiveRunbookRun, useRunbookStore } from "../../stores/runbookStore";
+import { useChatStore } from "../../stores/chatStore";
+import { getTerm } from "../../lib/termRegistry";
 
 export function Header() {
   const settingsOpen = useAppStore((s) => s.settingsOpen);
@@ -30,6 +32,18 @@ export function Header() {
   const runsById = useRunbookStore((s) => s.runsById);
   const setRunbooksOpen = useRunbookStore((s) => s.setWorkspaceOpen);
   const visibleRun = selectLiveRunbookRun(activeRun, runsById);
+  const workspaceMode = useChatStore((s) => s.workspaceMode);
+  const switchWorkspace = (mode: "terminal" | "chat") => {
+    void useChatStore.getState().setWorkspaceMode(mode);
+    if (mode === "terminal") {
+      requestAnimationFrame(() => {
+        const sessionId = useAppStore.getState().activeSessionId;
+        const entry = sessionId ? getTerm(sessionId) : undefined;
+        entry?.fit.fit();
+        entry?.term.focus();
+      });
+    }
+  };
 
   // The chip names the model that will actually answer, which is the SELECTED
   // one — never the one that happens to still be resident. Preferring
@@ -55,9 +69,13 @@ export function Header() {
         <span className="text-[13px] font-medium text-text-secondary">{S.app.name}</span>
       </div>
 
-      {/* Center: tabs */}
+      {/* Center: workspace switch plus the active workspace's navigation. */}
       <div className="flex min-w-0 items-center gap-2 px-2">
-        <TabStrip />
+        <div className="flex rounded-lg bg-bg-hover p-0.5 text-[10px]" data-tauri-drag-region="false">
+          <button onClick={() => switchWorkspace("terminal")} className={`rounded-md px-2.5 py-1 ${workspaceMode === "terminal" ? "bg-bg-card text-text-primary shadow-sm" : "text-text-muted hover:text-text-secondary"}`}>Terminal</button>
+          <button onClick={() => switchWorkspace("chat")} className={`rounded-md px-2.5 py-1 ${workspaceMode === "chat" ? "bg-bg-card text-text-primary shadow-sm" : "text-text-muted hover:text-text-secondary"}`}>Chat</button>
+        </div>
+        {workspaceMode === "terminal" && <TabStrip />}
       </div>
 
       {/* Right: model chip + past sessions + settings. The AI panel toggle lives

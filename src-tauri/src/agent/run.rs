@@ -433,69 +433,31 @@ async fn one_round(
     cancel: tokio::sync::watch::Receiver<bool>,
     on_event: &Channel<StreamEvent>,
 ) -> Result<(Vec<ToolCall>, String, (u32, u32), FinishReason), ProviderError> {
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<ProviderEvent>(64);
-    let mut collected_calls: Vec<ToolCall> = Vec::new();
-    let mut text = String::new();
-    let mut usage = (0u32, 0u32);
-    let mut finish = FinishReason::Stop;
-
-    let msgs = messages;
-    let stream = provider.chat_stream(msgs, tools, params, cancel, tx);
-    tokio::pin!(stream);
-
-    let mut stream_done: Option<Result<(), ProviderError>> = None;
-    loop {
-        tokio::select! {
-            result = &mut stream, if stream_done.is_none() => {
-                stream_done = Some(result);
-            }
-            event = rx.recv() => {
-                let Some(event) = event else { break };
-                match event {
-                    ProviderEvent::TextDelta(delta) => {
-                        text.push_str(&delta);
-                        let _ = on_event.send(StreamEvent::Delta { content: delta });
-                    }
-                    ProviderEvent::ReasoningDelta(delta) => {
-                        let _ = on_event.send(StreamEvent::ThinkingDelta { content: delta });
-                    }
-                    ProviderEvent::ToolCalls(calls) => collected_calls.extend(calls),
-                    ProviderEvent::Usage { prompt_tokens, completion_tokens } => {
-                        usage = (prompt_tokens, completion_tokens);
-                    }
-                    ProviderEvent::Done { finish_reason } => finish = finish_reason,
+    let output =
+        crate::provider::round::run_round(provider, messages, tools, params, cancel, |event| {
+            match event {
+                ProviderEvent::TextDelta(content) => {
+                    let _ = on_event.send(StreamEvent::Delta {
+                        content: content.clone(),
+                    });
                 }
-            }
-        }
-        if stream_done.is_some() && rx.is_closed() {
-            // Drain whatever is left, then exit.
-            while let Ok(event) = rx.try_recv() {
-                match event {
-                    ProviderEvent::TextDelta(delta) => {
-                        text.push_str(&delta);
-                        let _ = on_event.send(StreamEvent::Delta { content: delta });
-                    }
-                    ProviderEvent::ReasoningDelta(delta) => {
-                        let _ = on_event.send(StreamEvent::ThinkingDelta { content: delta });
-                    }
-                    ProviderEvent::ToolCalls(calls) => collected_calls.extend(calls),
-                    ProviderEvent::Usage {
-                        prompt_tokens,
-                        completion_tokens,
-                    } => {
-                        usage = (prompt_tokens, completion_tokens);
-                    }
-                    ProviderEvent::Done { finish_reason } => finish = finish_reason,
+                ProviderEvent::ReasoningDelta(content) => {
+                    let _ = on_event.send(StreamEvent::ThinkingDelta {
+                        content: content.clone(),
+                    });
                 }
+                ProviderEvent::WebCitation(citation) => {
+                    let _ = on_event.send(StreamEvent::WebCitation {
+                        url: citation.url.clone(),
+                        title: citation.title.clone(),
+                        cited_text: citation.cited_text.clone(),
+                    });
+                }
+                _ => {}
             }
-            break;
-        }
-    }
-
-    match stream_done {
-        Some(Err(e)) => Err(e),
-        _ => Ok((collected_calls, text, usage, finish)),
-    }
+        })
+        .await?;
+    Ok((output.calls, output.text, output.usage, output.finish))
 }
 
 struct ToolCallContext<'a> {
@@ -572,7 +534,7 @@ async fn smart_assess_with_timeout(
         max_tokens: Some(180),
         tool_choice: ToolChoiceMode::Auto,
         effort: crate::provider::Effort::Low,
-        web_access: false,
+        web: crate::provider::WebToolPolicy::Disabled,
     };
     let (tx, mut rx) = tokio::sync::mpsc::channel(32);
     let future = provider.chat_stream(messages, vec![tool], params, cancel, tx);
@@ -1242,7 +1204,11 @@ pub async fn run_agent(
             max_tokens: Some(round_max_tokens),
             tool_choice: ToolChoiceMode::Auto,
             effort: config.effort,
-            web_access: config.web_access,
+            web: if config.web_access {
+                crate::provider::WebToolPolicy::FetchOnly
+            } else {
+                crate::provider::WebToolPolicy::Disabled
+            },
         };
         stats.model_rounds = stats.model_rounds.saturating_add(1);
         let round = one_round(

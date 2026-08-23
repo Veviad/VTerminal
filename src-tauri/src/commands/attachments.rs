@@ -140,6 +140,45 @@ pub fn remove_archive_attachments(
     remove_archive_attachments_at(&root, session_id, remove_session_dir, stored_paths);
 }
 
+/// Remove only files whose final Chat owner was deleted.
+///
+/// A Chat can contain a shared path beside an unshared path in the same owner
+/// directory. Removing paths one by one preserves the shared file; `remove_dir`
+/// then drops the owner directory only after its last referenced file is gone.
+pub fn remove_chat_attachments(app: &AppHandle<Wry>, stored_paths: &[String]) {
+    let Ok(root) = attachments_root(app) else {
+        return;
+    };
+    remove_chat_attachment_paths_at(&root, stored_paths);
+}
+
+pub(crate) fn remove_chat_attachment_paths_at(root: &Path, paths: &[String]) {
+    let Ok(canonical_root) = std::fs::canonicalize(root) else {
+        return;
+    };
+    let mut dirs = HashSet::new();
+    for stored in paths {
+        let path = Path::new(stored);
+        let Some(parent) = path.parent() else {
+            continue;
+        };
+        let Ok(canonical_parent) = std::fs::canonicalize(parent) else {
+            continue;
+        };
+        if canonical_parent.parent() != Some(canonical_root.as_path()) {
+            continue;
+        }
+        if std::fs::remove_file(path).is_ok() {
+            dirs.insert(canonical_parent);
+        }
+    }
+    for dir in dirs {
+        // Unlike archive cleanup, Chat directories may still contain a file
+        // referenced by another thread. Only remove an empty owner directory.
+        let _ = std::fs::remove_dir(dir);
+    }
+}
+
 pub(crate) fn remove_archive_attachments_at(
     root: &Path,
     session_id: &str,
@@ -238,6 +277,32 @@ mod tests {
         );
         assert!(!source.exists());
         assert!(refused.exists());
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn chat_cleanup_preserves_shared_siblings_until_the_last_owner() {
+        let base = std::env::temp_dir().join(format!(
+            "vterminal-chat-attachment-cleanup-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let root = base.join("attachments");
+        let owner = root.join("chat-a");
+        std::fs::create_dir_all(&owner).unwrap();
+        let unique = owner.join("unique.png");
+        let shared = owner.join("shared.png");
+        std::fs::write(&unique, b"unique").unwrap();
+        std::fs::write(&shared, b"shared").unwrap();
+
+        remove_chat_attachment_paths_at(&root, &[unique.to_string_lossy().into_owned()]);
+        assert!(!unique.exists());
+        assert!(shared.exists());
+        assert!(owner.exists());
+
+        remove_chat_attachment_paths_at(&root, &[shared.to_string_lossy().into_owned()]);
+        assert!(!shared.exists());
+        assert!(!owner.exists());
 
         let _ = std::fs::remove_dir_all(base);
     }

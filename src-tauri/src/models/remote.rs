@@ -173,6 +173,7 @@ struct Spec {
     wire_model: String,
     context_tokens: u32,
     supports_vision: bool,
+    supports_tools: bool,
 }
 
 /// Past this many distinct configurations we stop being silent about the leak.
@@ -218,6 +219,8 @@ fn intern(spec: Spec) -> &'static CatalogModel {
         // invariant is held here by hand (and by a test below).
         default_effort: Effort::Off,
         supports_temperature: true,
+        supports_tools: spec.supports_tools,
+        native_web_search: false,
         // Server-side web fetch is an Anthropic Messages API feature; nothing
         // reachable over chat-completions has it. Never read from config.
         native_web_fetch: false,
@@ -249,6 +252,7 @@ fn spec_for(server: &RemoteServer, model: &RemoteModel) -> Spec {
         wire_model: model.wire_model.clone(),
         context_tokens: model.context_tokens,
         supports_vision: model.supports_vision,
+        supports_tools: model.supports_tools,
     }
 }
 
@@ -461,6 +465,7 @@ mod tests {
         // `catalog`'s default_effort_is_always_supported cannot see this entry.
         assert_eq!(m.default_effort, Effort::Off);
         assert!(!m.native_web_fetch);
+        assert!(!m.native_web_search);
         assert!(m.local.is_none());
         assert_eq!(m.provider, ProviderId::Remote);
         assert_eq!(m.wire_model, "qwen3:8b");

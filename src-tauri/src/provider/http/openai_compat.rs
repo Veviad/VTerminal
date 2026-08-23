@@ -957,7 +957,7 @@ mod tests {
                     temperature: Some(0.7),
                     max_tokens: None,
                     tool_choice: ToolChoiceMode::None,
-                    web_access: false,
+                    web: crate::provider::WebToolPolicy::Disabled,
                     effort: Effort::High,
                 },
                 cancel,

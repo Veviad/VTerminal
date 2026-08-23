@@ -20,6 +20,8 @@ function localEntry(id: string): CatalogEntry {
     efforts: ["off", "low", "medium", "high"],
     default_effort: "medium",
     supports_temperature: true,
+    supports_tools: true,
+    native_web_search: false,
     native_web_fetch: false,
     supports_vision: false,
     local: {

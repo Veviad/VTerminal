@@ -126,6 +126,11 @@ pub enum StreamEvent {
     ThinkingDelta {
         content: String,
     },
+    WebCitation {
+        url: String,
+        title: String,
+        cited_text: String,
+    },
     /// Agent proposes a command; nothing runs until respond_to_approval.
     ///
     /// Emitted only after backend mode/rule/classification evaluation concludes

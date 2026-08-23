@@ -51,7 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     max_tokens: Some(256),
                     tool_choice: ToolChoiceMode::None,
                     effort: Effort::Off,
-                    web_access: false,
+                    web: vterminal_lib::provider::WebToolPolicy::Disabled,
                 },
                 cancel_rx,
                 tx,

@@ -8,6 +8,7 @@ import { revokeAllLiveRunbookRuns } from "../lib/runbookLiveJobs";
 import type { EvidenceRecordingPolicy } from "../lib/runbooks";
 import { updateAllTermOptions } from "../lib/termRegistry";
 import { clampPanelRatio } from "../lib/panelRatio";
+import { useChatStore } from "../stores/chatStore";
 
 // Load-mirror / save-partial pattern (Cowork useSettings): hydrate the store
 // from Rust on mount; every save writes through Rust first, then updates the
@@ -153,6 +154,8 @@ export function useSettings() {
       useAppStore.setState({ archiveMaxAgeDays: patch.archive_max_age_days });
     if (patch.ai_panel_open !== undefined)
       useAppStore.setState({ aiPanelOpen: patch.ai_panel_open });
+    if (patch.workspace_mode !== undefined)
+      useChatStore.setState({ workspaceMode: patch.workspace_mode });
     if (patch.ai_panel_ratio !== undefined)
       useAppStore.setState({ aiPanelRatio: clampPanelRatio(patch.ai_panel_ratio) });
     if (patch.auto_load_model_on_start !== undefined)

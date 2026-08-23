@@ -15,6 +15,7 @@ import { S } from "../../lib/strings";
 import type { HistoryEntry, SshHost } from "../../lib/types";
 import { useRunbookStore } from "../../stores/runbookStore";
 import { shortcutFor, usesAlternateAction } from "../../lib/keymap";
+import { useChatStore } from "../../stores/chatStore";
 
 interface PaletteItem {
   id: string;
@@ -61,6 +62,30 @@ export function CommandPalette() {
     // the memo built would act on whatever tab was active back then.
     const live = () => useAppStore.getState();
     const actions: PaletteItem[] = [
+      {
+        id: "act-workspace-terminal",
+        section: "actions",
+        label: "Switch to Terminal workspace",
+        keywords: "workspace terminal shell",
+        run: () => void useChatStore.getState().setWorkspaceMode("terminal"),
+      },
+      {
+        id: "act-workspace-chat",
+        section: "actions",
+        label: "Switch to Chat workspace",
+        keywords: "workspace conversation assistant",
+        run: () => void useChatStore.getState().setWorkspaceMode("chat"),
+      },
+      {
+        id: "act-new-chat",
+        section: "actions",
+        label: "New chat",
+        hint: useChatStore.getState().workspaceMode === "chat" ? shortcutFor("new-tab") : undefined,
+        run: () => {
+          void useChatStore.getState().setWorkspaceMode("chat");
+          void useChatStore.getState().createChat();
+        },
+      },
       {
         id: "act-new-tab",
         section: "actions",
