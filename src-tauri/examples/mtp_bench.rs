@@ -168,7 +168,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let Ok(pid) = sysinfo::get_current_pid() else {
             return 0;
         };
-        let system = sysinfo::System::new_all();
+        let mut system = sysinfo::System::new();
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[pid]),
+            false,
+            sysinfo::ProcessRefreshKind::nothing()
+                .with_memory()
+                .without_tasks(),
+        );
         system.process(pid).map_or(0, sysinfo::Process::memory)
     }
 

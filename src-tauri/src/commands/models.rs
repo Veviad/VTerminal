@@ -36,6 +36,16 @@ fn find_artifact(
     installed.iter().find(|model| model.id == id).cloned()
 }
 
+fn remove_legacy_after_upgrade(
+    models_dir: &std::path::Path,
+    legacy: &registry::LocalModel,
+) -> Result<(), String> {
+    // Keep the registry entry until deletion succeeds. A failed cleanup then
+    // remains visible and manageable instead of leaving orphaned weights.
+    download::delete_model_files(models_dir, legacy)?;
+    registry::remove(models_dir, &legacy.id).map(|_| ())
+}
+
 fn resolve_install(spec: catalog::LocalSpec, installed: &[registry::LocalModel]) -> LocalInstall {
     let preferred = find_artifact(installed, spec.artifact);
     match spec.mtp {
@@ -262,16 +272,8 @@ pub async fn models_download(
             .legacy()
             .and_then(|artifact| find_artifact(&installed, artifact))
         {
-            match registry::remove(&dir, &legacy.id) {
-                Ok(Some(model)) => {
-                    if let Err(error) = download::delete_model_files(&dir, &model) {
-                        log::warn!("MTP upgrade installed but legacy weights could not be removed: {error}");
-                    }
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    log::warn!("MTP upgrade installed but legacy registry cleanup failed: {error}")
-                }
+            if let Err(error) = remove_legacy_after_upgrade(&dir, &legacy) {
+                log::warn!("MTP upgrade installed but legacy cleanup failed: {error}");
             }
         }
         on_event
@@ -636,6 +638,32 @@ mod tests {
         let ready = resolve_install(gemma, &[installed(gemma.artifact), installed(sidecar)]);
         assert_eq!(ready.mtp.state, MtpInstallState::Ready);
         assert!(ready.sidecar.is_some());
+    }
+
+    #[test]
+    fn failed_legacy_file_cleanup_preserves_its_registry_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let artifact = catalog::find("local/qwen3.5-4b")
+            .unwrap()
+            .local
+            .unwrap()
+            .mtp
+            .legacy()
+            .unwrap();
+        let file_path = temp.path().join("legacy-as-directory.gguf");
+        std::fs::create_dir(&file_path).unwrap();
+        let legacy = registry::make_local_model(
+            artifact.repo_id,
+            artifact.filename,
+            &file_path,
+            artifact.size_bytes,
+        );
+        registry::add(temp.path(), legacy.clone()).unwrap();
+
+        assert!(remove_legacy_after_upgrade(temp.path(), &legacy).is_err());
+        assert!(registry::load(temp.path())
+            .iter()
+            .any(|model| model.id == legacy.id));
     }
 
     #[test]

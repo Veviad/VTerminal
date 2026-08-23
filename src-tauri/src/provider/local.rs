@@ -1508,27 +1508,24 @@ fn generate(
                         drafted = drafted.saturating_add(draft.len() as u64);
                         let base = n_past;
                         batch.clear();
-                        if let Err(error) = batch.add(id_last, n_past, &[0], true) {
+                        if let Err(error) = batch.add(id_last, base, &[0], true) {
                             fallback_reason = Some(format!("MTP batch add failed: {error}"));
                             break;
                         }
-                        n_past += 1;
                         for (index, token) in draft.iter().enumerate() {
-                            if let Err(error) = batch.add(*token, n_past + index as i32, &[0], true)
+                            if let Err(error) =
+                                batch.add(*token, base + 1 + index as i32, &[0], true)
                             {
                                 fallback_reason = Some(format!("MTP batch add failed: {error}"));
-                                n_past = base;
                                 break 'generate;
                             }
                         }
                         if let Err(error) = speculative.target_context_mut().decode(&mut batch) {
                             fallback_reason = Some(format!("MTP target decode failed: {error}"));
-                            n_past = base;
                             break;
                         }
                         if let Err(error) = speculative.process(&batch) {
                             fallback_reason = Some(format!("MTP state update failed: {error}"));
-                            n_past = base;
                             break;
                         }
 
@@ -1547,7 +1544,10 @@ fn generate(
                             .err()
                             .map(|error| format!("MTP acceptance failed: {error}"));
                         accepted = accepted.saturating_add(accepted_now as u64);
-                        n_past += accepted_now as i32;
+                        // The target batch decoded `id_last` at `base`, followed by the
+                        // draft. Keep that token and the accepted draft prefix. The next
+                        // sampled token remains pending for the following decode.
+                        n_past = mtp_next_position(base, accepted_now);
 
                         for token in sampled {
                             prompt_tokens.push(id_last);
@@ -1591,11 +1591,20 @@ fn generate(
                     if let Some(reason) = fallback_reason {
                         log::warn!("{reason}; continuing with standard decoding");
                         update_generation_status("standard", Some(reason));
-                        let _ = speculative.target_context_mut().kv_cache_seq_rm(
-                            0,
-                            Some(n_past.max(0) as u32),
-                            None,
-                        );
+                        // Rebuild from confirmed history instead of trusting partially
+                        // updated speculative KV or recurrent state. This also makes a
+                        // failed rollback recoverable without duplicating streamed text.
+                        speculative.target_context_mut().clear_kv_cache();
+                        if !prompt_tokens.is_empty() {
+                            prefill_standard(
+                                speculative.target_context_mut(),
+                                &prompt_tokens,
+                                &mut batch,
+                                cancel,
+                                tx,
+                            )?;
+                        }
+                        n_past = prompt_tokens.len() as i32;
                         finish = standard_decode(
                             speculative.target_context_mut(),
                             model,
@@ -1700,6 +1709,11 @@ fn accepted_draft_prefix(
         .zip(draft)
         .take_while(|(sampled, drafted)| sampled == drafted)
         .count()
+}
+
+fn mtp_next_position(base: i32, accepted_draft_tokens: usize) -> i32 {
+    base.saturating_add(1)
+        .saturating_add(i32::try_from(accepted_draft_tokens).unwrap_or(i32::MAX))
 }
 
 fn update_generation_status(mode: &str, reason: Option<String>) {
@@ -1885,6 +1899,16 @@ mod tests {
         );
         assert_eq!(accepted_draft_prefix(&draft, &draft), 3);
         assert_eq!(accepted_draft_prefix(&[LlamaToken(99)], &draft), 0);
+    }
+
+    #[test]
+    fn mtp_rollback_starts_at_the_first_unaccepted_position() {
+        // `id_last` is decoded at base. With no accepted draft tokens, the
+        // pending sampled replacement belongs at base + 1.
+        assert_eq!(mtp_next_position(17, 0), 18);
+        // Accepted draft tokens stay in the cache. Rollback begins immediately
+        // after them, where the pending target-sampled token will be decoded.
+        assert_eq!(mtp_next_position(17, 3), 21);
     }
 
     fn drain(splitter: &mut OutputSplitter, chunks: &[&str]) -> (String, String) {
