@@ -688,8 +688,8 @@ fn split_segments(command: &str) -> Option<Vec<Segment>> {
                 if chars.peek() == Some(&'&') {
                     chars.next();
                     boundary!();
-                } else if bare.trim_end().ends_with('>') {
-                    // `2>&1` is fd plumbing, not job control.
+                } else if bare.trim_end().ends_with('>') || bare.trim_end().ends_with('<') {
+                    // `2>&1` / `0<&3` are fd plumbing, not job control.
                     text.push(ch);
                     bare.push(ch);
                 } else {
@@ -749,12 +749,15 @@ fn writes_file(bare: &str) -> bool {
     false
 }
 
-/// Split on whitespace, honouring simple quoting. Mirrors `tokenizeCommand` in
-/// `lib/nesting.ts` so the two halves of the app agree on what a word is.
+/// Split on whitespace, honouring simple quoting. Unquoted descriptor routing
+/// is shell structure rather than a program argument, so it is removed here
+/// once for every semantic classifier. Quoted or malformed lookalikes remain
+/// words and therefore keep the fail-closed answer of strict parsers.
 fn tokenize(segment: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = String::new();
     let mut quote: Option<char> = None;
+    let mut quoted = false;
     for ch in segment.trim().chars() {
         if let Some(q) = quote {
             if ch == q {
@@ -766,17 +769,23 @@ fn tokenize(segment: &str) -> Vec<String> {
         }
         if ch == '\'' || ch == '"' {
             quote = Some(ch);
+            quoted = true;
             continue;
         }
         if ch.is_whitespace() {
             if !current.is_empty() {
-                out.push(std::mem::take(&mut current));
+                if quoted || !is_fd_duplication(&current) {
+                    out.push(std::mem::take(&mut current));
+                } else {
+                    current.clear();
+                }
             }
+            quoted = false;
             continue;
         }
         current.push(ch);
     }
-    if !current.is_empty() {
+    if !current.is_empty() && (quoted || !is_fd_duplication(&current)) {
         out.push(current);
     }
     out
@@ -898,7 +907,12 @@ fn gh_is_read_only(segment: &str) -> bool {
         return false;
     }
     let action = args.get(1).map(String::as_str).unwrap_or("");
-    if action.starts_with('-') || args.iter().any(|arg| arg == "--web") {
+    if action.starts_with('-')
+        || args.iter().any(|arg| arg == "--web" || arg == "-w")
+        || (group == "auth"
+            && action == "status"
+            && args.iter().any(|arg| arg == "--show-token" || arg == "-t"))
+    {
         return false;
     }
 
@@ -914,6 +928,19 @@ fn gh_is_read_only(segment: &str) -> bool {
             | ("label", "list")
             | ("search", "code" | "commits" | "issues" | "prs" | "repos")
     )
+}
+
+/// An exact shell file-descriptor duplication token such as `2>&1`, `0<&3`,
+/// or `1>&-`.
+/// These only route or close an existing descriptor; they never name a file.
+/// Keep the grammar exact so malformed lookalikes cannot disappear from the
+/// semantic argument stream.
+fn is_fd_duplication(arg: &str) -> bool {
+    let Some((source, target)) = arg.split_once(">&").or_else(|| arg.split_once("<&")) else {
+        return false;
+    };
+    (source.is_empty() || source.chars().all(|ch| ch.is_ascii_digit()))
+        && (target == "-" || (!target.is_empty() && target.chars().all(|ch| ch.is_ascii_digit())))
 }
 
 /// `gh api` defaults to GET, but body fields silently switch it to POST and
@@ -979,7 +1006,18 @@ fn gh_api_is_read_only(args: &[String]) -> bool {
         {
             return false;
         }
-        if ["--hostname", "--cache", "--jq", "--template"].contains(&arg) {
+        if [
+            "--hostname",
+            "--cache",
+            "--jq",
+            "-q",
+            "--template",
+            "-t",
+            "--preview",
+            "-p",
+        ]
+        .contains(&arg)
+        {
             if args.get(i + 1).is_none() {
                 return false;
             }
@@ -987,9 +1025,25 @@ fn gh_api_is_read_only(args: &[String]) -> bool {
             continue;
         }
         if [
+            "--hostname=",
+            "--cache=",
+            "--jq=",
+            "--template=",
+            "--preview=",
+        ]
+        .iter()
+        .any(|prefix| {
+            arg.strip_prefix(prefix)
+                .is_some_and(|value| !value.is_empty())
+        }) {
+            i += 1;
+            continue;
+        }
+        if [
             "--paginate",
             "--slurp",
             "--include",
+            "-i",
             "--verbose",
             "--silent",
         ]
@@ -1202,6 +1256,85 @@ mod tests {
     }
 
     #[test]
+    fn github_read_families_accept_shell_fd_routing() {
+        // This is a grammar invariant, not a command-string allowlist: every
+        // supported GitHub read family must keep its classification when the
+        // shell routes or closes a descriptor around it.
+        let reads = [
+            "gh auth status",
+            "gh issue list --repo Veviad/VTerminal",
+            "gh issue status --repo Veviad/VTerminal",
+            "gh issue view 42 --repo Veviad/VTerminal",
+            "gh pr checks 44 --repo Veviad/VTerminal",
+            "gh pr diff 44 --repo Veviad/VTerminal",
+            "gh pr list --repo Veviad/VTerminal",
+            "gh pr status --repo Veviad/VTerminal",
+            "gh pr view 44 --repo Veviad/VTerminal",
+            "gh repo list Veviad",
+            "gh repo view Veviad/VTerminal",
+            "gh release list --repo Veviad/VTerminal",
+            "gh release view v0.3.2 --repo Veviad/VTerminal",
+            "gh run list --repo Veviad/VTerminal",
+            "gh run view 123 --repo Veviad/VTerminal",
+            "gh workflow list --repo Veviad/VTerminal",
+            "gh workflow view CI --repo Veviad/VTerminal",
+            "gh label list --repo Veviad/VTerminal",
+            "gh search code policy --repo Veviad/VTerminal",
+            "gh search commits policy --repo Veviad/VTerminal",
+            "gh search issues policy --repo Veviad/VTerminal",
+            "gh search prs policy --repo Veviad/VTerminal",
+            "gh search repos veviad --limit 20 --json fullName,url",
+            "gh api user/orgs --jq '.[].login'",
+            "gh api orgs/Veviad/packages?package_type=container -q '.[].name'",
+            "gh api repos/Veviad/VTerminal/releases --method=GET --paginate --slurp",
+            "gh api repos/Veviad/VTerminal --hostname=github.com --cache=1h --jq=.name --template='{{.}}' --preview=nebula",
+            "gh api -i -p nebula repos/Veviad/VTerminal -t '{{.name}}'",
+        ];
+        for cmd in reads {
+            for routing in ["2>&1", "1>&2", "3>&-", ">&1", "0<&3", "<&0"] {
+                let routed = format!("{cmd} {routing}");
+                assert!(read_only(&routed), "should remain read-only: {routed}");
+            }
+        }
+
+        let chained = reads
+            .iter()
+            .map(|cmd| format!("{cmd} 2>&1"))
+            .collect::<Vec<_>>()
+            .join("; echo '---'; ");
+        assert!(read_only(&chained), "read-only chain should auto-run");
+    }
+
+    #[test]
+    fn shell_fd_routing_never_turns_github_mutations_into_reads() {
+        for cmd in [
+            "gh api repos/Veviad/VTerminal/issues -f title=x",
+            "gh api --method POST repos/Veviad/VTerminal/issues",
+            "gh api -XDELETE repos/Veviad/VTerminal/issues/42",
+            "gh issue create --title x --body y",
+            "gh issue edit 42 --title x",
+            "gh pr merge 42",
+        ] {
+            for routing in ["2>&1", "1>&2", "3>&-", ">&1", "0<&3", "<&0"] {
+                let routed = format!("{cmd} {routing}");
+                assert!(!read_only(&routed), "must remain approval-gated: {routed}");
+            }
+        }
+    }
+
+    #[test]
+    fn descriptor_routing_is_removed_by_the_shared_shell_tokenizer() {
+        assert_eq!(
+            tokenize("tool before 2>&1 0<&3 after"),
+            ["tool", "before", "after"]
+        );
+        assert_eq!(
+            tokenize("tool '2>&1' \"0<&3\" 2>&1oops"),
+            ["tool", "2>&1", "0<&3", "2>&1oops"]
+        );
+    }
+
+    #[test]
     fn fails_closed_on_anything_that_could_write() {
         for cmd in [
             "rm -rf build",
@@ -1245,12 +1378,17 @@ mod tests {
             "gh api -XDELETE repos/Veviad/VTerminal/issues/42",
             "gh api repos/Veviad/VTerminal/issues -- -f title=x",
             "gh api -- repos/Veviad/VTerminal/issues",
+            "gh api user/orgs 2>&1oops",
+            "gh api user/orgs '2>&1'",
             "gh api graphql -f query='{ viewer { login } }'",
             "gh api repos/Veviad/VTerminal/issues -H 'X-HTTP-Method-Override: DELETE'",
             "gh issue create --title x --body y",
             "gh issue edit 42 --title x",
             "gh pr merge 42",
             "gh pr view 42 --web",
+            "gh pr view 42 -w",
+            "gh auth status --show-token",
+            "gh auth status -t",
             "gh extension-command something",
             "gh --repo Veviad/VTerminal issue view 42",
         ] {
