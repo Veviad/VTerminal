@@ -177,12 +177,17 @@ pub struct CatalogModel {
     /// Claude Opus 5 and Sonnet 5 reject `temperature` with a 400, as do the
     /// GPT-5.6 reasoning models — the request builder must omit it entirely.
     pub supports_temperature: bool,
+    /// Whether the model/provider path can execute app-owned client tools.
+    pub supports_tools: bool,
+    /// Whether this model supports Anthropic's server-side web search tool on
+    /// the provider path used by the app.
+    pub native_web_search: bool,
     /// Whether this model serves a SERVER-SIDE web fetch on the wire shape
     /// this app speaks. Anthropic's Messages API does; OpenAI and Mistral
     /// both keep web tools on a different API (Responses / Conversations)
     /// than the chat-completions call `openai_compat` makes, so they are
     /// false here even though the models themselves are capable. Local
-    /// GGUFs have nothing. False means the app falls back to the curl tier.
+    /// GGUFs have nothing.
     ///
     /// Backend-only, like `supports_temperature` — there is no picker for it.
     pub native_web_fetch: bool,
@@ -266,6 +271,8 @@ pub const CATALOG: &[CatalogModel] = &[
         efforts: TOGGLE_PLUS,
         default_effort: Effort::Low,
         supports_temperature: true,
+        supports_tools: true,
+        native_web_search: false,
         native_web_fetch: false,
         supports_vision: false,
         local: Some(LocalSpec {
@@ -287,6 +294,8 @@ pub const CATALOG: &[CatalogModel] = &[
         efforts: TOGGLE_PLUS,
         default_effort: Effort::Medium,
         supports_temperature: true,
+        supports_tools: true,
+        native_web_search: false,
         native_web_fetch: false,
         supports_vision: false,
         local: Some(LocalSpec {
@@ -308,6 +317,8 @@ pub const CATALOG: &[CatalogModel] = &[
         efforts: TOGGLE_PLUS,
         default_effort: Effort::Medium,
         supports_temperature: true,
+        supports_tools: true,
+        native_web_search: false,
         native_web_fetch: false,
         supports_vision: false,
         local: Some(LocalSpec {
@@ -329,6 +340,8 @@ pub const CATALOG: &[CatalogModel] = &[
         efforts: TOGGLE_PLUS,
         default_effort: Effort::Low,
         supports_temperature: true,
+        supports_tools: true,
+        native_web_search: false,
         native_web_fetch: false,
         supports_vision: false,
         local: Some(LocalSpec {
@@ -350,6 +363,8 @@ pub const CATALOG: &[CatalogModel] = &[
         efforts: TOGGLE_PLUS,
         default_effort: Effort::Medium,
         supports_temperature: true,
+        supports_tools: true,
+        native_web_search: false,
         native_web_fetch: false,
         supports_vision: false,
         local: Some(LocalSpec {
@@ -371,6 +386,8 @@ pub const CATALOG: &[CatalogModel] = &[
         efforts: TOGGLE_PLUS,
         default_effort: Effort::Medium,
         supports_temperature: true,
+        supports_tools: true,
+        native_web_search: false,
         native_web_fetch: false,
         supports_vision: false,
         local: Some(LocalSpec {
@@ -395,6 +412,8 @@ pub const CATALOG: &[CatalogModel] = &[
         efforts: TOGGLE_PLUS,
         default_effort: Effort::Low,
         supports_temperature: true,
+        supports_tools: true,
+        native_web_search: true,
         native_web_fetch: true,
         supports_vision: true,
         local: None,
@@ -411,6 +430,8 @@ pub const CATALOG: &[CatalogModel] = &[
         default_effort: Effort::High,
         // Sonnet 5 rejects temperature/top_p/top_k with a 400.
         supports_temperature: false,
+        supports_tools: true,
+        native_web_search: true,
         native_web_fetch: true,
         supports_vision: true,
         local: None,
@@ -428,6 +449,8 @@ pub const CATALOG: &[CatalogModel] = &[
         // Same 400 as Sonnet 5. Also: disabling thinking is only legal at
         // effort <= high, which the adapter enforces.
         supports_temperature: false,
+        supports_tools: true,
+        native_web_search: true,
         native_web_fetch: true,
         supports_vision: true,
         local: None,
@@ -444,6 +467,8 @@ pub const CATALOG: &[CatalogModel] = &[
         efforts: FULL,
         default_effort: Effort::Low,
         supports_temperature: false,
+        supports_tools: true,
+        native_web_search: false,
         native_web_fetch: false,
         supports_vision: true,
         local: None,
@@ -459,6 +484,8 @@ pub const CATALOG: &[CatalogModel] = &[
         efforts: FULL,
         default_effort: Effort::Medium,
         supports_temperature: false,
+        supports_tools: true,
+        native_web_search: false,
         native_web_fetch: false,
         supports_vision: true,
         local: None,
@@ -474,6 +501,8 @@ pub const CATALOG: &[CatalogModel] = &[
         efforts: FULL,
         default_effort: Effort::High,
         supports_temperature: false,
+        supports_tools: true,
+        native_web_search: false,
         native_web_fetch: false,
         supports_vision: true,
         local: None,
@@ -490,6 +519,8 @@ pub const CATALOG: &[CatalogModel] = &[
         efforts: MISTRAL_TOGGLE,
         default_effort: Effort::Off,
         supports_temperature: true,
+        supports_tools: true,
+        native_web_search: false,
         native_web_fetch: false,
         supports_vision: true,
         local: None,
@@ -506,6 +537,8 @@ pub const CATALOG: &[CatalogModel] = &[
         // A dedicated reasoning model defaults to reasoning.
         default_effort: Effort::High,
         supports_temperature: true,
+        supports_tools: true,
+        native_web_search: false,
         native_web_fetch: false,
         supports_vision: true,
         local: None,
@@ -522,6 +555,8 @@ pub const CATALOG: &[CatalogModel] = &[
         efforts: NO_REASONING,
         default_effort: Effort::Off,
         supports_temperature: true,
+        supports_tools: true,
+        native_web_search: false,
         native_web_fetch: false,
         // The one entry in this column not yet confirmed against a real
         // request. Mistral Large 3 already rejects `reasoning_effort`
@@ -569,6 +604,11 @@ mod tests {
             assert!(
                 m.id.starts_with(&format!("{}/", m.provider.as_str())),
                 "{} is not namespaced under its provider",
+                m.id
+            );
+            assert_eq!(
+                m.native_web_search, m.native_web_fetch,
+                "{} must pair native search and fetch",
                 m.id
             );
         }

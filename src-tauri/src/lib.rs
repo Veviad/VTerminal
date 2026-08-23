@@ -240,6 +240,15 @@ pub fn run() {
             commands::archive::archive_delete,
             commands::archive::archive_clear,
             commands::archive::archive_prune,
+            // terminal-independent Chat workspace
+            commands::chat::chat_list,
+            commands::chat::chat_get,
+            commands::chat::chat_save,
+            commands::chat::chat_set_archived,
+            commands::chat::chat_update_title,
+            commands::chat::chat_delete,
+            commands::chat_ai::chat_start,
+            commands::chat_ai::ai_name_chat,
             // attachments
             commands::attachments::attachment_put,
             commands::attachments::attachment_read,

@@ -7,6 +7,7 @@ import { getTerm } from "../lib/termRegistry";
 import { aiCancel } from "../lib/tauri";
 import { toggleAiPanel } from "../lib/aiPanel";
 import { isUpdateExitBarrier, useUpdateStore } from "../stores/updateStore";
+import { useChatStore } from "../stores/chatStore";
 
 /** Close the composer, cancelling any in-flight generation — otherwise the
  *  abandoned stream later resurrects a stale proposal into the closed UI. */
@@ -40,7 +41,11 @@ export function useGlobalShortcuts(): void {
       };
       switch (action) {
         case "new-tab":
-          void createSession().catch(() => {});
+          if (useChatStore.getState().workspaceMode === "chat") {
+            void useChatStore.getState().createChat().catch(() => {});
+          } else {
+            void createSession().catch(() => {});
+          }
           break;
         case "close-tab":
           if (s.activeSessionId) void closeSession(s.activeSessionId);

@@ -109,7 +109,7 @@ async fn round(
             // Authoring is offline reasoning about a machine the model cannot
             // reach. A fetch here would only pull unreviewed text into a
             // document that later runs commands.
-            web_access: false,
+            web: crate::provider::WebToolPolicy::Disabled,
             effort,
         },
         cancel,

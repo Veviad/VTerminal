@@ -7,6 +7,7 @@ pub mod chat_template;
 pub mod http;
 #[cfg(feature = "local-llm")]
 pub mod local;
+pub mod round;
 #[cfg(feature = "local-llm")]
 pub mod vision;
 
@@ -151,6 +152,35 @@ pub struct ToolCall {
     pub arguments: String,
 }
 
+/// One source attached to provider-grounded web prose. Kept structured until
+/// the renderer so an untrusted URL never becomes raw model-authored markdown.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebCitation {
+    pub url: String,
+    pub title: String,
+    #[serde(default)]
+    pub cited_text: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WebToolPolicy {
+    Disabled,
+    Unsupported,
+    FetchOnly,
+    SearchAndFetch,
+}
+
+impl WebToolPolicy {
+    pub fn allows_fetch(self) -> bool {
+        matches!(self, Self::FetchOnly | Self::SearchAndFetch)
+    }
+
+    pub fn allows_search(self) -> bool {
+        matches!(self, Self::SearchAndFetch)
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolDef {
     pub name: String,
@@ -173,8 +203,8 @@ pub struct ChatParams {
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
     pub tool_choice: ToolChoiceMode,
-    /// Whether this turn may reach the web using the PROVIDER's own server-side
-    /// tools. Each adapter intersects it with its model's catalog capability and
+    /// Which provider-native web tools this turn may use. Each adapter intersects
+    /// the policy with its model's catalog capabilities and
     /// emits its vendor's wire shape — the same discipline as `effort`, which is
     /// clamped by `catalog.efforts`. Adapters whose vendor offers nothing on the
     /// wire shape we speak (OpenAI and Mistral both keep web search on a
@@ -184,7 +214,7 @@ pub struct ChatParams {
     /// agent loop can dispatch", and `chat_template.rs` — which renders it for
     /// local GGUFs — is behind `--features local-llm`, so changing that type
     /// compiles clean in the default build and breaks the local engine.
-    pub web_access: bool,
+    pub web: WebToolPolicy,
     /// Reasoning depth on the app's normalized ladder. Each provider clamps it
     /// to the rungs its catalog entry declares, then maps it onto whatever that
     /// vendor actually accepts (`output_config.effort`, `reasoning_effort`, a
@@ -215,6 +245,7 @@ pub enum ProviderEvent {
     ReasoningDelta(String),
     /// Complete, parsed tool calls (local models emit them whole).
     ToolCalls(Vec<ToolCall>),
+    WebCitation(WebCitation),
     Usage {
         prompt_tokens: u32,
         completion_tokens: u32,

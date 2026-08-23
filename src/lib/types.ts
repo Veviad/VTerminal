@@ -132,6 +132,7 @@ export type StreamEvent =
   | { type: "Started"; request_id: string; model: string }
   | { type: "Delta"; content: string }
   | { type: "ThinkingDelta"; content: string }
+  | { type: "WebCitation"; url: string; title: string; cited_text: string }
   /** The backend has already applied mode, rules, and classification. Receiving
    *  this event means a real operator decision is required. */
   | {
@@ -318,6 +319,8 @@ export interface AiMessage {
   model?: string;
   /** Tokens this exchange cost, once the stream finished. */
   usage?: { prompt: number; completion: number };
+  /** Provider-grounded sources, kept out of model-authored markdown. */
+  citations?: WebCitation[];
   /** Set on a message typed while an agent run was already in flight.
    *  "queued" = waiting for the next round boundary; "undelivered" = the run
    *  ended before the loop picked it up. Absent once the model has seen it.
@@ -524,6 +527,10 @@ export interface CatalogEntry {
   efforts: Effort[];
   default_effort: Effort;
   supports_temperature: boolean;
+  /** Whether this provider path can execute app-owned client tools. */
+  supports_tools: boolean;
+  /** Native provider-side query search. Chat only enables it together with fetch. */
+  native_web_search: boolean;
   /** Whether this model can reach the web via the PROVIDER's own server-side
    *  tools during a single request. */
   native_web_fetch: boolean;
@@ -833,6 +840,85 @@ export interface WorkspaceRestore {
   skipped: boolean;
 }
 
+// ---------- Terminal-independent Chat workspace ----------
+
+export type WorkspaceMode = "terminal" | "chat";
+export type ChatTitleSource = "placeholder" | "fallback" | "generated" | "manual";
+export type WebToolPolicy = "disabled" | "unsupported" | "fetch_only" | "search_and_fetch";
+
+export interface WebCitation {
+  url: string;
+  title: string;
+  cited_text: string;
+}
+
+export interface ChatSummary {
+  id: string;
+  title: string;
+  title_source: ChatTitleSource;
+  created_at: string;
+  updated_at: string;
+  archived_at: string | null;
+  message_count: number;
+  first_prompt: string | null;
+}
+
+export interface ChatAttachment {
+  id: string;
+  kind: "image" | "text";
+  name: string;
+  media_type: string;
+  bytes: number;
+  path: string | null;
+  width: number | null;
+  height: number | null;
+}
+
+export interface ChatDisplayMessage {
+  id: string;
+  sort_order: number;
+  role: "user" | "assistant";
+  content: string;
+  thinking: string | null;
+  model: string | null;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  citations: WebCitation[];
+  attachments: ChatAttachment[];
+  created_at: string;
+}
+
+export interface ChatDetail {
+  summary: ChatSummary;
+  messages: ChatDisplayMessage[];
+  model_transcript: ChatMessage[];
+  model_transcript_version: number;
+  attached_bucket_refs: KnowledgeBucketRef[];
+}
+
+export interface ChatSaveInput {
+  id: string;
+  title: string;
+  title_source: ChatTitleSource;
+  created_at: string;
+  updated_at: string;
+  archived_at: string | null;
+  messages: Omit<ChatDisplayMessage, "sort_order">[];
+  model_transcript: ChatMessage[];
+  model_transcript_version: number;
+  attached_bucket_refs: KnowledgeBucketRef[];
+}
+
+export interface ChatStreamState {
+  status: "idle" | "streaming" | "error";
+  requestId: string | null;
+  content: string;
+  thinking: string;
+  model: string | null;
+  citations: WebCitation[];
+  lastError: string | null;
+}
+
 // ---------- Settings ----------
 
 export interface Settings {
@@ -870,6 +956,8 @@ export interface Settings {
   archive_max_sessions: number;
   archive_max_age_days: number;
   ai_panel_open: boolean;
+  workspace_mode: WorkspaceMode;
+  active_chat_id: string | null;
   /** Share of the window, or null when never dragged — `useSettings` then
    *  migrates from the legacy `ai_panel_width`. */
   ai_panel_ratio: number | null;
@@ -1283,6 +1371,9 @@ export interface SettingsPatch {
   archive_max_sessions: number;
   archive_max_age_days: number;
   ai_panel_open: boolean;
+  workspace_mode: WorkspaceMode;
+  /** Empty string clears the remembered chat. */
+  active_chat_id: string;
   ai_panel_ratio: number;
   agent_max_iterations: number;
   agent_command_timeout_secs: number;

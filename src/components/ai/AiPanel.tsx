@@ -1,13 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  BookOpen,
   Brain,
   ArrowLeftRight,
   ChevronDown,
   ChevronRight,
-  FileText,
   Hourglass,
-  Image as ImageIcon,
   KeyRound,
   Keyboard,
   Link2,
@@ -15,7 +12,6 @@ import {
   MessageSquarePlus,
   MonitorX,
   Paperclip,
-  ScanText,
   Send,
   Server,
   ShieldCheck,
@@ -56,7 +52,7 @@ import { Dropdown } from "../ui/Dropdown";
 import { EffortPicker } from "../ui/EffortPicker";
 import * as api from "../../lib/tauri";
 import { AttachmentChip } from "./AttachmentChip";
-import { thumbnailSrc } from "../../lib/attachments";
+import { AttachmentStrip, FoldedBlockSection } from "./MessageContent";
 import {
   knowledgeBucketKey,
   normalizeKnowledgeBucketRef,
@@ -66,7 +62,6 @@ import {
   inputsFromFileList,
   splitFoldedBlocks,
   stageInputs,
-  type FoldedBlock,
 } from "../../lib/attachInput";
 import type { AiMessage, Attachment, Block, CommandStall, Session } from "../../lib/types";
 import {
@@ -1217,7 +1212,7 @@ function MessageRow({ message, sessionId }: { message: AiMessage; sessionId: str
           message.steer === "undelivered" ? "border-warning/40" : "border-border-subtle"
         }`}
       >
-        <AttachmentStrip message={message} />
+        <AttachmentStrip attachments={message.attachments ?? []} />
         {/* The folded blocks come back OUT of `content` for display — the field
             itself keeps them, because it is what was sent and what is archived. */}
         {(() => {
@@ -1240,118 +1235,6 @@ function MessageRow({ message, sessionId }: { message: AiMessage; sessionId: str
       {message.thinking && <ThinkingSection content={message.thinking} live={false} />}
       {message.content && <AiMessageView content={message.content} />}
       <MessageMeta message={message} />
-    </div>
-  );
-}
-
-/** A block that was folded into the message text, shown collapsed.
- *
- *  Same treatment as `ThinkingSection`, for the same reason: an OCR transcript or a
- *  dropped log is machinery the MODEL needed, and rendering it as a full-width
- *  monospace wall makes the user's own question a footnote to it. `content` still
- *  carries the text — see `splitFoldedBlocks` — so this is purely presentation.
- *
- *  Always starts collapsed: unlike thinking there is no "live" phase during which
- *  watching it stream is the point.
- */
-function FoldedBlockSection({ block }: { block: FoldedBlock }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="mt-1.5 rounded-lg border border-border-subtle bg-bg-primary/50">
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => setOpen(!open)}
-        className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[10px] font-medium uppercase tracking-widest text-text-muted"
-      >
-        <span className="shrink-0">
-          {open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-        </span>
-        <span className="shrink-0">
-          {block.kind === "transcript" ? (
-            <ScanText size={11} />
-          ) : block.kind === "docs" ? (
-            <BookOpen size={11} />
-          ) : (
-            <FileText size={11} />
-          )}
-        </span>
-        {/* `shrink-0 whitespace-nowrap`, not a bare text node. Uppercase plus
-            `tracking-widest` makes even a short label wide, and as a shrinkable flex item
-            it wrapped onto a second line and left a gap the filename was pushed across.
-
-            Dropped entirely for a passage: the book icon already distinguishes it from a
-            file or a transcript, and at this tracking the word cost ~75px that a long
-            source filename needs more — three passages from one document are told apart
-            by their page, and the filename is what says WHICH document. */}
-        {block.kind !== "docs" && (
-          <span className="shrink-0 whitespace-nowrap">
-            {block.kind === "transcript"
-              ? S.attachments.blockTranscript
-              : S.attachments.blockFile}
-          </span>
-        )}
-        {/* The filename, model and page are data, not a section title — drop the
-            uppercase treatment for them or a path becomes unreadable.
-            `flex-1` so this is the element that absorbs the truncation. */}
-        <span className="min-w-0 flex-1 truncate font-normal normal-case tracking-normal">
-          {block.name}
-          {block.model ? ` ${S.attachments.blockReadBy(block.model)}` : ""}
-        </span>
-        {/* The page is the LAST thing that should be lost. Folded into the filename it
-            was truncated away first — and for three passages from one document the page
-            is the only thing telling them apart. Capped so a long heading cannot squeeze
-            the filename out entirely. */}
-        {block.locator && (
-          <span className="max-w-[45%] shrink-0 truncate font-normal normal-case tracking-normal">
-            {block.locator}
-          </span>
-        )}
-      </button>
-      {open && (
-        <div className="max-h-40 overflow-y-auto whitespace-pre-wrap px-3 pb-2 text-[11px] leading-relaxed text-text-muted">
-          {block.body}
-          {block.truncated && (
-            <p className="mt-1.5 italic">{S.attachments.blockTruncated}</p>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** What was attached to a turn, above its text.
- *
- *  Rendered from the message rather than from the pending list, so a scrolled-back
- *  turn still shows what the model was actually given. A restored transcript has
- *  the metadata but not the bytes until `attachment_read` refills them, hence the
- *  named fallback instead of a broken image.
- */
-function AttachmentStrip({ message }: { message: AiMessage }) {
-  const attachments = message.attachments ?? [];
-  if (attachments.length === 0) return null;
-  return (
-    <div className="mb-1.5 flex flex-wrap gap-1.5">
-      {attachments.map((a) => {
-        const src = a.kind === "image" ? thumbnailSrc(a) : null;
-        return src ? (
-          <img
-            key={a.id}
-            src={src}
-            alt={a.name}
-            title={a.name}
-            className="h-24 max-w-full rounded-lg border border-border-subtle object-cover"
-          />
-        ) : (
-          <span
-            key={a.id}
-            className="flex items-center gap-1 rounded-md border border-border-subtle bg-bg-hover px-1.5 py-0.5 text-[10px] text-text-secondary"
-          >
-            {a.kind === "image" ? <ImageIcon size={9} /> : <FileText size={9} />}
-            {a.name}
-          </span>
-        );
-      })}
     </div>
   );
 }

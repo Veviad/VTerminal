@@ -3,8 +3,12 @@ import { useAppStore, useActiveSessionUi } from "../../stores/appStore";
 import { describeRemote } from "../../lib/nesting";
 import { collapseHome } from "../../lib/sessionTitle";
 import { S } from "../../lib/strings";
+import { useChatStore } from "../../stores/chatStore";
 
 export function StatusBar() {
+  const workspaceMode = useChatStore((s) => s.workspaceMode);
+  const chatStream = useChatStore((s) => s.stream);
+  const chat = useChatStore((s) => s.current);
   const modelState = useAppStore((s) => s.modelState);
   const aiReady = useAppStore((s) => s.aiReady());
   const activeLabel = useAppStore(
@@ -20,6 +24,25 @@ export function StatusBar() {
     aiReady ? "bg-accent" : modelState === "loading" ? "bg-warning" : "bg-text-muted";
   const cwd = ui?.cwd;
   const remote = ui?.remote ?? null;
+
+  if (workspaceMode === "chat") {
+    const model = useAppStore.getState().catalog.find((entry) => entry.id === useAppStore.getState().activeModelId);
+    const web = !useAppStore.getState().aiWebAccess
+      ? "web off"
+      : model?.native_web_search && model.native_web_fetch
+        ? "web ready"
+        : "web unsupported";
+    return (
+      <footer className="flex h-7 shrink-0 items-center justify-between border-t border-border-subtle px-4 text-[10px] bg-bg-primary text-text-muted">
+        <span className="font-mono">{chatStream.model ?? activeLabel ?? S.statusBar.noModel}</span>
+        <span className="flex items-center gap-3">
+          <span>{web}</span>
+          <span>{chat?.attached_bucket_refs.length ? `${chat.attached_bucket_refs.length} Knowledge source${chat.attached_bucket_refs.length === 1 ? "" : "s"}` : "Knowledge not attached"}</span>
+          {chatStream.status === "streaming" && <span className="flex items-center gap-1.5 text-accent"><span className="h-1 w-1 animate-pulse rounded-full bg-accent" />{S.statusBar.generating}</span>}
+        </span>
+      </footer>
+    );
+  }
 
   return (
     <footer className="flex h-7 shrink-0 items-center justify-between border-t border-border-subtle px-4 text-[10px] bg-bg-primary text-text-muted">

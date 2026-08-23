@@ -15,6 +15,8 @@ import { RunbooksWorkspace } from "../runbooks";
 import { useRunbookStore } from "../../stores/runbookStore";
 import { resolveAiOwner, sidecarForSession } from "../../lib/sidecar";
 import { SidecarWorkspace } from "../sidecar/SidecarWorkspace";
+import { ChatWorkspace } from "../chat/ChatWorkspace";
+import { useChatStore } from "../../stores/chatStore";
 
 export function AppShell() {
   const sessions = useAppStore((s) => s.sessions);
@@ -26,6 +28,7 @@ export function AppShell() {
   const settingsOpen = useAppStore((s) => s.settingsOpen);
   const runbooksEnabled = useAppStore((s) => s.runbooksEnabled);
   const runbooksOpen = useRunbookStore((s) => s.workspaceOpen);
+  const workspaceMode = useChatStore((s) => s.workspaceMode);
   useGlobalShortcuts();
   const sidecar = activeSessionId ? sidecarForSession(sidecars, activeSessionId) : null;
   const aiSessionId = activeSessionId ? resolveAiOwner(sidecars, activeSessionId) : null;
@@ -37,23 +40,33 @@ export function AppShell() {
     <div className="flex h-full flex-col bg-bg-primary">
       <Header />
       <div className="relative flex min-h-0 flex-1">
-        <main className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-          {sessions.map((s) =>
-            linkedIds?.has(s.id) ? null : (
-              <TerminalPane key={s.id} sessionId={s.id} active={s.id === activeSessionId} />
-            ),
+        <div
+          className="absolute inset-0 flex"
+          style={{ visibility: workspaceMode === "terminal" ? "visible" : "hidden" }}
+          aria-hidden={workspaceMode !== "terminal"}
+        >
+          <main className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+            {sessions.map((s) =>
+              linkedIds?.has(s.id) ? null : (
+                <TerminalPane key={s.id} sessionId={s.id} active={s.id === activeSessionId} />
+              ),
+            )}
+            {sidecar && <SidecarWorkspace binding={sidecar} />}
+            {sessions.length === 0 && <EmptyState />}
+          </main>
+          {settingsLoaded && runbooksEnabled && runbooksOpen ? (
+            <RunbooksWorkspace sessionId={activeSessionId} />
+          ) : (
+            settingsLoaded && <AiPanel sessionId={aiSessionId} />
           )}
-          {sidecar && <SidecarWorkspace binding={sidecar} />}
-          {sessions.length === 0 && <EmptyState />}
-        </main>
-        {/* Gated on settingsLoaded, not on the open flag: the store defaults to
-            open, so rendering before hydration would flash the panel open for
-            anyone who left it collapsed. AiPanel itself renders the rail. */}
-        {settingsLoaded && runbooksEnabled && runbooksOpen ? (
-          <RunbooksWorkspace sessionId={activeSessionId} />
-        ) : (
-          settingsLoaded && <AiPanel sessionId={aiSessionId} />
-        )}
+        </div>
+        <div
+          className="absolute inset-0"
+          style={{ visibility: workspaceMode === "chat" ? "visible" : "hidden" }}
+          aria-hidden={workspaceMode !== "chat"}
+        >
+          <ChatWorkspace />
+        </div>
         {/* Settings is an overlay, NOT an early return — terminals must stay mounted. */}
         {settingsOpen && (
           <div className="absolute inset-0 z-40 bg-bg-primary">

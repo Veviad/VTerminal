@@ -6,6 +6,9 @@ import type {
   ArchiveSessionInput,
   ArchiveSummary,
   CatalogEntry,
+  ChatDetail,
+  ChatSaveInput,
+  ChatSummary,
   ChatMessage,
   DocBucket,
   DocFile,
@@ -326,6 +329,56 @@ export const aiCancel = (requestId: string) => invoke<void>("ai_cancel", { reque
  *  value is always safe to render. */
 export const aiNameSession = (requestId: string, digest: string) =>
   invoke<string>("ai_name_session", { requestId, digest });
+
+/** Terminal-free Chat workspace turn. The returned transcript is opaque and
+ * must be persisted exactly as received. */
+export async function chatStart(
+  requestId: string,
+  prompt: string,
+  history: ChatMessage[],
+  images: ImagePart[],
+  docBuckets: KnowledgeBucketRef[],
+  onEvent: (event: StreamEvent) => void,
+): Promise<ChatMessage[]> {
+  const channel = new Channel<StreamEvent>();
+  channel.onmessage = onEvent;
+  aiChannels.set(requestId, channel);
+  try {
+    return await invoke<ChatMessage[]>("chat_start", {
+      requestId,
+      prompt,
+      history,
+      images,
+      docBuckets,
+      onEvent: channel,
+    });
+  } finally {
+    aiChannels.delete(requestId);
+  }
+}
+
+export const aiNameChat = (requestId: string, prompt: string, answer: string) =>
+  invoke<string>("ai_name_chat", { requestId, prompt, answer });
+
+export const chatList = () => invoke<ChatSummary[]>("chat_list");
+export const chatGet = (chatId: string) => invoke<ChatDetail | null>("chat_get", { chatId });
+export const chatSave = (chat: ChatSaveInput) =>
+  trackArchiveWrite(() => invoke<void>("chat_save", { chat }));
+export const chatSetArchived = (chatId: string, archivedAt: string | null) =>
+  trackArchiveWrite(() => invoke<void>("chat_set_archived", { chatId, archivedAt }));
+export const chatUpdateTitle = (
+  chatId: string,
+  title: string,
+  source: ChatSaveInput["title_source"],
+  expectedTitle?: string,
+) => trackArchiveWrite(() => invoke<boolean>("chat_update_title", {
+  chatId,
+  title,
+  source,
+  expectedTitle: expectedTitle ?? null,
+}));
+export const chatDelete = (chatId: string) =>
+  trackArchiveWrite(() => invoke<void>("chat_delete", { chatId }));
 
 // ---------- Models ----------
 

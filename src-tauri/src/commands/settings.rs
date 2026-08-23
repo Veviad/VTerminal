@@ -95,6 +95,10 @@ pub fn get_settings(app: tauri::AppHandle<Wry>) -> Result<Value, String> {
         // Reasoning depth is per-model now — see `get_model_effort`.
         // Last-state, not a preference: whatever the panel was when you quit.
         "ai_panel_open": get("ai_panel_open", json!(true)),
+        // Last workspace, not a preference. Existing installs start exactly as
+        // before; Chat becomes sticky only after the user opens it once.
+        "workspace_mode": get("workspace_mode", json!("terminal")),
+        "active_chat_id": get("active_chat_id", Value::Null),
         // A SHARE of the window, so the panel keeps its proportion when the window
         // is resized. Null means "never dragged": the frontend then derives the
         // ratio from `ai_panel_width` below, which is the one-time migration and
@@ -195,6 +199,8 @@ pub fn save_settings(
     archive_max_sessions: Option<u32>,
     archive_max_age_days: Option<u32>,
     ai_panel_open: Option<bool>,
+    workspace_mode: Option<String>,
+    active_chat_id: Option<String>,
     ai_panel_ratio: Option<f64>,
     agent_max_iterations: Option<u32>,
     agent_command_timeout_secs: Option<u32>,
@@ -347,6 +353,15 @@ pub fn save_settings(
     }
     if let Some(v) = ai_panel_open {
         store.set("ai_panel_open", json!(v));
+    }
+    if let Some(v) = workspace_mode {
+        if !["terminal", "chat"].contains(&v.as_str()) {
+            return Err(format!("invalid workspace_mode: {v}"));
+        }
+        store.set("workspace_mode", json!(v));
+    }
+    if let Some(v) = active_chat_id {
+        store.set("active_chat_id", clearable(v));
     }
     if let Some(v) = ai_panel_ratio {
         // A share, not pixels — see `lib/panelRatio.ts`, whose bounds these mirror.

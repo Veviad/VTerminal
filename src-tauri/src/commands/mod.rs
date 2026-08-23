@@ -1,6 +1,8 @@
 pub mod ai;
 pub mod archive;
 pub mod attachments;
+pub mod chat;
+pub mod chat_ai;
 pub mod docs;
 pub mod embedding_models;
 pub mod history;

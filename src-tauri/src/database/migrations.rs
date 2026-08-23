@@ -49,6 +49,9 @@ pub fn run(conn: &Connection) -> Result<(), String> {
     if version < 11 {
         migrate_v11(conn)?;
     }
+    if version < 12 {
+        migrate_v12(conn)?;
+    }
     crate::runbooks::db::ensure_v6_runtime_indexes(conn)?;
 
     Ok(())
@@ -403,6 +406,71 @@ fn migrate_v11(conn: &Connection) -> Result<(), String> {
     .map_err(|e| format!("migration v11 failed: {e}"))
 }
 
+fn migrate_v12(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        BEGIN;
+        -- Terminal-independent Chat workspace threads. These deliberately do
+        -- not share archived_sessions: a chat may be active for months, has no
+        -- shell/scrollback lifecycle, and is retained until explicit deletion.
+        CREATE TABLE chat_threads (
+            id                   TEXT PRIMARY KEY,
+            title                TEXT NOT NULL DEFAULT 'New chat',
+            title_source         TEXT NOT NULL DEFAULT 'placeholder'
+                                 CHECK (title_source IN
+                                   ('placeholder','fallback','generated','manual')),
+            created_at           TEXT NOT NULL,
+            updated_at           TEXT NOT NULL,
+            archived_at          TEXT,
+            attached_bucket_refs TEXT NOT NULL DEFAULT '[]',
+            model_transcript     TEXT,
+            transcript_version   INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE INDEX idx_chat_threads_active
+            ON chat_threads(archived_at, updated_at DESC);
+
+        CREATE TABLE chat_messages (
+            id                TEXT PRIMARY KEY,
+            chat_id           TEXT NOT NULL
+                              REFERENCES chat_threads(id) ON DELETE CASCADE,
+            sort_order        INTEGER NOT NULL,
+            role              TEXT NOT NULL CHECK (role IN ('user','assistant')),
+            content           TEXT NOT NULL,
+            thinking          TEXT,
+            model             TEXT,
+            prompt_tokens     INTEGER,
+            completion_tokens INTEGER,
+            citations         TEXT NOT NULL DEFAULT '[]',
+            created_at        TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX idx_chat_messages_order
+            ON chat_messages(chat_id, sort_order);
+
+        CREATE TABLE chat_attachments (
+            id         TEXT PRIMARY KEY,
+            message_id TEXT NOT NULL
+                       REFERENCES chat_messages(id) ON DELETE CASCADE,
+            sort_order INTEGER NOT NULL,
+            kind       TEXT NOT NULL CHECK (kind IN ('image','text')),
+            name       TEXT NOT NULL,
+            media_type TEXT NOT NULL,
+            bytes      INTEGER NOT NULL,
+            path       TEXT,
+            width      INTEGER,
+            height     INTEGER
+        );
+        CREATE UNIQUE INDEX idx_chat_attachments_order
+            ON chat_attachments(message_id, sort_order);
+        CREATE INDEX idx_chat_attachments_path ON chat_attachments(path)
+            WHERE path IS NOT NULL;
+
+        INSERT INTO schema_version (version) VALUES (12);
+        COMMIT;
+        "#,
+    )
+    .map_err(|e| format!("migration v12 failed: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;
@@ -429,7 +497,41 @@ mod tests {
         let first = version(&conn);
         super::run(&conn).unwrap();
         assert_eq!(version(&conn), first);
-        assert_eq!(first, 11);
+        assert_eq!(first, 12);
+    }
+
+    #[test]
+    fn v11_upgrades_to_terminal_independent_chat_tables() {
+        let conn = mem();
+        conn.execute_batch("CREATE TABLE schema_version (version INTEGER PRIMARY KEY);")
+            .unwrap();
+        super::migrate_v1(&conn).unwrap();
+        super::migrate_v2(&conn).unwrap();
+        super::migrate_v3(&conn).unwrap();
+        super::migrate_v4(&conn).unwrap();
+        super::migrate_v5(&conn).unwrap();
+        crate::runbooks::db::migrate_v6(&conn).unwrap();
+        super::migrate_v7(&conn).unwrap();
+        crate::runbooks::db::migrate_v8(&conn).unwrap();
+        crate::runbooks::db::migrate_v9(&conn).unwrap();
+        crate::runbooks::db::migrate_v10(&conn).unwrap();
+        super::migrate_v11(&conn).unwrap();
+        assert_eq!(version(&conn), 11);
+
+        super::run(&conn).unwrap();
+
+        assert_eq!(version(&conn), 12);
+        let tables: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'chat_%' ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            tables,
+            vec!["chat_attachments", "chat_messages", "chat_threads"]
+        );
     }
 
     #[test]
@@ -468,7 +570,7 @@ mod tests {
         .unwrap();
 
         super::run(&conn).unwrap();
-        assert_eq!(version(&conn), 11);
+        assert_eq!(version(&conn), 12);
         let migrated: (String, Option<String>, Option<String>) = conn
             .query_row(
                 "SELECT cmd_command, cmd_target_role, cmd_target_label
@@ -581,7 +683,7 @@ mod tests {
         )
         .unwrap();
         super::run(&conn).unwrap();
-        assert_eq!(version(&conn), 11);
+        assert_eq!(version(&conn), 12);
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM command_history", [], |r| r.get(0))
             .unwrap();
@@ -614,7 +716,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 11);
+        assert_eq!(version(&conn), 12);
         let migrated: (String, i64, Option<i64>, String, String) = conn
             .query_row(
                 "SELECT source_kind, hidden, builtin_order, created_at, updated_at
@@ -655,7 +757,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 11);
+        assert_eq!(version(&conn), 12);
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(runbook_drafts)")
             .unwrap()
@@ -689,7 +791,7 @@ mod tests {
         super::run(&conn).unwrap();
 
         // Upgrades run the whole chain, so this lands on the current head.
-        assert_eq!(version(&conn), 11);
+        assert_eq!(version(&conn), 12);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()
@@ -735,7 +837,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 11);
+        assert_eq!(version(&conn), 12);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()

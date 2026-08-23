@@ -111,7 +111,7 @@ pub async fn execute_agent_phase(
                 tool_choice: ToolChoiceMode::Auto,
                 // A server-side web tool has no runbook approval handshake. Network
                 // operations must be proposed as visible terminal commands instead.
-                web_access: false,
+                web: crate::provider::WebToolPolicy::Disabled,
                 effort: config.effort,
             },
             cancel.clone(),
@@ -253,7 +253,7 @@ pub async fn summarize_structured_evidence(
             temperature: None,
             max_tokens: Some(768),
             tool_choice: ToolChoiceMode::None,
-            web_access: false,
+            web: crate::provider::WebToolPolicy::Disabled,
             effort,
         },
         cancel,
@@ -480,7 +480,9 @@ fn collect_provider_event(
         ProviderEvent::TextDelta(delta) => text.push_str(&delta),
         ProviderEvent::ToolCalls(found) => calls.extend(found),
         ProviderEvent::Done { finish_reason } => *finish = finish_reason,
-        ProviderEvent::ReasoningDelta(_) | ProviderEvent::Usage { .. } => {}
+        ProviderEvent::ReasoningDelta(_)
+        | ProviderEvent::WebCitation(_)
+        | ProviderEvent::Usage { .. } => {}
     }
 }
 

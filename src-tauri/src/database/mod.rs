@@ -1,4 +1,5 @@
 pub mod archive;
+pub mod chat;
 pub mod migrations;
 pub mod queries;
 pub mod workspace;

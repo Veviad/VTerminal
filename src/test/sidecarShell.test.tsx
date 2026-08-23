@@ -1,9 +1,10 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { SidecarBinding } from "../lib/sidecar";
 import type { Session } from "../lib/types";
 import { useAppStore } from "../stores/appStore";
+import { useChatStore } from "../stores/chatStore";
 
 vi.mock("../components/layout/Header", () => ({
   Header: () => <header data-testid="header" />,
@@ -33,6 +34,10 @@ vi.mock("../components/sidecar/SidecarWorkspace", () => ({
       data-focused-session-id={binding.focusedSessionId}
     />
   ),
+}));
+
+vi.mock("../components/chat/ChatWorkspace", () => ({
+  ChatWorkspace: () => <section data-testid="chat-workspace" />,
 }));
 
 vi.mock("../components/palette/CommandPalette", () => ({
@@ -122,6 +127,7 @@ describe("Sidecar shell integration", () => {
       runbooksEnabled: false,
       renamingSessionId: null,
     });
+    useChatStore.setState({ workspaceMode: "terminal" });
   });
 
   it("resolves either paired tab to one owner conversation without remounting the pair as ordinary panes", () => {
@@ -164,5 +170,18 @@ describe("Sidecar shell integration", () => {
 
     expect(useAppStore.getState().activeSessionId).toBe("remote");
     expect(useAppStore.getState().sidecars.local.focusedSessionId).toBe("remote");
+  });
+
+  it("keeps both workspace layers mounted while Chat hides the terminal layer", () => {
+    render(<AppShell />);
+    const terminal = screen.getByTestId("terminal-other");
+    const chat = screen.getByTestId("chat-workspace");
+
+    act(() => useChatStore.setState({ workspaceMode: "chat" }));
+
+    expect(terminal).toBeInTheDocument();
+    expect(chat).toBeInTheDocument();
+    expect(terminal.closest("[aria-hidden]")).toHaveAttribute("aria-hidden", "true");
+    expect(chat.closest("[aria-hidden]")).toHaveAttribute("aria-hidden", "false");
   });
 });

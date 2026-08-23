@@ -170,9 +170,24 @@ export function describeIngestFailure(f: IngestFailure): string {
  *  holds a decoded bitmap plus two encodes in memory, and six 25MB sources in
  *  flight at once is how a webview gets killed.
  */
-export async function stageInputs(sessionId: string, inputs: PendingInput[]): Promise<Attachment[]> {
+export interface AttachmentStageTarget {
+  setError(message: string | null): void;
+  setStatus(message: string | null): void;
+  attach(attachments: Attachment[]): Attachment[];
+}
+
+export async function stageInputs(
+  sessionId: string,
+  inputs: PendingInput[],
+  target?: AttachmentStageTarget,
+): Promise<Attachment[]> {
   if (inputs.length === 0) return [];
   const store = useAppStore.getState();
+  const sink: AttachmentStageTarget = target ?? {
+    setError: (message) => store.setAttachError(sessionId, message),
+    setStatus: (message) => store.setAttachStatus(sessionId, message),
+    attach: (attachments) => store.attachFilesToAi(sessionId, attachments),
+  };
   const ok: Attachment[] = [];
   let firstFailure: IngestFailure | null = null;
 
@@ -191,7 +206,7 @@ export async function stageInputs(sessionId: string, inputs: PendingInput[]): Pr
     // shape a born-digital PDF produces, so nothing downstream needs to care which
     // kind it was. Only reported as a failure when there is no reader.
     if (result.code === "pdf_no_text" && ocrAvailable()) {
-      const read = await readScannedPdf(sessionId, input, result.pageCount);
+      const read = await readScannedPdf(sessionId, input, result.pageCount, sink);
       if (read) {
         ok.push(read);
         continue;
@@ -205,9 +220,9 @@ export async function stageInputs(sessionId: string, inputs: PendingInput[]): Pr
   // message if the batch did not fit. Then a real failure, which outranks the
   // limit message because the user can do something about it. Only the FIRST
   // reason: six errors in a 10px line is not something anyone reads.
-  store.setAttachError(sessionId, null);
-  const accepted = ok.length > 0 ? store.attachFilesToAi(sessionId, ok) : [];
-  if (firstFailure) store.setAttachError(sessionId, describeIngestFailure(firstFailure));
+  sink.setError(null);
+  const accepted = ok.length > 0 ? sink.attach(ok) : [];
+  if (firstFailure) sink.setError(describeIngestFailure(firstFailure));
   return accepted;
 }
 
@@ -622,6 +637,7 @@ async function readScannedPdf(
   sessionId: string,
   input: PendingInput,
   pageCount: number,
+  target: AttachmentStageTarget,
 ): Promise<Attachment | null> {
   const store = useAppStore.getState();
   const { rasterizePdfPages, PDF_OCR_MAX_PAGES } = await import("./pdfText");
@@ -634,14 +650,14 @@ async function readScannedPdf(
     "an on-device model";
 
   try {
-    store.setAttachStatus(sessionId, S.attachments.pdfRendering(input.name));
+    target.setStatus(S.attachments.pdfRendering(input.name));
     const bytes = new Uint8Array(await input.blob.arrayBuffer());
     const rendered = await rasterizePdfPages(bytes, pageNumbers, IMAGE_MAX_EDGE);
     if (rendered.length === 0) return null;
 
     const parts: string[] = [];
     for (const [i, page] of rendered.entries()) {
-      store.setAttachStatus(sessionId, S.attachments.pdfReading(i + 1, rendered.length));
+      target.setStatus(S.attachments.pdfReading(i + 1, rendered.length));
       let text: string;
       try {
         text = await api.visionDescribe(`pdf-${sessionId}-${page.page}`, page.data);
@@ -670,6 +686,6 @@ async function readScannedPdf(
       truncated: wanted < pageCount,
     };
   } finally {
-    store.setAttachStatus(sessionId, null);
+    target.setStatus(null);
   }
 }

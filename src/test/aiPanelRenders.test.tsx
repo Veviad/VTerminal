@@ -25,6 +25,8 @@ function cloudEntry(): CatalogEntry {
     efforts: ["off", "low", "medium", "high", "max"],
     default_effort: "high",
     supports_temperature: false,
+    supports_tools: true,
+    native_web_search: true,
     native_web_fetch: true,
     supports_vision: true,
     local: null,
