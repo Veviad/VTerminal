@@ -494,6 +494,57 @@ describe("AI generation ownership", () => {
   });
 });
 
+describe("single-terminal command routing", () => {
+  it("accepts an ordinary approval and dispatch without treating it as Sidecar", async () => {
+    let onEvent!: (event: StreamEvent) => void;
+    api.agentStart.mockImplementationOnce((...args: unknown[]) => {
+      onEvent = args[6] as (event: StreamEvent) => void;
+      return Promise.resolve([]);
+    });
+    const { result } = renderHook(() => useAiStream());
+    await act(async () => result.current.startAgent(SID, "clone the project"));
+
+    act(() => {
+      onEvent({
+        type: "CommandProposal",
+        approval_id: "single-approval",
+        command: "git clone https://example.test/project.git",
+        explanation: "Clone the requested project",
+        read_only: false,
+        network: true,
+      });
+    });
+
+    expect(useAppStore.getState().aiStreams[SID].pendingProposal).toMatchObject({
+      approvalId: "single-approval",
+      command: "git clone https://example.test/project.git",
+    });
+    expect(useAppStore.getState().aiStreams[SID].lastError).toBeNull();
+    expect(api.aiCancel).not.toHaveBeenCalled();
+
+    act(() => {
+      onEvent({
+        type: "RunInTerminal",
+        approval_id: "single-approval",
+        session_id: SID,
+        command: "git clone https://example.test/project.git",
+        timeout_secs: 120,
+        explanation: "Clone the requested project",
+      });
+    });
+    await flushPreflight();
+
+    expect(pty.runInTerminal).toHaveBeenCalledWith(
+      SID,
+      "single-approval",
+      "git clone https://example.test/project.git",
+      expect.objectContaining({ timeoutMs: 120_000 }),
+    );
+    expect(useAppStore.getState().aiStreams[SID].lastError).toBeNull();
+    expect(api.aiCancel).not.toHaveBeenCalled();
+  });
+});
+
 describe("AI Sidecar routing", () => {
   it("sends separately grounded local and SSH contexts to agentStart", async () => {
     installSidecar();
