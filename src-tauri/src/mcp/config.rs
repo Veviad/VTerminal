@@ -301,7 +301,7 @@ fn validate_docker(args: &[String]) -> Result<(), String> {
         || joined.contains("--net=none")
         || joined.contains("--net none");
     if !no_network {
-        return Err("Docker MCP servers must use --network=none in v0.4.0".into());
+        return Err("Docker MCP servers must use --network=none in v0.4.4".into());
     }
     Ok(())
 }

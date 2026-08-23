@@ -1,4 +1,4 @@
-# MCP in VTerminal 0.4.0
+# MCP in VTerminal 0.4.4
 
 VTerminal can use tools from several Model Context Protocol servers in both Ask and Agent mode. Ask receives only MCP tools; Agent also retains its terminal and Knowledge tools. Every MCP call asks for approval unless you explicitly remember that exact tool for that exact server and schema.
 
@@ -75,4 +75,4 @@ VTerminal advertises MCP 2026-07-28, uses server/discover and per-request metada
 
 If selected schemas exceed 3% of the active model context, VTerminal exposes stable mcp_search_tools and mcp_call_tool broker tools instead of injecting every schema. Tool output supports text, structured JSON, images, audio, embedded resources, and resource-link metadata. Model-visible text/JSON is capped at 64 KiB with an explicit marker. Resource links are never fetched automatically.
 
-Version 0.4.0 implements MCP tools. Resources, prompts, roots, sampling, elicitation, Tasks, and MCP Apps are deferred. An input_required or background-task response is shown as unsupported instead of silently continuing.
+Version 0.4.4 implements MCP tools. Resources, prompts, roots, sampling, elicitation, Tasks, and MCP Apps are deferred. An input_required or background-task response is shown as unsupported instead of silently continuing.

@@ -520,11 +520,11 @@ impl McpManager {
         match response {
             CallToolResponse::Complete(result) => normalize_result(result),
             CallToolResponse::InputRequired(_) => Err(
-                "MCP tool requested interactive input; elicitation is not supported in VTerminal 0.4.0"
+                "MCP tool requested interactive input; elicitation is not supported in VTerminal 0.4.4"
                     .into(),
             ),
             CallToolResponse::Task(_) => Err(
-                "MCP tool returned a background task; MCP Tasks are not supported in VTerminal 0.4.0"
+                "MCP tool returned a background task; MCP Tasks are not supported in VTerminal 0.4.4"
                     .into(),
             ),
             _ => Err("MCP tool returned an unsupported result type".into()),
