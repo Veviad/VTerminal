@@ -7,29 +7,53 @@
 #[cfg(feature = "local-llm")]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use std::sync::Arc;
+    use std::{ffi::OsString, path::PathBuf, sync::Arc};
     use vterminal_lib::models::catalog::LocalFamily;
     use vterminal_lib::provider::local::{last_generation_metrics, LocalLlamaCpp, ReadyModel};
     use vterminal_lib::provider::{
         ChatMessage, ChatParams, Effort, Provider, ProviderEvent, ToolChoiceMode, WebToolPolicy,
     };
 
-    let mut args = std::env::args().skip(1);
-    let target = args
-        .next()
-        .expect("usage: mtp_bench <target.gguf> <qwen|gemma> <draft-tokens> [draft.gguf|-] [runs]");
-    let family = match args.next().as_deref() {
-        Some("gemma") => LocalFamily::Gemma,
-        _ => LocalFamily::Qwen,
+    let usage = "usage: mtp_bench <target.gguf> <qwen|gemma> <draft-tokens> [draft.gguf|-] [runs]";
+    let mut args = std::env::args_os().skip(1);
+    let target = canonical_gguf(args.next().ok_or(usage)?)?;
+    let family_arg = utf8_arg(args.next().ok_or(usage)?, "model family")?;
+    let family = match family_arg.as_str() {
+        "qwen" => LocalFamily::Qwen,
+        "gemma" => LocalFamily::Gemma,
+        _ => return Err("model family must be qwen or gemma".into()),
     };
-    let draft_tokens: u32 = args.next().as_deref().unwrap_or("4").parse()?;
-    let draft_path = args.next().filter(|value| value != "-");
-    let runs: usize = args.next().as_deref().unwrap_or("5").parse()?;
+    let draft_tokens: u32 = utf8_arg(args.next().ok_or(usage)?, "draft token limit")?.parse()?;
+    if !(1..=8).contains(&draft_tokens) {
+        return Err("draft token limit must be between 1 and 8".into());
+    }
+    let draft_path = match args.next() {
+        Some(value) if value != OsString::from("-") => Some(canonical_gguf(value)?),
+        _ => None,
+    };
+    let runs: usize = args
+        .next()
+        .map(|value| utf8_arg(value, "run count"))
+        .transpose()?
+        .as_deref()
+        .unwrap_or("5")
+        .parse()?;
+    if !(5..=50).contains(&runs) {
+        return Err("run count must be between 5 and 50".into());
+    }
+    if args.next().is_some() {
+        return Err(usage.into());
+    }
     std::env::set_var("VTERMINAL_MTP_BENCH_SEED", "424242");
 
     let mtp_ready = ReadyModel::load_standalone_with_mtp(
-        &target,
-        draft_path.as_deref(),
+        target
+            .to_str()
+            .ok_or("target GGUF path is not valid UTF-8")?,
+        draft_path
+            .as_deref()
+            .map(|path| path.to_str().ok_or("draft GGUF path is not valid UTF-8"))
+            .transpose()?,
         family,
         32_768,
         draft_tokens,
@@ -76,6 +100,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }));
     }
     println!("{}", serde_json::to_string_pretty(&rows)?);
+
+    fn utf8_arg(value: OsString, label: &str) -> Result<String, Box<dyn std::error::Error>> {
+        value
+            .into_string()
+            .map_err(|_| format!("{label} must be valid UTF-8").into())
+    }
+
+    fn canonical_gguf(value: OsString) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let path = PathBuf::from(value).canonicalize()?;
+        if !path.is_file()
+            || path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_none_or(|extension| !extension.eq_ignore_ascii_case("gguf"))
+        {
+            return Err(format!("{} is not a GGUF file", path.display()).into());
+        }
+        Ok(path)
+    }
 
     async fn run_once(
         provider: &LocalLlamaCpp,
