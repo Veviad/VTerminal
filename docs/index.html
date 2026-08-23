@@ -7,7 +7,7 @@
     <meta name="color-scheme" content="dark" />
     <meta name="robots" content="index,follow,max-image-preview:large" />
 
-    <title>VTerminal — The Lean AI Terminal for macOS and Windows 11</title>
+    <title>VTerminal | The Lean AI Terminal for macOS and Windows 11</title>
     <meta
       name="description"
       content="A lean, AI-powered terminal for macOS and Windows 11 with WSL2 Bash, command blocks, a multi-step agent, and in-process local models. Open source, GPL-3.0."
@@ -19,17 +19,25 @@
     <meta property="og:locale" content="en_GB" />
     <meta
       property="og:title"
-      content="VTerminal — The Lean AI Terminal for macOS and Windows 11"
+      content="VTerminal | The Lean AI Terminal for macOS and Windows 11"
     />
     <meta
       property="og:description"
       content="Command blocks, a multi-step AI agent, and local or Qdrant knowledge buckets. Local models run in-process via llama.cpp; nothing runs without you."
     />
     <meta property="og:url" content="https://vterminal.veviad.com/" />
-    <meta name="twitter:card" content="summary" />
+    <meta
+      property="og:image"
+      content="https://vterminal.veviad.com/assets/screenshots/vterminal-terminal-ai.png"
+    />
+    <meta
+      property="og:image:alt"
+      content="VTerminal showing a service health investigation beside an AI response."
+    />
+    <meta name="twitter:card" content="summary_large_image" />
     <meta
       name="twitter:title"
-      content="VTerminal — The Lean AI Terminal for macOS and Windows 11"
+      content="VTerminal | The Lean AI Terminal for macOS and Windows 11"
     />
     <meta
       name="twitter:description"
@@ -216,13 +224,10 @@
         </a>
 
         <nav class="desktop-nav" aria-label="Main navigation">
-          <a href="#why">Why</a>
-          <a href="#terminal">Terminal</a>
+          <a href="#why">Product</a>
           <a href="#ai">AI</a>
           <a href="#knowledge">Knowledge</a>
-          <a href="#runbooks">Runbooks</a>
           <a href="#safety">Safety</a>
-          <a href="#models">Models</a>
           <a href="#download">Install</a>
         </nav>
 
@@ -247,13 +252,10 @@
 
       <div class="mobile-menu" id="mobile-menu" data-mobile-menu hidden>
         <nav aria-label="Main navigation">
-          <a href="#why">Why</a>
-          <a href="#terminal">Terminal</a>
+          <a href="#why">Product</a>
           <a href="#ai">AI</a>
           <a href="#knowledge">Knowledge</a>
-          <a href="#runbooks">Runbooks</a>
           <a href="#safety">Safety</a>
-          <a href="#models">Models</a>
           <a href="#download">Install</a>
           <div class="mobile-menu-actions">
             <a
@@ -307,7 +309,7 @@
           <p class="hero-copy">
             Warp-style command blocks and a multi-step AI agent, without the
             bulk. Local models run <strong>in-process</strong> with Metal on Mac,
-            or Vulkan with automatic CPU fallback on Windows — no Ollama and no
+            or Vulkan with automatic CPU fallback on Windows. No Ollama and no
             daemon to babysit. Cloud models sit behind the same interface.
           </p>
 
@@ -345,23 +347,8 @@
             <a href="#download">installers and requirements</a>
           </p>
           <p class="release-date">
-            Published <span data-release-text="published_date">—</span>
+            Published <span data-release-text="published_date">pending</span>
           </p>
-
-          <ul class="hero-stats" aria-label="Project activity">
-            <li>
-              <a href="https://github.com/Veviad/VTerminal">
-                <strong data-release-text="stars">—</strong>
-                <span>GitHub stars</span>
-              </a>
-            </li>
-            <li>
-              <a href="#download">
-                <strong data-release-text="total_downloads">—</strong>
-                <span>release downloads</span>
-              </a>
-            </li>
-          </ul>
 
           <ul class="hero-proof" aria-label="At a glance">
             <li>
@@ -384,140 +371,28 @@
         </div>
       </section>
 
-      <!-- The mock reproduces VTerminal's own interface: command blocks with
-           exit badges on the left, the AI panel and its approval gate on the
-           right, in the app's default "Veviad Developer UI" theme. -->
-      <div class="dashboard-bridge shell">
-        <div class="dashboard-frame mock">
-          <div class="mock-chrome">
-            <div class="mock-lights" aria-hidden="true">
-              <span></span><span></span><span></span>
-            </div>
-            <div class="mock-tabs" aria-hidden="true">
-              <span class="mock-tab is-active">veviad_shell</span>
-              <span class="mock-tab">prod-01</span>
-            </div>
-          </div>
-
-          <div class="mock-body">
-            <div class="mock-term" aria-hidden="true">
-              <div class="mock-block is-ok">
-                <div class="mock-block-head">
-                  <span class="mock-cwd">~/veviad_shell</span>
-                  <span class="mock-branch">main</span>
-                  <span class="mock-badge is-ok">0</span>
-                </div>
-                <div class="mock-cmd">git pull --rebase</div>
-                <div class="mock-out">
-                  <span class="is-dim"
-                    >Successfully rebased and updated refs/heads/main.</span
-                  >
-                </div>
-              </div>
-
-              <div class="mock-block is-ok">
-                <div class="mock-block-head">
-                  <span class="mock-cwd">~/veviad_shell</span>
-                  <span class="mock-branch">main</span>
-                  <span class="mock-badge is-ok">0</span>
-                </div>
-                <div class="mock-cmd">cargo test --features local-llm</div>
-                <div class="mock-out">
-                  <span class="is-dim">   Compiling vterminal</span>
-                  <span class="is-dim">    Finished `test` profile in 4.21s</span>
-                  <span class="is-ok">test result: ok. 214 passed; 0 failed</span>
-                </div>
-              </div>
-
-              <div class="mock-block is-fail">
-                <div class="mock-block-head">
-                  <span class="mock-cwd">~/veviad_shell</span>
-                  <span class="mock-branch">main</span>
-                  <span class="mock-badge is-fail">1</span>
-                </div>
-                <div class="mock-cmd">npm run tauri build -- --features local-llm</div>
-                <div class="mock-out">
-                  <span class="is-dim">  Compiling llama-cpp-sys-2 v0.1.154</span>
-                  <span class="is-fail"
-                    >error: failed to run custom build command</span
-                  >
-                  <span class="is-fail">  CMake was not found in PATH</span>
-                </div>
-              </div>
-
-              <div class="mock-block">
-                <div class="mock-block-head">
-                  <span class="mock-cwd">~/veviad_shell</span>
-                  <span class="mock-branch">main</span>
-                </div>
-                <div class="mock-cmd"><span class="mock-caret"></span></div>
-              </div>
-            </div>
-
-            <div class="mock-ai" aria-hidden="true">
-              <div class="mock-ai-head">
-                <span class="mock-ai-title">Agent</span>
-                <span class="mock-chip is-accent">Qwen3.5 9B</span>
-                <span class="mock-chip">medium</span>
-              </div>
-
-              <div class="mock-turn">
-                <div class="mock-turn-user">why did the build fail?</div>
-              </div>
-
-              <div class="mock-think">Thought for 2s</div>
-
-              <p class="mock-answer">
-                The <code>local-llm</code> feature compiles llama.cpp through
-                cmake, which isn't on your PATH. Terminal-only builds don't need
-                it — but this one does.
-              </p>
-
-              <div class="mock-approval">
-                <div class="mock-approval-label">
-                  <svg class="ui-icon" style="width: 1em; height: 1em">
-                    <use href="#i-alert" />
-                  </svg>
-                  Approve command
-                </div>
-                <div class="mock-approval-cmd">brew install cmake</div>
-                <div class="mock-axes">
-                  <span class="mock-axis is-write">Modifies your system</span>
-                  <span class="mock-axis is-net">Reaches the network</span>
-                </div>
-                <div class="mock-actions">
-                  <span class="mock-action is-primary">Approve</span>
-                  <span class="mock-action">Edit</span>
-                  <span class="mock-action">Skip</span>
-                </div>
-                <p class="mock-approval-note">
-                  Runs in the visible terminal, in this tab.
-                </p>
-              </div>
-
-              <div class="mock-modes">
-                <span class="mock-mode is-active">Confirm</span>
-                <span class="mock-mode">Reads</span>
-                <span class="mock-mode">All</span>
-              </div>
-            </div>
-          </div>
-
-          <div class="mock-status" aria-hidden="true">
-            <span>zsh / WSL2 Bash</span>
-            <span class="mock-branch">2 tabs</span>
-            <span class="mock-status-right">
-              <span><span class="mock-key">⌘K / Ctrl+Shift+K</span> commands</span>
-              <span>on-device</span>
-            </span>
-          </div>
+      <figure class="dashboard-bridge shell product-shot product-shot-hero">
+        <div class="product-shot-frame">
+          <picture>
+            <source
+              srcset="assets/screenshots/vterminal-terminal-ai.webp"
+              type="image/webp"
+            />
+            <img
+              src="assets/screenshots/vterminal-terminal-ai.png"
+              width="3248"
+              height="2122"
+              alt="VTerminal showing a neutral service health investigation in the terminal and a concise Ask-mode response beside it."
+              fetchpriority="high"
+              decoding="async"
+            />
+          </picture>
         </div>
-        <p class="mock-caption">
-          Interface mockup of VTerminal's default theme — command blocks with
-          exit-code badges, and the agent's approval gate showing both
-          classification axes.
-        </p>
-      </div>
+        <figcaption>
+          <span class="product-shot-badge">Actual app</span>
+          A real VTerminal session with demo-only service data. No interface mockups.
+        </figcaption>
+      </figure>
 
       <aside class="audience-band shell" aria-labelledby="audience-title">
         <h2 id="audience-title">Built for People Who Live in a Shell</h2>
@@ -528,168 +403,6 @@
           <li>Anyone Tired of Electron</li>
         </ul>
       </aside>
-
-      <section
-        class="section section-soft release-highlights-section"
-        id="release-highlights"
-        aria-labelledby="release-highlights-title"
-      >
-        <div class="shell">
-          <header class="release-highlights-header">
-            <div>
-              <p class="eyebrow">New in 0.3.2</p>
-              <h2
-                class="section-heading section-heading-wide"
-                id="release-highlights-title"
-              >
-                Agent Runs Resume. Sidecar Terminals Stay Put.
-              </h2>
-            </div>
-            <p class="section-lead">
-              This release preserves safe Agent progress across pauses and
-              provider failures, while making the Local + SSH Sidecar steadier
-              and read-only automation more precise.
-            </p>
-          </header>
-
-          <div class="release-highlights-grid">
-            <article class="release-highlight-card">
-              <div class="release-highlight-meta">
-                <span class="release-highlight-icon" aria-hidden="true">
-                  <svg class="ui-icon"><use href="#i-robot" /></svg>
-                </span>
-                <span class="release-highlight-tag">PR #45</span>
-              </div>
-              <h3>Agent Runs Keep Their Place</h3>
-              <p>
-                Bounded, storage-safe checkpoints now preserve the latest
-                resumable transcript after stable model and tool rounds,
-                including when a provider fails after commands have run.
-              </p>
-              <ul class="release-highlight-list">
-                <li>Completed command outcomes stay paired with their tool calls</li>
-                <li>Pause, cancel, completion, and failure have typed outcomes</li>
-                <li>Durable diagnostics retain metadata, not prompts or terminal data</li>
-              </ul>
-              <a
-                class="release-highlight-link"
-                href="https://github.com/Veviad/VTerminal/pull/45"
-              >
-                Explore resumable Agent runs
-                <svg class="ui-icon" aria-hidden="true">
-                  <use href="#i-arrow-right" />
-                </svg>
-              </a>
-            </article>
-
-            <article class="release-highlight-card">
-              <div class="release-highlight-meta">
-                <span class="release-highlight-icon" aria-hidden="true">
-                  <svg class="ui-icon"><use href="#i-terminal" /></svg>
-                </span>
-                <span class="release-highlight-tag">PR #44</span>
-              </div>
-              <h3>Stable Sidecar, Stricter Reads</h3>
-              <p>
-                Both visible Sidecar terminals retain stable renderers, while
-                proven read-only network commands can flow through Reads mode
-                without weakening the independent web-access gate.
-              </p>
-              <ul class="release-highlight-list">
-                <li>Local and SSH panes stay visually stable through focus changes</li>
-                <li>Rename with AI replaces manual or SSH-derived labels explicitly</li>
-                <li>GitHub writes, GraphQL, bodies, and unknown shapes still stop</li>
-              </ul>
-              <a
-                class="release-highlight-link"
-                href="https://github.com/Veviad/VTerminal/pull/44"
-              >
-                Explore Sidecar and Reads improvements
-                <svg class="ui-icon" aria-hidden="true">
-                  <use href="#i-arrow-right" />
-                </svg>
-              </a>
-            </article>
-          </div>
-
-          <header class="release-highlights-header release-highlights-history">
-            <div>
-              <p class="eyebrow">New in 0.3.1</p>
-              <h2
-                class="section-heading section-heading-wide"
-                id="release-highlights-031-title"
-              >
-                Two Terminals for the Agent. Less Text in Your Composer.
-              </h2>
-            </div>
-            <p class="section-lead">
-              This release adds a safety-first Local + SSH Sidecar workspace and
-              turns substantial clipboard text into clean, reversible context
-              attachments.
-            </p>
-          </header>
-
-          <div class="release-highlights-grid">
-            <article class="release-highlight-card">
-              <div class="release-highlight-meta">
-                <span class="release-highlight-icon" aria-hidden="true">
-                  <svg class="ui-icon"><use href="#i-branch" /></svg>
-                </span>
-                <span class="release-highlight-tag">PR #40</span>
-              </div>
-              <h3>One Agent, Local + SSH</h3>
-              <p>
-                Pair one local shell with one live SSH session in a responsive
-                split workspace. Every proposed command names its Local or
-                Remote target before it can run.
-              </p>
-              <ul class="release-highlight-list">
-                <li>Independent, Confirm-first permissions for each target</li>
-                <li>Focus, resize, swap, replace, reconnect, and recover</li>
-                <li>No automatic credential, environment, or file transfer</li>
-              </ul>
-              <a
-                class="release-highlight-link"
-                href="https://github.com/Veviad/VTerminal/pull/40"
-              >
-                Explore the Sidecar agent
-                <svg class="ui-icon" aria-hidden="true">
-                  <use href="#i-arrow-right" />
-                </svg>
-              </a>
-            </article>
-
-            <article class="release-highlight-card">
-              <div class="release-highlight-meta">
-                <span class="release-highlight-icon" aria-hidden="true">
-                  <svg class="ui-icon"><use href="#i-chat" /></svg>
-                </span>
-                <span class="release-highlight-tag">PR #41</span>
-              </div>
-              <h3>Large Pastes, Clean Composer</h3>
-              <p>
-                Substantial plain-text pastes become ordered virtual
-                <code>.txt</code> attachments instead of flooding the composer,
-                with no image conversion or OCR in the way.
-              </p>
-              <ul class="release-highlight-list">
-                <li>The exact clipboard text and paste order are preserved</li>
-                <li>Remove each paste or restore it with <strong>Show as text</strong></li>
-                <li>Small pastes and active-agent steering stay inline</li>
-              </ul>
-              <a
-                class="release-highlight-link"
-                href="https://github.com/Veviad/VTerminal/pull/41"
-              >
-                Explore text attachments
-                <svg class="ui-icon" aria-hidden="true">
-                  <use href="#i-arrow-right" />
-                </svg>
-              </a>
-            </article>
-          </div>
-        </div>
-      </section>
 
       <section class="section why-section" id="why" aria-labelledby="why-title">
         <div class="why-layout shell">
@@ -746,7 +459,7 @@
                     The default model is a 9B GGUF running inside the app process
                     via llama.cpp, with Metal on Mac or Vulkan and automatic CPU
                     fallback on Windows. Nothing leaves the machine unless you
-                    pick a cloud model — and there is no daemon to maintain.
+                    pick a cloud model. There is no daemon to maintain.
                   </p>
                 </div>
               </article>
@@ -791,7 +504,7 @@
               </h2>
               <p class="section-lead">
                 Shell integration marks every command as a block, so the app
-                knows what you ran, where, and how it ended — which is also
+                knows what you ran, where, and how it ended. That is also
                 exactly the context the model needs.
               </p>
             </div>
@@ -880,7 +593,7 @@
               <h3>Six Themes</h3>
               <p>
                 Veviad Developer UI (default), Veviad UI, Midnight, Nord,
-                Solarized Dark and Light — each with a matched terminal ANSI
+                Solarized Dark and Light, each with a matched terminal ANSI
                 palette, not just recoloured chrome.
               </p>
             </article>
@@ -898,7 +611,7 @@
             <p class="section-lead">
               The same <code>Provider</code> trait covers in-process llama.cpp,
               Anthropic, OpenAI, Mistral and any OpenAI-compatible server you
-              run yourself — so every feature below works the same whichever you
+              run yourself. Every feature below works the same whichever you
               pick.
             </p>
 
@@ -927,7 +640,7 @@
               </span>
               <h3>Suggest <kbd>⌘I / Ctrl+Shift+I</kbd></h3>
               <p>
-                Describe the goal — or type <code>#</code> at an empty prompt —
+                Describe the goal, or type <code>#</code> at an empty prompt, then
                 and get a command inserted into your prompt, ready to read before
                 you press enter.
               </p>
@@ -971,7 +684,7 @@
               <h3>Reasoning Effort</h3>
               <p>
                 <code>off → low → medium → high → max</code>, per model, showing
-                only the rungs a model actually accepts — because a wrong value
+                only the rungs a model actually accepts because a wrong value
                 is a 400, not a downgrade.
               </p>
             </article>
@@ -1024,6 +737,29 @@
             </aside>
           </div>
 
+          <figure class="product-shot product-shot-secondary">
+            <div class="product-shot-frame">
+              <picture>
+                <source
+                  srcset="assets/screenshots/vterminal-knowledge.webp"
+                  type="image/webp"
+                />
+                <img
+                  src="assets/screenshots/vterminal-knowledge.png"
+                  width="3248"
+                  height="2122"
+                  alt="The VTerminal Knowledge settings screen with document buckets and local embedding model choices."
+                  loading="lazy"
+                  decoding="async"
+                />
+              </picture>
+            </div>
+            <figcaption>
+              <span class="product-shot-badge">Actual app</span>
+              Local embedding models are selected and managed inside VTerminal.
+            </figcaption>
+          </figure>
+
           <div class="knowledge-grid">
             <article class="knowledge-card">
               <span class="feature-icon" aria-hidden="true">
@@ -1037,12 +773,12 @@
                 compilation or arbitrary model files.
               </p>
               <ul>
-                <li>Qwen3-Embedding 0.6B Q8 — recommended</li>
+                <li>Qwen3-Embedding 0.6B Q8 (recommended)</li>
                 <li>Qwen3-Embedding 4B Q4_K_M</li>
                 <li>Qwen3-Embedding 8B Q4_K_M</li>
-                <li>EmbeddingGemma Q8 — 768 dimensions</li>
-                <li>Multilingual E5 Base Q8 — visible, release-gated</li>
-                <li>Multilingual E5 Large Q8 — visible, release-gated</li>
+                <li>EmbeddingGemma Q8 (768 dimensions)</li>
+                <li>Multilingual E5 Base Q8 (visible, release-gated)</li>
+                <li>Multilingual E5 Large Q8 (visible, release-gated)</li>
               </ul>
               <p class="knowledge-caveat">
                 Multilingual E5 Base and Large remain unavailable until signed,
@@ -1077,7 +813,7 @@
                 stay hidden instead of asking every client to recreate a fragile
                 local field mapping. Existing v0.2.0 local bindings remain under
                 Advanced for this compatibility release as read-only search
-                sources. Qdrant stores extracted chunks, metadata and vectors—not
+                sources. Qdrant stores extracted chunks, metadata and vectors, not
                 original binaries.
                 Profiles fingerprint the model, revision, dimensions and exact
                 query/document transforms; changing one creates a new profile
@@ -1321,7 +1057,7 @@
               <h3>Classified on Two Axes</h3>
               <p>
                 Every proposed command is checked for whether it is read-only and
-                whether it reaches the network — independently, since a fetch
+                whether it reaches the network independently, since a fetch
                 that writes no file still pulls unreviewed content into a loop
                 that proposes shell commands. Both are shown on the card.
               </p>
@@ -1334,7 +1070,7 @@
               <p>
                 The permission mode is per session, never persisted, and never
                 inherited by a new tab. Auto-run of reads requires read-only
-                <em>and</em> no network — unknown commands fail closed and cost
+                <em>and</em> no network. Unknown commands fail closed and cost
                 you one click.
               </p>
             </article>
@@ -1345,7 +1081,7 @@
               <h3>In Your Visible Terminal</h3>
               <p>
                 Approved commands run in the tab you're looking at, not a hidden
-                subprocess — so you see exactly what ran, and it runs wherever
+                subprocess. You see exactly what ran, and it runs wherever
                 that tab is, including over <code>ssh</code>.
               </p>
             </article>
@@ -1367,7 +1103,7 @@
               <h3>Edited Means Yours</h3>
               <p>
                 A command you rewrite before approving is treated as your own
-                text on your own gesture, not as model output — deliberately not
+                text on your own gesture, not as model output. It is deliberately not
                 re-classified.
               </p>
             </article>
@@ -1520,7 +1256,7 @@
                 </li>
               </ul>
               <p class="package-card__note">
-                Hosts are only contacted behind an explicit Test — never probed
+                Hosts are only contacted behind an explicit Test and are never probed
                 in the background. A token-bearing connection requires HTTPS,
                 except for localhost or loopback HTTP.
               </p>
@@ -1555,7 +1291,7 @@
                 </li>
               </ul>
               <p class="package-card__note">
-                Transcribed text is fenced and labelled as data — a screenshot is
+                Transcribed text is fenced and labelled as data. A screenshot is
                 attacker-controllable by construction.
               </p>
             </article>
@@ -1574,238 +1310,138 @@
         id="download"
         aria-labelledby="download-title"
       >
-        <div class="install-layout shell">
-          <div>
-            <p class="eyebrow">Download</p>
-            <h2 class="section-heading" id="download-title">
-              Native Installers. One Terminal.
-            </h2>
-            <p class="section-lead">
-              macOS ships as a Developer ID-signed and notarized disk image;
-              Windows 11 is available as an unsigned, per-user preview installer
-              for testing and is not yet considered stable. On-device
-              inference is compiled in on both, with Metal on Mac and dynamic
-              Vulkan with automatic CPU fallback on Windows.
-            </p>
-            <p class="metric-note">
-              The project counters above are rendered from GitHub-reported release data
-              when this static site is published. “Release downloads” counts the
-              macOS disk image, updater archive, and Windows installer across non-draft published
-              releases. It includes upgrades and is not a count of unique users
-              or installations; the app sends no telemetry.
-            </p>
+        <div class="download-shell shell">
+          <header class="download-header">
+            <div class="download-title-group">
+              <p class="eyebrow">Download</p>
+              <h2 class="section-heading" id="download-title">
+                Pick Your Platform. Start in Minutes.
+              </h2>
+            </div>
+            <div class="download-intro">
+              <p class="section-lead">
+                The macOS build is signed and notarized. Windows 11 is available
+                as an unsigned preview for WSL2 and Bash. Both installers include
+                on-device inference with automatic hardware acceleration.
+              </p>
+              <div class="download-trust" aria-label="Installer summary">
+                <span>Apple Silicon</span>
+                <span>Windows 11 x64 preview</span>
+                <span>No app telemetry</span>
+                <span>GPL-3.0</span>
+              </div>
+            </div>
+          </header>
 
-            <dl class="req-list">
-              <div class="req-row">
-                <dt>macOS</dt>
-                <dd>13 Ventura or newer</dd>
+          <div class="download-grid">
+            <article class="download-card">
+              <div class="download-card-heading">
+                <span class="download-platform-icon" aria-hidden="true">
+                  <svg class="ui-icon"><use href="#i-terminal" /></svg>
+                </span>
+                <div>
+                  <p class="download-card-kicker">Stable</p>
+                  <h3>macOS</h3>
+                  <p>Apple Silicon · macOS 13 Ventura or newer</p>
+                </div>
               </div>
-              <div class="req-row">
-                <dt>Windows</dt>
-                <dd>Windows 11 x64 preview (testing), WSL2 default distribution, Bash</dd>
-              </div>
-              <div class="req-row">
-                <dt>Packages</dt>
-                <dd>Apple Silicon DMG; unsigned per-user Windows NSIS preview</dd>
-              </div>
-              <div class="req-row">
-                <dt>Signatures</dt>
-                <dd>
-                  macOS Developer ID signed, notarized and stapled; Windows
-                  preview intentionally unsigned (verify SHA-256)
-                </dd>
-              </div>
-              <div class="req-row">
-                <dt>Updates</dt>
-                <dd>
-                  experimental and opt-in — signed updater downloads always ask
-                  before installing and restarting
-                </dd>
-              </div>
-              <div class="req-row">
-                <dt>Local models</dt>
-                <dd>
-                  fetched from inside the app when you want them — the default
-                  Qwen3.5 9B is ~5.3&nbsp;GB
-                </dd>
-              </div>
-            </dl>
 
-            <div class="download-cta" data-release-platform="windows">
               <a
-                class="button button-primary"
+                class="button button-primary download-card-button"
                 href="https://github.com/Veviad/VTerminal/releases"
-                data-release-href="windows"
-                data-release-aria="windows_download"
+                data-release-href="dmg"
+                data-release-aria="download"
               >
                 <svg class="ui-icon" aria-hidden="true"><use href="#i-download" /></svg>
-                Download Windows 11 preview
+                Download for macOS
               </a>
-              <span class="download-meta">
-                <code data-release-text="windows_name">Windows installer</code><br />
-                <span data-release-text="windows_size">EXE</span> · x64 · per-user NSIS
-              </span>
-            </div>
-            <p class="install-note" data-release-platform="windows">
-              <strong>Preview/testing:</strong> Windows support is not yet considered
-              stable. The installer is not Authenticode signed, so Windows reports
-              an unknown publisher and SmartScreen may require
-              <strong>More info → Run anyway</strong>. Verify its published SHA-256 first.
-            </p>
-            <p class="install-note" data-release-platform="windows">
-              VTerminal checks for a working WSL2 default distribution on first launch. It
-              never installs or upgrades WSL administratively; if WSL is absent,
-              follow <a href="https://learn.microsoft.com/windows/wsl/install">Microsoft's setup guide</a>
-              and relaunch VTerminal.
-            </p>
+              <p class="download-card-meta">
+                <code data-release-text="dmg_name">DMG</code>
+                <span data-release-text="dmg_size">Disk image</span>
+              </p>
 
-            <p class="install-note">
-              Prefer to build it yourself? The
-              <a href="https://github.com/Veviad/VTerminal#quick-start">README</a>
-              covers source builds for both platforms. Local macOS builds are
-              separate from the Developer ID-signed and notarized app distributed
-              in the published disk image.
-            </p>
-            <p class="install-note">
-              <strong>Experimental automatic updates.</strong> After installing,
-              open <strong>Settings → Updates</strong> to check
-              manually or opt in to checks every 24 hours. Stable releases and
-              prereleases share one channel, updater archives are
-              cryptographically verified, and every install requires your
-              confirmation before VTerminal restarts.
-            </p>
-          </div>
+              <ul class="install-checklist">
+                <li><span>1</span>Open the disk image</li>
+                <li><span>2</span>Drag VTerminal to Applications</li>
+                <li><span>3</span>Open it normally from Applications</li>
+              </ul>
 
-          <div>
-            <p class="eyebrow">macOS installation</p>
-            <ol class="steps">
-            <li class="step">
-              <span class="step-number" aria-hidden="true">1</span>
-              <div class="step-body">
-                <h3>Download the Disk Image</h3>
-                <div class="download-cta">
-                  <a
-                    class="button button-primary"
-                    href="https://github.com/Veviad/VTerminal/releases"
-                    data-release-href="dmg"
-                    data-release-aria="download"
-                  >
-                    <svg class="ui-icon" aria-hidden="true">
-                      <use href="#i-download" />
-                    </svg>
-                    VTerminal <span data-release-text="version">latest release</span>
-                  </a>
-                  <span class="download-meta">
-                    <code data-release-text="dmg_name">DMG</code><br />
-                    <span data-release-text="dmg_size">DMG</span> ·
-                    <a
-                      href="https://github.com/Veviad/VTerminal/releases"
-                      data-release-href="release"
-                      >release notes</a
-                    >
-                  </span>
-                </div>
-                <!-- The SHA-256 was inlined here as 64 literal hex characters
-                     and went stale the first time the release was rebuilt. A
-                     wrong checksum is worse than none: it tells someone their
-                     download was tampered with when it was not. Pointing at the
-                     published SHA256SUMS.txt cannot drift, and it is the command
-                     the release notes already give. -->
+              <p class="download-card-note">
+                Developer ID signed, notarized, and stapled for normal
+                Gatekeeper verification.
+              </p>
+
+              <details class="download-details">
+                <summary>Verify the download</summary>
                 <p>
-                  For an independent integrity check, download
+                  Download
                   <a
                     href="https://github.com/Veviad/VTerminal/releases"
                     data-release-href="checksum"
                     >SHA256SUMS.txt</a
                   >
-                  next to the image and run:
+                  next to the disk image, then run:
                 </p>
                 <div class="code-block">
                   <code>shasum -a 256 -c SHA256SUMS.txt</code>
-                  <button
-                    class="copy-button"
-                    type="button"
-                    aria-label="Copy command"
-                    data-copy
-                  >
+                  <button class="copy-button" type="button" aria-label="Copy command" data-copy>
                     <svg class="ui-icon" aria-hidden="true"><use href="#i-copy" /></svg>
                   </button>
                 </div>
+              </details>
+            </article>
+
+            <article class="download-card" data-release-platform="windows">
+              <div class="download-card-heading">
+                <span class="download-platform-icon" aria-hidden="true">
+                  <svg class="ui-icon"><use href="#i-terminal" /></svg>
+                </span>
+                <div>
+                  <p class="download-card-kicker is-preview">Preview</p>
+                  <h3>Windows 11</h3>
+                  <p>x64 · WSL2 default distribution · Bash</p>
+                </div>
               </div>
-            </li>
 
-            <li class="step">
-              <span class="step-number" aria-hidden="true">2</span>
-              <div class="step-body">
-                <h3>Drag VTerminal to Applications</h3>
-                <p>
-                  If you are upgrading, quit VTerminal completely first. Open
-                  the new disk image and replace the copy in Applications, then
-                  eject every older VTerminal image before launching
-                  <code>/Applications/VTerminal.app</code>. A running or mounted
-                  older copy can otherwise be reopened instead of the version
-                  you just installed.
-                </p>
-              </div>
-            </li>
+              <a
+                class="button button-primary download-card-button"
+                href="https://github.com/Veviad/VTerminal/releases"
+                data-release-href="windows"
+                data-release-aria="windows_download"
+              >
+                <svg class="ui-icon" aria-hidden="true"><use href="#i-download" /></svg>
+                Download Windows preview
+              </a>
+              <p class="download-card-meta">
+                <code data-release-text="windows_name">Windows installer</code>
+                <span data-release-text="windows_size">EXE</span>
+              </p>
 
-            <li class="step">
-              <span class="step-number" aria-hidden="true">3</span>
-              <div class="step-body">
-                <h3>Open VTerminal</h3>
-                <p>
-                  The published app is signed with a Developer ID certificate,
-                  notarized by Apple, and carries a stapled notarization ticket.
-                  Open it normally from Applications; Gatekeeper can verify the
-                  publisher and notarization without <strong>Open Anyway</strong>
-                  or removing the quarantine attribute.
-                </p>
+              <ul class="install-checklist">
+                <li><span>1</span>Verify the published SHA-256</li>
+                <li><span>2</span>Run the per-user installer</li>
+                <li><span>3</span>Confirm WSL2 and Bash</li>
+              </ul>
 
-                <p>
-                  Upgrading from an ad-hoc release (0.2.2 or earlier) may cause
-                  macOS Keychain to request one final authorization for each
-                  existing credential when it is actually used. Choose
-                  <strong>Always Allow</strong>; later VTerminal releases signed by
-                  the same Developer ID team and app identifier can reuse that
-                  authorization. The companion <code>vterminal-docs</code>
-                  executable has its own identifier and may request its own
-                  first-use authorization.
-                </p>
+              <p class="download-card-note is-warning">
+                Preview status: the installer is not Authenticode signed.
+                Windows may show an unknown publisher. Verify its checksum
+                before choosing <strong>More info → Run anyway</strong>.
+              </p>
 
+              <details class="download-details">
+                <summary>Verify and prepare Windows</summary>
                 <p>
-                  If macOS cannot verify the app, download the disk image again
-                  and check its published SHA-256 checksum rather than bypassing
-                  Gatekeeper.
-                </p>
-              </div>
-            </li>
-            </ol>
-          </div>
-        </div>
-
-        <div class="install-layout shell" data-release-platform="windows">
-          <div>
-            <p class="eyebrow">Windows 11 preview installation</p>
-            <h2 class="section-heading section-heading-wide">Preview, Per User, WSL First.</h2>
-            <p class="section-lead">
-              The NSIS installer needs no administrator rights. VTerminal uses the
-              default WSL2 distribution and interactive Bash; it does not install
-              or upgrade WSL for you.
-            </p>
-            <p class="install-note">
-              For detailed troubleshooting, build prerequisites, and the beta
-              acceptance matrix, see the
-              <a href="https://github.com/Veviad/VTerminal/blob/main/docs/WINDOWS.md">Windows guide</a>.
-            </p>
-          </div>
-          <ol class="steps">
-            <li class="step">
-              <span class="step-number" aria-hidden="true">1</span>
-              <div class="step-body">
-                <h3>Verify the Download</h3>
-                <p>
-                  Download <a href="https://github.com/Veviad/VTerminal/releases" data-release-href="checksum">SHA256SUMS.txt</a>
-                  beside the installer, then compare its published SHA-256 in PowerShell:
+                  Compare the installer with
+                  <a
+                    href="https://github.com/Veviad/VTerminal/releases"
+                    data-release-href="checksum"
+                    >SHA256SUMS.txt</a
+                  >, then follow the
+                  <a href="https://github.com/Veviad/VTerminal/blob/main/docs/WINDOWS.md"
+                    >Windows guide</a
+                  >
+                  if WSL2 is not ready.
                 </p>
                 <div class="code-block">
                   <code>Get-FileHash .\<span data-release-text="windows_name">VTerminal_x64-setup.exe</span> -Algorithm SHA256</code>
@@ -1813,32 +1449,26 @@
                     <svg class="ui-icon" aria-hidden="true"><use href="#i-copy" /></svg>
                   </button>
                 </div>
-              </div>
-            </li>
-            <li class="step">
-              <span class="step-number" aria-hidden="true">2</span>
-              <div class="step-body">
-                <h3>Run the Preview Installer</h3>
-                <p>
-                  Launch <code data-release-text="windows_name">VTerminal_x64-setup.exe</code>.
-                  It installs for the current user and manages only VTerminal's
-                  companion-CLI PATH entry.
-                </p>
-              </div>
-            </li>
-            <li class="step">
-              <span class="step-number" aria-hidden="true">3</span>
-              <div class="step-body">
-                <h3>Confirm WSL2 and Bash</h3>
-                <p>
-                  If first launch reports a missing prerequisite, run
-                  <code>wsl.exe --status</code> and <code>wsl.exe --list --verbose</code>.
-                  Set a WSL2 distribution as default, confirm it contains
-                  <code>/bin/bash</code>, then reopen VTerminal.
-                </p>
-              </div>
-            </li>
-          </ol>
+              </details>
+            </article>
+          </div>
+
+          <div class="download-footer">
+            <p>
+              Local models are downloaded only when you request them. Update
+              checks are opt-in, signed, and always require confirmation before
+              installation and restart.
+            </p>
+            <nav aria-label="More installation options">
+              <a href="https://github.com/Veviad/VTerminal#quick-start">Build from source</a>
+              <a
+                href="https://github.com/Veviad/VTerminal/releases"
+                data-release-href="release"
+                >Release notes</a
+              >
+              <a href="https://github.com/Veviad/VTerminal/releases">All releases</a>
+            </nav>
+          </div>
         </div>
       </section>
 
@@ -1870,7 +1500,7 @@
             Built in the Open, Under GPL-3.0.
           </h2>
           <p class="section-lead">
-            Issues and pull requests are welcome — please open an issue before
+            Issues and pull requests are welcome. Please open an issue before
             starting substantial work so the approach can be agreed first. If you
             intend to contribute regularly, get in touch: a licensing agreement
             may be needed to keep future relicensing possible.
