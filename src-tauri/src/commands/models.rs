@@ -667,6 +667,33 @@ mod tests {
     }
 
     #[test]
+    fn successful_legacy_cleanup_removes_the_file_and_registry_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let artifact = catalog::find("local/qwen3.5-4b")
+            .unwrap()
+            .local
+            .unwrap()
+            .mtp
+            .legacy()
+            .unwrap();
+        let file_path = temp.path().join("legacy.gguf");
+        std::fs::write(&file_path, b"legacy weights").unwrap();
+        let legacy = registry::make_local_model(
+            artifact.repo_id,
+            artifact.filename,
+            &file_path,
+            artifact.size_bytes,
+        );
+        registry::add(temp.path(), legacy.clone()).unwrap();
+
+        remove_legacy_after_upgrade(temp.path(), &legacy).unwrap();
+        assert!(!file_path.exists());
+        assert!(registry::load(temp.path())
+            .iter()
+            .all(|model| model.id != legacy.id));
+    }
+
+    #[test]
     fn catalog_presence_checks_each_provider_once_and_preserves_unknown_state() {
         let mut calls = std::collections::BTreeMap::new();
         let presence = catalog_provider_presence(
