@@ -7,7 +7,7 @@
     <meta name="color-scheme" content="dark" />
     <meta name="robots" content="index,follow" />
 
-    <title>Reusable Runbooks — VTerminal</title>
+    <title>Reusable Runbooks | VTerminal</title>
     <meta
       name="description"
       content="Author and run reusable VTerminal checklists with explicit approvals, immutable definitions, evidence capture and canonical reports."
@@ -223,7 +223,7 @@
               <strong>Apply and verify travel together.</strong>
               <p>
                 A step that changes something must prove it worked, so the two
-                phases are added and removed as a pair — a runbook with an apply
+                phases are added and removed as a pair. A runbook with an apply
                 and no verify is rejected at publish time. The wizard still
                 generates no agent, goal, or Ansible actions: those change who
                 decides whether a step succeeded, so they are read as YAML before
@@ -261,7 +261,7 @@
                 <span>01</span>
                 <div>
                   <strong>Describe it</strong>
-                  Say what the runbook should do. Requirements alone are enough —
+                  Say what the runbook should do. Requirements alone are enough;
                   the terminal is optional context, not a requirement.
                 </div>
               </li>
@@ -291,7 +291,7 @@
                 still approved in your terminal when the runbook runs. Output is
                 constrained to shell and manual actions by the draft format
                 itself, and every generated document passes the same validation
-                and secret scan as a hand-written one — a credential echoed out
+                and secret scan as a hand-written one. A credential echoed out
                 of a transcript is refused, not published. Attaching a terminal
                 is unavailable when terminal context is switched off in
                 Settings → AI, and for any tab that has run a Runbook.
@@ -436,7 +436,7 @@ spec:
               </li>
               <li>
                 Shell actions are one inline command of at most 4,096
-                characters—no newlines, control characters or heredocs.
+                characters, with no newlines, control characters or heredocs.
               </li>
               <li>
                 Typed inputs are non-secret and enter shell actions only through
@@ -546,7 +546,7 @@ spec:
             <p>
               Steps execute sequentially. A check explicitly distinguishes a
               compliant exit code, a non-compliant exit code and an execution
-              error—success is never inferred from an apply command alone.
+              error. Success is never inferred from an apply command alone.
             </p>
 
             <div class="guide-grid">
@@ -634,7 +634,7 @@ spec:
               goal serves as both, so one condition is written once instead of
               twice. Goal conditions are ordinary commands in your visible
               terminal and carry the same <code>shell_observed</code> assurance
-              as any other. Nothing claims a more trustworthy executor — what
+              as any other. Nothing claims a more trustworthy executor. What
               changed is who reads the result.
             </p>
 
@@ -710,7 +710,7 @@ spec:
                   Gives bounded Markdown instructions to the current model, plus
                   whatever the step's <a href="#goals">goal and context</a>
                   allow it to know. Each command it proposes receives its own
-                  approval, and the model phase itself is approved separately —
+                  approval, and the model phase itself is approved separately;
                   that card names the goal and the enforced bounds before the
                   model has them.
                 </p>

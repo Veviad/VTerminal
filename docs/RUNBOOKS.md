@@ -1,8 +1,8 @@
 # Veviad Runbooks
 
 A runbook is a reusable, versioned checklist that VTerminal runs against the
-terminal you are looking at. It checks things, and — with your approval on every
-single command — changes them, then proves the change worked and writes a report
+terminal you are looking at. It checks things and changes them only with your
+approval on every single command. It then proves the change worked and writes a report
 you can hand to someone else.
 
 The feature is experimental and **off by default**. Turn it on in
@@ -29,11 +29,11 @@ Open **Runbooks** from the header. Three tabs: **Library** (what you can run),
 VTerminal ships three macOS assessments that change nothing, so you can watch
 one work without risk:
 
-- **macOS Security Posture** — FileVault, SIP, Gatekeeper, the application
+- **macOS Security Posture:** FileVault, SIP, Gatekeeper, the application
   firewall, automatic updates.
-- **macOS Developer Workstation Health** — Xcode CLT, the SDK, Git, Rosetta,
+- **macOS Developer Workstation Health:** Xcode CLT, the SDK, Git, Rosetta,
   free space, optionally Homebrew.
-- **macOS Backup & Storage Readiness** — free space, the Time Machine
+- **macOS Backup & Storage Readiness:** free space, the Time Machine
   destination and backup age, APFS, optional local snapshots.
 
 Pick one, press **Run**, and you get a preflight screen: which terminal it will
@@ -57,7 +57,7 @@ type.
 |---|---|
 | **Basics** | id, version, title, description, tags, target platform (macOS 13+, Linux, Any), default failure policy, whether the runbook needs network or root, and the absolute paths it writes to |
 | **Inputs** | string, integer, boolean, path or enum, each with a description, a default and whether it is required |
-| **Checks** | ordered steps, each with a check — a shell command with explicit `VRUN_*` input mappings and exit codes, or a manual question — and optionally an **apply** that fixes what the check found plus a **verify** that proves it worked |
+| **Checks** | ordered steps, each with a check (a shell command with explicit `VRUN_*` input mappings and exit codes, or a manual question), and optionally an **apply** that fixes what the check found plus a **verify** that proves it worked |
 | **Review** | validation issues you can click to jump to, three summary tiles, and the exact YAML that will be published |
 
 Choosing macOS or Linux adds a locked first step that stops the run on the wrong
@@ -71,8 +71,8 @@ right proof. Every path the runbook writes to belongs in the Basics list: it is
 shown in preflight before the first command runs.
 
 The wizard still cannot author `agent`, `goal` or Ansible actions. Those change
-who decides whether a step succeeded, so they are read as YAML before they run —
-publish what you have, export it, and edit the file. See below.
+who decides whether a step succeeded, so they are read as YAML before they run.
+Publish what you have, export it, and edit the file. See below.
 
 ---
 
@@ -83,7 +83,7 @@ requirement and, optionally, a terminal session as context.
 
 The usual case: you installed and configured something by hand in a tab, and you
 want a runbook that does it again elsewhere. Attach that session and the model
-turns what you ran into steps — the command you used becomes the `apply`, and
+turns what you ran into steps. The command you used becomes the `apply`, and
 the way you would tell it already happened becomes the `check` and the `verify`.
 
 What leaves your machine is shown before it is sent. Pick the session, untick
@@ -94,7 +94,7 @@ output is suppressed so redacted evidence cannot be recovered).
 
 The result is an ordinary draft. It opens on **Review** with its validation
 issues listed, every field editable, and nothing saved to the Library until you
-publish it — the same path a hand-written draft takes. Generated commands get no
+publish it through the same path a hand-written draft takes. Generated commands get no
 special trust: each one is still approved in your terminal when the runbook runs.
 
 Drafts stay out of the Library until **Publish to Library** succeeds.
@@ -105,7 +105,7 @@ requires a strictly greater version. Publishing an unchanged draft does nothing.
 
 You can reopen a wizard project later. Removing the Library source leaves the
 draft available to republish; discarding a published draft detaches the wizard
-project only — the published runbook and its run history stay.
+project only. The published runbook and its run history stay.
 
 ---
 
@@ -113,7 +113,7 @@ project only — the published runbook and its run history stay.
 
 ### The authoring loop
 
-1. **Export runbook** from the Library — you get a folder named
+1. **Export runbook** from the Library. You get a folder named
    `runbook-<id>-v<version>`.
 2. Edit `runbook.vrun.yaml` and `README.md` in any editor.
 3. Keep `metadata.id` if it serves the same purpose, bump `metadata.version`,
@@ -185,7 +185,7 @@ spec:
 
 A definition is frozen at run creation: VTerminal stores the original YAML, its
 canonical JSON and a SHA-256 of each. Editing the package afterwards affects
-future runs only after a refresh — never a live or historical one.
+future runs only after a refresh, never a live or historical one.
 
 ### Inputs
 
@@ -217,7 +217,7 @@ in a definition.**
 A step runs up to three phases: **check** → **apply** → **verify**. Check
 decides whether work is needed; apply does it; verify proves it.
 
-Every step needs a check phase — from `check:` or from `goal.checks`. An
+Every step needs a check phase from `check:` or from `goal.checks`. An
 `apply:` is never complete without verification, so it needs `verify:` or
 `goal.checks`. A `verify:` without an `apply:` is an error.
 
@@ -255,7 +255,7 @@ other code is an execution error, not a non-compliance.
 `onFailure` is `pause` (default), `stop` or `continue`. A paused step lets you
 retry from a fresh check, skip, waive with an actor/reason/timestamp, or stop.
 Mutations are never replayed automatically. An **unknown** outcome always pauses
-for you, even under `continue` — not knowing what happened is not a result you
+for you, even under `continue`. Not knowing what happened is not a result you
 can carry forward.
 
 ---
@@ -299,7 +299,7 @@ The goal is met only when **every** condition exits with a code it declares. All
 of them run even after one fails, so the report can say which two of four
 conditions are unmet rather than just "something".
 
-Notice there is no `check:` and no `verify:`. The goal serves as both — one
+Notice there is no `check:` and no `verify:`. The goal serves as both: one
 statement of the condition instead of the same command written twice, which is
 two places for one truth to drift.
 
@@ -310,7 +310,7 @@ claims a more trustworthy executor. What changed is *who reads the result*.
 ### Bounds
 
 `constraints` narrow what an agent phase may do. Put them on a step, or in
-`spec.defaults.constraints` for the whole document — a step that declares its
+`spec.defaults.constraints` for the whole document. A step that declares its
 own block replaces the defaults entirely, so reading the step tells you what
 applies.
 
@@ -324,7 +324,7 @@ constraints:
 ```
 
 Every field narrows. Nothing here widens what you already allow, and
-`network: true` / `privilege: root` refuse nothing — they are a statement of
+`network: true` / `privilege: root` refuse nothing. They are a statement of
 expectation, and the model is told about neither, because promising a rule that
 is not applied is a lie.
 
@@ -374,7 +374,7 @@ Their output is shown to every agent phase in the run. This is what lets one
 runbook serve Debian, RHEL and Arch.
 
 - Each probe is approved like any other command. There is no exemption for a
-  "read-only" one — read-only cannot be proven from command text on a shell
+  "read-only" one because read-only cannot be proven from command text on a shell
   whose aliases and functions are not attested.
 - They run once per run, not per step, because `/etc/os-release` does not change
   between steps and every probe costs you a click.
@@ -390,7 +390,7 @@ runbook serve Debian, RHEL and Arch.
 
 [`examples/runbooks/linux-host-hardening`](../examples/runbooks/linux-host-hardening)
 is the whole feature in one file: four discovery probes, then firewall, Docker
-and SSH steps, each with a goal, its conditions and its bounds — including
+and SSH steps, each with a goal, its conditions and its bounds, including
 `network: false` on the two steps that only edit a local config file.
 
 [`linux-server-security-baseline`](../examples/runbooks/linux-server-security-baseline)
@@ -404,7 +404,7 @@ Every run binds to one visible terminal and the local, SSH or container context
 observed there. The engine pauses if the session or target changes. Two runs
 cannot drive the same terminal at once.
 
-- **Every visible-terminal shell action needs approval** — checks and
+- **Every visible-terminal shell action needs approval.** Checks and
   verifications included, not just changes. An existing interactive shell can
   alter an apparently harmless command through aliases, exported functions,
   `PATH` shims, loader variables, or an already-root SSH context, so no command
@@ -418,7 +418,7 @@ cannot drive the same terminal at once.
 - Approvals are single-click. In a live run you can also
   **Acknowledge and approve all remaining steps**. It approves the current
   request, then waits for each approved command to finish in the terminal
-  before the next approval appears — a step that takes minutes is normal and
+  before the next approval appears. A step that takes minutes is normal and
   does not end the flow. It stops at the first operator pause, manual step,
   finished run, or command that fails validation, and **Stop auto-approve**
   ends it at any point, including mid-wait. If a run goes quiet for longer than
@@ -427,7 +427,7 @@ cannot drive the same terminal at once.
   approved twice. Runbooks do not mirror the agent panel's `Auto all`.
 - **Abort run** stops an active run and returns you to the Library. It is two
   clicks, it sends SIGINT to an owned foreground command, and it cannot prove
-  the process stopped or undo a mutation already made — the active step is
+  the process stopped or undo a mutation already made. The active step is
   reported `unknown`. If the abort does not take, the run stays in front of you
   with its error rather than being navigated away from.
 - **A model phase has its own approval**, separate from the shell approvals for
@@ -451,7 +451,7 @@ cannot drive the same terminal at once.
 A timeout means the outcome is *unknown*: the command is not killed and not
 retried. Cancelling sends SIGINT to the owned foreground job and stops
 observation, but cannot prove the process stopped, terminate detached work, or
-undo what already happened — the active step is reported `unknown`. After a
+undo what already happened. The active step is reported `unknown`. After a
 process restart, active runs become `interrupted`, in-flight attempts become
 `unknown`, and resuming requires an explicit terminal rebind.
 
@@ -478,7 +478,7 @@ Three levels:
 | **Always, in full** | Every attempt keeps an artifact, and no run can opt out. |
 
 Preflight shows the resolved level and only offers levels at or above it. You
-can raise a single run, never lower it, and the clamp is applied in Rust — a
+can raise a single run, never lower it, and the clamp is applied in Rust. A
 stale frontend cannot reduce your audit level. **Never** is "off by default"
 rather than "recording forbidden", so a run you specifically want evidence for
 is still possible.
@@ -489,7 +489,7 @@ A report shows each attempt's redacted tail inline. Where a full artifact
 exists, **View recorded output** opens it. The recorded digest is re-verified on
 every read: an artifact that has been deleted, resized or altered since the run
 is reported as no longer readable rather than shown, because bytes that no
-longer match what was recorded are worse than none — you cannot tell by looking.
+longer match what was recorded are worse than none because you cannot tell by looking.
 
 The same viewer serves the report at the end of a run and the same run reopened
 from History months later.
@@ -517,7 +517,7 @@ from History months later.
 
 ### Reports
 
-Every terminal outcome — succeeded, exceptional, failed or cancelled — produces
+Every terminal outcome, whether succeeded, exceptional, failed or cancelled, produces
 a canonical `report.json`. `report.md` is generated only from that validated
 JSON. **Export report** writes both plus eligible evidence artifacts; it is not
 an importable package. Removing a package registration never deletes its runs.
@@ -534,7 +534,7 @@ separate, and recording more output does not feed more of it to a model.
 
 Keep `metadata.id` stable while a runbook serves the same purpose. Bump the
 semantic version whenever behaviour, requirements, inputs or the meaning of a
-step changes. Step IDs are durable report identifiers — never reuse one for a
+step changes. Step IDs are durable report identifiers. Never reuse one for a
 different check.
 
 Prefer idempotent checks, the smallest safe apply, and a verification of the
@@ -542,8 +542,8 @@ observable end state rather than of the command that produced it.
 
 > **A runbook using goals, constraints or discovery is rejected by an older
 > VTerminal**, with an opaque YAML error. `apiVersion` is matched exactly and
-> every structure refuses unknown fields, so there is no partial understanding —
-> which is safer than silently ignoring a bound the author relied on, but worth
+> every structure refuses unknown fields, so there is no partial understanding.
+> This is safer than silently ignoring a bound the author relied on, but worth
 > knowing before you share a file.
 
 ---
@@ -570,7 +570,7 @@ observable end state rather than of the command that produced it.
 |---|---|
 | `target.kind` | `active-terminal` |
 | `inputs` | Map of id → definition |
-| `declaredCapabilities` | `network`, `privilege`, `writes` — preflight disclosure, not enforcement |
+| `declaredCapabilities` | `network`, `privilege`, `writes`; preflight disclosure, not enforcement |
 | `defaults` | `onFailure`, `constraints` |
 | `audit.recordOutput` | `none` \| `tail` \| `full`; your Settings floor can only raise it |
 | `context.discover` | Up to 6 probes, run once before the first step |
