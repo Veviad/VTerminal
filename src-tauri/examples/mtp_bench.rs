@@ -1,48 +1,60 @@
 //! Repeatable standard-versus-MTP benchmark for the real VTerminal provider.
 //!
 //! Usage:
-//! cargo run --release --features local-llm --example mtp_bench -- \
-//!   <target.gguf> <qwen|gemma> <draft-tokens> [draft.gguf|-] [runs]
+//! cargo run --release --features local-llm --example mtp_bench < mtp-bench.json
+//!
+//! JSON fields: `target`, `family` (`qwen` or `gemma`), `draft_tokens`,
+//! optional `draft_path`, and optional `runs` (defaults to 5).
 
 #[cfg(feature = "local-llm")]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use std::{ffi::OsString, path::PathBuf, sync::Arc};
+    use std::{io::Read, path::PathBuf, sync::Arc};
     use vterminal_lib::models::catalog::LocalFamily;
     use vterminal_lib::provider::local::{last_generation_metrics, LocalLlamaCpp, ReadyModel};
     use vterminal_lib::provider::{
         ChatMessage, ChatParams, Effort, Provider, ProviderEvent, ToolChoiceMode, WebToolPolicy,
     };
 
-    let usage = "usage: mtp_bench <target.gguf> <qwen|gemma> <draft-tokens> [draft.gguf|-] [runs]";
-    let mut args = std::env::args_os().skip(1);
-    let target = canonical_gguf(args.next().ok_or(usage)?)?;
-    let family_arg = utf8_arg(args.next().ok_or(usage)?, "model family")?;
-    let family = match family_arg.as_str() {
+    #[derive(serde::Deserialize)]
+    struct BenchConfig {
+        target: String,
+        family: String,
+        draft_tokens: u32,
+        #[serde(default)]
+        draft_path: Option<String>,
+        #[serde(default)]
+        runs: Option<usize>,
+    }
+
+    let mut input = String::new();
+    std::io::stdin()
+        .lock()
+        .take(16_385)
+        .read_to_string(&mut input)?;
+    if input.len() > 16_384 {
+        return Err("benchmark configuration exceeds 16 KiB".into());
+    }
+    let config: BenchConfig = serde_json::from_str(&input)?;
+    let target = canonical_gguf(&config.target)?;
+    let family = match config.family.as_str() {
         "qwen" => LocalFamily::Qwen,
         "gemma" => LocalFamily::Gemma,
         _ => return Err("model family must be qwen or gemma".into()),
     };
-    let draft_tokens: u32 = utf8_arg(args.next().ok_or(usage)?, "draft token limit")?.parse()?;
+    let draft_tokens = config.draft_tokens;
     if !(1..=8).contains(&draft_tokens) {
         return Err("draft token limit must be between 1 and 8".into());
     }
-    let draft_path = match args.next() {
-        Some(value) if value != "-" => Some(canonical_gguf(value)?),
-        _ => None,
-    };
-    let runs: usize = args
-        .next()
-        .map(|value| utf8_arg(value, "run count"))
-        .transpose()?
+    let draft_path = config
+        .draft_path
         .as_deref()
-        .unwrap_or("5")
-        .parse()?;
+        .filter(|value| *value != "-")
+        .map(canonical_gguf)
+        .transpose()?;
+    let runs = config.runs.unwrap_or(5);
     if !(5..=50).contains(&runs) {
         return Err("run count must be between 5 and 50".into());
-    }
-    if args.next().is_some() {
-        return Err(usage.into());
     }
     std::env::set_var("VTERMINAL_MTP_BENCH_SEED", "424242");
 
@@ -101,13 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("{}", serde_json::to_string_pretty(&rows)?);
 
-    fn utf8_arg(value: OsString, label: &str) -> Result<String, Box<dyn std::error::Error>> {
-        value
-            .into_string()
-            .map_err(|_| format!("{label} must be valid UTF-8").into())
-    }
-
-    fn canonical_gguf(value: OsString) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    fn canonical_gguf(value: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
         let path = PathBuf::from(value).canonicalize()?;
         if !path.is_file()
             || path
