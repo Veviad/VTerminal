@@ -212,8 +212,8 @@ test("renders full zero counters instead of placeholders", async () => {
   const data = buildReleaseData({ ...metadata, generatedAt: "2026-08-13T12:00:00Z" });
   const template = [
     '<script type="application/ld+json" data-release-jsonld>{"softwareVersion":"Latest"}</script>',
-    '<strong data-release-text="stars">—</strong>',
-    '<strong data-release-text="total_downloads">—</strong>',
+    '<strong data-release-text="stars">0</strong>',
+    '<strong data-release-text="total_downloads">0</strong>',
   ].join("");
   const html = renderHtml(template, data);
   assert.equal((html.match(/<strong>0<\/strong>/g) || []).length, 2);
@@ -257,8 +257,7 @@ test("renders the checked-in Pages source and writes sanitized release.json", as
   assert.doesNotMatch(html, /data-release-/);
   assert.doesNotMatch(html, /releases\/(?:download|tag)\/v(?!0\.3\.0-beta\.2)/);
   assert.doesNotMatch(html, /<strong>1,234<\/strong>/);
-  assert.doesNotMatch(html, /<strong>1,027<\/strong>/);
-  assert.match(html, /Published <span>10 Aug 2026<\/span>/);
+  assert.match(html, /Published <span>10 Aug 2026<\/span>\s+<span aria-hidden="true">·<\/span>\s+<strong>1,027<\/strong> downloads across\s+all releases/);
   assert.match(html, /<code>VTerminal_0\.3\.0-beta\.2_aarch64\.dmg<\/code>/);
   assert.equal(
     (html.match(/href="https:\/\/github\.com\/Veviad\/VTerminal\/releases\/download\/v0\.3\.0-beta\.2\/VTerminal_0\.3\.0-beta\.2_aarch64\.dmg"/g) || []).length,
