@@ -65,7 +65,9 @@ export function ReconnectBar({ sessionId }: { sessionId: string }) {
       <button
         onClick={() => {
           setBusy(true);
-          void connectToHost(host, "current-tab", createSession).finally(() => setBusy(false));
+          void connectToHost(host, "current-tab", createSession, sessionId).finally(() =>
+            setBusy(false),
+          );
         }}
         disabled={busy || !gate.ok}
         title={gate.ok ? undefined : gate.reason}

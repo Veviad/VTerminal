@@ -105,7 +105,12 @@ describe("ReconnectBar", () => {
     fireEvent.click(reconnect);
 
     await waitFor(() => {
-      expect(mocks.connectToHost).toHaveBeenCalledWith(host, "current-tab", mocks.createSession);
+      expect(mocks.connectToHost).toHaveBeenCalledWith(
+        host,
+        "current-tab",
+        mocks.createSession,
+        session.id,
+      );
     });
   });
 

@@ -103,6 +103,7 @@ export const S = {
       degraded: "Target unavailable",
       degradedHint: "Reconnect or replace this target before continuing the combined run.",
       reconnect: "Reconnect",
+      reconnecting: "Reconnecting…",
       remoteAll: (host: string) =>
         `All commands for ${host} run without asking, including writes and network access.`,
       divider: "Resize local and SSH terminals",
