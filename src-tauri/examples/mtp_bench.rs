@@ -28,7 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("draft token limit must be between 1 and 8".into());
     }
     let draft_path = match args.next() {
-        Some(value) if value != OsString::from("-") => Some(canonical_gguf(value)?),
+        Some(value) if value != "-" => Some(canonical_gguf(value)?),
         _ => None,
     };
     let runs: usize = args

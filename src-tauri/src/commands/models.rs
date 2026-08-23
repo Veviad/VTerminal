@@ -23,6 +23,7 @@ pub struct MtpCatalogInfo {
 
 struct LocalInstall {
     target: Option<registry::LocalModel>,
+    #[cfg(any(feature = "local-llm", test))]
     sidecar: Option<registry::LocalModel>,
     mtp: MtpCatalogInfo,
 }
@@ -52,6 +53,7 @@ fn resolve_install(spec: catalog::LocalSpec, installed: &[registry::LocalModel])
             };
             LocalInstall {
                 target: preferred.clone().or_else(|| old.clone()),
+                #[cfg(any(feature = "local-llm", test))]
                 sidecar: None,
                 mtp: MtpCatalogInfo {
                     kind: "embedded",
@@ -86,32 +88,26 @@ fn resolve_install(spec: catalog::LocalSpec, installed: &[registry::LocalModel])
             } else {
                 MtpInstallState::NotInstalled
             };
+            let target_download_bytes = if preferred.is_none() {
+                spec.artifact.size_bytes
+            } else {
+                0
+            };
+            let sidecar_download_bytes = if sidecar.is_none() {
+                artifact.size_bytes
+            } else {
+                0
+            };
+            let missing_bytes = target_download_bytes.saturating_add(sidecar_download_bytes);
             LocalInstall {
                 target: preferred.clone(),
+                #[cfg(any(feature = "local-llm", test))]
                 sidecar: sidecar.clone(),
                 mtp: MtpCatalogInfo {
                     kind: "sidecar",
                     state,
-                    download_bytes: preferred
-                        .is_none()
-                        .then_some(spec.artifact.size_bytes)
-                        .unwrap_or(0)
-                        .saturating_add(
-                            sidecar
-                                .is_none()
-                                .then_some(artifact.size_bytes)
-                                .unwrap_or(0),
-                        ),
-                    disk_delta_bytes: preferred
-                        .is_none()
-                        .then_some(spec.artifact.size_bytes)
-                        .unwrap_or(0)
-                        .saturating_add(
-                            sidecar
-                                .is_none()
-                                .then_some(artifact.size_bytes)
-                                .unwrap_or(0),
-                        ),
+                    download_bytes: missing_bytes,
+                    disk_delta_bytes: missing_bytes,
                     draft_tokens,
                 },
             }
