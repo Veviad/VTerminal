@@ -38,7 +38,7 @@ pub struct SandboxGuard {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     #[cfg(target_os = "macos")]
-    private_dir: PathBuf,
+    private_dir: tempfile::TempDir,
     #[cfg(target_os = "macos")]
     process_group: Option<i32>,
     #[cfg(target_os = "windows")]
@@ -65,11 +65,11 @@ impl Drop for SandboxGuard {
         #[cfg(target_os = "macos")]
         {
             if let Some(process_group) = self.process_group.take() {
-                unsafe {
-                    libc::killpg(process_group, libc::SIGKILL);
-                }
+                let _ = nix::sys::signal::killpg(
+                    nix::unistd::Pid::from_raw(process_group),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
             }
-            let _ = std::fs::remove_dir_all(&self.private_dir);
         }
         #[cfg(target_os = "windows")]
         if let Some(relay) = self.relay.as_mut() {
@@ -78,10 +78,12 @@ impl Drop for SandboxGuard {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn scheme_escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+#[cfg(target_os = "macos")]
 fn canonical_existing(path: &str, kind: &str) -> Result<PathBuf, String> {
     let path = PathBuf::from(path);
     let canonical = path
@@ -94,16 +96,15 @@ fn canonical_existing(path: &str, kind: &str) -> Result<PathBuf, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn private_directory(server_id: &str) -> Result<PathBuf, String> {
+fn private_directory(server_id: &str) -> Result<tempfile::TempDir, String> {
     use std::os::unix::fs::PermissionsExt;
 
     let id = uuid::Uuid::parse_str(server_id).map_err(|_| "invalid MCP server id")?;
-    let directory = std::env::temp_dir()
-        .join("vterminal-mcp")
-        .join(id.hyphenated().to_string());
-    std::fs::create_dir_all(&directory)
+    let directory = tempfile::Builder::new()
+        .prefix(&format!("vterminal-mcp-{}-", id.simple()))
+        .tempdir()
         .map_err(|error| format!("could not create private MCP cache directory: {error}"))?;
-    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
         .map_err(|error| format!("could not secure private MCP cache directory: {error}"))?;
     Ok(directory)
 }
@@ -462,7 +463,7 @@ fn start_proxy(
 #[cfg(target_os = "macos")]
 fn start_domain_proxy(
     domains: &[String],
-    private_dir: PathBuf,
+    private_dir: tempfile::TempDir,
 ) -> Result<(u16, SandboxGuard), String> {
     let (port, shutdown) = start_proxy(domains, std::net::Ipv4Addr::LOCALHOST, None)?;
     Ok((
@@ -753,15 +754,16 @@ pub async fn command(
             None,
             SandboxGuard {
                 shutdown: None,
-                private_dir: private_dir.clone(),
+                private_dir,
                 process_group: None,
             },
         )
     } else {
-        let (port, guard) = start_domain_proxy(&policy.allowed_domains, private_dir.clone())?;
+        let (port, guard) = start_domain_proxy(&policy.allowed_domains, private_dir)?;
         (Some(port), guard)
     };
-    let profile = macos_profile(policy, cwd, &private_dir, proxy_port)?;
+    let private_dir = guard.private_dir.path();
+    let profile = macos_profile(policy, cwd, private_dir, proxy_port)?;
     let executable = resolve_executable(executable, policy)?;
     let mut child = Command::new("/usr/bin/sandbox-exec");
     child.process_group(0);
@@ -778,8 +780,8 @@ pub async fn command(
             child.env(key, value);
         }
     }
-    child.env("HOME", &private_dir);
-    child.env("TMPDIR", &private_dir);
+    child.env("HOME", private_dir);
+    child.env("TMPDIR", private_dir);
     child.env("XDG_CACHE_HOME", private_dir.join("cache"));
     if let Some(port) = proxy_port {
         let http = format!("http://127.0.0.1:{port}");
@@ -884,29 +886,27 @@ pub async fn command(
         let mut bridge = bridge
             .spawn()
             .map_err(|error| format!("could not start the bundled WSL relay: {error}"))?;
-        let mut ready = false;
-        for _ in 0..100 {
-            if bridge
+        // Enter WSL once and poll there. Repeatedly launching wsl.exe is slow
+        // enough to make the fixed startup window unreliable on cold systems.
+        let ready = Command::new("wsl.exe")
+            .args([
+                "--exec",
+                "sh",
+                "-c",
+                "i=0; while [ \"$i\" -lt 100 ]; do test -S \"$1\" && exit 0; i=$((i + 1)); sleep 0.05; done; exit 1",
+                "vterminal-relay-ready",
+                &socket,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .is_ok_and(|status| status.success())
+            && bridge
                 .try_wait()
                 .map_err(|error| error.to_string())?
-                .is_some()
-            {
-                break;
-            }
-            let exists = Command::new("wsl.exe")
-                .args(["--exec", "test", "-S", &socket])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .await
-                .is_ok_and(|status| status.success());
-            if exists {
-                ready = true;
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
+                .is_none();
         if !ready {
             let _ = bridge.start_kill();
             if let Some(stop) = shutdown.take() {
@@ -1029,10 +1029,33 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_profile_is_fail_closed_for_network() {
-        let directory = std::env::temp_dir().join("vterminal-mcp-profile-test");
-        let profile = macos_profile(&McpSandboxPolicy::default(), None, &directory, None).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let profile =
+            macos_profile(&McpSandboxPolicy::default(), None, directory.path(), None).unwrap();
         assert!(profile.contains("(deny default)"));
         assert!(profile.contains("(deny network*)"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn private_directories_are_unique_secured_and_automatically_removed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let server_id = "01234567-aaaa-bbbb-cccc-0123456789ab";
+        let first = private_directory(server_id).unwrap();
+        let second = private_directory(server_id).unwrap();
+        let first_path = first.path().to_path_buf();
+        assert_ne!(first.path(), second.path());
+        assert_eq!(
+            std::fs::metadata(first.path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        drop(first);
+        assert!(!first_path.exists());
     }
 
     #[cfg(target_os = "macos")]
@@ -1067,6 +1090,7 @@ mod tests {
         let _ = shutdown.send(());
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn root_is_never_an_allowed_user_path() {
         assert!(canonical_existing("/", "read").is_err());

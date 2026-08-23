@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type Dispatch,
+  type FormEvent,
+  type SetStateAction,
+} from "react";
 import {
   Check,
   Copy,
@@ -52,6 +59,157 @@ const inputClass =
   "w-full rounded-md border border-border-subtle bg-bg-secondary px-2.5 py-2 text-[12px] text-text-primary outline-none focus:border-accent";
 const buttonClass =
   "rounded-md border border-border-subtle px-2.5 py-1.5 text-[11px] text-text-secondary transition hover:bg-bg-hover hover:text-text-primary disabled:opacity-40";
+
+interface KeyValueEntry {
+  name: string;
+  value?: string;
+  secret?: boolean;
+}
+
+export function KeyValueEditor({
+  label,
+  entries,
+  slotPrefix,
+  forceSecret,
+  keyPlaceholder,
+  valuePlaceholder,
+  addLabel,
+  secrets,
+  setSecrets,
+  onChange,
+}: {
+  label: string;
+  entries: KeyValueEntry[];
+  slotPrefix: "header" | "env";
+  forceSecret: boolean;
+  keyPlaceholder: string;
+  valuePlaceholder: string;
+  addLabel: string;
+  secrets: Record<string, string>;
+  setSecrets: Dispatch<SetStateAction<Record<string, string>>>;
+  onChange: (entries: KeyValueEntry[]) => void;
+}) {
+  const slot = (name: string) => `${slotPrefix}:${name}`;
+  return (
+    <div className="space-y-2">
+      <p className="text-[11px] text-text-muted">{label}</p>
+      {entries.map((entry, index) => {
+        const isSecret = forceSecret || Boolean(entry.secret);
+        return (
+          <div
+            className={
+              forceSecret
+                ? "flex gap-2"
+                : "grid grid-cols-[1fr_1fr_auto_auto] gap-2"
+            }
+            key={`${slotPrefix}-${index}`}
+          >
+            <input
+              className={inputClass}
+              placeholder={keyPlaceholder}
+              value={entry.name}
+              onChange={(event) => {
+                const nextName = event.target.value;
+                const oldSlot = slot(entry.name);
+                const nextSlot = slot(nextName);
+                const nextEntries = [...entries];
+                nextEntries[index] = { ...entry, name: nextName };
+                setSecrets((current) => {
+                  if (!(oldSlot in current)) return current;
+                  const next = { ...current, [nextSlot]: current[oldSlot] };
+                  delete next[oldSlot];
+                  return next;
+                });
+                onChange(nextEntries);
+              }}
+            />
+            <input
+              type={isSecret ? "password" : "text"}
+              className={inputClass}
+              placeholder={isSecret ? valuePlaceholder : "Value"}
+              value={isSecret ? (secrets[slot(entry.name)] ?? "") : entry.value ?? ""}
+              onChange={(event) => {
+                if (isSecret) {
+                  setSecrets((current) => ({
+                    ...current,
+                    [slot(entry.name)]: event.target.value,
+                  }));
+                  return;
+                }
+                const nextEntries = [...entries];
+                nextEntries[index] = { ...entry, value: event.target.value };
+                onChange(nextEntries);
+              }}
+            />
+            {!forceSecret && (
+              <label className="flex items-center gap-1 text-[10px] text-text-muted">
+                <input
+                  type="checkbox"
+                  checked={isSecret}
+                  onChange={(event) => {
+                    const secret = event.target.checked;
+                    const nextEntries = [...entries];
+                    const secretSlot = slot(entry.name);
+                    if (secret) {
+                      if (entry.value) {
+                        setSecrets((current) => ({
+                          ...current,
+                          [secretSlot]: entry.value ?? "",
+                        }));
+                      }
+                      nextEntries[index] = { ...entry, value: "", secret: true };
+                    } else {
+                      nextEntries[index] = {
+                        ...entry,
+                        value: secrets[secretSlot] ?? "",
+                        secret: false,
+                      };
+                      setSecrets((current) => {
+                        const next = { ...current };
+                        delete next[secretSlot];
+                        return next;
+                      });
+                    }
+                    onChange(nextEntries);
+                  }}
+                />
+                Secret
+              </label>
+            )}
+            <button
+              type="button"
+              className={buttonClass}
+              onClick={() => {
+                setSecrets((current) => {
+                  const next = { ...current };
+                  delete next[slot(entry.name)];
+                  return next;
+                });
+                onChange(entries.filter((_, at) => at !== index));
+              }}
+            >
+              Remove
+            </button>
+          </div>
+        );
+      })}
+      <button
+        type="button"
+        className={buttonClass}
+        onClick={() =>
+          onChange([
+            ...entries,
+            forceSecret
+              ? { name: "" }
+              : { name: "", value: "", secret: false },
+          ])
+        }
+      >
+        {addLabel}
+      </button>
+    </div>
+  );
+}
 
 function asConfig(
   value: unknown,
@@ -596,84 +754,26 @@ Every individual tool call will still require approval.`,
                     </p>
                   </div>
                 )}
-                <div className="space-y-2">
-                  <p className="text-[11px] text-text-muted">
-                    Custom secret headers
-                  </p>
-                  {transport.headers.map((header, index) => (
-                    <div className="flex gap-2" key={index}>
-                      <input
-                        className={inputClass}
-                        placeholder="Header name"
-                        value={header.name}
-                        onChange={(event) => {
-                          const nextName = event.target.value;
-                          const oldSlot = `header:${header.name}`;
-                          const nextSlot = `header:${nextName}`;
-                          const headers = [...transport.headers];
-                          headers[index] = { name: nextName };
-                          const nextSecrets = { ...secrets };
-                          if (oldSlot in nextSecrets) {
-                            nextSecrets[nextSlot] = nextSecrets[oldSlot];
-                            delete nextSecrets[oldSlot];
-                          }
-                          setSecrets(nextSecrets);
-                          setDraft({
-                            ...draft,
-                            transport: { ...transport, headers },
-                          });
-                        }}
-                      />
-                      <input
-                        type="password"
-                        className={inputClass}
-                        placeholder="Value (stored in vault)"
-                        value={secrets[`header:${header.name}`] ?? ""}
-                        onChange={(event) =>
-                          setSecrets({
-                            ...secrets,
-                            [`header:${header.name}`]: event.target.value,
-                          })
-                        }
-                      />
-                      <button
-                        type="button"
-                        className={buttonClass}
-                        onClick={() => {
-                          const nextSecrets = { ...secrets };
-                          delete nextSecrets[`header:${header.name}`];
-                          setSecrets(nextSecrets);
-                          setDraft({
-                            ...draft,
-                            transport: {
-                              ...transport,
-                              headers: transport.headers.filter(
-                                (_, at) => at !== index,
-                              ),
-                            },
-                          });
-                        }}
-                      >
-                        Remove
-                      </button>
-                    </div>
-                  ))}
-                  <button
-                    type="button"
-                    className={buttonClass}
-                    onClick={() =>
-                      setDraft({
-                        ...draft,
-                        transport: {
-                          ...transport,
-                          headers: [...transport.headers, { name: "" }],
-                        },
-                      })
-                    }
-                  >
-                    Add header
-                  </button>
-                </div>
+                <KeyValueEditor
+                  label="Custom secret headers"
+                  entries={transport.headers}
+                  slotPrefix="header"
+                  forceSecret
+                  keyPlaceholder="Header name"
+                  valuePlaceholder="Value (stored in vault)"
+                  addLabel="Add header"
+                  secrets={secrets}
+                  setSecrets={setSecrets}
+                  onChange={(headers) =>
+                    setDraft({
+                      ...draft,
+                      transport: {
+                        ...transport,
+                        headers: headers.map(({ name }) => ({ name })),
+                      },
+                    })
+                  }
+                />
               </div>
             ) : (
               <div className="space-y-3">
@@ -797,126 +897,30 @@ Every individual tool call will still require approval.`,
                     }
                   />
                 </label>
-                <div className="space-y-2">
-                  <p className="text-[11px] text-text-muted">
-                    Environment variables
-                  </p>
-                  {transport.env.map((entry, index) => (
-                    <div
-                      className="grid grid-cols-[1fr_1fr_auto_auto] gap-2"
-                      key={index}
-                    >
-                      <input
-                        className={inputClass}
-                        placeholder="NAME"
-                        value={entry.name}
-                        onChange={(event) => {
-                          const nextName = event.target.value;
-                          const oldSlot = `env:${entry.name}`;
-                          const nextSlot = `env:${nextName}`;
-                          const env = [...transport.env];
-                          env[index] = { ...entry, name: nextName };
-                          const nextSecrets = { ...secrets };
-                          if (oldSlot in nextSecrets) {
-                            nextSecrets[nextSlot] = nextSecrets[oldSlot];
-                            delete nextSecrets[oldSlot];
-                          }
-                          setSecrets(nextSecrets);
-                          setDraft({
-                            ...draft,
-                            transport: { ...transport, env },
-                          });
-                        }}
-                      />
-                      <input
-                        type={entry.secret ? "password" : "text"}
-                        className={inputClass}
-                        placeholder={entry.secret ? "Stored in vault" : "Value"}
-                        value={
-                          entry.secret
-                            ? (secrets[`env:${entry.name}`] ?? "")
-                            : entry.value
-                        }
-                        onChange={(event) => {
-                          if (entry.secret) {
-                            setSecrets({
-                              ...secrets,
-                              [`env:${entry.name}`]: event.target.value,
-                            });
-                          } else {
-                            const env = [...transport.env];
-                            env[index] = {
-                              ...entry,
-                              value: event.target.value,
-                            };
-                            setDraft({
-                              ...draft,
-                              transport: { ...transport, env },
-                            });
-                          }
-                        }}
-                      />
-                      <label className="flex items-center gap-1 text-[10px] text-text-muted">
-                        <input
-                          type="checkbox"
-                          checked={entry.secret}
-                          onChange={(event) => {
-                            const secret = event.target.checked;
-                            const env = [...transport.env];
-                            env[index] = {
-                              ...entry,
-                              secret,
-                              value: secret ? "" : entry.value,
-                            };
-                            setDraft({
-                              ...draft,
-                              transport: { ...transport, env },
-                            });
-                          }}
-                        />
-                        Secret
-                      </label>
-                      <button
-                        type="button"
-                        className={buttonClass}
-                        onClick={() => {
-                          const nextSecrets = { ...secrets };
-                          delete nextSecrets[`env:${entry.name}`];
-                          setSecrets(nextSecrets);
-                          setDraft({
-                            ...draft,
-                            transport: {
-                              ...transport,
-                              env: transport.env.filter(
-                                (_, at) => at !== index,
-                              ),
-                            },
-                          });
-                        }}
-                      >
-                        Remove
-                      </button>
-                    </div>
-                  ))}
-                  <button
-                    type="button"
-                    className={buttonClass}
-                    onClick={() =>
-                      setDraft({
-                        ...draft,
-                        transport: {
-                          ...transport,
-                          env: [
-                            ...transport.env,
-                            { name: "", value: "", secret: false },
-                          ],
-                        },
-                      })
-                    }
-                  >
-                    Add environment variable
-                  </button>
-                </div>
+                <KeyValueEditor
+                  label="Environment variables"
+                  entries={transport.env}
+                  slotPrefix="env"
+                  forceSecret={false}
+                  keyPlaceholder="NAME"
+                  valuePlaceholder="Stored in vault"
+                  addLabel="Add environment variable"
+                  secrets={secrets}
+                  setSecrets={setSecrets}
+                  onChange={(env) =>
+                    setDraft({
+                      ...draft,
+                      transport: {
+                        ...transport,
+                        env: env.map((entry) => ({
+                          name: entry.name,
+                          value: entry.value ?? "",
+                          secret: Boolean(entry.secret),
+                        })),
+                      },
+                    })
+                  }
+                />
                 <label className="block text-[11px] text-text-muted">
                   Read-only paths (one per line)
                   <textarea

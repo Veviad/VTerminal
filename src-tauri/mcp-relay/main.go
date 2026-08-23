@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -197,7 +198,14 @@ func run(args []string) error {
 	proxy := "http://" + listener.Addr().String()
 	socks := "socks5h://" + listener.Addr().String()
 	childArgs := append([]string{"exec", "--"}, command...)
-	child := exec.Command(os.Args[0], childArgs...)
+	executable, err := currentExecutable()
+	if err != nil {
+		return err
+	}
+	// The executable comes from os.Executable, arguments remain an array, and
+	// no shell parses them. Re-execution is required to install seccomp in the
+	// child without applying it to this supervisor.
+	child := exec.Command(executable, childArgs...) // nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command, go_subproc_rule-subproc
 	child.Stdin = os.Stdin
 	child.Stdout = os.Stdout
 	child.Stderr = os.Stderr
@@ -246,11 +254,37 @@ func filteredExec(args []string) error {
 	if err := installSeccomp(); err != nil {
 		return err
 	}
-	path, err := exec.LookPath(args[0])
+	path, err := resolveCommand(args[0])
 	if err != nil {
 		return err
 	}
-	return syscall.Exec(path, args, os.Environ())
+	// Executing a user-configured MCP command is this relay's purpose. It runs
+	// only after bubblewrap and seccomp are active, uses a canonical executable,
+	// passes arguments without a shell, and inherits the already-cleared env.
+	return syscall.Exec(path, args, os.Environ()) // nosemgrep: go.lang.security.audit.dangerous-syscall-exec.dangerous-syscall-exec
+}
+
+func resolveCommand(name string) (string, error) {
+	path, err := exec.LookPath(name)
+	if err != nil {
+		return "", err
+	}
+	path, err = filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve MCP executable: %w", err)
+	}
+	path, err = filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize MCP executable: %w", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("inspect MCP executable: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return "", errors.New("MCP executable must be a regular executable file")
+	}
+	return path, nil
 }
 
 func installSeccomp() error {
@@ -287,20 +321,44 @@ func installSeccomp() error {
 	if _, _, errno := syscall.RawSyscall(syscall.SYS_PRCTL, prSetNoNewPrivs, 1, 0); errno != 0 {
 		return fmt.Errorf("PR_SET_NO_NEW_PRIVS: %w", errno)
 	}
-	if _, _, errno := syscall.RawSyscall(syscall.SYS_PRCTL, prSetSeccomp, seccompModeFilter, uintptr(unsafe.Pointer(&program))); errno != 0 {
+	// prctl's seccomp ABI accepts a pointer to the immutable BPF program. The
+	// slice remains live for the duration of this synchronous syscall and its
+	// length is checked by the kernel before the filter is copied.
+	programPointer := uintptr(unsafe.Pointer(&program)) // nosemgrep: go.lang.security.audit.unsafe.use-of-unsafe-block, go_unsafe_rule-unsafe
+	if _, _, errno := syscall.RawSyscall(syscall.SYS_PRCTL, prSetSeccomp, seccompModeFilter, programPointer); errno != 0 {
 		return fmt.Errorf("PR_SET_SECCOMP: %w", errno)
 	}
 	return nil
 }
 
 func selfTest() error {
-	command := exec.Command(os.Args[0], "probe")
+	executable, err := currentExecutable()
+	if err != nil {
+		return err
+	}
+	// os.Executable provides the exact current relay; no caller input or PATH
+	// lookup controls this command.
+	command := exec.Command(executable, "probe") // nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command, go_subproc_rule-subproc
 	command.Stdout = io.Discard
 	command.Stderr = os.Stderr
 	if err := command.Run(); err != nil {
 		return fmt.Errorf("seccomp probe failed: %w", err)
 	}
 	return nil
+}
+
+// currentExecutable resolves the running relay through the operating system.
+// os.Args[0] is caller-controlled and may be a relative path or a different
+// executable found through PATH, which is unsafe for the privileged supervisor.
+func currentExecutable() (string, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("resolve relay executable: %w", err)
+	}
+	if !filepath.IsAbs(executable) {
+		return "", errors.New("resolved relay executable is not an absolute path")
+	}
+	return executable, nil
 }
 
 func probe() error {

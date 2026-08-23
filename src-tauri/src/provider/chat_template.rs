@@ -198,6 +198,7 @@ mod tests {
                     arguments: r#"{"command":"du -sh *","explanation":"sizes"}"#.into(),
                 }]),
                 tool_call_id: None,
+                structured_tool_result: None,
                 images: None,
             },
             ChatMessage {
@@ -205,6 +206,7 @@ mod tests {
                 content: "exit code: 0\noutput (tail):\nTOOL_RESULT_MARKER".into(),
                 tool_calls: None,
                 tool_call_id: Some("t1".into()),
+                structured_tool_result: None,
                 images: None,
             },
             ChatMessage::user("STEER_MARKER use ripgrep instead"),
@@ -336,6 +338,7 @@ mod tests {
                     arguments: r#"{"command":"ls /tmp","explanation":"list"}"#.into(),
                 }]),
                 tool_call_id: None,
+                structured_tool_result: None,
                 images: None,
             },
             ChatMessage {
@@ -343,6 +346,7 @@ mod tests {
                 content: "a.txt\nb.txt".into(),
                 tool_calls: None,
                 tool_call_id: Some("call_1".into()),
+                structured_tool_result: None,
                 images: None,
             },
         ];

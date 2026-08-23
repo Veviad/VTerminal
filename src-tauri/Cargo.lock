@@ -5972,6 +5972,7 @@ dependencies = [
  "log",
  "minijinja",
  "minijinja-contrib",
+ "nix 0.31.3",
  "pdf-extract",
  "plist",
  "portable-pty",

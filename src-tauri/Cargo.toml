@@ -67,6 +67,9 @@ shlex = "=2.0.1"
 sysinfo = "0.39"
 sha2 = "0.11"
 zeroize = "1"
+# Runtime MCP sandboxes and integration harnesses both need private,
+# automatically cleaned directories.
+tempfile = "3"
 # Chat attachments cross the IPC boundary as base64 (a `Vec<u8>` argument
 # serializes as a JSON number array, ~7x the size) and are decoded once here
 # before being written to disk.
@@ -104,6 +107,7 @@ security-framework = "3.7"
 # Resolve the post-update executable from the bundle's signed metadata before
 # relaunching; the executable name is not required to match the old binary.
 plist = "1.10"
+nix = { version = "0.31", features = ["signal", "process"] }
 # Safe wrappers over core llama.h. Chosen over mistral.rs because its GGUF
 # architecture coverage is a strict superset (Gemma 4 and Qwen3.5/3.6 do not
 # load in mistral.rs) and it returns load errors instead of panicking on an
@@ -136,11 +140,6 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_WindowsProgramming",
     "Win32_UI_WindowsAndMessaging",
 ] }
-
-[dev-dependencies]
-# Integration harnesses execute shell commands and need a private working
-# directory that is removed automatically even when an assertion unwinds.
-tempfile = "3"
 
 # Metal kernels are unusably slow at opt-level 0
 [profile.dev.package."*"]

@@ -16,14 +16,17 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use tauri::Wry;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
 
 use super::config::{self, McpAuthMode, McpServerConfig, McpToolGrant, McpTransportConfig};
 
 const MAX_LOG_BYTES: usize = 256 * 1024;
+const MAX_STDERR_LINE_BYTES: usize = 16 * 1024;
 const MAX_RESULT_BYTES: usize = 64 * 1024;
 const MAX_SSE_EVENT_BYTES: usize = 2 * 1024 * 1024;
+const MAX_TOOL_ALIAS_BYTES: usize = 64;
+const MAX_ALIAS_TOOL_NAME_BYTES: usize = 39;
 const TOOL_CACHE_TTL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Default)]
@@ -178,24 +181,84 @@ async fn read_stderr(
     logs: Arc<Mutex<HashMap<String, String>>>,
     secrets: Vec<crate::credentials::Secret>,
 ) {
-    let mut lines = BufReader::new(stderr).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        let line = secrets.iter().fold(
-            crate::credentials::redact_provider_text(&line, None),
-            |line, secret| crate::credentials::redact_provider_text(&line, Some(secret)),
-        );
-        let mut logs = logs.lock().await;
-        let log = logs.entry(server_id.clone()).or_default();
-        log.push_str(&line);
-        log.push('\n');
-        if log.len() > MAX_LOG_BYTES {
-            let drop_at = log.len() - MAX_LOG_BYTES;
-            let drop_at = log
-                .char_indices()
-                .find_map(|(index, _)| (index >= drop_at).then_some(index))
-                .unwrap_or(drop_at);
-            log.drain(..drop_at);
+    let mut stderr = stderr;
+    let mut buffer = [0u8; 4096];
+    let mut line = BoundedStderrLine::default();
+    loop {
+        let read = match stderr.read(&mut buffer).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => read,
+        };
+        for (bytes, truncated) in line.push(&buffer[..read]) {
+            append_stderr_log(&logs, &server_id, &secrets, &bytes, truncated).await;
         }
+    }
+    if let Some((bytes, truncated)) = line.finish() {
+        append_stderr_log(&logs, &server_id, &secrets, &bytes, truncated).await;
+    }
+}
+
+#[derive(Default)]
+struct BoundedStderrLine {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+impl BoundedStderrLine {
+    fn push(&mut self, chunk: &[u8]) -> Vec<(Vec<u8>, bool)> {
+        let mut complete = Vec::new();
+        for &byte in chunk {
+            if byte == b'\n' {
+                complete.push((std::mem::take(&mut self.bytes), self.truncated));
+                self.truncated = false;
+            } else if self.bytes.len() < MAX_STDERR_LINE_BYTES {
+                self.bytes.push(byte);
+            } else {
+                self.truncated = true;
+            }
+        }
+        complete
+    }
+
+    fn finish(&mut self) -> Option<(Vec<u8>, bool)> {
+        if self.bytes.is_empty() && !self.truncated {
+            None
+        } else {
+            let value = (std::mem::take(&mut self.bytes), self.truncated);
+            self.truncated = false;
+            Some(value)
+        }
+    }
+}
+
+async fn append_stderr_log(
+    logs: &Mutex<HashMap<String, String>>,
+    server_id: &str,
+    secrets: &[crate::credentials::Secret],
+    bytes: &[u8],
+    truncated: bool,
+) {
+    let text = String::from_utf8_lossy(bytes);
+    let mut clean = secrets.iter().fold(
+        crate::credentials::redact_provider_text(&text, None),
+        |line, secret| crate::credentials::redact_provider_text(&line, Some(secret)),
+    );
+    if truncated {
+        clean.push_str(" [stderr line truncated]");
+    }
+    let mut logs = logs.lock().await;
+    append_bounded_log(logs.entry(server_id.to_owned()).or_default(), &clean);
+}
+
+fn append_bounded_log(log: &mut String, message: &str) {
+    log.push_str(message);
+    log.push('\n');
+    if log.len() > MAX_LOG_BYTES {
+        let minimum = log.len() - MAX_LOG_BYTES;
+        let boundary = (minimum..log.len())
+            .find(|index| log.is_char_boundary(*index))
+            .unwrap_or(log.len());
+        log.drain(..boundary);
     }
 }
 
@@ -203,13 +266,7 @@ impl McpManager {
     async fn append_log(&self, server_id: &str, message: impl AsRef<str>) {
         let clean = crate::credentials::redact_provider_text(message.as_ref(), None);
         let mut logs = self.logs.lock().await;
-        let log = logs.entry(server_id.to_owned()).or_default();
-        log.push_str(&clean);
-        log.push('\n');
-        if log.len() > MAX_LOG_BYTES {
-            let drain = log.len() - MAX_LOG_BYTES;
-            log.drain(..drain);
-        }
+        append_bounded_log(logs.entry(server_id.to_owned()).or_default(), &clean);
     }
 
     async fn new_service(
@@ -659,7 +716,7 @@ pub fn alias(server_id: &str, tool_name: &str) -> String {
                 '_'
             }
         })
-        .take(64)
+        .take(MAX_ALIAS_TOOL_NAME_BYTES)
         .collect::<String>();
     // Sanitising is not injective (`git.commit` and `git-commit` would collide),
     // so keep a short digest of the exact immutable tool identity in the alias.
@@ -670,7 +727,9 @@ pub fn alias(server_id: &str, tool_name: &str) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    format!("mcp__{prefix}__{clean}__{suffix}")
+    let alias = format!("mcp__{prefix}__{clean}__{suffix}");
+    debug_assert!(alias.len() <= MAX_TOOL_ALIAS_BYTES);
+    alias
 }
 
 pub fn schema_hash(tool: &Tool) -> Result<String, String> {
@@ -802,6 +861,23 @@ mod tests {
             alias("01234567-aaaa-bbbb-cccc-0123456789ab", "git.commit"),
             alias("01234567-aaaa-bbbb-cccc-0123456789ab", "git-commit")
         );
+        assert_eq!(
+            alias(
+                "01234567-aaaa-bbbb-cccc-0123456789ab",
+                &"tool".repeat(1_000)
+            )
+            .len(),
+            MAX_TOOL_ALIAS_BYTES
+        );
+    }
+
+    #[test]
+    fn stderr_lines_are_bounded_even_without_newlines() {
+        let mut line = BoundedStderrLine::default();
+        assert!(line.push(&vec![b'x'; MAX_STDERR_LINE_BYTES * 4]).is_empty());
+        let (bytes, truncated) = line.finish().unwrap();
+        assert_eq!(bytes.len(), MAX_STDERR_LINE_BYTES);
+        assert!(truncated);
     }
 
     #[test]
