@@ -599,6 +599,10 @@ pub struct LocalAccelerationInfo {
     pub device_name: Option<String>,
     pub device_memory_bytes: Option<u64>,
     pub fallback_reason: Option<String>,
+    #[serde(default)]
+    pub generation_mode: Option<String>,
+    #[serde(default)]
+    pub generation_fallback_reason: Option<String>,
 }
 
 #[cfg(any(feature = "local-llm", test))]
@@ -615,6 +619,8 @@ fn aggregate_local_acceleration(
             device_name: None,
             device_memory_bytes: None,
             fallback_reason: None,
+            generation_mode: None,
+            generation_fallback_reason: None,
         };
     };
     if active.len() == 1 {
@@ -665,6 +671,8 @@ fn aggregate_local_acceleration(
         device_name: Some(active_devices),
         device_memory_bytes: None,
         fallback_reason: (!labeled_fallbacks.is_empty()).then(|| labeled_fallbacks.join("; ")),
+        generation_mode: None,
+        generation_fallback_reason: None,
     }
 }
 
@@ -675,6 +683,8 @@ fn decode_host_acceleration(host: &str, value: serde_json::Value) -> LocalAccele
         device_name: None,
         device_memory_bytes: None,
         fallback_reason: Some(format!("could not read {host} accelerator status: {error}")),
+        generation_mode: None,
+        generation_fallback_reason: None,
     })
 }
 
@@ -726,6 +736,8 @@ pub async fn get_system_info(_app: tauri::AppHandle<Wry>) -> Result<SystemInfo, 
         device_name: None,
         device_memory_bytes: None,
         fallback_reason: Some("local inference is not included in this build".into()),
+        generation_mode: None,
+        generation_fallback_reason: None,
     };
     Ok(SystemInfo {
         total_ram_bytes: sys.total_memory(),
@@ -1102,6 +1114,8 @@ mod credential_tests {
             device_name: device.map(str::to_owned),
             device_memory_bytes: None,
             fallback_reason: None,
+            generation_mode: None,
+            generation_fallback_reason: None,
         }
     }
 

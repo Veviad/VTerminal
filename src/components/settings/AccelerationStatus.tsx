@@ -10,7 +10,12 @@ export function accelerationStatusText(
   if (acceleration.device_memory_bytes !== null) {
     details.push(`${formatBytes(acceleration.device_memory_bytes)} device memory`);
   }
-  const fallback = acceleration.fallback_reason ? ` — ${acceleration.fallback_reason}` : "";
+  if (acceleration.generation_mode === "mtp") details.push("MTP active");
+  if (acceleration.generation_mode === "standard") details.push("standard decoding");
+  const reasons = [acceleration.fallback_reason, acceleration.generation_fallback_reason].filter(
+    Boolean,
+  );
+  const fallback = reasons.length ? `. ${reasons.join("; ")}` : "";
   return `${label}: ${details.join(" · ")}${fallback}`;
 }
 
@@ -28,7 +33,7 @@ export function AccelerationStatus({
     <p
       role="status"
       className={`rounded-lg px-3 py-2 text-[11px] leading-relaxed ${
-        acceleration.fallback_reason
+        acceleration.fallback_reason || acceleration.generation_fallback_reason
           ? "border border-warning/30 bg-warning/10 text-warning"
           : "bg-bg-elevated text-text-muted"
       }`}

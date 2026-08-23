@@ -149,12 +149,68 @@ pub enum LocalFamily {
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
-pub struct LocalSpec {
+pub struct ArtifactSpec {
     pub repo_id: &'static str,
     pub filename: &'static str,
     pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MtpSpec {
+    /// The preferred target GGUF contains its own MTP head. `legacy` is the
+    /// ordinary target shipped before MTP support and remains loadable.
+    Embedded {
+        legacy: ArtifactSpec,
+        draft_tokens: u32,
+    },
+    /// Gemma keeps its existing target and adds a small assistant GGUF.
+    Sidecar {
+        artifact: ArtifactSpec,
+        draft_tokens: u32,
+    },
+}
+
+impl MtpSpec {
+    pub fn draft_tokens(self) -> u32 {
+        match self {
+            Self::Embedded { draft_tokens, .. } | Self::Sidecar { draft_tokens, .. } => {
+                draft_tokens
+            }
+        }
+    }
+
+    pub fn sidecar(self) -> Option<ArtifactSpec> {
+        match self {
+            Self::Sidecar { artifact, .. } => Some(artifact),
+            Self::Embedded { .. } => None,
+        }
+    }
+
+    pub fn legacy(self) -> Option<ArtifactSpec> {
+        match self {
+            Self::Embedded { legacy, .. } => Some(legacy),
+            Self::Sidecar { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct LocalSpec {
+    /// Preferred chat target. For Qwen this is the MTP-enabled replacement;
+    /// for Gemma it is the same target older VTerminal versions downloaded.
+    pub artifact: ArtifactSpec,
+    pub mtp: MtpSpec,
     pub min_ram_gb: u64,
     pub family: LocalFamily,
+}
+
+impl LocalSpec {
+    pub fn resident_size_bytes(self) -> u64 {
+        self.artifact
+            .size_bytes
+            .saturating_add(self.mtp.sidecar().map_or(0, |artifact| artifact.size_bytes))
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -276,9 +332,19 @@ pub const CATALOG: &[CatalogModel] = &[
         native_web_fetch: false,
         supports_vision: false,
         local: Some(LocalSpec {
-            repo_id: "unsloth/Qwen3.5-4B-GGUF",
-            filename: "Qwen3.5-4B-Q4_K_M.gguf",
-            size_bytes: 2_740_937_888,
+            artifact: ArtifactSpec {
+                repo_id: "unsloth/Qwen3.5-4B-MTP-GGUF",
+                filename: "Qwen3.5-4B-Q4_K_M.gguf",
+                size_bytes: 2_834_975_040,
+            },
+            mtp: MtpSpec::Embedded {
+                legacy: ArtifactSpec {
+                    repo_id: "unsloth/Qwen3.5-4B-GGUF",
+                    filename: "Qwen3.5-4B-Q4_K_M.gguf",
+                    size_bytes: 2_740_937_888,
+                },
+                draft_tokens: 6,
+            },
             min_ram_gb: 8,
             family: LocalFamily::Qwen,
         }),
@@ -299,9 +365,19 @@ pub const CATALOG: &[CatalogModel] = &[
         native_web_fetch: false,
         supports_vision: false,
         local: Some(LocalSpec {
-            repo_id: "unsloth/Qwen3.5-9B-GGUF",
-            filename: "Qwen3.5-9B-Q4_K_M.gguf",
-            size_bytes: 5_680_522_464,
+            artifact: ArtifactSpec {
+                repo_id: "unsloth/Qwen3.5-9B-MTP-GGUF",
+                filename: "Qwen3.5-9B-Q4_K_M.gguf",
+                size_bytes: 5_868_826_976,
+            },
+            mtp: MtpSpec::Embedded {
+                legacy: ArtifactSpec {
+                    repo_id: "unsloth/Qwen3.5-9B-GGUF",
+                    filename: "Qwen3.5-9B-Q4_K_M.gguf",
+                    size_bytes: 5_680_522_464,
+                },
+                draft_tokens: 6,
+            },
             min_ram_gb: 16,
             family: LocalFamily::Qwen,
         }),
@@ -322,9 +398,19 @@ pub const CATALOG: &[CatalogModel] = &[
         native_web_fetch: false,
         supports_vision: false,
         local: Some(LocalSpec {
-            repo_id: "unsloth/Qwen3.6-27B-GGUF",
-            filename: "Qwen3.6-27B-Q4_K_M.gguf",
-            size_bytes: 16_817_244_384,
+            artifact: ArtifactSpec {
+                repo_id: "unsloth/Qwen3.6-27B-MTP-GGUF",
+                filename: "Qwen3.6-27B-Q4_K_M.gguf",
+                size_bytes: 17_106_773_120,
+            },
+            mtp: MtpSpec::Embedded {
+                legacy: ArtifactSpec {
+                    repo_id: "unsloth/Qwen3.6-27B-GGUF",
+                    filename: "Qwen3.6-27B-Q4_K_M.gguf",
+                    size_bytes: 16_817_244_384,
+                },
+                draft_tokens: 2,
+            },
             min_ram_gb: 48,
             family: LocalFamily::Qwen,
         }),
@@ -345,9 +431,19 @@ pub const CATALOG: &[CatalogModel] = &[
         native_web_fetch: false,
         supports_vision: false,
         local: Some(LocalSpec {
-            repo_id: "unsloth/gemma-4-E2B-it-GGUF",
-            filename: "gemma-4-E2B-it-Q4_K_M.gguf",
-            size_bytes: 3_106_738_272,
+            artifact: ArtifactSpec {
+                repo_id: "unsloth/gemma-4-E2B-it-GGUF",
+                filename: "gemma-4-E2B-it-Q4_K_M.gguf",
+                size_bytes: 3_106_738_272,
+            },
+            mtp: MtpSpec::Sidecar {
+                artifact: ArtifactSpec {
+                    repo_id: "unsloth/gemma-4-E2B-it-GGUF",
+                    filename: "mtp-gemma-4-E2B-it.gguf",
+                    size_bytes: 97_817_664,
+                },
+                draft_tokens: 4,
+            },
             min_ram_gb: 8,
             family: LocalFamily::Gemma,
         }),
@@ -368,9 +464,19 @@ pub const CATALOG: &[CatalogModel] = &[
         native_web_fetch: false,
         supports_vision: false,
         local: Some(LocalSpec {
-            repo_id: "unsloth/gemma-4-E4B-it-GGUF",
-            filename: "gemma-4-E4B-it-Q4_K_M.gguf",
-            size_bytes: 4_977_171_584,
+            artifact: ArtifactSpec {
+                repo_id: "unsloth/gemma-4-E4B-it-GGUF",
+                filename: "gemma-4-E4B-it-Q4_K_M.gguf",
+                size_bytes: 4_977_171_584,
+            },
+            mtp: MtpSpec::Sidecar {
+                artifact: ArtifactSpec {
+                    repo_id: "unsloth/gemma-4-E4B-it-GGUF",
+                    filename: "mtp-gemma-4-E4B-it.gguf",
+                    size_bytes: 98_653_248,
+                },
+                draft_tokens: 4,
+            },
             min_ram_gb: 16,
             family: LocalFamily::Gemma,
         }),
@@ -391,9 +497,19 @@ pub const CATALOG: &[CatalogModel] = &[
         native_web_fetch: false,
         supports_vision: false,
         local: Some(LocalSpec {
-            repo_id: "unsloth/gemma-4-31B-it-GGUF",
-            filename: "gemma-4-31B-it-Q4_K_M.gguf",
-            size_bytes: 18_323_733_440,
+            artifact: ArtifactSpec {
+                repo_id: "unsloth/gemma-4-31B-it-GGUF",
+                filename: "gemma-4-31B-it-Q4_K_M.gguf",
+                size_bytes: 18_323_733_440,
+            },
+            mtp: MtpSpec::Sidecar {
+                artifact: ArtifactSpec {
+                    repo_id: "unsloth/gemma-4-31B-it-GGUF",
+                    filename: "mtp-gemma-4-31B-it.gguf",
+                    size_bytes: 514_687_200,
+                },
+                draft_tokens: 4,
+            },
             min_ram_gb: 48,
             family: LocalFamily::Gemma,
         }),
@@ -582,9 +698,14 @@ pub fn find(id: &str) -> Option<&'static CatalogModel> {
 pub fn find_by_legacy_local_id(legacy: &str) -> Option<&'static CatalogModel> {
     let (repo_id, filename) = legacy.split_once("::")?;
     CATALOG.iter().find(|m| {
-        m.local
-            .as_ref()
-            .is_some_and(|l| l.repo_id == repo_id && l.filename == filename)
+        m.local.is_some_and(|local| {
+            let preferred = local.artifact;
+            let old = local.mtp.legacy();
+            (preferred.repo_id == repo_id && preferred.filename == filename)
+                || old.is_some_and(|artifact| {
+                    artifact.repo_id == repo_id && artifact.filename == filename
+                })
+        })
     })
 }
 
@@ -737,7 +858,7 @@ mod tests {
             let spec = m.local.unwrap();
             let budget = (spec.min_ram_gb as f64) * 1_000_000_000.0 * 0.6;
             assert!(
-                (spec.size_bytes as f64) * 1.3 < budget,
+                (spec.resident_size_bytes() as f64) * 1.3 < budget,
                 "{} claims {}GB but does not fit the 1.3x/60% rule",
                 m.id,
                 spec.min_ram_gb

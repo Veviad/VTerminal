@@ -113,12 +113,12 @@ plist = "1.10"
 #
 # Build cost is bounded and does NOT touch cmake: llama-cpp-sys-2's build.rs
 # compiles tools/mtmd as a standalone cc::Build target.
-llama-cpp-2 = { version = "0.1.154", default-features = false, features = ["metal", "mtmd"], optional = true }
+llama-cpp-2 = { version = "0.1.154", default-features = false, features = ["common", "metal", "mtmd"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # Windows uses runtime-loaded GGML modules so a single installer can select
 # Vulkan when available and still start on machines that only have a CPU.
-llama-cpp-2 = { version = "0.1.154", default-features = false, features = ["dynamic-backends", "vulkan", "mtmd"], optional = true }
+llama-cpp-2 = { version = "0.1.154", default-features = false, features = ["common", "dynamic-backends", "vulkan", "mtmd"], optional = true }
 winreg = "0.56"
 windows-sys = { version = "0.61", features = [
     "Wdk_Foundation",

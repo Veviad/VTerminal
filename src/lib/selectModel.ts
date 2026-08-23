@@ -29,6 +29,8 @@ export async function refreshModels(): Promise<void> {
         device_name: null,
         device_memory_bytes: null,
         fallback_reason: null,
+        generation_mode: null,
+        generation_fallback_reason: null,
       },
     })),
   ]);

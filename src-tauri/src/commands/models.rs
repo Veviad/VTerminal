@@ -4,6 +4,121 @@ use tauri::{Manager, State, Wry};
 use crate::commands::settings;
 use crate::models::{catalog, download, registry, DownloadEvent, DownloadState, LoadEvent};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MtpInstallState {
+    NotInstalled,
+    UpgradeAvailable,
+    Ready,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct MtpCatalogInfo {
+    pub kind: &'static str,
+    pub state: MtpInstallState,
+    pub download_bytes: u64,
+    pub disk_delta_bytes: u64,
+    pub draft_tokens: u32,
+}
+
+struct LocalInstall {
+    target: Option<registry::LocalModel>,
+    sidecar: Option<registry::LocalModel>,
+    mtp: MtpCatalogInfo,
+}
+
+fn find_artifact(
+    installed: &[registry::LocalModel],
+    artifact: catalog::ArtifactSpec,
+) -> Option<registry::LocalModel> {
+    let id = registry::model_id(artifact.repo_id, artifact.filename);
+    installed.iter().find(|model| model.id == id).cloned()
+}
+
+fn resolve_install(spec: catalog::LocalSpec, installed: &[registry::LocalModel]) -> LocalInstall {
+    let preferred = find_artifact(installed, spec.artifact);
+    match spec.mtp {
+        catalog::MtpSpec::Embedded {
+            legacy,
+            draft_tokens,
+        } => {
+            let old = find_artifact(installed, legacy);
+            let state = if preferred.is_some() {
+                MtpInstallState::Ready
+            } else if old.is_some() {
+                MtpInstallState::UpgradeAvailable
+            } else {
+                MtpInstallState::NotInstalled
+            };
+            LocalInstall {
+                target: preferred.clone().or_else(|| old.clone()),
+                sidecar: None,
+                mtp: MtpCatalogInfo {
+                    kind: "embedded",
+                    state,
+                    download_bytes: if preferred.is_some() {
+                        0
+                    } else {
+                        spec.artifact.size_bytes
+                    },
+                    disk_delta_bytes: if preferred.is_some() {
+                        0
+                    } else if installed.iter().any(|model| {
+                        model.id == registry::model_id(legacy.repo_id, legacy.filename)
+                    }) {
+                        spec.artifact.size_bytes.saturating_sub(legacy.size_bytes)
+                    } else {
+                        spec.artifact.size_bytes
+                    },
+                    draft_tokens,
+                },
+            }
+        }
+        catalog::MtpSpec::Sidecar {
+            artifact,
+            draft_tokens,
+        } => {
+            let sidecar = find_artifact(installed, artifact);
+            let state = if preferred.is_some() && sidecar.is_some() {
+                MtpInstallState::Ready
+            } else if preferred.is_some() {
+                MtpInstallState::UpgradeAvailable
+            } else {
+                MtpInstallState::NotInstalled
+            };
+            LocalInstall {
+                target: preferred.clone(),
+                sidecar: sidecar.clone(),
+                mtp: MtpCatalogInfo {
+                    kind: "sidecar",
+                    state,
+                    download_bytes: preferred
+                        .is_none()
+                        .then_some(spec.artifact.size_bytes)
+                        .unwrap_or(0)
+                        .saturating_add(
+                            sidecar
+                                .is_none()
+                                .then_some(artifact.size_bytes)
+                                .unwrap_or(0),
+                        ),
+                    disk_delta_bytes: preferred
+                        .is_none()
+                        .then_some(spec.artifact.size_bytes)
+                        .unwrap_or(0)
+                        .saturating_add(
+                            sidecar
+                                .is_none()
+                                .then_some(artifact.size_bytes)
+                                .unwrap_or(0),
+                        ),
+                    draft_tokens,
+                },
+            }
+        }
+    }
+}
+
 fn models_dir(app: &tauri::AppHandle<Wry>) -> Result<std::path::PathBuf, String> {
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let override_dir = settings::read_string(app, "models_dir");
@@ -28,9 +143,49 @@ pub async fn models_download(
             entry.label
         )
     })?;
-    let (repo_id, filename) = (spec.repo_id.to_string(), spec.filename.to_string());
-    let file_key = format!("{repo_id}/{filename}");
-    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+    let dir = models_dir(&app)?;
+    let token = settings::read_credential(&app, crate::credentials::CredentialId::HuggingFace)?;
+    let installed = registry::load(&dir);
+    let resolution = resolve_install(spec, &installed);
+
+    #[cfg(feature = "local-llm")]
+    if resolution.mtp.kind == "embedded"
+        && resolution.mtp.state == MtpInstallState::UpgradeAvailable
+    {
+        let host = app.state::<crate::provider::local::ModelHost>();
+        let (loaded, _) = host.status().await;
+        if loaded.as_deref() == Some(model_id.as_str()) {
+            return Err(
+                "unload this model before replacing its weights with the MTP version".into(),
+            );
+        }
+    }
+
+    let mut artifacts = Vec::new();
+    if find_artifact(&installed, spec.artifact).is_none() {
+        artifacts.push(spec.artifact);
+    }
+    if let Some(sidecar) = spec.mtp.sidecar() {
+        if find_artifact(&installed, sidecar).is_none() {
+            artifacts.push(sidecar);
+        }
+    }
+    if artifacts.is_empty() {
+        on_event
+            .send(DownloadEvent::Completed {
+                model_id,
+                path: resolution
+                    .target
+                    .map_or_else(String::new, |model| model.path),
+            })
+            .ok();
+        return Ok(());
+    }
+
+    let keys: Vec<String> = artifacts
+        .iter()
+        .map(|artifact| format!("{}/{}", artifact.repo_id, artifact.filename))
+        .collect();
     {
         // The guard that matters is per target FILE — download_id is caller-
         // chosen and fresh on every click.
@@ -38,36 +193,110 @@ pub async fn models_download(
             .in_flight
             .lock()
             .map_err(|_| "download state poisoned")?;
-        if !in_flight.insert(file_key.clone()) {
-            return Err("this file is already downloading".into());
+        if keys.iter().any(|key| in_flight.contains(key)) {
+            return Err("this model is already downloading".into());
         }
-        let mut map = state.cancel.lock().map_err(|_| "download state poisoned")?;
-        map.insert(download_id.clone(), cancel_tx);
+        in_flight.extend(keys.iter().cloned());
     }
 
-    let req = download::DownloadRequest {
-        download_id: download_id.clone(),
-        repo_id,
-        filename,
-        revision: None,
-        expected_size: None,
-        expected_sha256: None,
-        models_dir: models_dir(&app)?,
-        hf_token: settings::read_credential(&app, crate::credentials::CredentialId::HuggingFace)?,
-    };
+    let (outer_tx, outer_rx) = tokio::sync::oneshot::channel::<()>();
+    let mut cancel_receivers = Vec::with_capacity(artifacts.len());
+    let mut cancel_senders = Vec::with_capacity(artifacts.len());
+    for _ in &artifacts {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        cancel_senders.push(tx);
+        cancel_receivers.push(rx);
+    }
+    state
+        .cancel
+        .lock()
+        .map_err(|_| "download state poisoned")?
+        .insert(download_id.clone(), outer_tx);
+    tokio::spawn(async move {
+        if outer_rx.await.is_ok() {
+            for sender in cancel_senders {
+                let _ = sender.send(());
+            }
+        }
+    });
 
-    let result = download::run(req, &on_event, cancel_rx).await;
+    let total = artifacts.iter().map(|artifact| artifact.size_bytes).sum();
+    on_event
+        .send(DownloadEvent::Started {
+            download_id: download_id.clone(),
+            total_bytes: Some(total),
+            resumed_from: 0,
+        })
+        .ok();
+    let mut offset = 0_u64;
+    let mut completed_target = resolution.target;
+    let mut result = Ok(());
+    for (artifact, cancel) in artifacts.into_iter().zip(cancel_receivers) {
+        let req = download::DownloadRequest {
+            download_id: download_id.clone(),
+            repo_id: artifact.repo_id.to_string(),
+            filename: artifact.filename.to_string(),
+            revision: None,
+            expected_size: Some(artifact.size_bytes),
+            expected_sha256: None,
+            models_dir: dir.clone(),
+            hf_token: token.clone(),
+        };
+        let sink = download::RebasedSink::new(&on_event, offset, total);
+        match download::run(req, &sink, cancel).await {
+            Ok(download::Outcome::Completed(model)) => {
+                if artifact.repo_id == spec.artifact.repo_id
+                    && artifact.filename == spec.artifact.filename
+                {
+                    completed_target = Some(model);
+                }
+                offset = offset.saturating_add(artifact.size_bytes);
+            }
+            Ok(download::Outcome::Cancelled) => break,
+            Err(error) => {
+                result = Err(error);
+                break;
+            }
+        }
+    }
+
+    if result.is_ok() && offset == total {
+        if let Some(legacy) = spec
+            .mtp
+            .legacy()
+            .and_then(|artifact| find_artifact(&installed, artifact))
+        {
+            match registry::remove(&dir, &legacy.id) {
+                Ok(Some(model)) => {
+                    if let Err(error) = download::delete_model_files(&dir, &model) {
+                        log::warn!("MTP upgrade installed but legacy weights could not be removed: {error}");
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    log::warn!("MTP upgrade installed but legacy registry cleanup failed: {error}")
+                }
+            }
+        }
+        on_event
+            .send(DownloadEvent::Completed {
+                model_id,
+                path: completed_target.map_or_else(String::new, |model| model.path),
+            })
+            .ok();
+    }
 
     if let Ok(mut map) = state.cancel.lock() {
         map.remove(&download_id);
     }
     if let Ok(mut in_flight) = state.in_flight.lock() {
-        in_flight.remove(&file_key);
+        for key in &keys {
+            in_flight.remove(key);
+        }
     }
-    // The single-file path has no use for WHICH outcome it was — the frontend
-    // already learned that from the Completed/Cancelled event. Only the two-file
-    // vision driver needs to branch on it.
-    result.map(|_| ())
+    // The frontend already learned the aggregate outcome from the single
+    // Completed/Cancelled event, so this command can return the batch result.
+    result
 }
 
 #[tauri::command]
@@ -95,7 +324,7 @@ pub fn models_list_local(app: tauri::AppHandle<Wry>) -> Result<Vec<registry::Loc
 /// can still be reclaimed instead of stranding tens of gigabytes on disk.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn models_delete(app: tauri::AppHandle<Wry>, model_id: String) -> Result<(), String> {
-    let registry_id = match catalog::find(&model_id) {
+    let registry_ids = match catalog::find(&model_id) {
         Some(entry) => {
             let spec = entry.local.ok_or_else(|| {
                 format!(
@@ -103,9 +332,19 @@ pub async fn models_delete(app: tauri::AppHandle<Wry>, model_id: String) -> Resu
                     entry.label
                 )
             })?;
-            registry::model_id(spec.repo_id, spec.filename)
+            let mut ids = vec![registry::model_id(
+                spec.artifact.repo_id,
+                spec.artifact.filename,
+            )];
+            if let Some(artifact) = spec.mtp.legacy() {
+                ids.push(registry::model_id(artifact.repo_id, artifact.filename));
+            }
+            if let Some(artifact) = spec.mtp.sidecar() {
+                ids.push(registry::model_id(artifact.repo_id, artifact.filename));
+            }
+            ids
         }
-        None if model_id.contains("::") => model_id.clone(),
+        None if model_id.contains("::") => vec![model_id.clone()],
         None => return Err(format!("unknown model: {model_id}")),
     };
 
@@ -119,9 +358,11 @@ pub async fn models_delete(app: tauri::AppHandle<Wry>, model_id: String) -> Resu
         }
     }
     let dir = models_dir(&app)?;
-    let removed = registry::remove(&dir, &registry_id)?;
-    if let Some(model) = removed {
-        download::delete_model_files(&dir, &model)?;
+    for registry_id in registry_ids {
+        let removed = registry::remove(&dir, &registry_id)?;
+        if let Some(model) = removed {
+            download::delete_model_files(&dir, &model)?;
+        }
     }
     Ok(())
 }
@@ -137,6 +378,8 @@ pub struct CatalogEntry {
     pub fits: bool,
     /// Local models only: is the GGUF already on disk.
     pub downloaded: bool,
+    /// Local chat models only: MTP packaging and installation readiness.
+    pub mtp: Option<MtpCatalogInfo>,
     /// API models only: is a key stored for this provider.
     pub configured: bool,
     /// Effective effort — the stored choice, clamped, or the model's default.
@@ -197,20 +440,24 @@ pub fn models_catalog(app: tauri::AppHandle<Wry>) -> Result<Vec<CatalogEntry>, S
         sysinfo::RefreshKind::nothing().with_memory(sysinfo::MemoryRefreshKind::everything()),
     );
     let total_ram = sys.total_memory();
-    let downloaded: std::collections::HashSet<String> = models_dir(&app)
-        .map(|dir| registry::load(&dir).into_iter().map(|m| m.id).collect())
+    let downloaded = models_dir(&app)
+        .map(|dir| registry::load(&dir))
         .unwrap_or_default();
     let credentials = crate::credentials::state(&app);
     let provider_presence =
         catalog_provider_presence(|| credentials.is_blocked(), |id| credentials.has(id))?;
 
     let built_in = catalog::CATALOG.iter().map(|model| {
-        let (fits, is_downloaded) = match &model.local {
-            Some(spec) => (
-                registry::fits_in_ram(spec.size_bytes, spec.min_ram_gb, total_ram),
-                downloaded.contains(&registry::model_id(spec.repo_id, spec.filename)),
-            ),
-            None => (true, false),
+        let (fits, is_downloaded, mtp) = match model.local {
+            Some(spec) => {
+                let install = resolve_install(spec, &downloaded);
+                (
+                    registry::fits_in_ram(spec.resident_size_bytes(), spec.min_ram_gb, total_ram),
+                    install.target.is_some(),
+                    Some(install.mtp),
+                )
+            }
+            None => (true, false, None),
         };
         let configured = match model.provider.api_key_setting() {
             Some(key) => provider_presence.get(key).copied().unwrap_or(false),
@@ -220,6 +467,7 @@ pub fn models_catalog(app: tauri::AppHandle<Wry>) -> Result<Vec<CatalogEntry>, S
             model,
             fits,
             downloaded: is_downloaded,
+            mtp,
             configured,
             effort: settings::read_effort(&app, model),
             remote: None,
@@ -236,6 +484,7 @@ pub fn models_catalog(app: tauri::AppHandle<Wry>) -> Result<Vec<CatalogEntry>, S
             // state the settings UI shows on the server itself.
             fits: true,
             downloaded: false,
+            mtp: None,
             configured: true,
             effort: settings::read_effort(&app, model),
             remote: Some(info),
@@ -259,11 +508,18 @@ pub async fn model_load(
         .ok_or_else(|| format!("{} runs over the API, not on-device", entry.label))?;
 
     let dir = models_dir(&app)?;
-    let registry_id = registry::model_id(spec.repo_id, spec.filename);
-    let downloaded = registry::load(&dir)
-        .into_iter()
-        .find(|m| m.id == registry_id)
+    let install = resolve_install(spec, &registry::load(&dir));
+    let downloaded = install
+        .target
         .ok_or_else(|| format!("{} has not been downloaded yet", entry.label))?;
+    let mtp = if install.mtp.state == MtpInstallState::Ready {
+        Some(crate::provider::local::MtpLoadSpec {
+            draft_path: install.sidecar.map(|model| model.path),
+            draft_tokens: spec.mtp.draft_tokens(),
+        })
+    } else {
+        None
+    };
 
     // Never ask for more context than the model itself advertises.
     let max_context =
@@ -275,6 +531,7 @@ pub async fn model_load(
         downloaded.path,
         spec.family,
         max_context,
+        mtp,
         &on_event,
     )
     .await
@@ -340,7 +597,9 @@ pub async fn model_status() -> Result<ModelStatus, String> {
             "backend": "unavailable",
             "device_name": null,
             "device_memory_bytes": null,
-            "fallback_reason": "local inference is not included in this build"
+            "fallback_reason": "local inference is not included in this build",
+            "generation_mode": null,
+            "generation_fallback_reason": null
         }),
     })
 }
@@ -348,6 +607,40 @@ pub async fn model_status() -> Result<ModelStatus, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn installed(artifact: catalog::ArtifactSpec) -> registry::LocalModel {
+        registry::make_local_model(
+            artifact.repo_id,
+            artifact.filename,
+            std::path::Path::new("/tmp/test.gguf"),
+            artifact.size_bytes,
+        )
+    }
+
+    #[test]
+    fn mtp_install_resolution_preserves_legacy_targets_and_detects_ready_bundles() {
+        let qwen = catalog::find("local/qwen3.5-4b").unwrap().local.unwrap();
+        let legacy = qwen.mtp.legacy().unwrap();
+        let old = resolve_install(qwen, &[installed(legacy)]);
+        assert!(old.target.is_some());
+        assert_eq!(old.mtp.state, MtpInstallState::UpgradeAvailable);
+        assert_eq!(old.mtp.download_bytes, qwen.artifact.size_bytes);
+        assert_eq!(
+            old.mtp.disk_delta_bytes,
+            qwen.artifact.size_bytes - legacy.size_bytes
+        );
+        let optimized = resolve_install(qwen, &[installed(qwen.artifact)]);
+        assert_eq!(optimized.mtp.state, MtpInstallState::Ready);
+
+        let gemma = catalog::find("local/gemma-4-e2b").unwrap().local.unwrap();
+        let target_only = resolve_install(gemma, &[installed(gemma.artifact)]);
+        assert!(target_only.target.is_some());
+        assert_eq!(target_only.mtp.state, MtpInstallState::UpgradeAvailable);
+        let sidecar = gemma.mtp.sidecar().unwrap();
+        let ready = resolve_install(gemma, &[installed(gemma.artifact), installed(sidecar)]);
+        assert_eq!(ready.mtp.state, MtpInstallState::Ready);
+        assert!(ready.sidecar.is_some());
+    }
 
     #[test]
     fn catalog_presence_checks_each_provider_once_and_preserves_unknown_state() {
@@ -428,6 +721,7 @@ mod tests {
             model: catalog::find("openai/gpt-5.6-terra").unwrap(),
             fits: true,
             downloaded: false,
+            mtp: None,
             configured: false,
             effort: catalog::Effort::Medium,
             remote: None,

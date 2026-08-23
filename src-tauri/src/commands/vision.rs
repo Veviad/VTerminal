@@ -80,7 +80,7 @@ mod enabled {
     fn active_chat_bytes(app: &tauri::AppHandle<Wry>) -> u64 {
         crate::commands::ai::active_model(app)
             .local
-            .map(|l| l.size_bytes)
+            .map(|local| local.resident_size_bytes())
             .unwrap_or(0)
     }
 

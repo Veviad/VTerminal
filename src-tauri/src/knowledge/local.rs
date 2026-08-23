@@ -811,6 +811,8 @@ mod runtime {
                 device_name: None,
                 device_memory_bytes: None,
                 fallback_reason: None,
+                generation_mode: None,
+                generation_fallback_reason: None,
             }
         }
 

@@ -437,12 +437,29 @@ export type Tier = "fast" | "balanced" | "max";
 
 export type LocalFamily = "qwen" | "gemma";
 
-export interface LocalSpec {
+export interface ArtifactSpec {
   repo_id: string;
   filename: string;
   size_bytes: number;
+}
+
+export type MtpSpec =
+  | { kind: "embedded"; legacy: ArtifactSpec; draft_tokens: number }
+  | { kind: "sidecar"; artifact: ArtifactSpec; draft_tokens: number };
+
+export interface LocalSpec {
+  artifact: ArtifactSpec;
+  mtp: MtpSpec;
   min_ram_gb: number;
   family: LocalFamily;
+}
+
+export interface MtpCatalogInfo {
+  kind: "embedded" | "sidecar";
+  state: "not_installed" | "upgrade_available" | "ready";
+  download_bytes: number;
+  disk_delta_bytes: number;
+  draft_tokens: number;
 }
 
 // ---------- Remote inference servers ----------
@@ -547,6 +564,8 @@ export interface CatalogEntry {
   fits: boolean;
   /** Local only: the GGUF is already on disk. */
   downloaded: boolean;
+  /** Local chat models only: MTP packaging and installation readiness. */
+  mtp?: MtpCatalogInfo | null;
   /** API only: a key is stored for this provider. */
   configured: boolean;
   /** Effective effort: the stored choice clamped, or the model default. */
@@ -600,6 +619,8 @@ export interface LocalAccelerationInfo {
   device_name: string | null;
   device_memory_bytes: number | null;
   fallback_reason: string | null;
+  generation_mode?: "mtp" | "standard" | null;
+  generation_fallback_reason?: string | null;
 }
 
 // ---------- History ----------
