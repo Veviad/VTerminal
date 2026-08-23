@@ -52,14 +52,9 @@ pub fn chat_delete(
     chat_id: String,
 ) -> Result<(), String> {
     let removed = {
-        let conn = db.0.lock().map_err(|_| "db poisoned")?;
-        chat::delete(&conn, &chat_id)?
+        let mut conn = db.0.lock().map_err(|_| "db poisoned")?;
+        chat::delete(&mut conn, &chat_id)?
     };
-    crate::commands::attachments::remove_archive_attachments(
-        &app,
-        &removed.id,
-        removed.remove_owner_dir,
-        &removed.attachment_paths,
-    );
+    crate::commands::attachments::remove_chat_attachments(&app, &removed.attachment_paths);
     Ok(())
 }

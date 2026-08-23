@@ -1,29 +1,37 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ChatDetail, ChatSummary } from "../lib/types";
+import type {
+  CatalogEntry,
+  ChatDetail,
+  ChatMessage,
+  ChatSaveInput,
+  ChatSummary,
+  StreamEvent,
+} from "../lib/types";
 
 const mocks = vi.hoisted(() => ({
   chatList: vi.fn(),
   chatGet: vi.fn(),
   chatSave: vi.fn(),
   chatSetArchived: vi.fn(),
+  chatUpdateTitle: vi.fn(),
+  chatDelete: vi.fn(),
+  chatStart: vi.fn(),
+  aiNameChat: vi.fn(),
+  aiCancel: vi.fn(),
+  knowledgeSearchDetailed: vi.fn(),
+  attachmentPut: vi.fn(),
+  attachmentRead: vi.fn(),
+  visionDescribe: vi.fn(),
   saveSettings: vi.fn(),
 }));
 
 vi.mock("../lib/tauri", () => ({
   ...mocks,
-  attachmentRead: vi.fn(),
   knowledgeBucketsList: vi.fn(async () => []),
-  chatUpdateTitle: vi.fn(),
-  chatDelete: vi.fn(),
-  aiCancel: vi.fn(),
-  chatStart: vi.fn(),
-  aiNameChat: vi.fn(),
-  knowledgeSearchDetailed: vi.fn(),
-  attachmentPut: vi.fn(),
-  visionDescribe: vi.fn(),
 }));
 
 import { useChatStore } from "../stores/chatStore";
+import { useAppStore } from "../stores/appStore";
 
 function summary(id: string, archived = false, messages = 1): ChatSummary {
   return {
@@ -48,12 +56,44 @@ function detail(value: ChatSummary): ChatDetail {
   };
 }
 
+function chatModel(): CatalogEntry {
+  return {
+    id: "anthropic/chat-test",
+    provider: "anthropic",
+    tier: "balanced",
+    label: "Chat Test",
+    description: "",
+    wire_model: "chat-test",
+    context_tokens: 100_000,
+    efforts: ["off"],
+    default_effort: "off",
+    supports_temperature: true,
+    supports_tools: true,
+    native_web_search: true,
+    native_web_fetch: true,
+    supports_vision: true,
+    local: null,
+    remote: null,
+    fits: true,
+    downloaded: false,
+    configured: true,
+    effort: "off",
+  };
+}
+
 describe("Chat workspace store", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.chatSave.mockResolvedValue(undefined);
     mocks.chatSetArchived.mockResolvedValue(undefined);
+    mocks.chatUpdateTitle.mockResolvedValue(false);
+    mocks.aiNameChat.mockResolvedValue("Generated title");
     mocks.saveSettings.mockResolvedValue(undefined);
+    useAppStore.setState({
+      catalog: [chatModel()],
+      activeModelId: "anthropic/chat-test",
+      docsEnabled: false,
+    });
     useChatStore.setState({
       initialized: false,
       workspaceMode: "terminal",
@@ -107,5 +147,59 @@ describe("Chat workspace store", () => {
 
     expect(mocks.chatSetArchived).not.toHaveBeenCalled();
     expect(useChatStore.getState().current?.summary.archived_at).toBeNull();
+  });
+
+  it("persists the user turn, tool checkpoint, and streamed assistant response", async () => {
+    const active = summary("active", false, 0);
+    useChatStore.setState({ current: detail(active), summaries: [active] });
+    const checkpoint: ChatMessage[] = [
+      { role: "user", content: "Explain this" },
+      { role: "assistant", content: "", tool_calls: [{ id: "tool-1", name: "search_docs", arguments: "{}" }] },
+      { role: "tool", content: "Reference", tool_call_id: "tool-1" },
+    ];
+    const transcript: ChatMessage[] = [
+      ...checkpoint,
+      { role: "assistant", content: "A grounded answer" },
+    ];
+    mocks.chatStart.mockImplementation(async (
+      _requestId: string,
+      _prompt: string,
+      _history: ChatMessage[],
+      _images: unknown[],
+      _buckets: unknown[],
+      onEvent: (event: StreamEvent) => void,
+    ) => {
+      expect(mocks.chatSave).toHaveBeenCalledTimes(1);
+      onEvent({ type: "Started", request_id: "request", model: "Chat Test" });
+      onEvent({ type: "ThinkingDelta", content: "Checking sources" });
+      onEvent({ type: "Delta", content: "A grounded answer" });
+      onEvent({
+        type: "WebCitation",
+        url: "https://example.com/source",
+        title: "Source",
+        cited_text: "Evidence",
+      });
+      onEvent({ type: "Checkpoint", sequence: 1, transcript: checkpoint });
+      onEvent({ type: "Done", prompt_tokens: 12, completion_tokens: 5 });
+      return transcript;
+    });
+
+    await useChatStore.getState().send("Explain this");
+
+    const saves = mocks.chatSave.mock.calls.map(([value]) => value as ChatSaveInput);
+    expect(saves[0].messages.map((message) => message.role)).toEqual(["user"]);
+    expect(saves.some((value) => value.model_transcript === checkpoint)).toBe(true);
+    const final = saves[saves.length - 1]!;
+    expect(final.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+    expect(final.messages[1]).toMatchObject({
+      content: "A grounded answer",
+      thinking: "Checking sources",
+      model: "Chat Test",
+      prompt_tokens: 12,
+      completion_tokens: 5,
+      citations: [{ url: "https://example.com/source", title: "Source", cited_text: "Evidence" }],
+    });
+    expect(final.model_transcript).toBe(transcript);
+    expect(useChatStore.getState().stream.status).toBe("idle");
   });
 });

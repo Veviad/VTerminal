@@ -23,7 +23,12 @@ fn search_docs_tool() -> ToolDef {
             "type": "object",
             "properties": {
                 "query": { "type": "string", "description": "The text to search for" },
-                "max_results": { "type": "string", "description": "Optional result count from 1 to 12" }
+                "max_results": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 12,
+                    "description": "Optional result count from 1 to 12"
+                }
             },
             "required": ["query"]
         }),
@@ -323,6 +328,10 @@ mod tests {
         assert!(!CHAT_SYSTEM.contains("run_command"));
         assert!(CHAT_SYSTEM.contains("no terminal"));
         assert_eq!(MAX_CLIENT_TOOL_ROUNDS, 8);
+        assert_eq!(
+            tool.parameters["properties"]["max_results"]["type"],
+            "integer"
+        );
     }
 
     #[test]

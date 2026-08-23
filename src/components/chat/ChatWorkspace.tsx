@@ -32,6 +32,14 @@ import { sanitizeExternalWebUrl } from "../../lib/externalUrl";
 import * as api from "../../lib/tauri";
 import type { ChatDisplayMessage, ChatSummary, WebCitation } from "../../lib/types";
 
+const CHAT_BOTTOM_THRESHOLD_PX = 48;
+
+export function isNearChatBottom(
+  viewport: Pick<HTMLElement, "scrollTop" | "scrollHeight" | "clientHeight">,
+): boolean {
+  return viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= CHAT_BOTTOM_THRESHOLD_PX;
+}
+
 export function ChatWorkspace() {
   const current = useChatStore((state) => state.current);
   const stream = useChatStore((state) => state.stream);
@@ -41,11 +49,23 @@ export function ChatWorkspace() {
   const knowledgeWarning = useChatStore((state) => state.knowledgeWarning);
   const [composer, setComposer] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
-  const endRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef(true);
   const archived = Boolean(current?.summary.archived_at);
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: stream.status === "streaming" ? "auto" : "smooth" });
+    stickToBottomRef.current = true;
+    const viewport = scrollRef.current;
+    if (viewport) viewport.scrollTo({ top: viewport.scrollHeight });
+  }, [current?.summary.id]);
+
+  useEffect(() => {
+    const viewport = scrollRef.current;
+    if (!viewport || !stickToBottomRef.current) return;
+    viewport.scrollTo({
+      top: viewport.scrollHeight,
+      behavior: stream.status === "streaming" ? "auto" : "smooth",
+    });
   }, [current?.messages.length, stream.content, stream.thinking]);
 
   const send = () => {
@@ -60,7 +80,14 @@ export function ChatWorkspace() {
       <ChatSidebar />
       <div className="flex min-w-0 flex-1 flex-col">
         <ChatToolbar />
-        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-7">
+        <div
+          ref={scrollRef}
+          data-testid="chat-timeline"
+          className="min-h-0 flex-1 overflow-y-auto px-6 py-7"
+          onScroll={(event) => {
+            stickToBottomRef.current = isNearChatBottom(event.currentTarget);
+          }}
+        >
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
             {current?.messages.length ? (
               current.messages.map((message) => <Message key={message.id} message={message} />)
@@ -87,7 +114,6 @@ export function ChatWorkspace() {
             )}
             {stream.lastError && <p className="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">{stream.lastError}</p>}
             {knowledgeWarning && <p className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">{knowledgeWarning}</p>}
-            <div ref={endRef} />
           </div>
         </div>
 

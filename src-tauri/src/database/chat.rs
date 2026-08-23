@@ -22,7 +22,7 @@ pub struct ChatSummary {
     pub first_prompt: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatAttachment {
     pub id: String,
     pub kind: String,
@@ -59,18 +59,6 @@ pub struct ChatDetail {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct ChatAttachmentInput {
-    pub id: String,
-    pub kind: String,
-    pub name: String,
-    pub media_type: String,
-    pub bytes: i64,
-    pub path: Option<String>,
-    pub width: Option<i64>,
-    pub height: Option<i64>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
 pub struct ChatMessageInput {
     pub id: String,
     pub role: String,
@@ -82,7 +70,7 @@ pub struct ChatMessageInput {
     #[serde(default)]
     pub citations: Vec<WebCitation>,
     #[serde(default)]
-    pub attachments: Vec<ChatAttachmentInput>,
+    pub attachments: Vec<ChatAttachment>,
     pub created_at: String,
 }
 
@@ -110,9 +98,7 @@ fn transcript_v1() -> i64 {
 
 #[derive(Debug)]
 pub struct ChatRemoval {
-    pub id: String,
     pub attachment_paths: Vec<String>,
-    pub remove_owner_dir: bool,
 }
 
 const SUMMARY_COLS: &str = "t.id, t.title, t.title_source, t.created_at, t.updated_at, \
@@ -406,12 +392,19 @@ pub fn update_title(
     Ok(changed > 0)
 }
 
-pub fn delete(conn: &Connection, id: &str) -> Result<ChatRemoval, String> {
-    let mut stmt = conn
+pub fn delete(conn: &mut Connection, id: &str) -> Result<ChatRemoval, String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let mut stmt = tx
         .prepare(
-            "SELECT DISTINCT a.path FROM chat_attachments a \
-             JOIN chat_messages m ON m.id = a.message_id \
-             WHERE m.chat_id = ?1 AND a.path IS NOT NULL",
+            "SELECT DISTINCT owned.path \
+             FROM chat_attachments owned \
+             JOIN chat_messages owned_message ON owned_message.id = owned.message_id \
+             WHERE owned_message.chat_id = ?1 AND owned.path IS NOT NULL \
+               AND NOT EXISTS ( \
+                 SELECT 1 FROM chat_attachments other \
+                 JOIN chat_messages other_message ON other_message.id = other.message_id \
+                 WHERE other.path = owned.path AND other_message.chat_id <> ?1 \
+               )",
         )
         .map_err(|e| e.to_string())?;
     let paths = stmt
@@ -420,25 +413,11 @@ pub fn delete(conn: &Connection, id: &str) -> Result<ChatRemoval, String> {
         .collect::<Result<Vec<String>, _>>()
         .map_err(|e| e.to_string())?;
     drop(stmt);
-    conn.execute("DELETE FROM chat_threads WHERE id = ?1", params![id])
+    tx.execute("DELETE FROM chat_threads WHERE id = ?1", params![id])
         .map_err(|e| e.to_string())?;
-    let has_shared_path = paths.iter().any(|path| {
-        conn.query_row(
-            "SELECT COUNT(*) FROM chat_attachments WHERE path = ?1",
-            params![path],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap_or(1)
-            > 0
-    });
-    // Attachment files are grouped by owner directory. If any path is still
-    // referenced, keep the directory intact; the final owner's deletion will
-    // remove that original directory (including earlier orphaned siblings).
-    let paths = if has_shared_path { Vec::new() } else { paths };
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(ChatRemoval {
-        id: id.to_string(),
         attachment_paths: paths,
-        remove_owner_dir: !has_shared_path,
     })
 }
 
@@ -505,7 +484,7 @@ mod tests {
         save(&mut conn, &input("chat-a", "first")).unwrap();
         save(&mut conn, &input("chat-a", "replacement")).unwrap();
         assert_eq!(get(&conn, "chat-a").unwrap().unwrap().messages.len(), 1);
-        delete(&conn, "chat-a").unwrap();
+        delete(&mut conn, "chat-a").unwrap();
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM chat_messages", [], |row| row.get(0))
             .unwrap();
@@ -518,7 +497,7 @@ mod tests {
         let path = "/app/attachments/original/image.png";
         for chat_id in ["chat-a", "chat-b"] {
             let mut value = input(chat_id, "image");
-            value.messages[0].attachments.push(ChatAttachmentInput {
+            value.messages[0].attachments.push(ChatAttachment {
                 id: format!("attachment-{chat_id}"),
                 kind: "image".into(),
                 name: "image.png".into(),
@@ -531,12 +510,48 @@ mod tests {
             save(&mut conn, &value).unwrap();
         }
 
-        let first = delete(&conn, "chat-a").unwrap();
-        assert!(!first.remove_owner_dir);
+        let first = delete(&mut conn, "chat-a").unwrap();
         assert!(first.attachment_paths.is_empty());
-        let last = delete(&conn, "chat-b").unwrap();
-        assert!(last.remove_owner_dir);
+        let last = delete(&mut conn, "chat-b").unwrap();
         assert_eq!(last.attachment_paths, vec![path]);
+    }
+
+    #[test]
+    fn mixed_shared_and_unshared_attachments_are_filtered_individually() {
+        let mut conn = db();
+        let shared = "/app/attachments/chat-a/shared.png";
+        let unique = "/app/attachments/chat-a/unique.png";
+        let mut first = input("chat-a", "two images");
+        for (suffix, path) in [("shared", shared), ("unique", unique)] {
+            first.messages[0].attachments.push(ChatAttachment {
+                id: format!("attachment-{suffix}"),
+                kind: "image".into(),
+                name: format!("{suffix}.png"),
+                media_type: "image/png".into(),
+                bytes: 10,
+                path: Some(path.into()),
+                width: Some(10),
+                height: Some(10),
+            });
+        }
+        save(&mut conn, &first).unwrap();
+        let mut second = input("chat-b", "shared image");
+        second.messages[0].attachments.push(ChatAttachment {
+            id: "attachment-shared-copy".into(),
+            kind: "image".into(),
+            name: "shared.png".into(),
+            media_type: "image/png".into(),
+            bytes: 10,
+            path: Some(shared.into()),
+            width: Some(10),
+            height: Some(10),
+        });
+        save(&mut conn, &second).unwrap();
+
+        let first_removal = delete(&mut conn, "chat-a").unwrap();
+        assert_eq!(first_removal.attachment_paths, vec![unique]);
+        let second_removal = delete(&mut conn, "chat-b").unwrap();
+        assert_eq!(second_removal.attachment_paths, vec![shared]);
     }
 
     #[test]

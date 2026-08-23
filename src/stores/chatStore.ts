@@ -9,6 +9,7 @@ import {
   persistAttachments,
   transcribeImages,
 } from "../lib/attachInput";
+import type { Outgoing } from "../lib/attachInput";
 import { base64FromBytes, MAX_ATTACHMENTS } from "../lib/attachments";
 import type {
   Attachment,
@@ -179,6 +180,209 @@ async function persist(detail: ChatDetail): Promise<void> {
   }
 }
 
+function updateCurrentSummary(state: ChatState, summary: ChatSummary) {
+  return {
+    current: state.current?.summary.id === summary.id
+      ? { ...state.current, summary }
+      : state.current,
+    summaries: ordered(state.summaries.map((chat) => chat.id === summary.id ? summary : chat)),
+  };
+}
+
+interface PreparedTurn {
+  outgoing: Outgoing;
+  staged: Attachment[];
+  knowledgeWarning: string | null;
+}
+
+async function prepareTurn(
+  detail: ChatDetail,
+  prompt: string,
+  pending: Attachment[],
+  requestId: string,
+): Promise<PreparedTurn> {
+  let outgoing = buildOutgoing(prompt, pending);
+  const app = useAppStore.getState();
+  const model = app.catalog.find((entry) => entry.id === app.activeModelId);
+  if (outgoing.images.length > 0 && model?.supports_vision === false && ocrAvailable()) {
+    const transcribed = await transcribeImages(requestId, outgoing.prompt, pending);
+    if (transcribed === null) {
+      throw new Error("The image reader could not read this attachment.");
+    }
+    outgoing = { prompt: transcribed, images: [] };
+  }
+
+  let knowledgeWarning: string | null = null;
+  if (app.docsEnabled && detail.attached_bucket_refs.length > 0 && model?.supports_tools === false) {
+    try {
+      const response = await api.knowledgeSearchDetailed(
+        detail.attached_bucket_refs,
+        prompt,
+        DOC_INJECT_LIMIT,
+      );
+      const folded = foldRetrievedPassages(outgoing.prompt, response.hits);
+      outgoing = { ...outgoing, prompt: folded.prompt };
+      if (response.partial) {
+        knowledgeWarning = response.warnings.map((warning) => warning.message).join(" · ");
+      }
+    } catch {
+      knowledgeWarning = "Attached Knowledge could not be searched for this turn.";
+    }
+  }
+
+  return {
+    outgoing,
+    staged: await persistAttachments(detail.summary.id, pending),
+    knowledgeWarning,
+  };
+}
+
+function appendUserTurn(
+  detail: ChatDetail,
+  prompt: string,
+  prepared: PreparedTurn,
+): { detail: ChatDetail; isFirst: boolean } {
+  const now = new Date().toISOString();
+  const isFirst = detail.messages.length === 0;
+  const title = isFirst
+    ? fallbackTitle(prompt || prepared.staged[0]?.name || "New chat")
+    : detail.summary.title;
+  const titleSource: ChatTitleSource = isFirst ? "fallback" : detail.summary.title_source;
+  const userMessage: ChatDisplayMessage = {
+    id: id("message"),
+    sort_order: detail.messages.length,
+    role: "user",
+    content: prepared.outgoing.prompt,
+    thinking: null,
+    model: null,
+    prompt_tokens: null,
+    completion_tokens: null,
+    citations: [],
+    attachments: prepared.staged.map(attachmentToDisplay),
+    created_at: now,
+  };
+  return {
+    isFirst,
+    detail: {
+      ...detail,
+      summary: {
+        ...detail.summary,
+        title,
+        title_source: titleSource,
+        updated_at: now,
+        message_count: detail.messages.length + 1,
+        first_prompt: detail.summary.first_prompt ?? prompt,
+      },
+      messages: [...detail.messages, userMessage],
+    },
+  };
+}
+
+type ChatSet = (
+  update: Partial<ChatState> | ((state: ChatState) => Partial<ChatState>),
+) => void;
+
+async function streamTurn(
+  requestId: string,
+  outgoing: Outgoing,
+  initial: ChatDetail,
+  get: () => ChatState,
+  set: ChatSet,
+): Promise<{ detail: ChatDetail; transcript: ChatDetail["model_transcript"]; usage: { prompt: number; completion: number } }> {
+  let detail = initial;
+  let transcript = detail.model_transcript;
+  let usage = { prompt: 0, completion: 0 };
+  try {
+    transcript = await api.chatStart(
+      requestId,
+      outgoing.prompt,
+      transcript,
+      outgoing.images,
+      detail.attached_bucket_refs,
+      (event: StreamEvent) => {
+        if (get().stream.requestId !== requestId) return;
+        if (event.type === "Started") {
+          set((state) => ({ stream: { ...state.stream, model: event.model } }));
+        }
+        if (event.type === "Delta") {
+          set((state) => ({ stream: { ...state.stream, content: state.stream.content + event.content } }));
+        }
+        if (event.type === "ThinkingDelta") {
+          set((state) => ({ stream: { ...state.stream, thinking: state.stream.thinking + event.content } }));
+        }
+        if (event.type === "WebCitation") {
+          const citation: WebCitation = {
+            url: event.url,
+            title: event.title,
+            cited_text: event.cited_text,
+          };
+          set((state) => ({
+            stream: {
+              ...state.stream,
+              citations: [
+                ...state.stream.citations.filter((item) => item.url !== citation.url),
+                citation,
+              ],
+            },
+          }));
+        }
+        if (event.type === "Checkpoint") {
+          detail = { ...detail, model_transcript: event.transcript };
+          void persist(detail);
+        }
+        if (event.type === "Done") {
+          usage = { prompt: event.prompt_tokens, completion: event.completion_tokens };
+        }
+        if (event.type === "Error") {
+          set((state) => ({
+            stream: { ...state.stream, status: "error", lastError: event.message },
+          }));
+        }
+      },
+    );
+  } catch (error) {
+    set((state) => ({
+      stream: { ...state.stream, status: "error", lastError: String(error) },
+    }));
+  }
+  return { detail, transcript, usage };
+}
+
+function completeTurn(
+  detail: ChatDetail,
+  stream: ChatStreamState,
+  transcript: ChatDetail["model_transcript"],
+  usage: { prompt: number; completion: number },
+): ChatDetail {
+  if (!stream.content && !stream.thinking) {
+    return { ...detail, model_transcript: transcript };
+  }
+  const finished = new Date().toISOString();
+  const assistant: ChatDisplayMessage = {
+    id: id("message"),
+    sort_order: detail.messages.length,
+    role: "assistant",
+    content: stream.content,
+    thinking: stream.thinking || null,
+    model: stream.model,
+    prompt_tokens: usage.prompt,
+    completion_tokens: usage.completion,
+    citations: stream.citations,
+    attachments: [],
+    created_at: finished,
+  };
+  return {
+    ...detail,
+    summary: {
+      ...detail.summary,
+      updated_at: finished,
+      message_count: detail.messages.length + 1,
+    },
+    messages: [...detail.messages, assistant],
+    model_transcript: transcript,
+  };
+}
+
 export const useChatStore = create<ChatState>((set, get) => ({
   initialized: false,
   workspaceMode: "terminal",
@@ -260,10 +464,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!detail || !clean) return;
     await api.chatUpdateTitle(detail.summary.id, clean, "manual");
     const summary = { ...detail.summary, title: clean, title_source: "manual" as ChatTitleSource, updated_at: new Date().toISOString() };
-    set((state) => ({
-      current: { ...detail, summary },
-      summaries: ordered(state.summaries.map((chat) => chat.id === summary.id ? summary : chat)),
-    }));
+    set((state) => updateCurrentSummary(state, summary));
   },
 
   regenerateTitle: async () => {
@@ -277,10 +478,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const changed = await api.chatUpdateTitle(detail.summary.id, title, "generated", expected);
     if (!changed) return;
     const summary = { ...detail.summary, title, title_source: "generated" as ChatTitleSource, updated_at: new Date().toISOString() };
-    set((state) => ({
-      current: state.current?.summary.id === summary.id ? { ...state.current, summary } : state.current,
-      summaries: ordered(state.summaries.map((chat) => chat.id === summary.id ? summary : chat)),
-    }));
+    set((state) => updateCurrentSummary(state, summary));
   },
 
   archive: async (archived) => {
@@ -289,10 +487,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const archivedAt = archived ? new Date().toISOString() : null;
     await api.chatSetArchived(detail.summary.id, archivedAt);
     const summary = { ...detail.summary, archived_at: archivedAt, updated_at: new Date().toISOString() };
-    set((state) => ({
-      current: { ...detail, summary },
-      summaries: ordered(state.summaries.map((chat) => chat.id === summary.id ? summary : chat)),
-    }));
+    set((state) => updateCurrentSummary(state, summary));
   },
 
   deleteCurrent: async () => {
@@ -341,56 +536,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const detail = get().current;
     const prompt = rawPrompt.trim();
     if (!detail || detail.summary.archived_at || get().stream.status === "streaming") return;
-    if (!prompt && get().pendingAttachments.length === 0) return;
+    const pending = get().pendingAttachments;
+    if (!prompt && pending.length === 0) return;
 
     const requestId = id("chat-request");
-    const staged = await persistAttachments(detail.summary.id, get().pendingAttachments);
-    let outgoing = buildOutgoing(prompt, staged);
-    const app = useAppStore.getState();
-    const model = app.catalog.find((entry) => entry.id === app.activeModelId);
-    if (outgoing.images.length > 0 && model?.supports_vision === false && ocrAvailable()) {
-      const transcribed = await transcribeImages(requestId, outgoing.prompt, staged);
-      if (transcribed === null) {
-        set({ stream: { ...idleStream(), status: "error", lastError: "The image reader could not read this attachment." } });
-        return;
-      }
-      outgoing = { prompt: transcribed, images: [] };
+    let prepared: PreparedTurn;
+    try {
+      prepared = await prepareTurn(detail, prompt, pending, requestId);
+    } catch (error) {
+      set({
+        knowledgeWarning: null,
+        stream: {
+          ...idleStream(),
+          status: "error",
+          lastError: error instanceof Error ? error.message : String(error),
+        },
+      });
+      return;
     }
-
-    set({ knowledgeWarning: null });
-    if (app.docsEnabled && detail.attached_bucket_refs.length > 0 && model?.supports_tools === false) {
-      try {
-        const response = await api.knowledgeSearchDetailed(detail.attached_bucket_refs, prompt, DOC_INJECT_LIMIT);
-        const folded = foldRetrievedPassages(outgoing.prompt, response.hits);
-        outgoing = { ...outgoing, prompt: folded.prompt };
-        if (response.partial) set({ knowledgeWarning: response.warnings.map((warning) => warning.message).join(" · ") });
-      } catch {
-        set({ knowledgeWarning: "Attached Knowledge could not be searched for this turn." });
-      }
-    }
-
-    const now = new Date().toISOString();
-    const isFirst = detail.messages.length === 0;
-    const title = isFirst ? fallbackTitle(prompt || staged[0]?.name || "New chat") : detail.summary.title;
-    const source: ChatTitleSource = isFirst ? "fallback" : detail.summary.title_source;
-    const userMessage: ChatDisplayMessage = {
-      id: id("message"),
-      sort_order: detail.messages.length,
-      role: "user",
-      content: outgoing.prompt,
-      thinking: null,
-      model: null,
-      prompt_tokens: null,
-      completion_tokens: null,
-      citations: [],
-      attachments: staged.map(attachmentToDisplay),
-      created_at: now,
-    };
-    let live: ChatDetail = {
-      ...detail,
-      summary: { ...detail.summary, title, title_source: source, updated_at: now, message_count: detail.messages.length + 1, first_prompt: detail.summary.first_prompt ?? prompt },
-      messages: [...detail.messages, userMessage],
-    };
+    set({ knowledgeWarning: prepared.knowledgeWarning });
+    const appended = appendUserTurn(detail, prompt, prepared);
+    let live = appended.detail;
     await persist(live);
     set((state) => ({
       current: live,
@@ -399,72 +565,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
       summaries: ordered(state.summaries.map((chat) => chat.id === live.summary.id ? live.summary : chat)),
     }));
 
-    let transcript = live.model_transcript;
-    let usage = { prompt: 0, completion: 0 };
-    try {
-      transcript = await api.chatStart(requestId, outgoing.prompt, transcript, outgoing.images, live.attached_bucket_refs, (event: StreamEvent) => {
-        if (get().stream.requestId !== requestId) return;
-        if (event.type === "Started") set((state) => ({ stream: { ...state.stream, model: event.model } }));
-        if (event.type === "Delta") set((state) => ({ stream: { ...state.stream, content: state.stream.content + event.content } }));
-        if (event.type === "ThinkingDelta") set((state) => ({ stream: { ...state.stream, thinking: state.stream.thinking + event.content } }));
-        if (event.type === "WebCitation") {
-          const citation: WebCitation = { url: event.url, title: event.title, cited_text: event.cited_text };
-          set((state) => ({ stream: { ...state.stream, citations: [...state.stream.citations.filter((item) => item.url !== citation.url), citation] } }));
-        }
-        if (event.type === "Checkpoint") {
-          live = { ...live, model_transcript: event.transcript };
-          void persist(live);
-        }
-        if (event.type === "Done") usage = { prompt: event.prompt_tokens, completion: event.completion_tokens };
-        if (event.type === "Error") set((state) => ({ stream: { ...state.stream, status: "error", lastError: event.message } }));
-      });
-    } catch (error) {
-      set((state) => ({ stream: { ...state.stream, status: "error", lastError: String(error) } }));
-    }
-
-    const stream = get().stream;
-    if (stream.content || stream.thinking) {
-      const finished = new Date().toISOString();
-      const assistant: ChatDisplayMessage = {
-        id: id("message"),
-        sort_order: live.messages.length,
-        role: "assistant",
-        content: stream.content,
-        thinking: stream.thinking || null,
-        model: stream.model,
-        prompt_tokens: usage.prompt,
-        completion_tokens: usage.completion,
-        citations: stream.citations,
-        attachments: [],
-        created_at: finished,
+    const streamed = await streamTurn(requestId, prepared.outgoing, live, get, set);
+    live = completeTurn(streamed.detail, get().stream, streamed.transcript, streamed.usage);
+    await persist(live);
+    set((state) => {
+      const summary = state.current?.summary.id === live.summary.id && state.current.summary.title_source === "manual"
+        ? state.current.summary
+        : live.summary;
+      return {
+        current: { ...live, summary },
+        summaries: ordered(state.summaries.map((chat) => chat.id === summary.id ? summary : chat)),
       };
-      live = {
-        ...live,
-        summary: { ...live.summary, updated_at: finished, message_count: live.messages.length + 1 },
-        messages: [...live.messages, assistant],
-        model_transcript: transcript,
-      };
-      await persist(live);
-      set((state) => {
-        const summary = state.current?.summary.id === live.summary.id && state.current.summary.title_source === "manual"
-          ? state.current.summary
-          : live.summary;
-        return {
-          current: { ...live, summary },
-          summaries: ordered(state.summaries.map((chat) => chat.id === summary.id ? summary : chat)),
-        };
-      });
-    } else {
-      live = { ...live, model_transcript: transcript };
-      await persist(live);
-      set((state) => ({
-        current: state.current?.summary.id === live.summary.id && state.current.summary.title_source === "manual"
-          ? { ...live, summary: state.current.summary }
-          : live,
-      }));
-    }
+    });
     set((state) => ({ stream: { ...idleStream(), lastError: state.stream.lastError } }));
-    if (isFirst && live.summary.title_source === "fallback" && live.messages.some((message) => message.role === "assistant")) {
+    if (appended.isFirst && live.summary.title_source === "fallback" && live.messages.some((message) => message.role === "assistant")) {
       void get().regenerateTitle().catch(() => {});
     }
   },

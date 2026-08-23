@@ -501,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn v11_upgrades_to_terminal_independent_chat_tables() {
+    fn v11_to_v12_adds_terminal_independent_chat_tables() {
         let conn = mem();
         conn.execute_batch("CREATE TABLE schema_version (version INTEGER PRIMARY KEY);")
             .unwrap();
