@@ -256,8 +256,8 @@ test("renders the checked-in Pages source and writes sanitized release.json", as
   const manifest = JSON.parse(await readFile(join(output, "release.json"), "utf8"));
   assert.doesNotMatch(html, /data-release-/);
   assert.doesNotMatch(html, /releases\/(?:download|tag)\/v(?!0\.3\.0-beta\.2)/);
-  assert.match(html, /<strong>1,234<\/strong>/);
-  assert.match(html, /<strong>1,027<\/strong>/);
+  assert.doesNotMatch(html, /<strong>1,234<\/strong>/);
+  assert.doesNotMatch(html, /<strong>1,027<\/strong>/);
   assert.match(html, /Published <span>10 Aug 2026<\/span>/);
   assert.match(html, /<code>VTerminal_0\.3\.0-beta\.2_aarch64\.dmg<\/code>/);
   assert.equal(
@@ -275,16 +275,10 @@ test("renders the checked-in Pages source and writes sanitized release.json", as
   assert.match(html, /aria-label="Download VTerminal 0\.3\.0-beta\.2 for macOS \(Apple Silicon\), 12\.8 MB\."/);
   assert.match(html, /aria-label="Download VTerminal 0\.3\.0-beta\.2 Windows 11 preview \(x64\), 18\.8 MB\."/);
   assert.match(html, /aria-label="Pre-release 0\.3\.0-beta\.2\. Read the release notes\."/);
-  assert.match(html, /New in 0\.3\.2/);
-  assert.match(html, /Agent Runs Keep Their Place/);
-  assert.match(html, /Stable Sidecar, Stricter Reads/);
-  assert.match(html, /href="https:\/\/github\.com\/Veviad\/VTerminal\/pull\/44"/);
-  assert.match(html, /href="https:\/\/github\.com\/Veviad\/VTerminal\/pull\/45"/);
-  assert.match(html, /New in 0\.3\.1/);
-  assert.match(html, /One Agent, Local \+ SSH/);
-  assert.match(html, /Large Pastes, Clean Composer/);
-  assert.match(html, /href="https:\/\/github\.com\/Veviad\/VTerminal\/pull\/40"/);
-  assert.match(html, /href="https:\/\/github\.com\/Veviad\/VTerminal\/pull\/41"/);
+  assert.match(html, /vterminal-terminal-ai\.webp/);
+  assert.match(html, /vterminal-knowledge\.webp/);
+  assert.match(html, /Pick Your Platform\. Start in Minutes\./);
+  assert.match(html, /Verify and prepare Windows/);
   assert.match(html, /"softwareVersion": "0\.3\.0-beta\.2"/);
   assert.match(
     html,

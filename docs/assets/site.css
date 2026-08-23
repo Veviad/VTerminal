@@ -2,20 +2,18 @@
  * VTerminal project page.
  *
  * Structure, typography and section rhythm come from veviad.com's
- * src/styles/global.css — Anton headings over Inter body, the same `.shell`
+ * src/styles/global.css: Anton headings over Inter body, the same `.shell`
  * measure, eyebrow/heading/lead triplet, and the same component shapes
  * (`.why-list`, `.lifecycle`, `.feature-grid`, `.package-card`).
  *
  * The PALETTE does not. Every colour below is VTerminal's own default theme,
- * "Veviad Developer UI" (`@theme` in src/app.css) — near-black surfaces with a
- * single emerald accent — so the page and the product it ships look like one
+ * "Veviad Developer UI" (`@theme` in src/app.css): near-black surfaces with a
+ * single emerald accent, so the page and the product it ships look like one
  * thing. That is also why the page alternates three near-blacks rather than
  * white/grey/indigo: on a dark page the section rhythm has to come from small
  * surface steps plus borders, since shadows are invisible on black.
  *
- * The `.mock` block keeps its own scoped copy of those tokens on purpose. It
- * reproduces the app's UI, so it must stay pinned to the app's values even if
- * the page's ever drift.
+ * Product visuals are real application captures using the same palette.
  */
 
 @font-face {
@@ -37,7 +35,7 @@
     U+2212, U+2215, U+FEFF, U+FFFD;
 }
 
-/* Regular only — nothing sets a bold weight in mono, and synthesis is off. */
+/* Regular only; nothing sets a bold weight in mono, and synthesis is off. */
 @font-face {
   font-family: "JetBrains Mono";
   font-style: normal;
@@ -47,7 +45,7 @@
 }
 
 :root {
-  /* Verbatim from src/app.css @theme — the app's default theme. */
+  /* Verbatim from src/app.css @theme, the app's default theme. */
   --bg: #09090b;
   --bg-2: #0f0f12;
   --bg-card: #18181b;
@@ -60,7 +58,7 @@
   --text: #fafafa;
   --text-2: #a1a1aa;
   /* text-3 is held at >= 4.5:1 on bg / bg-2 / bg-card (4.54 on card). It lands
-     3.82 on bg-elevated, so raised surfaces use --text-2 instead — the same
+     3.82 on bg-elevated, so raised surfaces use --text-2 instead. The same
      rule the app documents for its own --color-text-muted. */
   --text-3: #82828d;
   --line: #27272a;
@@ -74,7 +72,7 @@
   --radius-lg: 28px;
   --header-height: 72px;
   --shell: 1180px;
-  --section-space: clamp(4.75rem, 8vw, 7.25rem);
+  --section-space: clamp(4.25rem, 7vw, 6rem);
   --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
@@ -265,7 +263,7 @@ a:hover {
 }
 
 /* Accent fill takes bg-primary text, as the app does (`bg-accent
-   text-bg-primary`, ui/Segmented.tsx) — not white, which reads at 2.5:1. */
+   text-bg-primary`, ui/Segmented.tsx), not white, which reads at 2.5:1. */
 .button-primary {
   background: var(--accent);
   color: var(--bg);
@@ -660,7 +658,7 @@ a:hover {
   text-transform: uppercase;
 }
 
-/* -------------------------------------------------------------- the mock */
+/* ------------------------------------------------------ product screenshot */
 
 .dashboard-bridge {
   position: relative;
@@ -668,444 +666,66 @@ a:hover {
   margin-top: clamp(-8rem, -9vw, -6rem);
 }
 
-/*
- * The page and the app now share a palette, so the frame cannot rely on a
- * light/dark contrast to read as a separate surface. A hairline border, a
- * faint accent ring and a deep shadow do that job instead — and the app's
- * terminal bg (#0a0a0c) is a shade below the page's (#09090b), which is the
- * same relationship you see running the real thing.
- */
-.dashboard-frame {
-  max-width: 68rem;
-  margin: 0 auto;
+.product-shot {
+  margin-inline: auto;
+}
+
+.product-shot-frame {
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 1.1rem;
   background: var(--bg-terminal);
   box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.08),
-    0 40px 90px rgba(0, 0, 0, 0.72), 0 12px 30px rgba(0, 0, 0, 0.5);
-  text-align: left;
+    0 40px 90px rgba(0, 0, 0, 0.68), 0 12px 30px rgba(0, 0, 0, 0.45);
 }
 
-/*
- * Scoped copy of src/app.css's @theme. Kept separate from the page tokens
- * above so the mock stays pinned to the app's real values.
- *
- * Every length inside is in `em` so the whole composition scales from the one
- * font-size below — that is what makes it read as a screenshot rather than as
- * page furniture that reflows on its own.
- */
-.mock {
-  --m-bg: #09090b;
-  --m-bg-2: #0f0f12;
-  --m-bg-card: #18181b;
-  --m-bg-elevated: #27272a;
-  --m-term: #0a0a0c;
-  --m-accent: #10b981;
-  --m-text: #fafafa;
-  --m-text-2: #a1a1aa;
-  --m-text-3: #82828d;
-  --m-border: #27272a;
-  --m-border-soft: #1c1c1f;
-  --m-error: #f04a4a;
-  --m-warning: #f59e0b;
-  font-family: var(--mono);
-  font-size: clamp(0.5rem, 0.93vw, 0.72rem);
-  font-synthesis-weight: none;
-  line-height: 1.55;
+.product-shot picture {
+  display: block;
 }
 
-.mock-chrome {
+.product-shot img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.product-shot figcaption {
   display: flex;
-  align-items: center;
-  gap: 1em;
-  border-bottom: 1px solid var(--m-border-soft);
-  background: var(--m-bg-2);
-  padding: 0.85em 1.1em;
-}
-
-.mock-lights {
-  display: flex;
-  flex: 0 0 auto;
-  gap: 0.55em;
-}
-
-.mock-lights span {
-  width: 0.85em;
-  height: 0.85em;
-  border-radius: 50%;
-}
-
-.mock-lights span:nth-child(1) {
-  background: #ff5f57;
-}
-
-.mock-lights span:nth-child(2) {
-  background: #febc2e;
-}
-
-.mock-lights span:nth-child(3) {
-  background: #28c840;
-}
-
-.mock-tabs {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 0.4em;
-}
-
-.mock-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5em;
-  overflow: hidden;
-  border: 1px solid transparent;
-  border-radius: 0.5em;
-  color: var(--m-text-3);
-  padding: 0.35em 0.75em;
-  white-space: nowrap;
-}
-
-.mock-tab.is-active {
-  border-color: var(--m-border);
-  background: var(--m-bg-card);
-  color: var(--m-text);
-}
-
-.mock-tab::before {
-  width: 0.42em;
-  height: 0.42em;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  background: currentColor;
-  content: "";
-  opacity: 0.55;
-}
-
-.mock-tab.is-active::before {
-  background: var(--m-accent);
-  opacity: 1;
-}
-
-.mock-body {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 0.62fr);
-  align-items: stretch;
-}
-
-.mock-term {
-  display: grid;
-  align-content: start;
-  gap: 1.15em;
-  min-width: 0;
-  background: var(--m-term);
-  padding: 1.35em 1.4em;
-}
-
-/* Command block: gutter rail + exit badge, as BlockGutter draws it. */
-.mock-block {
-  position: relative;
-  display: grid;
-  gap: 0.5em;
-  border-left: 2px solid var(--m-border);
-  padding-left: 1.05em;
-}
-
-.mock-block.is-ok {
-  border-left-color: var(--m-accent);
-}
-
-.mock-block.is-fail {
-  border-left-color: var(--m-error);
-}
-
-.mock-block-head {
-  display: flex;
-  align-items: center;
-  gap: 0.7em;
-  color: var(--m-text-3);
-}
-
-.mock-cwd {
-  color: var(--m-accent);
-}
-
-.mock-branch {
-  color: var(--m-text-3);
-}
-
-.mock-badge {
-  display: inline-flex;
-  min-width: 1.7em;
   align-items: center;
   justify-content: center;
-  gap: 0.3em;
-  margin-left: auto;
-  border-radius: 0.45em;
-  padding: 0.1em 0.45em;
-}
-
-.mock-badge.is-ok {
-  background: rgba(16, 185, 129, 0.14);
-  color: var(--m-accent);
-}
-
-.mock-badge.is-fail {
-  background: rgba(240, 74, 74, 0.14);
-  color: var(--m-error);
-}
-
-.mock-cmd {
-  display: flex;
-  gap: 0.6em;
-  color: var(--m-text);
-}
-
-.mock-cmd::before {
-  color: var(--m-accent);
-  content: "\276F";
-}
-
-.mock-out {
-  display: grid;
-  gap: 0.1em;
-  color: var(--m-text-2);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.mock-out .is-dim {
-  color: var(--m-text-3);
-}
-
-.mock-out .is-ok {
-  color: var(--m-accent);
-}
-
-.mock-out .is-fail {
-  color: var(--m-error);
-}
-
-.mock-caret {
-  display: inline-block;
-  width: 0.55em;
-  height: 1.05em;
-  background: var(--m-accent);
-  translate: 0 0.18em;
-}
-
-/* AI panel */
-.mock-ai {
-  display: grid;
-  align-content: start;
-  gap: 0.9em;
-  border-left: 1px solid var(--m-border);
-  background: var(--m-bg);
-  padding: 1.2em 1.15em;
-}
-
-.mock-ai-head {
-  display: flex;
-  align-items: center;
-  gap: 0.6em;
-  color: var(--m-text-3);
-}
-
-.mock-ai-title {
-  color: var(--m-text);
-  font-family: "Inter Variable", system-ui, sans-serif;
-  font-weight: 650;
-  letter-spacing: -0.01em;
-}
-
-.mock-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35em;
-  border: 1px solid var(--m-border);
-  border-radius: 999px;
-  color: var(--m-text-2);
-  font-size: 0.88em;
-  padding: 0.15em 0.6em;
-}
-
-.mock-chip.is-accent {
-  border-color: rgba(16, 185, 129, 0.4);
-  background: rgba(16, 185, 129, 0.1);
-  color: var(--m-accent);
-}
-
-.mock-ai-head .mock-chip:first-of-type {
-  margin-left: auto;
-}
-
-.mock-turn {
-  display: grid;
-  gap: 0.35em;
-}
-
-.mock-turn-user {
-  border-radius: 0.6em;
-  background: var(--m-bg-card);
-  color: var(--m-text);
-  padding: 0.6em 0.75em;
-}
-
-.mock-think {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.45em;
-  color: var(--m-text-3);
-}
-
-.mock-think::before {
-  content: "\25B8";
-}
-
-.mock-answer {
-  color: var(--m-text-2);
-  font-family: "Inter Variable", system-ui, sans-serif;
-  font-size: 1.05em;
-  line-height: 1.6;
-}
-
-.mock code {
-  background: var(--m-bg-elevated);
-  color: var(--m-text);
-  font-family: var(--mono);
-}
-
-/* The approval gate — two independent axes, then the buttons. */
-.mock-approval {
-  display: grid;
-  gap: 0.7em;
-  border: 1px solid var(--m-border);
-  border-radius: 0.7em;
-  background: var(--m-bg-card);
-  padding: 0.85em;
-}
-
-.mock-approval-label {
-  display: flex;
-  align-items: center;
-  gap: 0.45em;
-  color: var(--m-warning);
-  font-size: 0.9em;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-.mock-approval-cmd {
-  overflow-x: auto;
-  border-radius: 0.45em;
-  background: var(--m-term);
-  color: var(--m-text);
-  padding: 0.6em 0.7em;
-  white-space: pre;
-}
-
-.mock-axes {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.4em;
-}
-
-.mock-axis {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35em;
-  border-radius: 0.4em;
-  font-size: 0.9em;
-  padding: 0.2em 0.5em;
-}
-
-.mock-axis.is-write {
-  background: rgba(245, 158, 11, 0.14);
-  color: var(--m-warning);
-}
-
-.mock-axis.is-net {
-  background: rgba(240, 74, 74, 0.13);
-  color: var(--m-error);
-}
-
-.mock-actions {
-  display: flex;
-  gap: 0.4em;
-}
-
-.mock-action {
-  border-radius: 0.45em;
-  background: var(--m-bg-elevated);
-  color: var(--m-text-2);
-  padding: 0.35em 0.7em;
-}
-
-.mock-action.is-primary {
-  background: var(--m-accent);
-  color: var(--m-bg);
-}
-
-.mock-approval-note {
-  color: var(--m-text-3);
-  font-size: 0.9em;
-}
-
-/* The permission-mode control is a `Segmented` (ui/Segmented.tsx):
-   border-subtle over bg-card, inactive segments at text-muted, and the ACTIVE
-   one a filled accent pill — `auto_all` filling with warning instead. */
-.mock-modes {
-  display: flex;
-  gap: 0.3em;
-  border: 1px solid var(--m-border-soft);
-  border-radius: 0.55em;
-  background: var(--m-bg-card);
-  padding: 0.25em;
-}
-
-.mock-mode {
-  flex: 1 1 0;
-  border-radius: 0.4em;
-  color: var(--m-text-3);
-  padding: 0.3em 0.4em;
-  text-align: center;
-}
-
-.mock-mode.is-active {
-  background: var(--m-accent);
-  color: var(--m-bg);
-}
-
-.mock-status {
-  display: flex;
-  align-items: center;
-  gap: 1em;
-  border-top: 1px solid var(--m-border-soft);
-  background: var(--m-bg-2);
-  color: var(--m-text-3);
-  padding: 0.6em 1.1em;
-}
-
-.mock-status .mock-status-right {
-  display: flex;
-  gap: 1em;
-  margin-left: auto;
-}
-
-.mock-key {
-  border: 1px solid var(--m-border);
-  border-radius: 0.35em;
-  color: var(--m-text-2);
-  padding: 0.05em 0.4em;
-}
-
-.mock-caption {
-  max-width: 42rem;
-  margin: 1.1rem auto 0;
+  gap: 0.65rem;
+  margin-top: 1rem;
   color: var(--text-3);
   font-size: 0.78rem;
   text-align: center;
+}
+
+.product-shot-badge {
+  flex: 0 0 auto;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  border-radius: 999px;
+  background: var(--accent-subtle);
+  color: var(--accent);
+  font-size: 0.66rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  padding: 0.28rem 0.55rem;
+  text-transform: uppercase;
+}
+
+.product-shot-secondary {
+  margin-block: 3rem 0;
+}
+
+.product-shot-secondary .product-shot-frame {
+  aspect-ratio: 16 / 7.5;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.48);
+}
+
+.product-shot-secondary img {
+  height: 100%;
+  object-fit: cover;
+  object-position: top;
 }
 
 /* --------------------------------------------------------- audience band */
@@ -1493,7 +1113,7 @@ a:hover {
   text-align: center;
 }
 
-/* The ring is the CARD colour, not white — it exists to punch a hole in the
+/* The ring is the CARD colour, not white. It exists to punch a hole in the
    connector line behind each number. */
 .lifecycle-number {
   display: grid;
@@ -1600,7 +1220,7 @@ a:hover {
   gap: 1rem;
 }
 
-/* Inside .section-dark (bg-card), cards step DOWN to bg-2 rather than up —
+/* Inside .section-dark (bg-card), cards step DOWN to bg-2 rather than up;
    there is no lighter surface left that keeps text-2 above 4.5:1. */
 .assistant-card {
   min-width: 0;
@@ -1769,7 +1389,7 @@ a:hover {
 
 /*
  * The README's "safety rail, not a sandbox" warning. Deliberately the loudest
- * element in this section — the app's own copy is test-pinned to make that
+ * element in this section. The app's own copy is test-pinned to make that
  * promise, so the page must not soften it.
  */
 .callout {
@@ -1835,7 +1455,7 @@ a:hover {
 }
 
 /* The "inverted" card in the light original. On a dark page the equivalent
-   emphasis is a step UP to bg-elevated — where text-3 drops to 3.82:1, so its
+   emphasis is a step UP to bg-elevated. Text-3 drops to 3.82:1 there, so its
    dimmed copy is overridden to text-2 below. */
 .package-card.is-enterprise {
   border-color: var(--bg-elevated);
@@ -2038,6 +1658,221 @@ a:hover {
 
 /* --------------------------------------------------------------- install */
 
+.download-shell {
+  position: relative;
+}
+
+.download-header {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(22rem, 1.1fr);
+  align-items: end;
+  gap: clamp(2rem, 6vw, 5rem);
+  margin-bottom: 2.75rem;
+}
+
+.download-title-group .section-heading {
+  max-width: 32rem;
+}
+
+.download-header .section-lead {
+  max-width: 46rem;
+  margin: 0;
+}
+
+.download-trust {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  margin-top: 1.25rem;
+}
+
+.download-trust span {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-2);
+  color: var(--text-2);
+  font-size: 0.76rem;
+  font-weight: 700;
+  padding: 0.5rem 0.75rem;
+}
+
+.download-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 1.25rem;
+}
+
+.download-card {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(145deg, var(--bg-2), var(--bg));
+  padding: clamp(1.4rem, 3vw, 2rem);
+}
+
+.download-card-heading {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 1rem;
+}
+
+.download-platform-icon {
+  display: grid;
+  width: 2.75rem;
+  height: 2.75rem;
+  place-items: center;
+  border: 1px solid rgba(16, 185, 129, 0.32);
+  border-radius: 0.9rem;
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.download-card-kicker {
+  margin: 0 0 0.2rem;
+  color: var(--accent);
+  font-size: 0.67rem;
+  font-weight: 820;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+}
+
+.download-card-kicker.is-preview {
+  color: var(--warning);
+}
+
+.download-card-heading h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: clamp(1.65rem, 3vw, 2.2rem);
+  line-height: 1;
+}
+
+.download-card-heading p:last-child {
+  margin: 0.45rem 0 0;
+  color: var(--text-2);
+  font-size: 0.82rem;
+}
+
+.download-card-button {
+  width: 100%;
+  margin-top: 1.6rem;
+}
+
+.download-card-meta {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.7rem;
+  margin: 0.7rem 0 0;
+  color: var(--text-3);
+  font-size: 0.75rem;
+}
+
+.download-card-meta code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.install-checklist {
+  display: grid;
+  gap: 0.75rem;
+  margin: 1.6rem 0 0;
+  list-style: none;
+  padding: 0;
+}
+
+.install-checklist li {
+  display: grid;
+  grid-template-columns: 1.65rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.75rem;
+  color: var(--text-2);
+  font-size: 0.88rem;
+}
+
+.install-checklist li > span {
+  display: grid;
+  width: 1.65rem;
+  height: 1.65rem;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 0.7rem;
+  font-weight: 820;
+}
+
+.download-card-note {
+  margin: 1.5rem 0 0;
+  border-left: 2px solid var(--accent);
+  color: var(--text-2);
+  font-size: 0.8rem;
+  line-height: 1.65;
+  padding-left: 0.85rem;
+}
+
+.download-card-note.is-warning {
+  border-left-color: var(--warning);
+}
+
+.download-details {
+  margin-top: 1.25rem;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 1rem;
+}
+
+.download-details summary {
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 750;
+}
+
+.download-details p {
+  margin: 0.8rem 0;
+  color: var(--text-2);
+  font-size: 0.8rem;
+}
+
+.download-details .code-block {
+  font-size: 0.72rem;
+}
+
+.download-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.5rem;
+  margin-top: 1.5rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: rgba(9, 9, 11, 0.5);
+  padding: 1rem 1.15rem;
+}
+
+.download-footer p {
+  max-width: 44rem;
+  margin: 0;
+  color: var(--text-2);
+  font-size: 0.78rem;
+}
+
+.download-footer nav {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 0.6rem 1rem;
+}
+
+.download-footer a {
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
 .install-layout {
   display: grid;
   grid-template-columns: minmax(0, 0.82fr) minmax(0, 1.18fr);
@@ -2142,7 +1977,7 @@ a:hover {
 }
 
 /* Terminal bg, so a command block on the page matches a command block in the
-   app — and stays distinct from the bg-card band it sits inside. */
+   app, and stays distinct from the bg-card band it sits inside. */
 .code-block {
   position: relative;
   display: flex;
@@ -2174,7 +2009,7 @@ a:hover {
 /*
  * Wraps rather than scrolls. `white-space: pre` plus `overflow-x: auto` looked
  * fine until 375px, where `npm run tauri dev -- --features local-llm` (483px)
- * started scrolling inside a 297px box — and the copy button, being absolutely
+ * started scrolling inside a 297px box. The copy button, being absolutely
  * positioned inside that scroll container, slid across the command text. The
  * reserved `padding-right` gutter applies to every wrapped line, so the button
  * now never overlaps. Nothing wraps above ~700px; the longest command is 605px
@@ -2182,14 +2017,14 @@ a:hover {
  *
  * `min-width: 0` is what lets it wrap at all. As a flex item this defaults to
  * `min-width: auto`, so the box refused to shrink below the clone URL's
- * min-content width (314px in a 210px line) and overflowed instead — sliding
+ * min-content width (314px in a 210px line) and overflowed instead, sliding
  * the copy button over the text.
  *
  * `break-word` is kept for the URL, which genuinely cannot fit on one line and
  * is fine to split. It is NOT trusted to place the other breaks: Blink splits
  * `--features` mid-token even though the line has spaces to break at, which
  * rendered the command as `-- --` then `features local-llm`. Where a mid-token
- * break would misread, the markup marks the unit `.nowrap` instead — explicit
+ * break would misread, the markup marks the unit `.nowrap` instead. This is explicit
  * and UA-independent, and it adds no characters, so the copied string is
  * unchanged.
  */
@@ -2294,7 +2129,7 @@ a:hover {
   padding: 0.7rem 0.85rem;
 }
 
-/* A shared min-width so the labels start on one line down the column —
+/* A shared min-width so the labels start on one line down the column;
    "⌘1…9" is otherwise half a chord wider than "⌘T" and left the list ragged. */
 .keys-grid kbd {
   min-width: 3.15rem;
@@ -2937,6 +2772,7 @@ code {
   }
 
   .assistant-layout,
+  .download-header,
   .install-layout,
   .knowledge-heading,
   .release-highlights-header,
@@ -2948,6 +2784,15 @@ code {
   .release-highlights-header {
     align-items: start;
     gap: 1.25rem;
+  }
+
+  .download-header {
+    align-items: start;
+    gap: 1.4rem;
+  }
+
+  .download-trust {
+    justify-content: flex-start;
   }
 
   .why-layout {
@@ -2977,6 +2822,7 @@ code {
   }
 
   .feature-grid,
+  .download-grid,
   .knowledge-grid,
   .release-highlights-grid,
   .security-grid {
@@ -2986,6 +2832,15 @@ code {
   .guide-layout {
     grid-template-columns: 1fr;
     gap: 2.5rem;
+  }
+
+  .download-footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .download-footer nav {
+    flex: 1 1 auto;
   }
 
   .guide-toc {
@@ -3005,19 +2860,6 @@ code {
     padding: 0.42rem 0.75rem;
   }
 
-  /* The mock stacks: terminal above, AI panel below, both full width. */
-  .mock-body {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .mock-ai {
-    border-top: 1px solid var(--m-border);
-    border-left: 0;
-  }
-
-  .mock {
-    font-size: clamp(0.62rem, 2.1vw, 0.78rem);
-  }
 }
 
 @media (max-width: 640px) {
@@ -3059,6 +2901,20 @@ code {
 
   .dashboard-frame {
     border-radius: 0.8rem;
+  }
+
+  .product-shot-frame {
+    border-radius: 0.8rem;
+  }
+
+  .product-shot figcaption {
+    align-items: flex-start;
+    flex-direction: column;
+    text-align: left;
+  }
+
+  .product-shot-secondary .product-shot-frame {
+    aspect-ratio: 4 / 3;
   }
 
   .audience-band {
@@ -3160,6 +3016,11 @@ code {
 
   .announcement {
     font-size: 0.76rem;
+    text-align: left;
+  }
+
+  .announcement-label {
+    white-space: normal;
   }
 
   .why-list {
@@ -3178,6 +3039,12 @@ code {
   }
 
   .callout {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 520px) {
+  .keys-grid {
     grid-template-columns: 1fr;
   }
 }
