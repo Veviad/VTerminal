@@ -141,6 +141,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // tool would change what it is measuring — the `docs` argument below is `None`
         // for the same reason.
         doc_buckets: vec![],
+        mcp_tools: vec![],
         // Headless: there is no PTY here, so this drives the captured-subprocess
         // path. The app itself always uses ExecTarget::Pty.
         exec_target: run::ExecTarget::Subprocess,
@@ -181,6 +182,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // attached, so the knowledge service is never invoked.
         None,
         // No document index headless: there is no app data directory to open one in.
+        None,
+        // No MCP runtime in this headless example.
         None,
         cancel_rx,
         &on_event,

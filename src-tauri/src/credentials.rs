@@ -43,6 +43,9 @@ pub enum CredentialId {
     RemoteServer(String),
     Qdrant(String),
     SshHost(String),
+    /// MCP credentials are split into named slots (bearer, header:name,
+    /// env:NAME, oauth) and bound to an immutable server plus HTTP origin.
+    Mcp(String),
 }
 
 impl CredentialId {
@@ -55,6 +58,7 @@ impl CredentialId {
             Self::RemoteServer(id) => format!("remote-model/{id}"),
             Self::Qdrant(id) => format!("qdrant/{id}"),
             Self::SshHost(id) => format!("ssh/{id}"),
+            Self::Mcp(id) => format!("mcp/{id}"),
         }
     }
 
@@ -84,6 +88,33 @@ pub fn ssh_id(
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     CredentialId::SshHost(format!("{host_id}/{fingerprint}"))
+}
+
+/// Bind one MCP secret slot to the server id and its transport trust boundary.
+/// HTTP credentials must never survive an origin change; stdio credentials use
+/// the literal `stdio` boundary and remain tied to the immutable server UUID.
+pub fn mcp_id(server_id: &str, boundary: &str, slot: &str) -> Result<CredentialId, String> {
+    uuid::Uuid::parse_str(server_id).map_err(|_| "invalid MCP credential server id")?;
+    if slot.is_empty()
+        || slot.len() > 256
+        || slot.chars().any(char::is_control)
+        || slot.contains('/')
+    {
+        return Err("invalid MCP credential slot".into());
+    }
+    let normalized = if boundary == "stdio" {
+        "stdio".to_string()
+    } else {
+        crate::mcp::config::normalized_http_origin(boundary)?
+    };
+    let digest = Sha256::digest(normalized.as_bytes());
+    let fingerprint = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(CredentialId::Mcp(format!(
+        "{server_id}/{fingerprint}/{slot}"
+    )))
 }
 
 /// Bind a Qdrant credential to the connection id *and network origin*. During an

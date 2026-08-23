@@ -14,6 +14,7 @@ dist-ssr
 src-tauri/target
 src-tauri/gen/schemas
 src-tauri/binaries/vterminal-docs-x86_64-pc-windows-msvc.exe
+src-tauri/binaries/vterminal-mcp-relay
 src-tauri/binaries/llama-backends/*.dll
 src-tauri/binaries/llama-runtime/*.dll
 

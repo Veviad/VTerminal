@@ -11,6 +11,7 @@ pub mod credentials;
 mod database;
 pub mod docs;
 pub mod knowledge;
+pub mod mcp;
 pub mod models;
 pub mod provider;
 mod pty;
@@ -112,6 +113,9 @@ pub fn run() {
             app.manage(agent::AgentPermissionState::default());
             app.manage(agent::PtyExecState::default());
             app.manage(agent::SteerState::default());
+            app.manage(mcp::McpManager::default());
+            app.manage(mcp::approval::McpApprovalState::default());
+            app.manage(mcp::oauth::McpOAuthState::default());
             app.manage(models::DownloadState::default());
             app.manage(commands::updates::UpdateState::default());
             app.manage(std::sync::Arc::new(
@@ -356,6 +360,29 @@ pub fn run() {
             commands::remote_servers::remote_servers_set_api_key,
             commands::remote_servers::remote_servers_set_models,
             commands::remote_servers::remote_servers_probe,
+            // Model Context Protocol servers
+            commands::mcp::mcp_servers_list,
+            commands::mcp::mcp_servers_upsert,
+            commands::mcp::mcp_servers_delete,
+            commands::mcp::mcp_servers_set_secret,
+            commands::mcp::mcp_servers_trust,
+            commands::mcp::mcp_servers_test,
+            commands::mcp::mcp_server_connect,
+            commands::mcp::mcp_server_disconnect,
+            commands::mcp::mcp_tools_list,
+            commands::mcp::mcp_tools_refresh,
+            commands::mcp::mcp_tools_call,
+            commands::mcp::mcp_disconnect,
+            commands::mcp::mcp_logs,
+            commands::mcp::mcp_sandbox_status,
+            commands::mcp::mcp_default_server_ids,
+            commands::mcp::mcp_remember_tool,
+            commands::mcp::respond_to_mcp_approval,
+            commands::mcp::mcp_oauth_start,
+            commands::mcp::mcp_oauth_finish,
+            commands::mcp::mcp_oauth_revoke,
+            commands::mcp::mcp_forget_approvals,
+            commands::mcp::mcp_export_redacted,
             // ai
             commands::ai::ai_suggest,
             commands::ai::ai_explain,
@@ -425,6 +452,8 @@ pub fn run() {
                             }
                         }
                     } else {
+                        app.state::<mcp::oauth::McpOAuthState>().cancel_all();
+                        tauri::async_runtime::block_on(app.state::<mcp::McpManager>().shutdown());
                         // Dock Quit/OS termination can bypass preventable exit.
                         if let Err(error) = app.state::<pty::PtyManager>().kill_all_verified() {
                             log::error!(

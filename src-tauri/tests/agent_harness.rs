@@ -207,6 +207,7 @@ async fn run_scenario_with_context(
         policy_scope_single: "local".into(),
         policy_scope_remote: "remote:test".into(),
         doc_buckets: vec![],
+        mcp_tools: vec![],
         exec_target: ExecTarget::Subprocess,
     };
     let pty_exec = PtyExecState::default();
@@ -225,6 +226,7 @@ async fn run_scenario_with_context(
         None,
         &pty_exec,
         &steers,
+        None,
         None,
         None,
         cancel_rx,

@@ -135,6 +135,7 @@ pub struct ArchiveDetail {
     pub summary: ArchiveSummary,
     /// Display shape, `sort_order` ascending.
     pub messages: Vec<ArchivedMessage>,
+    pub mcp_selection: Option<crate::mcp::config::McpChatSelection>,
 }
 
 // ---------- Input shapes ----------
@@ -226,6 +227,10 @@ pub struct ArchiveSessionInput {
     pub model_transcript: Option<Vec<ChatMessage>>,
     #[serde(default)]
     pub model: Option<String>,
+    /// `None` preserves the stored value on metadata-only writes. Old rows and
+    /// pre-0.4 callers therefore reopen with no MCP servers selected.
+    #[serde(default)]
+    pub mcp_selection: Option<crate::mcp::config::McpChatSelection>,
     /// The archive row this session was reopened from. Deleted (CASCADE) inside
     /// this transaction, and its `opened_at` is inherited — otherwise
     /// reopen/close/reopen/close leaves a chain of near-duplicates that evicts
@@ -312,6 +317,17 @@ pub fn get(conn: &Connection, session_id: &str) -> Result<Option<ArchiveDetail>,
         return Ok(None);
     };
 
+    let mcp_selection = conn
+        .query_row(
+            "SELECT mcp_selection_json FROM archived_sessions WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .and_then(|raw| serde_json::from_str(&raw).ok());
+
     let mut stmt = conn
         .prepare(
             "SELECT id, sort_order, role, kind, content, thinking, cmd_command, cmd_output,
@@ -395,7 +411,11 @@ pub fn get(conn: &Connection, session_id: &str) -> Result<Option<ArchiveDetail>,
         }
     }
 
-    Ok(Some(ArchiveDetail { summary, messages }))
+    Ok(Some(ArchiveDetail {
+        summary,
+        messages,
+        mcp_selection,
+    }))
 }
 
 /// Twin of `workspace::scrollback`.
@@ -507,6 +527,12 @@ pub fn put_many(
             }
             None => None,
         };
+        let mcp_selection = input
+            .mcp_selection
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| format!("serialize MCP selection: {e}"))?;
 
         // Only recount when the caller actually sent messages; a metadata-only
         // tick must leave the stored counts alone.
@@ -534,10 +560,10 @@ pub fn put_many(
                  title, shell, cwd, host_id, remote_kind, remote_target, cols, rows,
                  script_version, format_version, scrollback, scrollback_lines,
                  message_count, agent_command_count, history_command_count, model,
-                 model_transcript, transcript_version)
+                 model_transcript, transcript_version, mcp_selection_json)
              VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 1,
                      ?15, COALESCE(?16, 0), COALESCE(?17, 0), COALESCE(?18, 0), ?19,
-                     COALESCE(?20, ''), ?21, 1)
+                     COALESCE(?20, ''), ?21, 1, ?22)
              ON CONFLICT(session_id) DO UPDATE SET
                 opened_at = excluded.opened_at,
                 closed_at = excluded.closed_at,
@@ -560,7 +586,8 @@ pub fn put_many(
                 agent_command_count = COALESCE(?18, archived_sessions.agent_command_count),
                 history_command_count = excluded.history_command_count,
                 model = COALESCE(?20, archived_sessions.model),
-                model_transcript = COALESCE(?21, archived_sessions.model_transcript)",
+                model_transcript = COALESCE(?21, archived_sessions.model_transcript),
+                mcp_selection_json = COALESCE(?22, archived_sessions.mcp_selection_json)",
             params![
                 input.session_id,
                 opened_at,
@@ -583,6 +610,7 @@ pub fn put_many(
                 history_commands,
                 input.model,
                 model_transcript,
+                mcp_selection,
             ],
         )
         .map_err(|e| format!("archive session {}: {e}", input.session_id))?;
@@ -1007,6 +1035,7 @@ mod tests {
             messages: None,
             model_transcript: None,
             model: None,
+            mcp_selection: None,
             supersedes: None,
         }
     }
@@ -1542,7 +1571,7 @@ mod tests {
     }
 
     #[test]
-    fn model_transcript_round_trips_tool_calls_and_ids() {
+    fn model_transcript_round_trips_tool_calls_ids_and_structured_results() {
         let mut conn = mem();
         let mut r = row("a");
         r.model_transcript = Some(vec![
@@ -1557,6 +1586,7 @@ mod tests {
                     arguments: r#"{"command":"ls"}"#.into(),
                 }]),
                 tool_call_id: None,
+                structured_tool_result: None,
                 images: None,
             },
             ChatMessage {
@@ -1564,6 +1594,15 @@ mod tests {
                 content: "exit code: 0".into(),
                 tool_calls: None,
                 tool_call_id: Some("call_1".into()),
+                structured_tool_result: Some(crate::provider::StructuredToolResult {
+                    content: vec![serde_json::json!({
+                        "type": "resource_link",
+                        "uri": "docs://result/1"
+                    })],
+                    structured_content: Some(serde_json::json!({"files": 3})),
+                    is_error: false,
+                    truncated: false,
+                }),
                 images: None,
             },
         ]);
@@ -1575,6 +1614,9 @@ mod tests {
         assert_eq!(calls[0].id, "call_1");
         assert_eq!(calls[0].arguments, r#"{"command":"ls"}"#);
         assert_eq!(back[3].tool_call_id.as_deref(), Some("call_1"));
+        let structured = back[3].structured_tool_result.as_ref().unwrap();
+        assert_eq!(structured.content[0]["uri"], "docs://result/1");
+        assert_eq!(structured.structured_content.as_ref().unwrap()["files"], 3);
         assert!(list(&conn, 50, 0).unwrap()[0].has_model_transcript);
     }
 

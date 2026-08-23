@@ -234,6 +234,9 @@ fn signal_runtime_cleanup(app: &AppHandle<Wry>) {
     let downloads = app.state::<DownloadState>();
     let ai_state = app.state::<AiState>();
     let approvals = app.state::<ApprovalState>();
+    let mcp_approvals = app.state::<crate::mcp::approval::McpApprovalState>();
+    let mcp_oauth = app.state::<crate::mcp::oauth::McpOAuthState>();
+    let mcp_manager = app.state::<crate::mcp::McpManager>();
     let pty_exec = app.state::<PtyExecState>();
     let steers = app.state::<SteerState>();
     let runbooks = app.state::<std::sync::Arc<RunbookCommandState>>();
@@ -241,6 +244,9 @@ fn signal_runtime_cleanup(app: &AppHandle<Wry>) {
     downloads.cancel_all();
     ai_state.cancel_all();
     approvals.drain_all();
+    mcp_approvals.drain_all();
+    mcp_oauth.cancel_all();
+    tauri::async_runtime::block_on(mcp_manager.shutdown());
     pty_exec.drain_all();
     steers.drain_all();
     runbooks.cancellations.cancel_all();

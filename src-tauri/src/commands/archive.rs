@@ -240,6 +240,7 @@ mod tests {
             }]),
             model_transcript: None,
             model: None,
+            mcp_selection: None,
             supersedes: supersedes.map(str::to_string),
         }
     }

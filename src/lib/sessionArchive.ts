@@ -19,7 +19,11 @@
 import * as api from "./tauri";
 import { useAppStore } from "../stores/appStore";
 import { getTerm, serializeSession } from "./termRegistry";
-import type { AiMessage, ArchiveMessageInput, ArchiveSessionInput } from "./types";
+import type {
+  AiMessage,
+  ArchiveMessageInput,
+  ArchiveSessionInput,
+} from "./types";
 import { PRIVATE_OUTPUT_NOTICE } from "./types";
 import { isRunbookTerminalProtected } from "./runbookTerminalPrivacy";
 
@@ -44,11 +48,18 @@ const CARD_OUTPUT_TAIL = 8_192;
  * their payload lives in `command`, and dropping them would archive an agent run
  * as a conversation in which no commands were ever proposed.
  */
-export function toArchiveMessages(messages: AiMessage[]): ArchiveMessageInput[] {
+export function toArchiveMessages(
+  messages: AiMessage[],
+): ArchiveMessageInput[] {
   return messages.map((m) => ({
     role: m.role,
-    kind: m.kind ?? "text",
-    content: m.content,
+    // v0.4 rich MCP result cards degrade to an ordinary readable message in
+    // the existing display archive schema. The model transcript separately
+    // retains the tool-call/result pairing needed for Agent continuation.
+    kind: m.kind === "mcp_tool" ? "text" : (m.kind ?? "text"),
+    content: m.mcp
+      ? `${m.mcp.serverName} · ${m.mcp.toolName} (${m.mcp.status})\n\nArguments:\n${JSON.stringify(m.mcp.arguments, null, 2)}${m.mcp.result?.model_text ? `\n\nResult:\n${m.mcp.result.model_text}` : ""}${m.mcp.error ? `\n\nError: ${m.mcp.error}` : ""}`
+      : m.content,
     thinking: m.thinking ?? null,
     command: m.command
       ? {
@@ -136,15 +147,22 @@ export function buildArchiveRow(
     // Deliberately NOT gated on quiescence. That guard exists so the periodic
     // snapshot never captures mid-`cat`; at close there is no later chance, so a
     // slightly ragged capture beats no capture at all.
-    const captured = serializeSession(sessionId, Math.min(maxLines, state.scrollbackLines));
+    const captured = serializeSession(
+      sessionId,
+      Math.min(maxLines, state.scrollbackLines),
+    );
     if (captured) {
       scrollback = captured.data;
       scrollbackLines = captured.lines;
     }
   }
 
-  const messages = opts.withTranscript ? toArchiveMessages(stream?.messages ?? []) : null;
-  const modelTranscript = opts.withTranscript ? (stream?.modelTranscript ?? []) : null;
+  const messages = opts.withTranscript
+    ? toArchiveMessages(stream?.messages ?? [])
+    : null;
+  const modelTranscript = opts.withTranscript
+    ? (stream?.modelTranscript ?? [])
+    : null;
 
   return {
     session_id: sessionId,
@@ -169,11 +187,16 @@ export function buildArchiveRow(
     // `model` labels the transcript, so it only means anything alongside one.
     model: opts.withTranscript ? (stream?.model ?? "") : null,
     model_transcript: modelTranscript,
+    mcp_selection: opts.withTranscript
+      ? (stream?.mcpSelection ?? { server_ids: [], disabled_tools: {} })
+      : null,
     // Collapse the row this tab was reopened from, but only once the run is
     // actually over: doing it on the periodic tick would delete the archived
     // original while the user might still want to reopen it again.
     supersedes:
-      opts.isOpen && !opts.stageSupersedes ? null : (session.archivedFrom ?? null),
+      opts.isOpen && !opts.stageSupersedes
+        ? null
+        : (session.archivedFrom ?? null),
   };
 }
 
@@ -215,7 +238,9 @@ export async function archiveOnClose(sessionId: string): Promise<void> {
  * Metadata-and-transcript only: no blob, so this stays cheap enough to run on a
  * timer.
  */
-export async function archiveTranscriptOnly(sessionId: string): Promise<boolean> {
+export async function archiveTranscriptOnly(
+  sessionId: string,
+): Promise<boolean> {
   const stream = useAppStore.getState().aiStreams[sessionId];
   // Nothing said yet: writing an empty open row would put a live tab in the
   // archive with nothing to show for it.

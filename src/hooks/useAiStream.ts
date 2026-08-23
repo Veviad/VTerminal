@@ -3,7 +3,11 @@ import * as api from "../lib/tauri";
 import { useAppStore, type CommandTargetMeta } from "../stores/appStore";
 import { getTerm } from "../lib/termRegistry";
 import { readLineRange, readScreenTail } from "../lib/terminalSnapshot";
-import { abortSession, runInTerminal, type PtyExecOutcome } from "../lib/ptyExec";
+import {
+  abortSession,
+  runInTerminal,
+  type PtyExecOutcome,
+} from "../lib/ptyExec";
 import { nameSession } from "../lib/sessionNaming";
 import {
   markTranscriptCheckpoint,
@@ -56,14 +60,19 @@ const CONTEXT_BLOCKS = 3;
 /** Read a block's output tail from the live xterm buffer. Uses the LIVE
  *  markers (lines shift with scrollback trimming/reflow); the end marker sits
  *  on the next prompt's row, so it is treated as EXCLUSIVE. */
-export function readBlockOutput(sessionId: string, block: Block, limit = OUTPUT_TAIL_LIMIT): string {
+export function readBlockOutput(
+  sessionId: string,
+  block: Block,
+  limit = OUTPUT_TAIL_LIMIT,
+): string {
   if (isTerminalOutputProtected(sessionId)) return "";
   const entry = getTerm(sessionId);
   if (!entry) return "";
   const markers = entry.blockMarkers.get(block.id);
   const startLine =
     markers && !markers.start.isDisposed ? markers.start.line : block.startLine;
-  const endLine = markers?.end && !markers.end.isDisposed ? markers.end.line : block.endLine;
+  const endLine =
+    markers?.end && !markers.end.isDisposed ? markers.end.line : block.endLine;
   if (endLine === null || endLine === undefined) return "";
   return readLineRange(sessionId, startLine, endLine - 1, { limit }).trim();
 }
@@ -77,7 +86,9 @@ export function buildTerminalContext(sessionId: string): TerminalContext {
   const recentBlocks = terminalOutputProtected ? [] : (ui?.blocks ?? [])
     // Agent-run commands are already in the model's own message history; sending
     // them back as "recent commands" just doubles them up.
-    .filter((b) => b.state === "done" && b.command.trim() && b.origin !== "agent")
+    .filter(
+      (b) => b.state === "done" && b.command.trim() && b.origin !== "agent",
+    )
     .slice(-CONTEXT_BLOCKS)
     .map((b) => ({
       command: b.command,
@@ -115,53 +126,68 @@ export function buildTerminalContext(sessionId: string): TerminalContext {
 
 export function useAiStream() {
   /** NL→command in the composer: streams into composerProposal, never runs anything. */
-  const generateCommand = useCallback(async (sessionId: string, prompt: string) => {
-    const store = useAppStore.getState();
-    const requestId = newRequestId();
-    store.updateSessionUi(sessionId, {
-      composerStatus: "generating",
-      composerProposal: null,
-      composerError: null,
-      composerRequestId: requestId,
-    });
-    let accumulated = "";
-    // Drop events from an abandoned request (user closed the composer and the
-    // cancel raced) — otherwise a stale proposal resurrects into a fresh UI.
-    const isCurrent = () =>
-      useAppStore.getState().sessionUi[sessionId]?.composerRequestId === requestId;
-    try {
-      await api.aiSuggest(requestId, prompt, buildTerminalContext(sessionId), (e: StreamEvent) => {
-        if (!isCurrent()) return;
-        if (e.type === "Delta") {
-          accumulated += e.content;
-          const parsed = parseSuggestion(accumulated);
-          useAppStore.getState().updateSessionUi(sessionId, { composerProposal: parsed });
-        } else if (e.type === "Done") {
-          const parsed = parseSuggestion(accumulated);
-          useAppStore.getState().updateSessionUi(sessionId, {
-            composerStatus: parsed.command ? "proposal" : "error",
-            composerProposal: parsed,
-            composerError: parsed.command ? null : "No command in model response",
-          });
-        } else if (e.type === "Error") {
+  const generateCommand = useCallback(
+    async (sessionId: string, prompt: string) => {
+      const store = useAppStore.getState();
+      const requestId = newRequestId();
+      store.updateSessionUi(sessionId, {
+        composerStatus: "generating",
+        composerProposal: null,
+        composerError: null,
+        composerRequestId: requestId,
+      });
+      let accumulated = "";
+      // Drop events from an abandoned request (user closed the composer and the
+      // cancel raced) — otherwise a stale proposal resurrects into a fresh UI.
+      const isCurrent = () =>
+        useAppStore.getState().sessionUi[sessionId]?.composerRequestId ===
+        requestId;
+      try {
+        await api.aiSuggest(
+          requestId,
+          prompt,
+          buildTerminalContext(sessionId),
+          (e: StreamEvent) => {
+            if (!isCurrent()) return;
+            if (e.type === "Delta") {
+              accumulated += e.content;
+              const parsed = parseSuggestion(accumulated);
+              useAppStore
+                .getState()
+                .updateSessionUi(sessionId, { composerProposal: parsed });
+            } else if (e.type === "Done") {
+              const parsed = parseSuggestion(accumulated);
+              useAppStore.getState().updateSessionUi(sessionId, {
+                composerStatus: parsed.command ? "proposal" : "error",
+                composerProposal: parsed,
+                composerError: parsed.command
+                  ? null
+                  : "No command in model response",
+              });
+            } else if (e.type === "Error") {
+              useAppStore.getState().updateSessionUi(sessionId, {
+                composerStatus: "error",
+                composerError: e.message,
+              });
+            } else if (e.type === "Cancelled") {
+              useAppStore
+                .getState()
+                .updateSessionUi(sessionId, { composerStatus: "idle" });
+            }
+          },
+        );
+      } catch (err) {
+        if (isCurrent()) {
           useAppStore.getState().updateSessionUi(sessionId, {
             composerStatus: "error",
-            composerError: e.message,
+            composerError: String(err),
           });
-        } else if (e.type === "Cancelled") {
-          useAppStore.getState().updateSessionUi(sessionId, { composerStatus: "idle" });
         }
-      });
-    } catch (err) {
-      if (isCurrent()) {
-        useAppStore.getState().updateSessionUi(sessionId, {
-          composerStatus: "error",
-          composerError: String(err),
-        });
       }
-    }
-    return requestId;
-  }, []);
+      return requestId;
+    },
+    [],
+  );
 
   /** Explain a failed block in the AI panel. */
   const explainBlock = useCallback(async (sessionId: string, block: Block) => {
@@ -190,7 +216,9 @@ export function useAiStream() {
       );
     } catch (err) {
       if (ownsActiveRequest(sessionId, requestId)) {
-        useAppStore.getState().finishAiStream(sessionId, String(err), undefined, requestId);
+        useAppStore
+          .getState()
+          .finishAiStream(sessionId, String(err), undefined, requestId);
       }
     }
   }, []);
@@ -235,17 +263,23 @@ export function useAiStream() {
       return {
         role: m.role,
         content: stripped.content,
-        image_count: (m.attachments ?? []).filter((a) => a.kind === "image").length,
+        image_count: (m.attachments ?? []).filter((a) => a.kind === "image")
+          .length,
         doc_count: stripped.count,
       };
     });
 
     let staged: Awaited<ReturnType<typeof persistAttachments>>;
     try {
-      staged = await persistAttachments(sessionId, stream?.pendingAttachments ?? []);
+      staged = await persistAttachments(
+        sessionId,
+        stream?.pendingAttachments ?? [],
+      );
     } catch (err) {
       if (ownsActiveRequest(sessionId, requestId)) {
-        useAppStore.getState().finishAiStream(sessionId, String(err), undefined, requestId);
+        useAppStore
+          .getState()
+          .finishAiStream(sessionId, String(err), undefined, requestId);
       }
       return;
     }
@@ -255,7 +289,9 @@ export function useAiStream() {
     // The chat model cannot see, but a sidecar is loaded: transcribe on-device and
     // send TEXT. The panel blocks Send when there is no sidecar, so reaching here
     // with images and no vision means one is ready.
-    const canSee = store.catalog.find((m) => m.id === store.activeModelId)?.supports_vision;
+    const canSee = store.catalog.find(
+      (m) => m.id === store.activeModelId,
+    )?.supports_vision;
     if (outgoing.images.length > 0 && !canSee) {
       if (!ocrAvailable()) {
         useAppStore
@@ -307,7 +343,9 @@ export function useAiStream() {
         outgoing = { ...outgoing, prompt: folded.prompt };
         docsUsed = folded.count;
         if (response.partial) {
-          const details = response.warnings.map((warning) => warning.message).join(" · ");
+          const details = response.warnings
+            .map((warning) => warning.message)
+            .join(" · ");
           store.setKnowledgeWarning(
             sessionId,
             details
@@ -345,10 +383,13 @@ export function useAiStream() {
         context,
         docsUsed > 0,
         (e) => dispatchPanelEvent(sessionId, requestId, e),
+        stream?.mcpSelection,
       );
     } catch (err) {
       if (ownsActiveRequest(sessionId, requestId)) {
-        useAppStore.getState().finishAiStream(sessionId, String(err), undefined, requestId);
+        useAppStore
+          .getState()
+          .finishAiStream(sessionId, String(err), undefined, requestId);
       }
     }
   }, []);
@@ -360,7 +401,11 @@ export function useAiStream() {
     const ownerSessionId = store.resolveAiOwner(sessionId);
     if (isSessionBusy(ownerSessionId)) return;
     const initialSidecar = store.sidecarForSession(ownerSessionId);
-    if (initialSidecar && store.refreshSidecarHealth(ownerSessionId)?.status !== "active") return;
+    if (
+      initialSidecar &&
+      store.refreshSidecarHealth(ownerSessionId)?.status !== "active"
+    )
+      return;
     const requestId = newRequestId();
     // Like ask mode, own the session before attachment persistence yields. This
     // makes a shutdown fence authoritative even while no backend request exists.
@@ -369,7 +414,8 @@ export function useAiStream() {
     try {
       staged = await persistAttachments(
         ownerSessionId,
-        ownRecordValue(store.aiStreams, ownerSessionId)?.pendingAttachments ?? [],
+        ownRecordValue(store.aiStreams, ownerSessionId)?.pendingAttachments ??
+          [],
       );
     } catch (err) {
       if (ownsActiveRequest(ownerSessionId, requestId)) {
@@ -400,7 +446,10 @@ export function useAiStream() {
       );
       return;
     }
-    if (liveSidecar && liveStore.refreshSidecarHealth(ownerSessionId)?.status !== "active") {
+    if (
+      liveSidecar &&
+      liveStore.refreshSidecarHealth(ownerSessionId)?.status !== "active"
+    ) {
       liveStore.finishAiStream(
         ownerSessionId,
         "Sidecar target is no longer available.",
@@ -423,11 +472,15 @@ export function useAiStream() {
     // transcript is written into the store asynchronously, and this is what turns
     // agent mode from single-shot into an actual conversation.
     const history =
-      ownRecordValue(useAppStore.getState().aiStreams, ownerSessionId)?.modelTranscript ?? [];
+      ownRecordValue(useAppStore.getState().aiStreams, ownerSessionId)
+        ?.modelTranscript ?? [];
     // Read at dispatch time for the same reason as `history`: the user may attach or
     // detach a bucket between turns, and each turn is a fresh run whose tool vector is
     // decided from this list.
-    const activeStream = ownRecordValue(useAppStore.getState().aiStreams, ownerSessionId);
+    const activeStream = ownRecordValue(
+      useAppStore.getState().aiStreams,
+      ownerSessionId,
+    );
     const docBuckets =
       activeStream?.attachedBucketRefs ??
       (activeStream?.attachedBucketIds ?? []).map(normalizeKnowledgeBucketRef);
@@ -461,6 +514,7 @@ export function useAiStream() {
         },
         sidecarTargets,
         permissionModes,
+        activeStream?.mcpSelection,
       );
       // Done/Paused clears requestId before agentStart resolves. generationId
       // intentionally survives that event, but is replaced by a new run and
@@ -495,7 +549,8 @@ export function useAiStream() {
     async (sessionId: string) => {
       // Idempotent against a double click and against a button left over from a
       // pause that has already been resumed.
-      if (useAppStore.getState().aiStreams[sessionId]?.status !== "paused") return;
+      if (useAppStore.getState().aiStreams[sessionId]?.status !== "paused")
+        return;
       await startAgent(sessionId, S.aiPanel.continueGoal);
     },
     [startAgent],
@@ -540,18 +595,56 @@ export function useAiStream() {
   );
 
   const respondToProposal = useCallback(
-    async (sessionId: string, decision: "run" | "skip" | "stop", editedCommand?: string) => {
+    async (
+      sessionId: string,
+      decision: "run" | "skip" | "stop",
+      editedCommand?: string,
+    ) => {
       const initialStore = useAppStore.getState();
       const ownerSessionId = initialStore.resolveAiOwner(sessionId);
       const stream = ownRecordValue(initialStore.aiStreams, ownerSessionId);
       const proposal = stream?.pendingProposal;
       if (!proposal) return;
       if (decision === "skip") {
-        useAppStore.getState().setPendingProposal(ownerSessionId, null, "streaming");
+        useAppStore
+          .getState()
+          .setPendingProposal(ownerSessionId, null, "streaming");
       } else if (decision === "stop") {
-        useAppStore.getState().setPendingProposal(ownerSessionId, null, "streaming");
+        useAppStore
+          .getState()
+          .setPendingProposal(ownerSessionId, null, "streaming");
       }
-      await api.respondToApproval(proposal.approvalId, decision, editedCommand).catch(() => {});
+      await api
+        .respondToApproval(proposal.approvalId, decision, editedCommand)
+        .catch(() => {});
+    },
+    [],
+  );
+
+  const respondToMcpProposal = useCallback(
+    async (
+      sessionId: string,
+      decision: "allow_once" | "always_allow" | "deny",
+    ) => {
+      const state = useAppStore.getState();
+      const ownerSessionId = state.resolveAiOwner(sessionId);
+      const proposal = ownRecordValue(
+        state.aiStreams,
+        ownerSessionId,
+      )?.pendingMcpProposal;
+      if (!proposal) return;
+      state.setPendingMcpProposal(ownerSessionId, null);
+      if (decision === "deny") {
+        state.finishMcpTool(
+          ownerSessionId,
+          proposal.approvalId,
+          undefined,
+          "Denied by user",
+        );
+      }
+      await api
+        .respondToMcpApproval(proposal.approvalId, decision)
+        .catch(() => {});
     },
     [],
   );
@@ -590,6 +683,7 @@ export function useAiStream() {
     continueRun,
     steer,
     respondToProposal,
+    respondToMcpProposal,
     cancel,
   };
 }
@@ -598,11 +692,18 @@ function isSessionBusy(sessionId: string): boolean {
   const store = useAppStore.getState();
   const ownerSessionId = store.resolveAiOwner(sessionId);
   const status = ownRecordValue(store.aiStreams, ownerSessionId)?.status;
-  return status === "streaming" || status === "awaiting_approval" || status === "executing";
+  return (
+    status === "streaming" ||
+    status === "awaiting_approval" ||
+    status === "executing"
+  );
 }
 
 function ownsGeneration(sessionId: string, generationId: string): boolean {
-  return ownRecordValue(useAppStore.getState().aiStreams, sessionId)?.generationId === generationId;
+  return (
+    ownRecordValue(useAppStore.getState().aiStreams, sessionId)
+      ?.generationId === generationId
+  );
 }
 
 function ownsActiveRequest(sessionId: string, requestId: string): boolean {
@@ -628,8 +729,14 @@ function resolveCommandTarget(
   const store = useAppStore.getState();
   const binding = store.sidecarForSession(ownerSessionId);
   if (!binding) {
-    if (event.target_role !== undefined || event.target_session_id !== undefined) {
-      return { ok: false, reason: "The Sidecar binding ended before command dispatch." };
+    if (
+      event.target_role !== undefined ||
+      event.target_session_id !== undefined
+    ) {
+      return {
+        ok: false,
+        reason: "The Sidecar binding ended before command dispatch.",
+      };
     }
     return { ok: true, sessionId: ownerSessionId };
   }
@@ -637,15 +744,24 @@ function resolveCommandTarget(
   const health = store.refreshSidecarHealth(ownerSessionId);
   const current = useAppStore.getState().sidecarForSession(ownerSessionId);
   if (!current || health?.status !== "active") {
-    return { ok: false, reason: "A Sidecar target is disconnected or changed identity." };
+    return {
+      ok: false,
+      reason: "A Sidecar target is disconnected or changed identity.",
+    };
   }
   if (!event.target_role || !event.target_session_id) {
-    return { ok: false, reason: "The agent did not identify a Sidecar command target." };
+    return {
+      ok: false,
+      reason: "The agent did not identify a Sidecar command target.",
+    };
   }
 
   const expectedSessionId = sessionIdForRole(current, event.target_role);
   if (event.target_session_id !== expectedSessionId) {
-    return { ok: false, reason: "The agent command target does not match the Sidecar binding." };
+    return {
+      ok: false,
+      reason: "The agent command target does not match the Sidecar binding.",
+    };
   }
   const entry = getTerm(expectedSessionId);
   if (!entry || entry.disposed) {
@@ -653,10 +769,15 @@ function resolveCommandTarget(
       role: event.target_role,
       reason: "terminal_unavailable",
     });
-    return { ok: false, reason: "The selected Sidecar terminal is no longer available." };
+    return {
+      ok: false,
+      reason: "The selected Sidecar terminal is no longer available.",
+    };
   }
 
-  const targetSession = store.sessions.find((session) => session.id === expectedSessionId);
+  const targetSession = store.sessions.find(
+    (session) => session.id === expectedSessionId,
+  );
   const targetUi = ownRecordValue(store.sessionUi, expectedSessionId);
   const label =
     event.target_role === "remote"
@@ -680,7 +801,8 @@ function canDispatchToTarget(
   expectedSessionId: string,
 ): boolean {
   const store = useAppStore.getState();
-  if (ownRecordValue(store.aiStreams, ownerSessionId)?.requestId !== requestId) return false;
+  if (ownRecordValue(store.aiStreams, ownerSessionId)?.requestId !== requestId)
+    return false;
   const target = resolveCommandTarget(ownerSessionId, event);
   return target.ok && target.sessionId === expectedSessionId;
 }
@@ -691,10 +813,15 @@ function rejectTargetedRun(
   reason: string,
   approvalId?: string,
 ): void {
-  if (approvalId) void api.respondToApproval(approvalId, "stop").catch(() => {});
+  if (approvalId)
+    void api.respondToApproval(approvalId, "stop").catch(() => {});
   const store = useAppStore.getState();
-  if (ownRecordValue(store.aiStreams, ownerSessionId)?.requestId !== requestId) return;
-  store.finishAiStream(ownerSessionId, `Sidecar safety check stopped this run: ${reason}`);
+  if (ownRecordValue(store.aiStreams, ownerSessionId)?.requestId !== requestId)
+    return;
+  store.finishAiStream(
+    ownerSessionId,
+    `Sidecar safety check stopped this run: ${reason}`,
+  );
   markTranscriptDirty(ownerSessionId);
   void api.aiCancel(requestId).catch(() => {});
 }
@@ -712,11 +839,16 @@ function rejectTerminalDispatch(
   rejectTargetedRun(ownerSessionId, requestId, reason);
 }
 
-function dispatchPanelEvent(sessionId: string, requestId: string, e: StreamEvent): void {
+function dispatchPanelEvent(
+  sessionId: string,
+  requestId: string,
+  e: StreamEvent,
+): void {
   const store = useAppStore.getState();
   // Ownership check: drop events from a superseded/cancelled request so a
   // stale stream can never mutate a newer run's state.
-  if (ownRecordValue(store.aiStreams, sessionId)?.requestId !== requestId) return;
+  if (ownRecordValue(store.aiStreams, sessionId)?.requestId !== requestId)
+    return;
   switch (e.type) {
     case "Delta":
       store.appendAiDelta(sessionId, e.content);
@@ -745,25 +877,25 @@ function dispatchPanelEvent(sessionId: string, requestId: string, e: StreamEvent
       // already been evaluated as requiring a real operator decision; the
       // frontend must never reinterpret the fields and auto-click the gate.
       store.setPendingProposal(
-          sessionId,
-          {
-            approvalId: e.approval_id,
-            command: e.command,
-            explanation: e.explanation,
-            readOnly: e.read_only,
-            network: e.network,
-            outputPolicy: e.output_policy,
-            ...(e.assessment ? { assessment: e.assessment } : {}),
-            ...(e.ask_reason ? { askReason: e.ask_reason } : {}),
-            ...(target.meta
-              ? {
-                  targetRole: target.meta.role,
-                  targetSessionId: target.meta.sessionId,
-                }
-              : {}),
-          },
-          "awaiting_approval",
-        );
+        sessionId,
+        {
+          approvalId: e.approval_id,
+          command: e.command,
+          explanation: e.explanation,
+          readOnly: e.read_only,
+          network: e.network,
+          outputPolicy: e.output_policy,
+          ...(e.assessment ? { assessment: e.assessment } : {}),
+          ...(e.ask_reason ? { askReason: e.ask_reason } : {}),
+          ...(target.meta
+            ? {
+                targetRole: target.meta.role,
+                targetSessionId: target.meta.sessionId,
+              }
+            : {}),
+        },
+        "awaiting_approval",
+      );
       break;
     }
     case "CommandBlocked": {
@@ -817,7 +949,8 @@ function dispatchPanelEvent(sessionId: string, requestId: string, e: StreamEvent
         // Revalidate after prompt probing and immediately before the one PTY
         // write. Pane focus is deliberately irrelevant; immutable session ids
         // and the live binding are the authority.
-        canWrite: () => canDispatchToTarget(sessionId, requestId, e, target.sessionId),
+        canWrite: () =>
+          canDispatchToTarget(sessionId, requestId, e, target.sessionId),
       })
         .then((outcome) => {
           const s = useAppStore.getState();
@@ -866,6 +999,54 @@ function dispatchPanelEvent(sessionId: string, requestId: string, e: StreamEvent
       );
       break;
     }
+    case "McpToolProposal":
+      store.pushAiMessage(sessionId, {
+        id: `mcp-${e.approval_id}`,
+        role: "assistant",
+        content: "",
+        createdAt: new Date().toISOString(),
+        kind: "mcp_tool",
+        mcp: {
+          approvalId: e.approval_id,
+          serverId: e.server_id,
+          serverName: e.server_name,
+          toolName: e.tool_name,
+          arguments: e.arguments,
+          status: "awaiting",
+        },
+      });
+      store.setPendingMcpProposal(sessionId, {
+        approvalId: e.approval_id,
+        serverId: e.server_id,
+        serverName: e.server_name,
+        toolName: e.tool_name,
+        title: e.title,
+        description: e.description,
+        arguments: e.arguments,
+        schemaHash: e.schema_hash,
+      });
+      break;
+    case "McpToolStarted": {
+      const pending = ownRecordValue(
+        store.aiStreams,
+        sessionId,
+      )?.pendingMcpProposal;
+      store.beginMcpTool(
+        sessionId,
+        e.approval_id,
+        e.server_id,
+        e.server_name,
+        e.tool_name,
+        pending?.approvalId === e.approval_id ? pending.arguments : {},
+      );
+      break;
+    }
+    case "McpToolResult":
+      store.finishMcpTool(sessionId, e.approval_id, e.result, e.error);
+      break;
+    case "McpServerProblem":
+      store.setKnowledgeWarning(sessionId, `MCP: ${e.message}`);
+      break;
     case "Started":
       // Previously dropped on the floor, which is why switching models
       // relabelled the whole scrollback: attribution has to be recorded when
@@ -873,10 +1054,15 @@ function dispatchPanelEvent(sessionId: string, requestId: string, e: StreamEvent
       store.setAiStreamModel(sessionId, e.model);
       break;
     case "Done":
-      store.finishAiStream(sessionId, undefined, {
-        prompt: e.prompt_tokens,
-        completion: e.completion_tokens,
-      }, requestId);
+      store.finishAiStream(
+        sessionId,
+        undefined,
+        {
+          prompt: e.prompt_tokens,
+          completion: e.completion_tokens,
+        },
+        requestId,
+      );
       // A completed exchange is the first moment there is anything worth naming
       // a tab after. Debounced and heavily gated (see lib/sessionNaming.ts) —
       // and deliberately after finishAiStream, so the session reads as idle and
@@ -931,16 +1117,25 @@ function cardStatus(o: PtyExecOutcome): "done" | "timeout" | "blocked" {
 }
 
 /** What the model sees: the note (if any) explains an unknown exit code. */
-function modelResult(o: PtyExecOutcome, outputPolicy: "normal" | "private" = "normal"): string {
+function modelResult(
+  o: PtyExecOutcome,
+  outputPolicy: "normal" | "private" = "normal",
+): string {
   if (outputPolicy === "private") return PRIVATE_OUTPUT_NOTICE;
-  const where = o.mode && o.mode !== "integrated" ? "(ran in the nested/remote shell) " : "";
+  const where =
+    o.mode && o.mode !== "integrated"
+      ? "(ran in the nested/remote shell) "
+      : "";
   if (o.note) return `${where}${o.note}\n${o.output}`.trim();
   return `${where}${o.output}`.trim();
 }
 
 // The suggest prompt asks the model for a fenced command plus a one-line
 // rationale; parse both out of the streamed text.
-export function parseSuggestion(text: string): { command: string; explanation: string } {
+export function parseSuggestion(text: string): {
+  command: string;
+  explanation: string;
+} {
   const fence = text.match(/```(?:\w+)?\n([\s\S]*?)(?:```|$)/);
   const command = fence ? fence[1].trim().split("\n")[0].trim() : "";
   const explanation = text

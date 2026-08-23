@@ -34,6 +34,7 @@ try {
   $env:CMAKE_GENERATOR = "Ninja"
   npm ci
   rustup target add $target
+  & (Join-Path $repo "scripts\build-mcp-relay.ps1")
   # Tauri validates externalBin from this package's build script before Cargo
   # can produce vterminal-docs.exe. The target-named path is gitignored; create
   # a placeholder for validation and replace it with the linked sidecar below.

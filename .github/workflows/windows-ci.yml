@@ -67,6 +67,9 @@ jobs:
 
       - run: npm ci
 
+      - name: Build bundled WSL MCP relay
+        run: ./scripts/build-mcp-relay.ps1
+
       - name: Managed CLI PATH script
         run: ./scripts/windows-cli-path.tests.ps1
 

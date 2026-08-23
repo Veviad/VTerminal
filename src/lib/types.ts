@@ -103,13 +103,132 @@ export type PtyEvent =
   | { type: "Error"; message: string }
   | { type: "Warning"; message: string };
 
+// ---------- Model Context Protocol ----------
+
+export type McpAuthMode = "none" | "oauth" | "bearer" | "headers";
+
+export interface McpHttpAuth {
+  mode: McpAuthMode;
+  scopes: string[];
+  client_id?: string | null;
+  callback_port?: number | null;
+}
+
+export interface McpHeaderConfig {
+  name: string;
+}
+export interface McpEnvConfig {
+  name: string;
+  value: string;
+  secret: boolean;
+}
+export interface McpSandboxPolicy {
+  allow_read: string[];
+  allow_write: string[];
+  allowed_domains: string[];
+}
+
+export type McpTransportConfig =
+  | {
+      type: "streamable_http";
+      url: string;
+      auth: McpHttpAuth;
+      headers: McpHeaderConfig[];
+    }
+  | {
+      type: "stdio";
+      command: string;
+      args: string[];
+      cwd?: string | null;
+      env: McpEnvConfig[];
+      sandbox: McpSandboxPolicy;
+    };
+
+export interface McpTimeouts {
+  startup_ms: number;
+  list_ms: number;
+  call_ms: number;
+}
+
+export interface McpServerConfig {
+  version: number;
+  id: string;
+  name: string;
+  enabled: boolean;
+  default_for_new_chats: boolean;
+  revision: number;
+  transport: McpTransportConfig;
+  timeouts: McpTimeouts;
+  disabled_tools: string[];
+  trust_hash?: string | null;
+}
+
+export interface McpServerView extends McpServerConfig {
+  trusted: boolean;
+  missing_secret_slots: string[];
+  runtime: {
+    connected: boolean;
+    log_bytes: number;
+    tool_count?: number | null;
+  };
+  oauth?: { authenticated: boolean; granted_scopes: string[] } | null;
+}
+
+export interface McpOAuthStartView {
+  authorization_url: string;
+  browser_opened: boolean;
+  redirect_uri: string;
+}
+
+export interface McpOAuthRevokeView {
+  revoked_remotely: boolean;
+}
+
+export interface McpChatSelection {
+  server_ids: string[];
+  disabled_tools: Record<string, string[]>;
+}
+
+export interface McpToolView {
+  server_id: string;
+  server_name: string;
+  name: string;
+  alias: string;
+  title?: string | null;
+  description?: string | null;
+  input_schema: unknown;
+  output_schema?: unknown;
+  annotations?: unknown;
+  schema_hash: string;
+}
+
+export interface McpToolResultView {
+  content: unknown[];
+  structured_content?: unknown;
+  is_error: boolean;
+  model_text: string;
+  truncated: boolean;
+}
+
+export interface McpSandboxStatus {
+  supported: boolean;
+  ready: boolean;
+  backend: string;
+  message: string;
+  network_domain_filtering: boolean;
+}
+
 // ---------- AI streaming ----------
 
 export type AgentTargetRole = "local" | "remote";
 export type OutputPolicy = "normal" | "private";
 export const PRIVATE_OUTPUT_NOTICE = "[private output suppressed]";
 
-export type CommandEffect = "semantic_read" | "state_change" | "sensitive_read" | "unknown";
+export type CommandEffect =
+  | "semantic_read"
+  | "state_change"
+  | "sensitive_read"
+  | "unknown";
 export interface CommandAssessment {
   effect: CommandEffect;
   network: boolean;
@@ -185,7 +304,12 @@ export type StreamEvent =
       target_role?: AgentTargetRole;
       target_session_id?: string;
     }
-  | { type: "CommandOutput"; approval_id: string; chunk: string; is_stderr: boolean }
+  | {
+      type: "CommandOutput";
+      approval_id: string;
+      chunk: string;
+      is_stderr: boolean;
+    }
   /** exit_code is null when the command outlived its timeout — it is still
    *  running in the user's terminal and was NOT killed. */
   | {
@@ -197,6 +321,34 @@ export type StreamEvent =
       target_role?: AgentTargetRole;
       target_session_id?: string;
     }
+  | {
+      type: "McpToolProposal";
+      approval_id: string;
+      server_id: string;
+      server_name: string;
+      tool_name: string;
+      title?: string;
+      description?: string;
+      arguments: unknown;
+      schema_hash: string;
+    }
+  | {
+      type: "McpToolStarted";
+      approval_id: string;
+      server_id: string;
+      server_name: string;
+      tool_name: string;
+    }
+  | {
+      type: "McpToolResult";
+      approval_id: string;
+      server_id: string;
+      server_name: string;
+      tool_name: string;
+      result: McpToolResultView;
+      error?: string;
+    }
+  | { type: "McpServerProblem"; server_id: string; message: string }
   /** The loop appended these queued steering messages to the transcript. This is
    *  the ONLY thing that clears a message's "queued" badge — one that never gets
    *  a SteerDelivered is one the model never saw. */
@@ -285,6 +437,8 @@ export interface ChatMessage {
   content: string;
   tool_calls?: { id: string; name: string; arguments: string }[];
   tool_call_id?: string;
+  /** Typed MCP blocks retained beside the bounded provider-safe text result. */
+  structured_tool_result?: Omit<McpToolResultView, "model_text">;
   /** Present only on the turn being sent. Rust strips these from every history
    *  turn (`HISTORY_IMAGE_TURNS`), so a round-tripped transcript never has them. */
   images?: ImagePart[];
@@ -336,7 +490,17 @@ export interface AiMessage {
    *  `sessionArchive`, which maps fields explicitly. */
   attachments?: Attachment[];
   /** "command" messages render as terminal-output cards in agent transcripts. */
-  kind?: "text" | "command";
+  kind?: "text" | "command" | "mcp_tool";
+  mcp?: {
+    approvalId: string;
+    serverId: string;
+    serverName: string;
+    toolName: string;
+    arguments: unknown;
+    status: "awaiting" | "running" | "done" | "denied" | "error";
+    result?: McpToolResultView;
+    error?: string;
+  };
   command?: {
     command: string;
     output: string;
@@ -404,8 +568,18 @@ export interface Attachment {
 // ---------- Models ----------
 
 export type DownloadEvent =
-  | { type: "Started"; download_id: string; total_bytes: number | null; resumed_from: number }
-  | { type: "Progress"; downloaded: number; total_bytes: number | null; bytes_per_sec: number }
+  | {
+      type: "Started";
+      download_id: string;
+      total_bytes: number | null;
+      resumed_from: number;
+    }
+  | {
+      type: "Progress";
+      downloaded: number;
+      total_bytes: number | null;
+      bytes_per_sec: number;
+    }
   | { type: "Completed"; model_id: string; path: string }
   | { type: "Cancelled" }
   | { type: "Error"; message: string };
@@ -797,6 +971,7 @@ export interface ArchivedAttachment {
 export interface ArchiveDetail {
   summary: ArchiveSummary;
   messages: ArchivedMessage[];
+  mcp_selection?: McpChatSelection | null;
 }
 
 /** Deliberately shaped like `SessionSnapshotInput` plus the archive-only fields,
@@ -824,6 +999,8 @@ export interface ArchiveSessionInput {
   /** null = keep the stored transcript. */
   model_transcript: ChatMessage[] | null;
   model: string | null;
+  /** null preserves the stored selection; old rows deserialize as no selection. */
+  mcp_selection?: McpChatSelection | null;
   /** The archive row this session was reopened from: collapsed into this one, so
    *  one thread of work stays one entry instead of a chain of near-duplicates. */
   supersedes: string | null;
@@ -1029,7 +1206,12 @@ export interface Settings {
  *  `stale` and `missing` are ordinary states, not errors: sources are referenced by
  *  path, so files WILL be edited, moved and deleted, and the UI reports that rather
  *  than failing an operation the user did not perform. */
-export type DocFileState = "pending" | "indexed" | "stale" | "missing" | "failed";
+export type DocFileState =
+  | "pending"
+  | "indexed"
+  | "stale"
+  | "missing"
+  | "failed";
 
 export interface DocBucket {
   id: string;
@@ -1181,13 +1363,23 @@ export interface EmbeddingCatalogEntry {
 
 export type EmbeddingInstallEvent =
   | { type: "Started"; total_bytes: number | null; resumed_from: number }
-  | { type: "Progress"; downloaded: number; total_bytes: number | null; bytes_per_sec: number }
+  | {
+      type: "Progress";
+      downloaded: number;
+      total_bytes: number | null;
+      bytes_per_sec: number;
+    }
   | { type: "Phase"; phase: "verifying" | "loading" }
   | { type: "Ready"; profile_id: string }
   | { type: "Cancelled" }
   | { type: "Error"; message: string };
 
-export type QdrantConnectionStatus = "unchecked" | "checking" | "connected" | "stale" | "error";
+export type QdrantConnectionStatus =
+  | "unchecked"
+  | "checking"
+  | "connected"
+  | "stale"
+  | "error";
 
 /** The backend never serializes an API key. `has_api_key` is the only credential
  * information allowed back over IPC. */
@@ -1433,6 +1625,9 @@ export interface UpdateMetadata {
 
 export type UpdateDownloadEvent =
   | { event: "Started"; data: { totalBytes: number | null } }
-  | { event: "Progress"; data: { downloadedBytes: number; totalBytes: number | null } }
+  | {
+      event: "Progress";
+      data: { downloadedBytes: number; totalBytes: number | null };
+    }
   | { event: "Verifying" }
   | { event: "ReadyToInstall" };

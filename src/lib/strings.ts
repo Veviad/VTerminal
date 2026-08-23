@@ -354,6 +354,7 @@ export const S = {
     tabs: {
       models: "Models",
       agent: "Agent",
+      mcp: "MCP",
       docs: "Knowledge",
       updates: "Updates",
       runbooks: "Runbooks",

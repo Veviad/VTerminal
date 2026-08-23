@@ -35,6 +35,7 @@ impl Default for InferenceGate {
 }
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 pub use crate::models::catalog::Effort;
 
@@ -72,6 +73,22 @@ pub struct ImagePart {
 /// 400, and the value originates from bytes the user dropped in.
 pub const ALLOWED_IMAGE_TYPES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
 
+/// Typed content retained beside the provider-safe text rendering of a tool
+/// result. MCP can return structured JSON, media, embedded resources, and
+/// resource links; keeping those blocks here prevents an archive/checkpoint
+/// round trip from reducing them permanently to an untyped string.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StructuredToolResult {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_content: Option<Value>,
+    #[serde(default)]
+    pub is_error: bool,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: Role,
@@ -86,6 +103,11 @@ pub struct ChatMessage {
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Rich MCP result data. Provider adapters continue to send `content`, the
+    /// bounded model-visible rendering, while the typed transcript remains
+    /// available to future adapters and survives archive/reopen unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_tool_result: Option<StructuredToolResult>,
     /// Images on this turn. The `default` above is doing real work here: a
     /// transcript archived before this field existed must still deserialize, and
     /// it does — as `None`.
@@ -100,6 +122,7 @@ impl ChatMessage {
             content: content.into(),
             tool_calls: None,
             tool_call_id: None,
+            structured_tool_result: None,
             images: None,
         }
     }
@@ -109,6 +132,7 @@ impl ChatMessage {
             content: content.into(),
             tool_calls: None,
             tool_call_id: None,
+            structured_tool_result: None,
             images: None,
         }
     }
@@ -118,6 +142,7 @@ impl ChatMessage {
             content: content.into(),
             tool_calls: None,
             tool_call_id: None,
+            structured_tool_result: None,
             // Empty stays None so every downstream `is_some()` means "there are
             // actually images here".
             images: if images.is_empty() {
@@ -133,6 +158,7 @@ impl ChatMessage {
             content: content.into(),
             tool_calls: None,
             tool_call_id: None,
+            structured_tool_result: None,
             images: None,
         }
     }

@@ -47,12 +47,16 @@ sqlite-vec = "=0.1.9"
 tokio = { version = "1", features = ["full"] }
 portable-pty = "0.9.0"
 reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], default-features = false }
+# Official Tier-1 MCP client.  Keep the protocol implementation in the SDK and
+# VTerminal's policy (credentials, approvals, sandboxing, lifecycle) around it.
+rmcp = { version = "=3.1.4", default-features = false, features = ["client", "auth", "transport-async-rw", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
 # Already in the lock file via reqwest, so this is free to compile. Used by
 # `models::remote_probe` to normalize whatever address a user types for a remote
 # inference server — the policy there is subtle enough (default ports, path
 # prefixes, credentials) that hand-rolled parsing would be the wrong economy.
 url = "2"
 futures = "0.3"
+http = "1"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"

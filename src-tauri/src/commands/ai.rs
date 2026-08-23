@@ -350,6 +350,8 @@ pub(crate) fn with_note(prompt: String, note: Option<String>) -> String {
 pub async fn ai_ask(
     app: tauri::AppHandle<Wry>,
     ai_state: State<'_, AiState>,
+    mcp_manager: State<'_, crate::mcp::client::McpManager>,
+    mcp_approvals: State<'_, crate::mcp::approval::McpApprovalState>,
     request_id: String,
     prompt: String,
     history: Vec<HistoryMessage>,
@@ -362,6 +364,7 @@ pub async fn ai_ask(
     // Only the prompt tier depends on it: the passages themselves are already in
     // `prompt`, so a stale `false` costs the framing paragraph, not the content.
     docs: Option<bool>,
+    mcp_selection: Option<crate::mcp::config::McpChatSelection>,
     on_event: Channel<StreamEvent>,
 ) -> Result<(), String> {
     // Ask mode has no client tools, but a provider with a server-side fetch
@@ -427,15 +430,43 @@ pub async fn ai_ask(
         with_note(prompt, note),
         images,
     ));
-    run_chat(
+    let mcp_selection = mcp_selection.unwrap_or_default();
+    if mcp_selection.server_ids.is_empty() {
+        return run_chat(
+            &app,
+            &ai_state,
+            request_id,
+            messages,
+            on_event,
+            Some(2048),
+            None,
+            true,
+        )
+        .await;
+    }
+    let resolved = resolve_provider(&app).await?;
+    let context = crate::mcp::chat::McpRunContext::prepare(
+        &app,
+        &mcp_manager,
+        &mcp_approvals,
+        &request_id,
+        &context.session_id,
+        &mcp_selection,
+        resolved.model.context_tokens,
+        &on_event,
+    )
+    .await?;
+    run_chat_with_mcp(
         &app,
         &ai_state,
+        &mcp_approvals,
         request_id,
         messages,
         on_event,
         Some(2048),
-        None,
         true,
+        resolved,
+        &context,
     )
     .await
 }
@@ -558,6 +589,7 @@ pub async fn ai_name_session(
 pub fn ai_cancel(
     ai_state: State<'_, AiState>,
     approvals: State<'_, crate::agent::ApprovalState>,
+    mcp_approvals: State<'_, crate::mcp::approval::McpApprovalState>,
     pty_exec: State<'_, crate::agent::PtyExecState>,
     steers: State<'_, crate::agent::SteerState>,
     request_id: String,
@@ -565,6 +597,7 @@ pub fn ai_cancel(
     ai_state.cancel(&request_id);
     // Drop any approval gates the cancelled agent run is still waiting on.
     approvals.drain_for_request(&request_id);
+    mcp_approvals.drain_for_request(&request_id);
     // …and any command it was still waiting to hear back about from the PTY.
     pty_exec.drain_for_request(&request_id);
     // …and close its steering mailbox, so a message that never reached the model
@@ -687,6 +720,8 @@ pub async fn agent_start(
     permissions: State<'_, crate::agent::AgentPermissionState>,
     pty_exec: State<'_, crate::agent::PtyExecState>,
     steers: State<'_, crate::agent::SteerState>,
+    mcp_manager: State<'_, crate::mcp::client::McpManager>,
+    mcp_approvals: State<'_, crate::mcp::approval::McpApprovalState>,
     docs: State<'_, crate::docs::db::DocsDb>,
     request_id: String,
     goal: String,
@@ -704,6 +739,7 @@ pub async fn agent_start(
     // Images on the goal turn. Same `Option` reasoning as `history`.
     images: Option<Vec<crate::provider::ImagePart>>,
     permission_modes: Option<crate::agent::AgentPermissionModes>,
+    mcp_selection: Option<crate::mcp::config::McpChatSelection>,
     on_event: Channel<StreamEvent>,
 ) -> Result<Vec<crate::provider::ChatMessage>, String> {
     if let Some(targets) = &sidecar_targets {
@@ -738,6 +774,25 @@ pub async fn agent_start(
     let native_web = web_access && resolved.model.native_web_fetch;
     // Gate before the provider box is moved out of `resolved`.
     let (goal_images, gate_note) = gate_images(resolved.model, images.unwrap_or_default());
+    let conversation_id = context.session_id.clone();
+    let mcp_selection = mcp_selection.unwrap_or_default();
+    let mcp_context = if mcp_selection.server_ids.is_empty() {
+        None
+    } else {
+        Some(
+            crate::mcp::chat::McpRunContext::prepare(
+                &app,
+                &mcp_manager,
+                &mcp_approvals,
+                &request_id,
+                &conversation_id,
+                &mcp_selection,
+                resolved.model.context_tokens,
+                &on_event,
+            )
+            .await?,
+        )
+    };
     let provider = resolved.provider;
 
     let shell = crate::commands::settings::read_string(&app, "shell_path")
@@ -815,6 +870,10 @@ pub async fn agent_start(
             .map(|identity| format!("remote:{identity}"))
             .unwrap_or_else(|| "remote:unknown".into()),
         doc_buckets,
+        mcp_tools: mcp_context
+            .as_ref()
+            .map(crate::mcp::chat::McpRunContext::tool_defs)
+            .unwrap_or_default(),
         // Always a user-established visible PTY. Sidecar freezes one session id
         // per role; ordinary runs retain their single destination.
         exec_target,
@@ -893,6 +952,7 @@ pub async fn agent_start(
         // Handed over only when a bucket is attached, so a run with none cannot open
         // `docs.db` at all — which is what keeps the flag-off install free of the file.
         if docs_attached { Some(&*docs) } else { None },
+        mcp_context.as_ref(),
         cancel_rx,
         &on_event,
     )
@@ -900,6 +960,7 @@ pub async fn agent_start(
 
     ai_state.finish(&request_id);
     approvals.drain_for_request(&request_id);
+    mcp_approvals.drain_for_request(&request_id);
     permissions.finish(&request_id);
     pty_exec.drain_for_request(&request_id);
     steers.drain_for_request(&request_id);
@@ -1104,6 +1165,185 @@ async fn run_chat(
             Err(message)
         }
     }
+}
+
+/// Ask-mode model loop. It shares the MCP discovery/approval/dispatch context
+/// with Agent but deliberately receives no terminal or document tools.
+#[allow(clippy::too_many_arguments)]
+async fn run_chat_with_mcp(
+    app: &tauri::AppHandle<Wry>,
+    ai_state: &AiState,
+    mcp_approvals: &crate::mcp::approval::McpApprovalState,
+    request_id: String,
+    mut messages: Vec<ChatMessage>,
+    on_event: Channel<StreamEvent>,
+    max_tokens: Option<u32>,
+    allow_web: bool,
+    resolved: Resolved,
+    mcp: &crate::mcp::chat::McpRunContext<'_>,
+) -> Result<(), String> {
+    use crate::provider::{FinishReason, ProviderError, ProviderEvent, Role, ToolChoiceMode};
+
+    const MAX_ASK_MCP_ROUNDS: u32 = 12;
+    let model = resolved.model;
+    let provider = resolved.provider;
+    let tools = mcp.tool_defs();
+    let temperature = crate::commands::settings::read_f64_opt(app, "temperature").map(|t| t as f32);
+    let cancel = ai_state.register(&request_id);
+    let _ = on_event.send(StreamEvent::Started {
+        request_id: request_id.clone(),
+        model: model.label.to_string(),
+    });
+    let mut usage = (0u32, 0u32);
+
+    for _round in 0..MAX_ASK_MCP_ROUNDS {
+        if *cancel.borrow() {
+            ai_state.finish(&request_id);
+            mcp_approvals.drain_for_request(&request_id);
+            let _ = on_event.send(StreamEvent::Cancelled);
+            return Ok(());
+        }
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ProviderEvent>(64);
+        let params = ChatParams {
+            temperature,
+            max_tokens,
+            tool_choice: if tools.is_empty() {
+                ToolChoiceMode::None
+            } else {
+                ToolChoiceMode::Auto
+            },
+            effort: resolved.effort,
+            web: if allow_web
+                && model.native_web_fetch
+                && crate::commands::settings::read_bool(app, "ai_web_access", true)
+            {
+                crate::provider::WebToolPolicy::FetchOnly
+            } else {
+                crate::provider::WebToolPolicy::Disabled
+            },
+        };
+        let future =
+            provider.chat_stream(messages.clone(), tools.clone(), params, cancel.clone(), tx);
+        tokio::pin!(future);
+        let mut calls = Vec::new();
+        let mut text = String::new();
+        let mut filter = ThinkFilter::new();
+        let mut result = None;
+        let mut finish = FinishReason::Stop;
+        loop {
+            tokio::select! {
+                completed = &mut future, if result.is_none() => result = Some(completed),
+                event = rx.recv() => match event {
+                    Some(ProviderEvent::TextDelta(delta)) => {
+                        let clean = filter.push(&delta);
+                        if !clean.is_empty() {
+                            text.push_str(&clean);
+                            let _ = on_event.send(StreamEvent::Delta { content: clean });
+                        }
+                    }
+                    Some(ProviderEvent::ReasoningDelta(delta)) => {
+                        let _ = on_event.send(StreamEvent::ThinkingDelta { content: delta });
+                    }
+                    Some(ProviderEvent::WebCitation(citation)) => {
+                        let _ = on_event.send(StreamEvent::WebCitation {
+                            url: citation.url,
+                            title: citation.title,
+                            cited_text: citation.cited_text,
+                        });
+                    }
+                    Some(ProviderEvent::ToolCalls(found)) => calls.extend(found),
+                    Some(ProviderEvent::Usage { prompt_tokens, completion_tokens }) => {
+                        usage.0 = usage.0.saturating_add(prompt_tokens);
+                        usage.1 = usage.1.saturating_add(completion_tokens);
+                    }
+                    Some(ProviderEvent::Done { finish_reason }) => finish = finish_reason,
+                    None => break,
+                }
+            }
+            if rx.is_closed() && result.is_some() {
+                break;
+            }
+        }
+        let tail = filter.flush();
+        if !tail.is_empty() {
+            text.push_str(&tail);
+            let _ = on_event.send(StreamEvent::Delta { content: tail });
+        }
+        match result.unwrap_or(Ok(())) {
+            Ok(()) => {}
+            Err(ProviderError::Cancelled) => {
+                ai_state.finish(&request_id);
+                mcp_approvals.drain_for_request(&request_id);
+                let _ = on_event.send(StreamEvent::Cancelled);
+                return Ok(());
+            }
+            Err(error) => {
+                let message = error.to_string();
+                ai_state.finish(&request_id);
+                mcp_approvals.drain_for_request(&request_id);
+                let _ = on_event.send(StreamEvent::Error {
+                    message: message.clone(),
+                });
+                return Err(message);
+            }
+        }
+        if calls.is_empty() {
+            ai_state.finish(&request_id);
+            mcp_approvals.drain_for_request(&request_id);
+            if finish == FinishReason::Length && text.trim().is_empty() {
+                let message =
+                    "The response hit the token limit before producing output".to_string();
+                let _ = on_event.send(StreamEvent::Error {
+                    message: message.clone(),
+                });
+                return Err(message);
+            }
+            let _ = on_event.send(StreamEvent::Done {
+                prompt_tokens: usage.0,
+                completion_tokens: usage.1,
+            });
+            return Ok(());
+        }
+        messages.push(ChatMessage {
+            role: Role::Assistant,
+            content: text,
+            tool_calls: Some(calls.clone()),
+            tool_call_id: None,
+            structured_tool_result: None,
+            images: None,
+        });
+        for call in calls {
+            let dispatched = if mcp.owns_call(&call.name) {
+                mcp.dispatch(&call, &cancel, &on_event)
+                    .await
+                    .unwrap_or_else(|error| {
+                        crate::mcp::chat::McpDispatchResult::text(format!(
+                            "MCP tool error: {error}"
+                        ))
+                    })
+            } else {
+                crate::mcp::chat::McpDispatchResult::text(format!(
+                    "Error: unknown Ask-mode tool {}",
+                    call.name
+                ))
+            };
+            messages.push(ChatMessage {
+                role: Role::Tool,
+                content: dispatched.model_text,
+                tool_calls: None,
+                tool_call_id: Some(call.id),
+                structured_tool_result: dispatched.structured_tool_result,
+                images: None,
+            });
+        }
+    }
+    ai_state.finish(&request_id);
+    mcp_approvals.drain_for_request(&request_id);
+    let message = format!("Ask stopped after {MAX_ASK_MCP_ROUNDS} MCP model rounds");
+    let _ = on_event.send(StreamEvent::Error {
+        message: message.clone(),
+    });
+    Err(message)
 }
 
 #[cfg(test)]

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Brain,
   ArrowLeftRight,
@@ -21,7 +22,11 @@ import {
   Terminal,
   Zap,
 } from "lucide-react";
-import { useAppStore, type AiMode, type SessionUiState } from "../../stores/appStore";
+import {
+  useAppStore,
+  type AiMode,
+  type SessionUiState,
+} from "../../stores/appStore";
 import {
   beginPanelResize,
   commitAiPanelRatio,
@@ -38,6 +43,8 @@ import { AiMessageView } from "./AiMessageView";
 import { BlockContextChip } from "./BlockContextChip";
 import { BucketChip, BucketPicker } from "./BucketPicker";
 import { CommandApprovalCard } from "./CommandApprovalCard";
+import { McpApprovalCard } from "./McpApprovalCard";
+import { McpPicker } from "./McpPicker";
 import { describeRemote } from "../../lib/nesting";
 import {
   selectArchiveWillKeepChats,
@@ -47,6 +54,7 @@ import {
 import { interruptJob } from "../../lib/ptyExec";
 import { askReason, PERMISSION_MODES } from "../../lib/permissionMode";
 import { relativeTime } from "../../lib/relativeTime";
+import { sanitizeExternalWebUrl } from "../../lib/externalUrl";
 import { S } from "../../lib/strings";
 import { shortcutFor } from "../../lib/keymap";
 import { Dropdown } from "../ui/Dropdown";
@@ -64,7 +72,13 @@ import {
   splitFoldedBlocks,
   stageInputs,
 } from "../../lib/attachInput";
-import type { AiMessage, Attachment, Block, CommandStall, Session } from "../../lib/types";
+import type {
+  AiMessage,
+  Attachment,
+  Block,
+  CommandStall,
+  Session,
+} from "../../lib/types";
 import {
   captureSidecarRemoteIdentity,
   sessionIdForRole,
@@ -141,12 +155,18 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const aiStreams = useAppStore((s) => s.aiStreams);
   const sidecars = useAppStore((s) => s.sidecars);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
-  const stream = useAppStore((s) => (sessionId ? s.aiStreams[sessionId] : undefined));
+  const stream = useAppStore((s) =>
+    sessionId ? s.aiStreams[sessionId] : undefined,
+  );
   const blocks = useAppStore((s) =>
     sessionId ? (s.sessionUi[sessionId]?.blocks ?? NO_BLOCKS) : NO_BLOCKS,
   );
-  const remote = useAppStore((s) => (sessionId ? (s.sessionUi[sessionId]?.remote ?? null) : null));
-  const cwd = useAppStore((s) => (sessionId ? (s.sessionUi[sessionId]?.cwd ?? null) : null));
+  const remote = useAppStore((s) =>
+    sessionId ? (s.sessionUi[sessionId]?.remote ?? null) : null,
+  );
+  const cwd = useAppStore((s) =>
+    sessionId ? (s.sessionUi[sessionId]?.cwd ?? null) : null,
+  );
   const aiReady = useAppStore((s) => s.aiReady());
   const aiBlockedReason = useAppStore((s) => s.aiBlockedReason());
   const activeModelId = useAppStore((s) => s.activeModelId);
@@ -164,8 +184,18 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const swapSidecarPanes = useAppStore((s) => s.swapSidecarPanes);
   const replaceSidecarTarget = useAppStore((s) => s.replaceSidecarTarget);
   const setSidecarPermission = useAppStore((s) => s.setSidecarPermission);
-  const setSidecarFocusedSession = useAppStore((s) => s.setSidecarFocusedSession);
-  const { ask, startAgent, continueRun, steer, respondToProposal, cancel } = useAiStream();
+  const setSidecarFocusedSession = useAppStore(
+    (s) => s.setSidecarFocusedSession,
+  );
+  const {
+    ask,
+    startAgent,
+    continueRun,
+    steer,
+    respondToProposal,
+    respondToMcpProposal,
+    cancel,
+  } = useAiStream();
   const chatIsKept = useAppStore(selectArchiveWillKeepChats);
   const [confirmClear, setConfirmClear] = useState(false);
   const [sidecarMenuOpen, setSidecarMenuOpen] = useState(false);
@@ -199,37 +229,54 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
         terminalAvailable: (id) => Boolean(getTerm(id)),
       }).ok
     : false;
-  const localChoices = (ownerLocal
-    ? availableFor("local").filter((candidate) => candidate.id === sessionId)
-    : ownerRemote
-      ? availableFor("local")
-      : []
-  ).map((candidate) => terminalChoice(candidate.id, "local", sessions, sessionUi));
-  const remoteChoices = (ownerRemote
-    ? availableFor("remote").filter((candidate) => candidate.id === sessionId)
-    : ownerLocal
-      ? availableFor("remote")
-      : []
-  ).map((candidate) => terminalChoice(candidate.id, "remote", sessions, sessionUi));
-  const replacementChoices = (role: AgentTargetRole): SidecarTerminalChoice[] => {
+  const localChoices = (
+    ownerLocal
+      ? availableFor("local").filter((candidate) => candidate.id === sessionId)
+      : ownerRemote
+        ? availableFor("local")
+        : []
+  ).map((candidate) =>
+    terminalChoice(candidate.id, "local", sessions, sessionUi),
+  );
+  const remoteChoices = (
+    ownerRemote
+      ? availableFor("remote").filter((candidate) => candidate.id === sessionId)
+      : ownerLocal
+        ? availableFor("remote")
+        : []
+  ).map((candidate) =>
+    terminalChoice(candidate.id, "remote", sessions, sessionUi),
+  );
+  const replacementChoices = (
+    role: AgentTargetRole,
+  ): SidecarTerminalChoice[] => {
     if (!sidecar) return [];
     const currentTarget = sessionIdForRole(sidecar, role);
-    const otherTarget = sessionIdForRole(sidecar, role === "local" ? "remote" : "local");
+    const otherTarget = sessionIdForRole(
+      sidecar,
+      role === "local" ? "remote" : "local",
+    );
     return sessions
       .filter((candidate) => {
         if (candidate.id === otherTarget) return false;
         // Moving the transcript-owning role would orphan the shared timeline.
         // It may still be explicitly recovered in its existing terminal.
-        if (currentTarget === sidecar.ownerSessionId && candidate.id !== currentTarget) {
+        if (
+          currentTarget === sidecar.ownerSessionId &&
+          candidate.id !== currentTarget
+        ) {
           return false;
         }
         const occupied = sidecarForSession(sidecars, candidate.id);
-        if (occupied && occupied.ownerSessionId !== sidecar.ownerSessionId) return false;
+        if (occupied && occupied.ownerSessionId !== sidecar.ownerSessionId)
+          return false;
         return validateSidecarTarget(sidecarView, candidate.id, role, {
           terminalAvailable: (id) => Boolean(getTerm(id)),
         }).ok;
       })
-      .map((candidate) => terminalChoice(candidate.id, role, sessions, sessionUi));
+      .map((candidate) =>
+        terminalChoice(candidate.id, role, sessions, sessionUi),
+      );
   };
 
   // A SHARE of the panel, not a fixed 120px: the same number is too small on a
@@ -237,7 +284,9 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   // the message list is `flex-1 min-h-0 overflow-y-auto`, so whatever the box
   // takes is absorbed by the list with no other layout change.
   const composerMax =
-    panelHeight > 0 ? Math.min(320, Math.max(88, Math.round(panelHeight * 0.4))) : 120;
+    panelHeight > 0
+      ? Math.min(320, Math.max(88, Math.round(panelHeight * 0.4)))
+      : 120;
   // MEASURED width, not the stored ratio: CSS resolves the ratio against the
   // window, so a window resize changes our width without changing the ratio. The
   // re-fit still has to happen — rewrapping changes the line count without
@@ -252,6 +301,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const streamingContent = stream?.streamingContent ?? "";
   const thinkingContent = stream?.thinkingContent ?? "";
   const pendingProposal = stream?.pendingProposal ?? null;
+  const pendingMcpProposal = stream?.pendingMcpProposal ?? null;
   const permissionMode = stream?.permissionMode ?? "ask";
   const proposalRole = pendingProposal?.targetRole ?? null;
   const proposalPermissionMode =
@@ -263,7 +313,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const proposalTarget =
     sidecar && proposalRole
       ? sidecarTargetLabel(sidecar, proposalRole, sessions, sessionUi)
-      : describeRemote(remote) ?? cwd;
+      : (describeRemote(remote) ?? cwd);
   const attachedBlocks = (stream?.attachedBlockIds ?? [])
     .map((id) => blocks.find((b) => b.id === id))
     .filter((b) => b !== undefined);
@@ -274,7 +324,9 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
     stream?.attachedBucketRefs ??
     (stream?.attachedBucketIds ?? []).map(normalizeKnowledgeBucketRef);
   const attachedBuckets = attachedBucketRefs
-    .map((ref) => knowledgeBuckets.find((bucket) => sameKnowledgeBucket(bucket.ref, ref)))
+    .map((ref) =>
+      knowledgeBuckets.find((bucket) => sameKnowledgeBucket(bucket.ref, ref)),
+    )
     .filter((b) => b !== undefined);
   const attachError = stream?.attachError ?? null;
   const attachStatus = stream?.attachStatus ?? null;
@@ -330,7 +382,13 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
-  }, [messages.length, streamingContent, thinkingContent, pendingProposal]);
+  }, [
+    messages.length,
+    streamingContent,
+    thinkingContent,
+    pendingProposal,
+    pendingMcpProposal,
+  ]);
 
   // Feeds `composerMax` and the composer's re-fit. Both axes: height for the
   // former, width for the latter, and only width changes on a window resize now
@@ -359,7 +417,9 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   useEffect(() => {
     const open = (event: Event) => {
       setSidecarMenuOpen(true);
-      setReplacingTarget(Boolean((event as CustomEvent<{ replace?: boolean }>).detail.replace));
+      setReplacingTarget(
+        Boolean((event as CustomEvent<{ replace?: boolean }>).detail.replace),
+      );
     };
     window.addEventListener("vterminal:open-sidecar", open);
     return () => {
@@ -371,8 +431,13 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   // Agent mode is steerable mid-run; ask mode is one provider call with no round
   // boundary to inject into, so it stays locked while it streams.
   const steering = busy && agentMode;
-  const clipboardStaging = useClipboardStaging({ sessionId, steering, pendingAttachments });
-  const { input, inputRef, pasteAnnouncement, pastedTextStaging } = clipboardStaging;
+  const clipboardStaging = useClipboardStaging({
+    sessionId,
+    steering,
+    pendingAttachments,
+  });
+  const { input, inputRef, pasteAnnouncement, pastedTextStaging } =
+    clipboardStaging;
   useAutoGrow(inputRef, composerMax, [input, panelWidth]);
   const queuedSteers = stream?.steerQueue.length ?? 0;
   const hasInlineInput = input.trim().length > 0;
@@ -433,13 +498,16 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
         if (!hasFiles(e.dataTransfer)) return;
         e.preventDefault();
         setDragDepth(0);
-        if (sessionId) void stageInputs(sessionId, inputsFromFileList(e.dataTransfer.files));
+        if (sessionId)
+          void stageInputs(sessionId, inputsFromFileList(e.dataTransfer.files));
       }}
     >
       <ResizeHandle />
       {dragDepth > 0 && (
         <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-none border-2 border-dashed border-accent bg-bg-primary/80">
-          <span className="text-[12px] font-medium text-accent">{S.attachments.dropHere}</span>
+          <span className="text-[12px] font-medium text-accent">
+            {S.attachments.dropHere}
+          </span>
         </div>
       )}
       {/* Header */}
@@ -463,7 +531,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
               }}
               disabled={busy}
               className={`flex items-center gap-1 rounded-md px-2.5 py-0.5 text-[11px] font-medium transition-all duration-150 ${
-                (mode === m || (mode === "explain" && m === "ask"))
+                mode === m || (mode === "explain" && m === "ask")
                   ? m === "agent"
                     ? "bg-accent/15 text-accent shadow-sm"
                     : "bg-bg-hover text-text-primary shadow-sm"
@@ -495,7 +563,9 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             onBlur={() => setConfirmClear(false)}
             disabled={!sessionId || !hasChat}
             className={`rounded-md p-1 transition-colors duration-100 hover:bg-bg-hover ${
-              confirmClear ? "text-error" : "text-text-muted hover:text-text-secondary"
+              confirmClear
+                ? "text-error"
+                : "text-text-muted hover:text-text-secondary"
             } ${!sessionId || !hasChat ? "opacity-50" : ""}`}
             title={
               confirmClear
@@ -530,9 +600,12 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
                 (sidecar ? (
                   replacingTarget ? (
                     <SidecarReplacementPopover
-                      defaultRole={sidecar.degraded?.role ?? (
-                        sidecar.ownerSessionId === sidecar.localSessionId ? "remote" : "local"
-                      )}
+                      defaultRole={
+                        sidecar.degraded?.role ??
+                        (sidecar.ownerSessionId === sidecar.localSessionId
+                          ? "remote"
+                          : "local")
+                      }
                       choices={{
                         local: replacementChoices("local"),
                         remote: replacementChoices("remote"),
@@ -581,23 +654,39 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
                     defaultLocalId={
                       ownerLocal
                         ? sessionId
-                        : localChoices.some((choice) => choice.id === activeSessionId)
+                        : localChoices.some(
+                              (choice) => choice.id === activeSessionId,
+                            )
                           ? activeSessionId
                           : (localChoices[0]?.id ?? null)
                     }
                     defaultRemoteId={
                       ownerRemote
                         ? sessionId
-                        : remoteChoices.some((choice) => choice.id === activeSessionId)
+                        : remoteChoices.some(
+                              (choice) => choice.id === activeSessionId,
+                            )
                           ? activeSessionId
                           : (remoteChoices[0]?.id ?? null)
                     }
                     onStart={(localId, remoteId) => {
                       const live = useAppStore.getState();
-                      const runtime = { terminalAvailable: (id: string) => Boolean(getTerm(id)) };
-                      const localValidation = validateSidecarTarget(live, localId, "local", runtime);
+                      const runtime = {
+                        terminalAvailable: (id: string) => Boolean(getTerm(id)),
+                      };
+                      const localValidation = validateSidecarTarget(
+                        live,
+                        localId,
+                        "local",
+                        runtime,
+                      );
                       if (!localValidation.ok) return localValidation.reason;
-                      const remoteValidation = validateSidecarTarget(live, remoteId, "remote", runtime);
+                      const remoteValidation = validateSidecarTarget(
+                        live,
+                        remoteId,
+                        "remote",
+                        runtime,
+                      );
                       if (!remoteValidation.ok) return remoteValidation.reason;
                       const remoteSession = live.sessions.find(
                         (candidate) => candidate.id === remoteId,
@@ -606,11 +695,18 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
                         remoteSession,
                         ownRecordValue(live.sessionUi, remoteId),
                       );
-                      if (!identity) return "The SSH target identity could not be verified.";
-                      const result = startSidecar(sessionId, localId, remoteId, identity);
+                      if (!identity)
+                        return "The SSH target identity could not be verified.";
+                      const result = startSidecar(
+                        sessionId,
+                        localId,
+                        remoteId,
+                        identity,
+                      );
                       if (result.ok) {
                         const focus =
-                          activeSessionId === localId || activeSessionId === remoteId
+                          activeSessionId === localId ||
+                          activeSessionId === remoteId
                             ? activeSessionId
                             : sessionId;
                         if (focus) setSidecarFocusedSession(sessionId, focus);
@@ -641,10 +737,10 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
               deliberate, visible act. The per-mode explanations also read better here:
               as a segmented control they were tooltips nobody hovered. */}
           {agentMode && sessionId && !sidecar && (
-            <Dropdown
-              value={permissionMode}
-              options={PERMISSION_OPTIONS}
-              onChange={(next) => changePermissionMode(next)}
+              <Dropdown
+                value={permissionMode}
+                options={PERMISSION_OPTIONS}
+                onChange={(next) => changePermissionMode(next)}
               ariaLabel={S.aiPanel.permissionLabel}
               hint={S.aiPanel.permissionLabel}
               size="sm"
@@ -656,7 +752,12 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
               gets the best-matching passages folded into the turn. Not in Explain,
               which is one-shot on a block the user already picked. Renders nothing when
               the feature is off or no bucket has been indexed. */}
-          {(agentMode || mode === "ask") && sessionId && <BucketPicker sessionId={sessionId} />}
+          {(agentMode || mode === "ask") && sessionId && (
+            <BucketPicker sessionId={sessionId} />
+          )}
+          {(agentMode || mode === "ask") && sessionId && (
+            <McpPicker sessionId={sessionId} disabled={busy} />
+          )}
           {/* Reasoning depth for the model in use. The rungs come from that
               model's own capabilities, so this is not a fixed on/off switch — and
               `layout="dropdown"` because five of them at ~150px is the single widest
@@ -693,8 +794,8 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
           onFocus={(targetSessionId) =>
             setSidecarFocusedSession(sidecar.ownerSessionId, targetSessionId)
           }
-          onPermission={(role, next) => {
-            changePermissionMode(next, role);
+            onPermission={(role, next) => {
+              changePermissionMode(next, role);
           }}
         />
       )}
@@ -731,7 +832,10 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
       )}
 
       {/* Messages */}
-      <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3">
+      <div
+        ref={scrollRef}
+        className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3"
+      >
         {messages.length === 0 && !busy && (
           <p className="pt-6 text-center text-[12px] text-text-muted">
             {aiReady
@@ -758,7 +862,10 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
         ))}
         {/* Live thinking stream */}
         {thinkingContent && (
-          <ThinkingSection content={thinkingContent} live={stream?.status === "streaming"} />
+          <ThinkingSection
+            content={thinkingContent}
+            live={stream?.status === "streaming"}
+          />
         )}
         {/* Live answer stream */}
         {streamingContent && (
@@ -766,12 +873,16 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             <AiMessageView content={streamingContent} />
           </div>
         )}
-        {busy && !streamingContent && !thinkingContent && !pendingProposal && (
-          <span className="flex items-center gap-1.5 text-[12px] text-text-muted">
-            <span className="inline-block h-1 w-1 animate-pulse rounded-full bg-accent" />
-            {S.aiPanel.thinking}
-          </span>
-        )}
+        {busy &&
+          !streamingContent &&
+          !thinkingContent &&
+          !pendingProposal &&
+          !pendingMcpProposal && (
+            <span className="flex items-center gap-1.5 text-[12px] text-text-muted">
+              <span className="inline-block h-1 w-1 animate-pulse rounded-full bg-accent" />
+              {S.aiPanel.thinking}
+            </span>
+          )}
         {/* Approval gate */}
         {pendingProposal && sessionId && (
           <CommandApprovalCard
@@ -785,21 +896,55 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             queuedSteers={queuedSteers}
             // Why this is asking despite an armed auto mode. Null in Confirm,
             // where no explanation is owed.
-            askedBecause={pendingProposal.askReason ?? askReason(proposalPermissionMode, pendingProposal)}
-            onRemember={pendingProposal.outputPolicy === "private" ? undefined : (effect) => {
-              const activeSession = Object.entries(sessionUi)
-                .find(([id]) => id === sessionId)?.[1];
-              const remoteTarget = proposalRole === "remote" && sidecar
-                ? sidecar.remoteIdentity.hostId ?? sidecar.remoteIdentity.target
-                : activeSession?.remoteHost?.id ?? remote?.target;
-              const scope = proposalRole === "remote" || remote
-                ? `remote:${remoteTarget ?? "unknown"}`
-                : "local";
-              void api.rememberCommandPolicyRule(pendingProposal.command, effect, scope)
-                .then((rules) => useAppStore.setState({ agentCommandPolicyRules: rules }))
-                .catch(() => {});
-            }}
-            onRespond={(decision, edited) => void respondToProposal(sessionId, decision, edited)}
+            askedBecause={
+              pendingProposal.askReason ??
+              askReason(proposalPermissionMode, pendingProposal)
+            }
+            onRemember={
+              pendingProposal.outputPolicy === "private"
+                ? undefined
+                : (effect) => {
+                    const activeSession = Object.entries(sessionUi).find(
+                      ([id]) => id === sessionId,
+                    )?.[1];
+                    const remoteTarget =
+                      proposalRole === "remote" && sidecar
+                        ? (sidecar.remoteIdentity.hostId ??
+                          sidecar.remoteIdentity.target)
+                        : (activeSession?.remoteHost?.id ?? remote?.target);
+                    const scope =
+                      proposalRole === "remote" || remote
+                        ? `remote:${remoteTarget ?? "unknown"}`
+                        : "local";
+                    void api
+                      .rememberCommandPolicyRule(
+                        pendingProposal.command,
+                        effect,
+                        scope,
+                      )
+                      .then((rules) =>
+                        useAppStore.setState({
+                          agentCommandPolicyRules: rules,
+                        }),
+                      )
+                      .catch(() => {});
+                  }
+            }
+            onRespond={(decision, edited) =>
+              void respondToProposal(sessionId, decision, edited)
+            }
+          />
+        )}
+        {pendingMcpProposal && sessionId && (
+          <McpApprovalCard
+            key={pendingMcpProposal.approvalId}
+            server={pendingMcpProposal.serverName}
+            tool={pendingMcpProposal.title ?? pendingMcpProposal.toolName}
+            description={pendingMcpProposal.description}
+            args={pendingMcpProposal.arguments}
+            onRespond={(decision) =>
+              void respondToMcpProposal(sessionId, decision)
+            }
           />
         )}
         {/* A guard rail, not a failure: the transcript is intact and resumable, so
@@ -811,14 +956,19 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             <p>
               {stream.pause.reason === "context_limit"
                 ? S.aiPanel.pausedContextLimit(stream.pause.steps)
-                : S.aiPanel.pausedStepLimit(stream.pause.steps, stream.pause.limit)}
+                : S.aiPanel.pausedStepLimit(
+                    stream.pause.steps,
+                    stream.pause.limit,
+                  )}
             </p>
             <p className="mt-0.5">{S.aiPanel.pausedHint}</p>
             <button
               type="button"
               onClick={() => void continueRun(sessionId)}
               disabled={Boolean(sidecar?.degraded)}
-              title={sidecar?.degraded ? S.aiPanel.sidecar.degradedHint : undefined}
+              title={
+                sidecar?.degraded ? S.aiPanel.sidecar.degradedHint : undefined
+              }
               className="mt-1.5 rounded-md bg-accent px-3 py-1 text-[11px] font-medium text-bg-primary transition-colors duration-150 hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
             >
               {S.aiPanel.pausedContinue}
@@ -862,7 +1012,12 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
       {/* A visual chip is not enough feedback for someone using a screen reader.
           Announce conversion/rematerialization without moving focus away from the
           textarea; aria-atomic keeps the filename and line count together. */}
-      <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+      <span
+        className="sr-only"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      >
         {pasteAnnouncement}
       </span>
 
@@ -875,52 +1030,60 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
         attachStatus ||
         knowledgeWarning) &&
         sessionId && (
-        <div className="flex flex-wrap items-center gap-1.5 border-t border-border-subtle px-3 py-2">
-          {attachedBlocks.map((b) => (
-            <BlockContextChip
-              key={b.id}
-              block={b}
-              onRemove={() => detachBlockFromAi(sessionId, b.id)}
-            />
-          ))}
-          {attachedBuckets.map((b) => (
-            <BucketChip
-              key={knowledgeBucketKey(b.ref)}
-              label={b.label}
-              source={b.ref.source}
-              connectionLabel={b.connection_label}
-              chunkCount={b.chunk_count}
-              onRemove={() => detachBucketFromAi(sessionId, b.ref)}
-            />
-          ))}
-          {pendingAttachments.map((a) => (
-            <AttachmentChip
-              key={a.id}
-              attachment={a}
-              onRemove={() => detachFileFromAi(sessionId, a.id)}
-              onShowAsText={
-                a.origin === "pasted-text" && a.kind === "text" && typeof a.text === "string"
-                  ? () => {
-                      clipboardStaging.showAttachmentAsText(a);
-                    }
-                  : undefined
-              }
-            />
-          ))}
-          {/* Progress outranks the error line visually by being calm: this is work
+          <div className="flex flex-wrap items-center gap-1.5 border-t border-border-subtle px-3 py-2">
+            {attachedBlocks.map((b) => (
+              <BlockContextChip
+                key={b.id}
+                block={b}
+                onRemove={() => detachBlockFromAi(sessionId, b.id)}
+              />
+            ))}
+            {attachedBuckets.map((b) => (
+              <BucketChip
+                key={knowledgeBucketKey(b.ref)}
+                label={b.label}
+                source={b.ref.source}
+                connectionLabel={b.connection_label}
+                chunkCount={b.chunk_count}
+                onRemove={() => detachBucketFromAi(sessionId, b.ref)}
+              />
+            ))}
+            {pendingAttachments.map((a) => (
+              <AttachmentChip
+                key={a.id}
+                attachment={a}
+                onRemove={() => detachFileFromAi(sessionId, a.id)}
+                onShowAsText={
+                  a.origin === "pasted-text" &&
+                  a.kind === "text" &&
+                  typeof a.text === "string"
+                    ? () => {
+                        clipboardStaging.showAttachmentAsText(a);
+                      }
+                    : undefined
+                }
+              />
+            ))}
+            {/* Progress outranks the error line visually by being calm: this is work
               in flight, not a problem. */}
-          {attachStatus && (
-            <span className="flex w-full items-center gap-1.5 text-[10px] text-text-muted">
-              <span className="inline-block h-1 w-1 animate-pulse rounded-full bg-accent" />
-              {attachStatus}
-            </span>
-          )}
-          {attachError && <span className="w-full text-[10px] text-error">{attachError}</span>}
-          {knowledgeWarning && (
-            <span className="w-full text-[10px] text-warning">{knowledgeWarning}</span>
-          )}
-        </div>
-      )}
+            {attachStatus && (
+              <span className="flex w-full items-center gap-1.5 text-[10px] text-text-muted">
+                <span className="inline-block h-1 w-1 animate-pulse rounded-full bg-accent" />
+                {attachStatus}
+              </span>
+            )}
+            {attachError && (
+              <span className="w-full text-[10px] text-error">
+                {attachError}
+              </span>
+            )}
+            {knowledgeWarning && (
+              <span className="w-full text-[10px] text-warning">
+                {knowledgeWarning}
+              </span>
+            )}
+          </div>
+        )}
 
       {/* Input */}
       <div className="shrink-0 border-t border-border-subtle p-2">
@@ -934,7 +1097,8 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             multiple
             hidden
             onChange={(e) => {
-              if (sessionId) void stageInputs(sessionId, inputsFromFileList(e.target.files));
+              if (sessionId)
+                void stageInputs(sessionId, inputsFromFileList(e.target.files));
               // Reset, or picking the same file twice in a row is a no-op.
               e.target.value = "";
             }}
@@ -1080,7 +1244,10 @@ function SidecarContextBar({
   sessionUi: Record<string, SessionUiState>;
   activeSessionId: string | null;
   onFocus: (sessionId: string) => void;
-  onPermission: (role: AgentTargetRole, mode: (typeof PERMISSION_MODES)[number]) => void;
+  onPermission: (
+    role: AgentTargetRole,
+    mode: (typeof PERMISSION_MODES)[number],
+  ) => void;
 }) {
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-border-subtle bg-bg-primary px-2 py-1.5">
@@ -1110,8 +1277,16 @@ function SidecarContextBar({
               }`}
               aria-label={`Focus ${role} Sidecar terminal ${label}`}
             >
-              {role === "remote" ? <Server size={10} /> : <Terminal size={10} />}
-              <span>{role === "remote" ? S.aiPanel.sidecar.remote : S.aiPanel.sidecar.local}</span>
+              {role === "remote" ? (
+                <Server size={10} />
+              ) : (
+                <Terminal size={10} />
+              )}
+              <span>
+                {role === "remote"
+                  ? S.aiPanel.sidecar.remote
+                  : S.aiPanel.sidecar.local}
+              </span>
               <span aria-hidden="true">·</span>
               <span className="min-w-0 truncate font-mono normal-case tracking-normal text-text-secondary">
                 {label}
@@ -1122,11 +1297,17 @@ function SidecarContextBar({
                 }`}
               >
                 {degraded && <Link2Off size={9} />}
-                {degraded ? S.aiPanel.sidecar.degraded : S.aiPanel.sidecar.connected}
+                {degraded
+                  ? S.aiPanel.sidecar.degraded
+                  : S.aiPanel.sidecar.connected}
               </span>
             </button>
             <Dropdown
-              value={role === "local" ? binding.permissions.local : binding.permissions.remote}
+              value={
+                role === "local"
+                  ? binding.permissions.local
+                  : binding.permissions.remote
+              }
               options={PERMISSION_OPTIONS}
               onChange={(next) => {
                 onPermission(role, next);
@@ -1155,7 +1336,7 @@ function terminalChoice(
   const label = session ? resolveSessionTitle(session, ui) : sessionId;
   const detail =
     role === "remote"
-      ? describeRemote(ui?.remote ?? null) ?? "SSH"
+      ? (describeRemote(ui?.remote ?? null) ?? "SSH")
       : ui?.cwd
         ? collapseHome(ui.cwd)
         : "local shell";
@@ -1169,7 +1350,9 @@ function sidecarTargetLabel(
   sessionUi: Record<string, SessionUiState>,
 ): string {
   if (role === "remote") return binding.remoteIdentity.label;
-  const session = sessions.find((candidate) => candidate.id === binding.localSessionId);
+  const session = sessions.find(
+    (candidate) => candidate.id === binding.localSessionId,
+  );
   const ui = ownRecordValue(sessionUi, binding.localSessionId);
   if (ui?.cwd) return collapseHome(ui.cwd);
   return session ? resolveSessionTitle(session, ui) : "local shell";
@@ -1189,7 +1372,9 @@ function CollapsedRail({ busy }: { busy: boolean }) {
         <Sparkles size={14} />
       </button>
       {/* Otherwise a collapsed panel hides the fact that it is still working. */}
-      {busy && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />}
+      {busy && (
+        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
+      )}
     </aside>
   );
 }
@@ -1225,7 +1410,9 @@ function ResizeHandle() {
 
         const onMove = (ev: PointerEvent) => {
           // Dragging left (negative delta) widens a right-hand panel.
-          setAiPanelRatio(ratioFromDrag(startWidth - (ev.clientX - startX), containerWidth));
+          setAiPanelRatio(
+            ratioFromDrag(startWidth - (ev.clientX - startX), containerWidth),
+          );
         };
         const onUp = () => {
           el.releasePointerCapture(e.pointerId);
@@ -1244,15 +1431,26 @@ function ResizeHandle() {
   );
 }
 
-function MessageRow({ message, sessionId }: { message: AiMessage; sessionId: string | null }) {
+function MessageRow({
+  message,
+  sessionId,
+}: {
+  message: AiMessage;
+  sessionId: string | null;
+}) {
   if (message.kind === "command" && message.command) {
     return <CommandMessage message={message} sessionId={sessionId} />;
+  }
+  if (message.kind === "mcp_tool" && message.mcp) {
+    return <McpToolMessage message={message} />;
   }
   if (message.role === "user") {
     return (
       <div
         className={`ms-6 rounded-lg border bg-bg-card px-3 py-2 text-[12px] text-text-secondary ${
-          message.steer === "undelivered" ? "border-warning/40" : "border-border-subtle"
+          message.steer === "undelivered"
+            ? "border-warning/40"
+            : "border-border-subtle"
         }`}
       >
         <AttachmentStrip attachments={message.attachments ?? []} />
@@ -1264,7 +1462,10 @@ function MessageRow({ message, sessionId }: { message: AiMessage; sessionId: str
             <>
               {prompt && <AiMessageView content={prompt} />}
               {blocks.map((block, i) => (
-                <FoldedBlockSection key={`${block.kind}-${block.name}-${i}`} block={block} />
+                <FoldedBlockSection
+                  key={`${block.kind}-${block.name}-${i}`}
+                  block={block}
+                />
               ))}
             </>
           );
@@ -1275,10 +1476,179 @@ function MessageRow({ message, sessionId }: { message: AiMessage; sessionId: str
   }
   return (
     <div className="text-text-primary">
-      {message.thinking && <ThinkingSection content={message.thinking} live={false} />}
+      {message.thinking && (
+        <ThinkingSection content={message.thinking} live={false} />
+      )}
       {message.content && <AiMessageView content={message.content} />}
       <MessageMeta message={message} />
     </div>
+  );
+}
+
+function McpToolMessage({ message }: { message: AiMessage }) {
+  const call = message.mcp!;
+  const [open, setOpen] = useState(false);
+  const statusLabel =
+    call.status === "awaiting"
+      ? "Awaiting approval"
+      : call.status === "running"
+        ? "Running"
+        : call.status === "denied"
+          ? "Denied"
+          : call.status === "error"
+            ? "Error"
+            : "Done";
+  return (
+    <div className="rounded-lg border border-border-subtle bg-bg-card">
+      <button
+        type="button"
+        className="flex w-full items-center gap-2 px-3 py-2 text-left"
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+      >
+        <Server
+          size={13}
+          className={call.status === "error" ? "text-error" : "text-accent"}
+        />
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-[11px] font-medium text-text-primary">
+            {call.serverName} · {call.toolName}
+          </span>
+          <span className="text-[9px] text-text-muted">{statusLabel}</span>
+        </span>
+        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+      </button>
+      {open && (
+        <div className="space-y-2 border-t border-border-subtle p-2">
+          <p className="text-[9px] font-medium uppercase tracking-wide text-text-muted">
+            Arguments
+          </p>
+          <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded bg-bg-primary p-2 text-[10px] text-text-secondary">
+            {JSON.stringify(call.arguments, null, 2)}
+          </pre>
+          {call.error && <p className="text-[10px] text-error">{call.error}</p>}
+          {call.result?.content.map((block, index) => (
+            <McpContent key={index} block={block} />
+          ))}
+          {call.result?.structured_content !== undefined && (
+            <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all rounded bg-bg-primary p-2 text-[10px] text-text-secondary">
+              {JSON.stringify(call.result.structured_content, null, 2)}
+            </pre>
+          )}
+          {call.result?.truncated && (
+            <p className="text-[9px] text-warning">
+              The model-visible result was truncated at 64 KiB. Rich content
+              above is retained.
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function McpContent({ block }: { block: unknown }) {
+  if (!block || typeof block !== "object")
+    return (
+      <pre className="text-[10px] text-text-muted">{JSON.stringify(block)}</pre>
+    );
+  const value = block as Record<string, unknown>;
+  const type = String(value.type ?? "");
+  if (type === "text")
+    return (
+      <div className="text-[11px] text-text-secondary">
+        <AiMessageView content={String(value.text ?? "")} />
+      </div>
+    );
+  if (type === "image" && typeof value.data === "string") {
+    const mime = String(value.mimeType ?? value.mime_type ?? "image/png");
+    if (
+      ![
+        "image/png",
+        "image/jpeg",
+        "image/gif",
+        "image/webp",
+        "image/avif",
+      ].includes(mime)
+    ) {
+      return (
+        <p className="text-[10px] text-warning">
+          Unsupported MCP image type: {mime}
+        </p>
+      );
+    }
+    return (
+      <img
+        className="max-h-64 rounded border border-border-subtle"
+        src={`data:${mime};base64,${value.data}`}
+        alt="MCP tool result"
+      />
+    );
+  }
+  if (type === "audio" && typeof value.data === "string") {
+    const mime = String(value.mimeType ?? value.mime_type ?? "audio/mpeg");
+    if (
+      ![
+        "audio/mpeg",
+        "audio/mp4",
+        "audio/ogg",
+        "audio/wav",
+        "audio/webm",
+      ].includes(mime)
+    ) {
+      return (
+        <p className="text-[10px] text-warning">
+          Unsupported MCP audio type: {mime}
+        </p>
+      );
+    }
+    return (
+      <audio
+        controls
+        src={`data:${mime};base64,${value.data}`}
+        className="w-full"
+      />
+    );
+  }
+  if (type === "resource_link" && typeof value.uri === "string") {
+    const safe = sanitizeExternalWebUrl(value.uri);
+    return safe ? (
+      <button
+        type="button"
+        className="break-all text-left text-[10px] text-accent underline"
+        onClick={() => void openUrl(safe)}
+      >
+        {String(value.name ?? value.title ?? value.uri)}
+      </button>
+    ) : (
+      <p className="break-all text-[10px] text-text-muted">
+        {String(value.name ?? value.title ?? value.uri)}
+      </p>
+    );
+  }
+  const resource = value.resource as Record<string, unknown> | undefined;
+  if (type === "resource" && resource) {
+    return (
+      <div className="rounded bg-bg-primary p-2">
+        <p className="mb-1 break-all text-[9px] text-text-muted">
+          {String(resource.uri ?? "Embedded resource")}
+        </p>
+        {typeof resource.text === "string" ? (
+          <pre className="max-h-48 overflow-auto whitespace-pre-wrap text-[10px] text-text-secondary">
+            {resource.text}
+          </pre>
+        ) : (
+          <p className="text-[10px] text-text-muted">
+            Embedded binary resource
+          </p>
+        )}
+      </div>
+    );
+  }
+  return (
+    <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded bg-bg-primary p-2 text-[10px] text-text-muted">
+      {JSON.stringify(value, null, 2)}
+    </pre>
   );
 }
 
@@ -1288,7 +1658,13 @@ function MessageRow({ message, sessionId }: { message: AiMessage; sessionId: str
  *  clears becomes "undelivered" when the run ends, and the user is never left
  *  believing the model read something it did not. Undelivered offers a Send, not
  *  an auto-retry: starting a fresh run is the user's call. */
-function SteerBadge({ message, sessionId }: { message: AiMessage; sessionId: string | null }) {
+function SteerBadge({
+  message,
+  sessionId,
+}: {
+  message: AiMessage;
+  sessionId: string | null;
+}) {
   const { startAgent } = useAiStream();
   if (!message.steer) return null;
   if (message.steer === "queued") {
@@ -1335,7 +1711,10 @@ function MessageMeta({ message }: { message: AiMessage }) {
 }
 
 /** Per-stall copy plus whether the user is offered the interrupt. */
-const STALL_UI: Record<CommandStall, { label: string; icon: typeof KeyRound; offer: boolean }> = {
+const STALL_UI: Record<
+  CommandStall,
+  { label: string; icon: typeof KeyRound; offer: boolean }
+> = {
   // Handled automatically: the ladder is already running, so no button.
   tui: { label: S.aiPanel.stallTui, icon: MonitorX, offer: false },
   // The user's keyboard is the fix, not a signal.
@@ -1354,9 +1733,12 @@ function CommandMessage({
   const cmd = message.command;
   if (!cmd) return null;
   const failed = cmd.status === "done" && (cmd.exitCode ?? 0) !== 0;
-  const stall = cmd.status === "running" && cmd.stall ? STALL_UI[cmd.stall] : null;
+  const stall =
+    cmd.status === "running" && cmd.stall ? STALL_UI[cmd.stall] : null;
   const interruptSessionId = cmd.targetSessionId ?? sessionId;
-  const targetName = cmd.targetLabel ?? (cmd.targetRole === "remote" ? "SSH target" : "local shell");
+  const targetName =
+    cmd.targetLabel ??
+    (cmd.targetRole === "remote" ? "SSH target" : "local shell");
   return (
     <div
       className={`overflow-hidden rounded-lg border ${
@@ -1376,8 +1758,16 @@ function CommandMessage({
           }`}
           aria-label={`${cmd.targetRole === "remote" ? "Remote" : "Local"} command destination ${targetName}`}
         >
-          {cmd.targetRole === "remote" ? <Server size={10} /> : <Terminal size={10} />}
-          <span>{cmd.targetRole === "remote" ? S.aiPanel.sidecar.remote : S.aiPanel.sidecar.local}</span>
+          {cmd.targetRole === "remote" ? (
+            <Server size={10} />
+          ) : (
+            <Terminal size={10} />
+          )}
+          <span>
+            {cmd.targetRole === "remote"
+              ? S.aiPanel.sidecar.remote
+              : S.aiPanel.sidecar.local}
+          </span>
           <span aria-hidden="true">·</span>
           <span className="min-w-0 truncate font-mono normal-case tracking-normal">
             {targetName}
@@ -1420,7 +1810,9 @@ function CommandMessage({
       {/* Why it ran. Matters most for a command that auto-ran under a permission
           mode: there was no approval card to read this on. */}
       {cmd.explanation && (
-        <p className="bg-bg-elevated px-2.5 py-1 text-[10px] text-text-muted">{cmd.explanation}</p>
+        <p className="bg-bg-elevated px-2.5 py-1 text-[10px] text-text-muted">
+          {cmd.explanation}
+        </p>
       )}
       {cmd.outputPolicy === "private" && (
         <p className="flex items-center gap-1.5 bg-accent/10 px-2.5 py-1 text-[10px] text-accent">
@@ -1456,7 +1848,9 @@ function CommandMessage({
         </div>
       )}
       {cmd.note && (
-        <p className="bg-bg-elevated px-2.5 py-1 text-[10px] text-text-secondary">{cmd.note}</p>
+        <p className="bg-bg-elevated px-2.5 py-1 text-[10px] text-text-secondary">
+          {cmd.note}
+        </p>
       )}
       {cmd.output && (
         <pre className="max-h-48 overflow-y-auto bg-bg-terminal px-2.5 py-1.5 font-mono text-[11px] leading-relaxed text-text-secondary">
@@ -1467,7 +1861,13 @@ function CommandMessage({
   );
 }
 
-function ThinkingSection({ content, live }: { content: string; live: boolean }) {
+function ThinkingSection({
+  content,
+  live,
+}: {
+  content: string;
+  live: boolean;
+}) {
   const [open, setOpen] = useState(live);
   // Auto-collapse when the live stream transitions into the answer.
   useEffect(() => {
@@ -1482,7 +1882,9 @@ function ThinkingSection({ content, live }: { content: string; live: boolean }) 
         {open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
         <Brain size={11} />
         {S.aiPanel.thinkingLabel}
-        {live && <span className="inline-block h-1 w-1 animate-pulse rounded-full bg-accent" />}
+        {live && (
+          <span className="inline-block h-1 w-1 animate-pulse rounded-full bg-accent" />
+        )}
       </button>
       {open && (
         <div className="max-h-40 overflow-y-auto px-3 pb-2 text-[11px] leading-relaxed text-text-muted">

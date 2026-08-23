@@ -227,6 +227,40 @@ pub enum StreamEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         target_session_id: Option<String>,
     },
+    /// A selected MCP server needs an explicit per-call decision. Tool
+    /// annotations are deliberately informational and never skip this gate.
+    McpToolProposal {
+        approval_id: String,
+        server_id: String,
+        server_name: String,
+        tool_name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        arguments: serde_json::Value,
+        schema_hash: String,
+    },
+    McpToolStarted {
+        approval_id: String,
+        server_id: String,
+        server_name: String,
+        tool_name: String,
+    },
+    McpToolResult {
+        approval_id: String,
+        server_id: String,
+        server_name: String,
+        tool_name: String,
+        result: crate::mcp::client::McpToolResultView,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// One selected server failed without disabling the others or the turn.
+    McpServerProblem {
+        server_id: String,
+        message: String,
+    },
     /// The loop just appended these queued steering messages to the transcript.
     /// The frontend clears its "queued" badge on this and on nothing else — a
     /// message that never gets one is a message the model never saw, and the

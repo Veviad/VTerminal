@@ -44,6 +44,7 @@ const markCleanExitMock = vi.fn(async () => {});
 const markRunningMock = vi.fn(async () => {});
 const ptyKillMock = vi.fn(async (_sessionId: string) => {});
 const aiCancelMock = vi.fn(async (_requestId: string) => {});
+const mcpDisconnectMock = vi.fn(async (_conversationId: string) => {});
 
 vi.mock("../lib/tauri", async () => {
   const tracker = await vi.importActual<typeof import("../lib/archiveWriteTracker")>(
@@ -61,6 +62,7 @@ vi.mock("../lib/tauri", async () => {
     workspaceMarkRunning: () => markRunningMock(),
     ptyKill: (sessionId: string) => ptyKillMock(sessionId),
     aiCancel: (requestId: string) => aiCancelMock(requestId),
+    mcpDisconnect: (conversationId: string) => mcpDisconnectMock(conversationId),
     appQuitBegin: () => quitBeginMock(),
     appQuitCommit: (token: number) => quitCommitMock(token),
     appQuitForce: (token: number, reason?: string) => quitForceMock(token, reason),
@@ -182,6 +184,8 @@ beforeEach(() => {
   ptyKillMock.mockResolvedValue(undefined);
   aiCancelMock.mockClear();
   aiCancelMock.mockResolvedValue(undefined);
+  mcpDisconnectMock.mockClear();
+  mcpDisconnectMock.mockResolvedValue(undefined);
   quitBeginMock.mockReset();
   quitBeginMock.mockResolvedValue({ token: 7, origin: "windowClose" });
   quitCommitMock.mockReset();

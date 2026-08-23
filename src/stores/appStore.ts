@@ -13,6 +13,9 @@ import type {
   LocalAccelerationInfo,
   LocalModel,
   ModelState,
+  McpChatSelection,
+  McpServerView,
+  McpToolResultView,
   OutputPolicy,
   RemoteContext,
   Session,
@@ -28,7 +31,11 @@ import { MAX_ATTACHMENTS } from "../lib/attachments";
 import type { Phase } from "../lib/osc133";
 import type { PermissionMode } from "../lib/permissionMode";
 import { PANEL_DEFAULT_RATIO, clampPanelRatio } from "../lib/panelRatio";
-import { ownRecordValue, withRecordValue, withoutRecordKey } from "../lib/records";
+import {
+  ownRecordValue,
+  withRecordValue,
+  withoutRecordKey,
+} from "../lib/records";
 import { S } from "../lib/strings";
 import { DEFAULT_THEME_ID } from "../lib/themes";
 import {
@@ -93,6 +100,7 @@ export type AiMode = "ask" | "explain" | "agent";
 
 export type SettingsTab =
   | "models"
+  | "mcp"
   | "agent"
   | "docs"
   | "runbooks"
@@ -110,7 +118,13 @@ export interface CommandTargetMeta {
 
 export interface AiStreamState {
   mode: AiMode;
-  status: "idle" | "streaming" | "awaiting_approval" | "executing" | "error" | "paused";
+  status:
+    | "idle"
+    | "streaming"
+    | "awaiting_approval"
+    | "executing"
+    | "error"
+    | "paused";
   requestId: string | null;
   /** Stable owner for every asynchronous continuation belonging to a run.
    * It survives Done until the agent promise resolves, but fences/new runs
@@ -145,6 +159,18 @@ export interface AiStreamState {
     targetRole?: AgentTargetRole;
     targetSessionId?: string;
   } | null;
+  pendingMcpProposal: {
+    approvalId: string;
+    serverId: string;
+    serverName: string;
+    toolName: string;
+    title?: string;
+    description?: string;
+    arguments: unknown;
+    schemaHash: string;
+  } | null;
+  /** Snapshot of global defaults when this conversation was created. */
+  mcpSelection: McpChatSelection;
   /** How much this agent run may do without asking. Per-session, never
    *  persisted, never inherited — see `restoreAiTranscript` and
    *  `newAiConversation`. Widened from a boolean `autoAccept`; the safety
@@ -160,7 +186,11 @@ export interface AiStreamState {
    *  Not a synthetic transcript message and not archived, for the same reason
    *  `restoredAt` is neither — and a restored Continue button would offer to
    *  dispatch a run against a transcript the user has not looked at. */
-  pause: { reason: "step_limit" | "context_limit"; steps: number; limit: number } | null;
+  pause: {
+    reason: "step_limit" | "context_limit";
+    steps: number;
+    limit: number;
+  } | null;
   /** Steering messages typed mid-run that the backend has NOT yet confirmed
    *  delivering. Only StreamEvent::SteerDelivered removes an entry, so anything
    *  left here is something the model never saw. */
@@ -262,6 +292,8 @@ export function emptyAiStream(): AiStreamState {
     modelTranscript: [],
     restoredAt: null,
     pendingProposal: null,
+    pendingMcpProposal: null,
+    mcpSelection: { server_ids: [], disabled_tools: {} },
     permissionMode: "ask",
     pause: null,
     steerQueue: [],
@@ -297,7 +329,10 @@ export interface AppState {
   endSidecar(sessionId: string): void;
   swapSidecarPanes(sessionId: string): void;
   setSidecarRatio(sessionId: string, ratio: number): void;
-  setSidecarOrientation(sessionId: string, orientation: SidecarSplitOrientation): void;
+  setSidecarOrientation(
+    sessionId: string,
+    orientation: SidecarSplitOrientation,
+  ): void;
   setSidecarFocusedSession(sessionId: string, focusedSessionId: string): void;
   setSidecarPermission(
     sessionId: string,
@@ -328,9 +363,18 @@ export interface AppState {
 
   // Blocks (driven by BlockTracker callbacks)
   startBlock(sessionId: string, block: Block): void;
-  finishBlock(sessionId: string, blockId: string, exitCode: number, endLine: number | null): void;
+  finishBlock(
+    sessionId: string,
+    blockId: string,
+    exitCode: number,
+    endLine: number | null,
+  ): void;
   trimBlock(sessionId: string, blockId: string): void;
-  markBlockOrigin(sessionId: string, blockId: string, origin: Block["origin"]): void;
+  markBlockOrigin(
+    sessionId: string,
+    blockId: string,
+    origin: Block["origin"],
+  ): void;
 
   // AI panel. `aiPanelOpen`/`aiPanelRatio` are part of the persisted settings
   // mirror below — prefer lib/aiPanel.ts over these raw setters, so the change
@@ -349,6 +393,25 @@ export interface AppState {
     sessionId: string,
     proposal: AiStreamState["pendingProposal"],
     status?: AiStreamState["status"],
+  ): void;
+  setPendingMcpProposal(
+    sessionId: string,
+    proposal: AiStreamState["pendingMcpProposal"],
+  ): void;
+  setMcpSelection(sessionId: string, selection: McpChatSelection): void;
+  beginMcpTool(
+    sessionId: string,
+    approvalId: string,
+    serverId: string,
+    serverName: string,
+    toolName: string,
+    args: unknown,
+  ): void;
+  finishMcpTool(
+    sessionId: string,
+    approvalId: string,
+    result: McpToolResultView | undefined,
+    error?: string,
   ): void;
   setPermissionMode(sessionId: string, mode: PermissionMode): void;
   noteBlockedCommand(
@@ -373,12 +436,20 @@ export interface AppState {
     target?: CommandTargetMeta,
     outputPolicy?: OutputPolicy,
   ): void;
-  appendCommandOutput(sessionId: string, approvalId: string, chunk: string): void;
+  appendCommandOutput(
+    sessionId: string,
+    approvalId: string,
+    chunk: string,
+  ): void;
   /** REPLACE the card's output. The PTY path re-reads the live terminal tail
    *  instead of receiving incremental chunks, so appending would duplicate. */
   setCommandOutput(sessionId: string, approvalId: string, output: string): void;
   /** Live hang classification for a running command; null clears it. */
-  setCommandStall(sessionId: string, approvalId: string, stall: CommandStall | null): void;
+  setCommandStall(
+    sessionId: string,
+    approvalId: string,
+    stall: CommandStall | null,
+  ): void;
   /** The line actually typed, when hardening changed it from the approved one. */
   setCommandTyped(sessionId: string, approvalId: string, typed: string): void;
   finishCommand(
@@ -427,6 +498,7 @@ export interface AppState {
     messages: AiMessage[],
     modelTranscript: ChatMessage[],
     capturedAt: string,
+    mcpSelection?: McpChatSelection | null,
   ): void;
   /** Start a fresh conversation in a tab that stays open.
    *
@@ -437,8 +509,14 @@ export interface AppState {
   newAiConversation(sessionId: string): void;
   attachBlockToAi(sessionId: string, blockId: string): void;
   detachBlockFromAi(sessionId: string, blockId: string): void;
-  attachBucketToAi(sessionId: string, bucket: string | KnowledgeBucketRef): void;
-  detachBucketFromAi(sessionId: string, bucket: string | KnowledgeBucketRef): void;
+  attachBucketToAi(
+    sessionId: string,
+    bucket: string | KnowledgeBucketRef,
+  ): void;
+  detachBucketFromAi(
+    sessionId: string,
+    bucket: string | KnowledgeBucketRef,
+  ): void;
   /** Stage files for the next turn, return the accepted subset, and set
    *  `attachError` when the limit drops any — silently dropping is worse. */
   attachFilesToAi(sessionId: string, attachments: Attachment[]): Attachment[];
@@ -458,6 +536,10 @@ export interface AppState {
     data: string,
   ): void;
   setAiMode(sessionId: string, mode: AiMode): void;
+
+  // Global MCP configuration cache. Secrets never cross this boundary.
+  mcpServers: McpServerView[];
+  setMcpServers(servers: McpServerView[]): void;
 
   // UI chrome
   /** Tab whose label is currently being edited inline. Lives here rather than
@@ -607,7 +689,11 @@ export interface AppState {
   updateDownload(id: string, p: DownloadProgress): void;
   clearDownload(id: string): void;
   downloadErrors: Record<string, string>;
-  setDownloadError(kind: DownloadProgress["kind"], modelId: string, message: string | null): void;
+  setDownloadError(
+    kind: DownloadProgress["kind"],
+    modelId: string,
+    message: string | null,
+  ): void;
 
   /** Whether the SELECTED model can answer right now.
    *  `modelState` alone is NOT this: it tracks the on-device ModelHost only, so
@@ -636,7 +722,10 @@ export interface AppState {
 }
 
 /** Fold streamed text + thinking into a finished assistant message. */
-function flushStreaming(s: AiStreamState, usage?: { prompt: number; completion: number }): AiStreamState {
+function flushStreaming(
+  s: AiStreamState,
+  usage?: { prompt: number; completion: number },
+): AiStreamState {
   if (!s.streamingContent && !s.thinkingContent) return s;
   const messages = [
     ...s.messages,
@@ -687,7 +776,9 @@ function patchCommand(
   return withAiStream(state, sessionId, (s) => ({
     ...s,
     messages: s.messages.map((m) =>
-      m.id === `cmd-${approvalId}` && m.command ? { ...m, command: { ...m.command, ...patch } } : m,
+      m.id === `cmd-${approvalId}` && m.command
+        ? { ...m, command: { ...m.command, ...patch } }
+        : m,
     ),
   }));
 }
@@ -706,7 +797,10 @@ function reconcileSidecars(
       next.push([owner, binding]);
       continue;
     }
-    const health = inspectCurrentSidecarHealth(binding, { sessions, sessionUi });
+    const health = inspectCurrentSidecarHealth(binding, {
+      sessions,
+      sessionUi,
+    });
     if (health.degradation) {
       next.push([owner, { ...binding, degraded: health.degradation }]);
       changed = true;
@@ -740,25 +834,47 @@ function permissionReset(
   });
 }
 
+function defaultMcpSelection(servers: McpServerView[]): McpChatSelection {
+  return {
+    server_ids: servers
+      .filter((server) => server.enabled && server.default_for_new_chats)
+      .map((server) => server.id),
+    disabled_tools: {},
+  };
+}
+
 export const useAppStore = create<AppState>((set, get) => ({
   sessions: [],
   activeSessionId: null,
   sessionUi: {},
   sidecars: {},
+  mcpServers: [],
 
-  resolveAiOwner: (sessionId) => resolveSidecarAiOwner(get().sidecars, sessionId),
+  // Defaults are snapshots taken by addSession/newAiConversation. A settings
+  // refresh must never reinterpret an intentionally empty existing selection.
+  setMcpServers: (servers) => set({ mcpServers: servers }),
 
-  sidecarForSession: (sessionId) => findSidecarForSession(get().sidecars, sessionId),
+  resolveAiOwner: (sessionId) =>
+    resolveSidecarAiOwner(get().sidecars, sessionId),
+
+  sidecarForSession: (sessionId) =>
+    findSidecarForSession(get().sidecars, sessionId),
 
   sidecarHealth: (sessionId) => {
     const state = get();
     const binding = findSidecarForSession(state.sidecars, sessionId);
     if (!binding) return null;
-    if (binding.degraded) return { status: "degraded", degradation: binding.degraded };
+    if (binding.degraded)
+      return { status: "degraded", degradation: binding.degraded };
     return inspectCurrentSidecarHealth(binding, state);
   },
 
-  startSidecar: (ownerSessionId, localSessionId, remoteSessionId, remoteIdentity) => {
+  startSidecar: (
+    ownerSessionId,
+    localSessionId,
+    remoteSessionId,
+    remoteIdentity,
+  ) => {
     const state = get();
     const result = createSidecarBinding(
       state,
@@ -776,7 +892,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       },
       // A previous single-terminal mode must not leak authority into a newly
       // linked conversation. The companion stream remains untouched.
-      aiStreams: permissionReset(current.aiStreams, result.binding.ownerSessionId),
+      aiStreams: permissionReset(
+        current.aiStreams,
+        result.binding.ownerSessionId,
+      ),
     }));
     return result;
   },
@@ -799,7 +918,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       return {
         sidecars: {
           ...state.sidecars,
-          [binding.ownerSessionId]: { ...binding, paneOrder: [second, first] as const },
+          [binding.ownerSessionId]: {
+            ...binding,
+            paneOrder: [second, first] as const,
+          },
         },
       };
     }),
@@ -811,7 +933,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       return {
         sidecars: {
           ...state.sidecars,
-          [binding.ownerSessionId]: { ...binding, splitRatio: clampSidecarRatio(ratio) },
+          [binding.ownerSessionId]: {
+            ...binding,
+            splitRatio: clampSidecarRatio(ratio),
+          },
         },
       };
     }),
@@ -856,24 +981,46 @@ export const useAppStore = create<AppState>((set, get) => ({
       };
     }),
 
-  replaceSidecarTarget: (sessionId, role, replacementSessionId, remoteIdentity) => {
+  replaceSidecarTarget: (
+    sessionId,
+    role,
+    replacementSessionId,
+    remoteIdentity,
+  ) => {
     const state = get();
     const binding = findSidecarForSession(state.sidecars, sessionId);
-    if (!binding) return { ok: false, reason: "This terminal does not belong to a sidecar." };
-
-    const currentTarget = sessionIdForRole(binding, role);
-    if (currentTarget === binding.ownerSessionId && replacementSessionId !== currentTarget) {
+    if (!binding)
       return {
         ok: false,
-        reason: "The transcript-owning target cannot be replaced. End the sidecar and start it from the new terminal.",
+        reason: "This terminal does not belong to a sidecar.",
+      };
+
+    const currentTarget = sessionIdForRole(binding, role);
+    if (
+      currentTarget === binding.ownerSessionId &&
+      replacementSessionId !== currentTarget
+    ) {
+      return {
+        ok: false,
+        reason:
+          "The transcript-owning target cannot be replaced. End the sidecar and start it from the new terminal.",
       };
     }
-    if (replacementSessionId === sessionIdForRole(binding, role === "local" ? "remote" : "local")) {
+    if (
+      replacementSessionId ===
+      sessionIdForRole(binding, role === "local" ? "remote" : "local")
+    ) {
       return { ok: false, reason: "Choose two different terminals." };
     }
-    const occupied = findSidecarForSession(state.sidecars, replacementSessionId);
+    const occupied = findSidecarForSession(
+      state.sidecars,
+      replacementSessionId,
+    );
     if (occupied && occupied.ownerSessionId !== binding.ownerSessionId) {
-      return { ok: false, reason: "That terminal already belongs to another sidecar." };
+      return {
+        ok: false,
+        reason: "That terminal already belongs to another sidecar.",
+      };
     }
 
     const eligible = validateSidecarTarget(state, replacementSessionId, role);
@@ -885,19 +1032,29 @@ export const useAppStore = create<AppState>((set, get) => ({
         state.sessions.find((session) => session.id === replacementSessionId),
         ownRecordValue(state.sessionUi, replacementSessionId),
       );
-      if (!liveIdentity || (remoteIdentity && !sameRemoteIdentity(liveIdentity, remoteIdentity))) {
-        return { ok: false, reason: "The replacement SSH identity could not be verified." };
+      if (
+        !liveIdentity ||
+        (remoteIdentity && !sameRemoteIdentity(liveIdentity, remoteIdentity))
+      ) {
+        return {
+          ok: false,
+          reason: "The replacement SSH identity could not be verified.",
+        };
       }
       nextIdentity = liveIdentity;
     }
 
     const replacement: SidecarBinding = {
       ...binding,
-      localSessionId: role === "local" ? replacementSessionId : binding.localSessionId,
-      remoteSessionId: role === "remote" ? replacementSessionId : binding.remoteSessionId,
+      localSessionId:
+        role === "local" ? replacementSessionId : binding.localSessionId,
+      remoteSessionId:
+        role === "remote" ? replacementSessionId : binding.remoteSessionId,
       remoteIdentity: nextIdentity,
       focusedSessionId:
-        binding.focusedSessionId === currentTarget ? replacementSessionId : binding.focusedSessionId,
+        binding.focusedSessionId === currentTarget
+          ? replacementSessionId
+          : binding.focusedSessionId,
       permissions: { local: "ask", remote: "ask" },
       degraded: null,
     };
@@ -924,13 +1081,17 @@ export const useAppStore = create<AppState>((set, get) => ({
     const state = get();
     const binding = findSidecarForSession(state.sidecars, sessionId);
     if (!binding) return null;
-    if (binding.degraded) return { status: "degraded", degradation: binding.degraded };
+    if (binding.degraded)
+      return { status: "degraded", degradation: binding.degraded };
     const health = inspectCurrentSidecarHealth(binding, state);
     if (health.degradation) {
       set((current) => ({
         sidecars: {
           ...current.sidecars,
-          [binding.ownerSessionId]: { ...binding, degraded: health.degradation },
+          [binding.ownerSessionId]: {
+            ...binding,
+            degraded: health.degradation,
+          },
         },
       }));
     }
@@ -938,12 +1099,17 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   addSession: (s, activate = true) =>
-    set((state) => ({
-      sessions: [...state.sessions, s],
-      activeSessionId: activate ? s.id : (state.activeSessionId ?? s.id),
-      sessionUi: { ...state.sessionUi, [s.id]: emptySessionUi() },
-      aiStreams: { ...state.aiStreams, [s.id]: emptyAiStream() },
-    })),
+    set((state) => {
+      const stream = emptyAiStream();
+      if (!s.archivedFrom)
+        stream.mcpSelection = defaultMcpSelection(state.mcpServers);
+      return {
+        sessions: [...state.sessions, s],
+        activeSessionId: activate ? s.id : (state.activeSessionId ?? s.id),
+        sessionUi: { ...state.sessionUi, [s.id]: emptySessionUi() },
+        aiStreams: { ...state.aiStreams, [s.id]: stream },
+      };
+    }),
 
   reorderSessions: (ids) =>
     set((state) => {
@@ -986,7 +1152,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       let activeSessionId = state.activeSessionId;
       if (activeSessionId === id) {
         const idx = state.sessions.findIndex((s) => s.id === id);
-        activeSessionId = sessions[Math.min(idx, sessions.length - 1)]?.id ?? null;
+        activeSessionId =
+          sessions[Math.min(idx, sessions.length - 1)]?.id ?? null;
       }
       return {
         sessions,
@@ -995,14 +1162,16 @@ export const useAppStore = create<AppState>((set, get) => ({
         sidecars,
         activeSessionId,
         // A closed tab must not leave the rename editor open over its neighbour.
-        renamingSessionId: state.renamingSessionId === id ? null : state.renamingSessionId,
+        renamingSessionId:
+          state.renamingSessionId === id ? null : state.renamingSessionId,
       };
     }),
 
   setActiveSession: (id) =>
     set((state) => {
       const binding = findSidecarForSession(state.sidecars, id);
-      if (!binding || !roleForSession(binding, id)) return { activeSessionId: id };
+      if (!binding || !roleForSession(binding, id))
+        return { activeSessionId: id };
       return {
         activeSessionId: id,
         sidecars: {
@@ -1014,7 +1183,9 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   updateSession: (id, u) =>
     set((state) => {
-      const sessions = state.sessions.map((s) => (s.id === id ? { ...s, ...u } : s));
+      const sessions = state.sessions.map((s) =>
+        s.id === id ? { ...s, ...u } : s,
+      );
       return {
         sessions,
         sidecars: reconcileSidecars(state.sidecars, sessions, state.sessionUi),
@@ -1027,7 +1198,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (!patch.sessionUi) return patch;
       return {
         ...patch,
-        sidecars: reconcileSidecars(state.sidecars, state.sessions, patch.sessionUi),
+        sidecars: reconcileSidecars(
+          state.sidecars,
+          state.sessions,
+          patch.sessionUi,
+        ),
       };
     }),
 
@@ -1035,7 +1210,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((state) =>
       withSessionUi(state, sessionId, (ui) => {
         let blocks = [...ui.blocks, block];
-        if (blocks.length > MAX_BLOCKS_PER_SESSION) blocks = blocks.slice(-MAX_BLOCKS_PER_SESSION);
+        if (blocks.length > MAX_BLOCKS_PER_SESSION)
+          blocks = blocks.slice(-MAX_BLOCKS_PER_SESSION);
         return { ...ui, blocks, runningBlockId: block.id };
       }),
     ),
@@ -1046,10 +1222,17 @@ export const useAppStore = create<AppState>((set, get) => ({
         ...ui,
         blocks: ui.blocks.map((b) =>
           b.id === blockId
-            ? { ...b, state: "done" as const, exitCode, endLine, endedAt: new Date().toISOString() }
+            ? {
+                ...b,
+                state: "done" as const,
+                exitCode,
+                endLine,
+                endedAt: new Date().toISOString(),
+              }
             : b,
         ),
-        runningBlockId: ui.runningBlockId === blockId ? null : ui.runningBlockId,
+        runningBlockId:
+          ui.runningBlockId === blockId ? null : ui.runningBlockId,
       })),
     ),
 
@@ -1057,7 +1240,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((state) =>
       withSessionUi(state, sessionId, (ui) => ({
         ...ui,
-        blocks: ui.blocks.map((b) => (b.id === blockId ? { ...b, state: "trimmed" as const } : b)),
+        blocks: ui.blocks.map((b) =>
+          b.id === blockId ? { ...b, state: "trimmed" as const } : b,
+        ),
       })),
     ),
 
@@ -1108,16 +1293,29 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((state) => withAiStream(state, sessionId, (s) => ({ ...s, model }))),
 
   setModelTranscript: (sessionId, transcript) =>
-    set((state) => withAiStream(state, sessionId, (s) => ({ ...s, modelTranscript: transcript }))),
+    set((state) =>
+      withAiStream(state, sessionId, (s) => ({
+        ...s,
+        modelTranscript: transcript,
+      })),
+    ),
 
   setModelTranscriptForGeneration: (sessionId, generationId, transcript) =>
     set((state) =>
       withAiStream(state, sessionId, (s) =>
-        s.generationId === generationId ? { ...s, modelTranscript: transcript } : s,
+        s.generationId === generationId
+          ? { ...s, modelTranscript: transcript }
+          : s,
       ),
     ),
 
-  restoreAiTranscript: (sessionId, messages, modelTranscript, capturedAt) =>
+  restoreAiTranscript: (
+    sessionId,
+    messages,
+    modelTranscript,
+    capturedAt,
+    mcpSelection,
+  ) =>
     set((state) => ({
       ...withAiStream(state, sessionId, (s) => ({
         ...s,
@@ -1132,6 +1330,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         streamingContent: "",
         thinkingContent: "",
         pendingProposal: null,
+        pendingMcpProposal: null,
+        mcpSelection: mcpSelection ?? { server_ids: [], disabled_tools: {} },
         // Explicit rather than merely inherited from a new session: even a
         // direct restore into a live tab must not arrive pre-armed.
         permissionMode: "ask",
@@ -1159,6 +1359,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           // Attached blocks, permissionMode and restoredAt deliberately do not
           // carry over — the same stance restoreAiTranscript takes.
           mode: s.mode,
+          mcpSelection: defaultMcpSelection(state.mcpServers),
         })),
         // New Chat is the explicit conversation boundary for a sidecar.
         sidecars: withoutSidecarForSession(state.sidecars, sessionId),
@@ -1166,16 +1367,27 @@ export const useAppStore = create<AppState>((set, get) => ({
     }),
 
   pushAiMessage: (sessionId, msg) =>
-    set((state) => withAiStream(state, sessionId, (s) => ({ ...s, messages: [...s.messages, msg] }))),
+    set((state) =>
+      withAiStream(state, sessionId, (s) => ({
+        ...s,
+        messages: [...s.messages, msg],
+      })),
+    ),
 
   appendAiDelta: (sessionId, content) =>
     set((state) =>
-      withAiStream(state, sessionId, (s) => ({ ...s, streamingContent: s.streamingContent + content })),
+      withAiStream(state, sessionId, (s) => ({
+        ...s,
+        streamingContent: s.streamingContent + content,
+      })),
     ),
 
   appendThinking: (sessionId, content) =>
     set((state) =>
-      withAiStream(state, sessionId, (s) => ({ ...s, thinkingContent: s.thinkingContent + content })),
+      withAiStream(state, sessionId, (s) => ({
+        ...s,
+        thinkingContent: s.thinkingContent + content,
+      })),
     ),
 
   setPendingProposal: (sessionId, proposal, status) =>
@@ -1187,8 +1399,106 @@ export const useAppStore = create<AppState>((set, get) => ({
       })),
     ),
 
+  setPendingMcpProposal: (sessionId, proposal) =>
+    set((state) =>
+      withAiStream(state, sessionId, (stream) => ({
+        ...stream,
+        pendingMcpProposal: proposal,
+        status: proposal
+          ? "awaiting_approval"
+          : stream.requestId
+            ? "streaming"
+            : "idle",
+      })),
+    ),
+
+  setMcpSelection: (sessionId, selection) =>
+    set((state) =>
+      withAiStream(state, sessionId, (stream) => ({
+        ...stream,
+        mcpSelection: selection,
+      })),
+    ),
+
+  beginMcpTool: (sessionId, approvalId, serverId, serverName, toolName, args) =>
+    set((state) =>
+      withAiStream(state, sessionId, (stream) => {
+        const existing = stream.messages.some(
+          (message) =>
+            message.kind === "mcp_tool" &&
+            message.mcp?.approvalId === approvalId,
+        );
+        const messages = existing
+          ? stream.messages.map((message) =>
+              message.kind === "mcp_tool" &&
+              message.mcp?.approvalId === approvalId
+                ? {
+                    ...message,
+                    mcp: { ...message.mcp, status: "running" as const },
+                  }
+                : message,
+            )
+          : [
+              ...stream.messages,
+              {
+                id: `mcp-${approvalId}`,
+                role: "assistant" as const,
+                content: "",
+                createdAt: new Date().toISOString(),
+                kind: "mcp_tool" as const,
+                mcp: {
+                  approvalId,
+                  serverId,
+                  serverName,
+                  toolName,
+                  arguments: args,
+                  status: "running" as const,
+                },
+              },
+            ];
+        return {
+          ...stream,
+          messages,
+          pendingMcpProposal: null,
+          status: "executing",
+        };
+      }),
+    ),
+
+  finishMcpTool: (sessionId, approvalId, result, error) =>
+    set((state) =>
+      withAiStream(state, sessionId, (stream) => ({
+        ...stream,
+        pendingMcpProposal:
+          stream.pendingMcpProposal?.approvalId === approvalId
+            ? null
+            : stream.pendingMcpProposal,
+        status: stream.requestId ? "streaming" : "idle",
+        messages: stream.messages.map((message) =>
+          message.kind === "mcp_tool" && message.mcp?.approvalId === approvalId
+            ? {
+                ...message,
+                mcp: {
+                  ...message.mcp,
+                  status:
+                    error === "Denied by user"
+                      ? ("denied" as const)
+                      : error || result?.is_error
+                        ? ("error" as const)
+                        : ("done" as const),
+                  result,
+                  error,
+                },
+              }
+            : message,
+        ),
+      })),
+    ),
+
   setPermissionMode: (sessionId, mode) =>
-    set((state) => withAiStream(state, sessionId, (s) => ({ ...s, permissionMode: mode }))),
+    set((state) =>
+      withAiStream(state, sessionId, (s) => ({ ...s, permissionMode: mode })),
+    ),
 
   // A command policy refused. Appended already SETTLED, in one set(): there was
   // no approval gate and no execution, so routing it through
@@ -1283,7 +1593,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         ...s,
         steerQueue: s.steerQueue.filter((q) => q.id !== id),
         messages: s.messages.map((m) =>
-          m.id === `msg-steer-${id}` ? { ...m, steer: "undelivered" as const } : m,
+          m.id === `msg-steer-${id}`
+            ? { ...m, steer: "undelivered" as const }
+            : m,
         ),
       })),
     ),
@@ -1399,7 +1711,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   finishAiStream: (sessionId, error, usage, generationId) =>
     set((state) =>
       withAiStream(state, sessionId, (s) => {
-        if (generationId !== undefined && s.generationId !== generationId) return s;
+        if (generationId !== undefined && s.generationId !== generationId)
+          return s;
         const flushed = flushStreaming(s, usage);
         return {
           ...flushed,
@@ -1416,7 +1729,8 @@ export const useAppStore = create<AppState>((set, get) => ({
           messages: flushed.messages.map((m) => {
             // Anything the loop never confirmed is something the model never
             // saw. Say so rather than leaving it looking delivered.
-            if (m.steer === "queued") return { ...m, steer: "undelivered" as const };
+            if (m.steer === "queued")
+              return { ...m, steer: "undelivered" as const };
             return m.command?.status === "running"
               ? { ...m, command: { ...m.command, status: "done" as const } }
               : m;
@@ -1439,7 +1753,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   pauseAiStream: (sessionId, pause, usage, generationId) =>
     set((state) =>
       withAiStream(state, sessionId, (s) => {
-        if (generationId !== undefined && s.generationId !== generationId) return s;
+        if (generationId !== undefined && s.generationId !== generationId)
+          return s;
         // Same flush as the finish path, or the model's last text never lands in
         // the panel.
         const flushed = flushStreaming(s, usage);
@@ -1456,7 +1771,8 @@ export const useAppStore = create<AppState>((set, get) => ({
           messages: flushed.messages.map((m) => {
             // Identical to the finish path: past the hard cap the loop leaves a
             // steer in the mailbox precisely so it can be reported as unseen.
-            if (m.steer === "queued") return { ...m, steer: "undelivered" as const };
+            if (m.steer === "queued")
+              return { ...m, steer: "undelivered" as const };
             return m.command?.status === "running"
               ? { ...m, command: { ...m.command, status: "done" as const } }
               : m;
@@ -1488,8 +1804,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       withAiStream(state, sessionId, (s) => {
         const ref = normalizeKnowledgeBucketRef(bucket);
         const currentRefs =
-          s.attachedBucketRefs ?? s.attachedBucketIds.map(normalizeKnowledgeBucketRef);
-        const refs = currentRefs.some((candidate) => sameKnowledgeBucket(candidate, ref))
+          s.attachedBucketRefs ??
+          s.attachedBucketIds.map(normalizeKnowledgeBucketRef);
+        const refs = currentRefs.some((candidate) =>
+          sameKnowledgeBucket(candidate, ref),
+        )
           ? currentRefs
           : [...currentRefs, ref];
         const localId = ref.source === "local" ? ref.bucket_id : null;
@@ -1509,7 +1828,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       withAiStream(state, sessionId, (s) => {
         const ref = normalizeKnowledgeBucketRef(bucket);
         const currentRefs =
-          s.attachedBucketRefs ?? s.attachedBucketIds.map(normalizeKnowledgeBucketRef);
+          s.attachedBucketRefs ??
+          s.attachedBucketIds.map(normalizeKnowledgeBucketRef);
         return {
           ...s,
           attachedBucketRefs: currentRefs.filter(
@@ -1533,7 +1853,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         return {
           ...s,
           pendingAttachments: [...s.pendingAttachments, ...accepted],
-          attachError: dropped > 0 ? attachLimitMessage(dropped) : s.attachError,
+          attachError:
+            dropped > 0 ? attachLimitMessage(dropped) : s.attachError,
         };
       }),
     );
@@ -1544,7 +1865,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((state) =>
       withAiStream(state, sessionId, (s) => ({
         ...s,
-        pendingAttachments: s.pendingAttachments.filter((a) => a.id !== attachmentId),
+        pendingAttachments: s.pendingAttachments.filter(
+          (a) => a.id !== attachmentId,
+        ),
         // Removing a file is how the user reacts to a limit message, so the
         // message has to go with it or it lies.
         attachError: null,
@@ -1561,14 +1884,21 @@ export const useAppStore = create<AppState>((set, get) => ({
     ),
 
   setAttachError: (sessionId, message) =>
-    set((state) => withAiStream(state, sessionId, (s) => ({ ...s, attachError: message }))),
+    set((state) =>
+      withAiStream(state, sessionId, (s) => ({ ...s, attachError: message })),
+    ),
 
   setAttachStatus: (sessionId, message) =>
-    set((state) => withAiStream(state, sessionId, (s) => ({ ...s, attachStatus: message }))),
+    set((state) =>
+      withAiStream(state, sessionId, (s) => ({ ...s, attachStatus: message })),
+    ),
 
   setKnowledgeWarning: (sessionId, message) =>
     set((state) =>
-      withAiStream(state, sessionId, (s) => ({ ...s, knowledgeWarning: message })),
+      withAiStream(state, sessionId, (s) => ({
+        ...s,
+        knowledgeWarning: message,
+      })),
     ),
 
   setAttachmentData: (sessionId, messageId, attachmentId, data) =>
@@ -1657,7 +1987,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         // Preserve a cancel that arrived between two files: the loop reads this flag
         // after each file, and a progress update must not clear a stop the user asked
         // for.
-        next[bucketId] = { ...progress, cancel: next[bucketId]?.cancel ?? false };
+        next[bucketId] = {
+          ...progress,
+          cancel: next[bucketId]?.cancel ?? false,
+        };
       }
       return { docsIndexing: next };
     }),
@@ -1666,7 +1999,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       const current = state.docsIndexing[bucketId];
       if (!current) return state;
       return {
-        docsIndexing: { ...state.docsIndexing, [bucketId]: { ...current, cancel: true } },
+        docsIndexing: {
+          ...state.docsIndexing,
+          [bucketId]: { ...current, cancel: true },
+        },
       };
     }),
   setDocsError: (docsError) => set({ docsError }),
@@ -1683,7 +2019,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({
       visionLoadedModelId: loaded,
       visionState: state,
-      ...(acceleration !== undefined ? { visionAcceleration: acceleration } : {}),
+      ...(acceleration !== undefined
+        ? { visionAcceleration: acceleration }
+        : {}),
     }),
   visionLoadError: null,
   setVisionLoadError: (message) => set({ visionLoadError: message }),
@@ -1715,7 +2053,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   setHasApiKey: (provider, present) =>
     set((s) => ({ hasApiKey: { ...s.hasApiKey, [provider]: present } })),
   downloads: {},
-  updateDownload: (id, p) => set((state) => ({ downloads: { ...state.downloads, [id]: p } })),
+  updateDownload: (id, p) =>
+    set((state) => ({ downloads: { ...state.downloads, [id]: p } })),
   clearDownload: (id) =>
     set((state) => {
       const { [id]: _d, ...downloads } = state.downloads;
@@ -1739,13 +2078,17 @@ export const useAppStore = create<AppState>((set, get) => ({
     // "load a model" would point at a button that only errors. Say the real
     // reason instead — `resolve_provider` fails the same way on the backend.
     // Before the catalog lands, the id prefix is the only signal there is.
-    const wantsLocal = entry ? !!entry.local : s.activeModelId.startsWith("local/");
+    const wantsLocal = entry
+      ? !!entry.local
+      : s.activeModelId.startsWith("local/");
     if (wantsLocal && s.localEngineMissing()) return "engine";
     // Before the catalog arrives, fall back to the on-device signal so a
     // local-first boot does not flash a misleading "add a key" message.
     if (!entry) return s.modelState === "ready" ? null : "load";
     if (entry.local) {
-      return s.loadedModelId === entry.id && s.modelState === "ready" ? null : "load";
+      return s.loadedModelId === entry.id && s.modelState === "ready"
+        ? null
+        : "load";
     }
     // A server the user configured themselves: the weights live over there, so
     // there is nothing to load, and most are keyless on a LAN, so there is
@@ -1787,10 +2130,14 @@ export const useAppStore = create<AppState>((set, get) => ({
 
 // Convenience selectors
 export const useActiveSessionUi = (): SessionUiState | null =>
-  useAppStore((s) => (s.activeSessionId ? (s.sessionUi[s.activeSessionId] ?? null) : null));
+  useAppStore((s) =>
+    s.activeSessionId ? (s.sessionUi[s.activeSessionId] ?? null) : null,
+  );
 
 export const useActiveAiStream = (): AiStreamState | null =>
-  useAppStore((s) => (s.activeSessionId ? (s.aiStreams[s.activeSessionId] ?? null) : null));
+  useAppStore((s) =>
+    s.activeSessionId ? (s.aiStreams[s.activeSessionId] ?? null) : null,
+  );
 
 // Vite HMR: hot-replacing this module builds a FRESH store with default state,
 // including `settingsLoaded: false`. AppShell gates the AI panel on that flag,

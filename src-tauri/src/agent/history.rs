@@ -303,6 +303,7 @@ mod tests {
             content: format!("running {id}"),
             tool_calls: Some(vec![call(id)]),
             tool_call_id: None,
+            structured_tool_result: None,
             images: None,
         }
     }
@@ -313,6 +314,7 @@ mod tests {
             content: format!("exit code: 0\noutput of {id}"),
             tool_calls: None,
             tool_call_id: Some(id.into()),
+            structured_tool_result: None,
             images: None,
         }
     }
@@ -608,6 +610,7 @@ mod tests {
                 content: "orphan".into(),
                 tool_calls: None,
                 tool_call_id: Some(String::new()),
+                structured_tool_result: None,
                 images: None,
             },
         ]);
@@ -624,6 +627,7 @@ mod tests {
             content: "  ".into(),
             tool_calls: Some(vec![call("never_answered")]),
             tool_call_id: None,
+            structured_tool_result: None,
             images: None,
         }]);
         normalize(&mut messages);
@@ -638,6 +642,7 @@ mod tests {
             content: "here is what I found".into(),
             tool_calls: Some(vec![call("never_answered")]),
             tool_call_id: None,
+            structured_tool_result: None,
             images: None,
         }]);
         normalize(&mut messages);
@@ -653,6 +658,7 @@ mod tests {
                 content: "running two".into(),
                 tool_calls: Some(vec![call("c1"), call("c2")]),
                 tool_call_id: None,
+                structured_tool_result: None,
                 images: None,
             },
             tool_result("c1"),
@@ -713,6 +719,7 @@ mod tests {
             content: "   ".into(),
             tool_calls: None,
             tool_call_id: Some("gone".into()),
+            structured_tool_result: None,
             images: None,
         }]);
         normalize(&mut messages);
@@ -728,6 +735,7 @@ mod tests {
                 content: "running two".into(),
                 tool_calls: Some(vec![call("c1"), call("c2")]),
                 tool_call_id: None,
+                structured_tool_result: None,
                 images: None,
             },
             tool_result("c1"),
@@ -824,6 +832,7 @@ mod tests {
                 content: "two".into(),
                 tool_calls: Some(vec![call("c1"), call("c2")]),
                 tool_call_id: None,
+                structured_tool_result: None,
                 images: None,
             },
             tool_result("c1"),

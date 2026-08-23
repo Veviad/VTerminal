@@ -697,6 +697,7 @@ mod tests {
                     arguments: "{}".into(),
                 }]),
                 tool_call_id: None,
+                structured_tool_result: None,
                 images: None,
             },
             ChatMessage {
@@ -704,6 +705,7 @@ mod tests {
                 content: "exit code: 0".into(),
                 tool_calls: None,
                 tool_call_id: Some("t1".into()),
+                structured_tool_result: None,
                 images: None,
             },
             ChatMessage::user("actually, check the logs first"),
@@ -773,6 +775,7 @@ mod tests {
                     arguments: "{}".into(),
                 }]),
                 tool_call_id: None,
+                structured_tool_result: None,
                 images: None,
             },
             ChatMessage {
@@ -780,6 +783,7 @@ mod tests {
                 content: "exit code: 0".into(),
                 tool_calls: None,
                 tool_call_id: Some("t1".into()),
+                structured_tool_result: None,
                 images: None,
             },
             ChatMessage::user_with_images(
@@ -833,6 +837,7 @@ mod tests {
                 content: "a".into(),
                 tool_calls: None,
                 tool_call_id: Some("t1".into()),
+                structured_tool_result: None,
                 images: None,
             },
             ChatMessage {
@@ -840,6 +845,7 @@ mod tests {
                 content: "b".into(),
                 tool_calls: None,
                 tool_call_id: Some("t2".into()),
+                structured_tool_result: None,
                 images: None,
             },
         ];
@@ -859,6 +865,7 @@ mod tests {
                 arguments: r#"{"cmd":"ls"}"#.into(),
             }]),
             tool_call_id: None,
+            structured_tool_result: None,
             images: None,
         }];
         let (_, out) = build_messages(msgs);
@@ -885,6 +892,7 @@ mod tests {
                 content: "result with no call".into(),
                 tool_calls: None,
                 tool_call_id: Some("ghost".into()),
+                structured_tool_result: None,
                 images: None,
             },
             ChatMessage {
@@ -896,6 +904,7 @@ mod tests {
                     arguments: "{}".into(),
                 }]),
                 tool_call_id: None,
+                structured_tool_result: None,
                 images: None,
             },
             ChatMessage {
@@ -907,6 +916,7 @@ mod tests {
                     arguments: r#"{"command":"ls"}"#.into(),
                 }]),
                 tool_call_id: None,
+                structured_tool_result: None,
                 images: None,
             },
             ChatMessage {
@@ -914,6 +924,7 @@ mod tests {
                 content: "exit code: 0".into(),
                 tool_calls: None,
                 tool_call_id: Some("good".into()),
+                structured_tool_result: None,
                 images: None,
             },
             ChatMessage::user("the goal"),

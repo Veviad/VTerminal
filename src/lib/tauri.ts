@@ -36,6 +36,12 @@ import type {
   LoadEvent,
   LocalModel,
   ModelStatus,
+  McpChatSelection,
+  McpSandboxStatus,
+  McpServerConfig,
+  McpServerView,
+  McpToolResultView,
+  McpToolView,
   PtyEvent,
   QdrantConnection,
   QdrantConnectionConfig,
@@ -60,8 +66,14 @@ import type {
   WorkspaceSnapshotInput,
 } from "./types";
 import type { PermissionMode } from "./permissionMode";
-import { localBucketDescriptor, normalizeKnowledgeBucketRef } from "./knowledge";
-import { trackArchiveWrite, trackExitArchiveWrite } from "./archiveWriteTracker";
+import {
+  localBucketDescriptor,
+  normalizeKnowledgeBucketRef,
+} from "./knowledge";
+import {
+  trackArchiveWrite,
+  trackExitArchiveWrite,
+} from "./archiveWriteTracker";
 
 // RETAINED-CHANNEL GOTCHA (same as Cowork's realtimeChannels map):
 // a Channel must stay referenced for as long as Rust will send on it, or GC
@@ -83,7 +95,12 @@ const embeddingDownloadIds = new Map<string, string>();
 
 export async function ptySpawn(
   sessionId: string,
-  opts: { cols: number; rows: number; cwd?: string | null; shell?: string | null },
+  opts: {
+    cols: number;
+    rows: number;
+    cwd?: string | null;
+    shell?: string | null;
+  },
   onData: (buf: ArrayBuffer) => void,
   onEvent: (e: PtyEvent) => void,
 ): Promise<number> {
@@ -148,7 +165,12 @@ export async function aiSuggest(
   channel.onmessage = onEvent;
   aiChannels.set(requestId, channel);
   try {
-    await invoke<void>("ai_suggest", { requestId, prompt, context, onEvent: channel });
+    await invoke<void>("ai_suggest", {
+      requestId,
+      prompt,
+      context,
+      onEvent: channel,
+    });
   } finally {
     aiChannels.delete(requestId);
   }
@@ -189,13 +211,19 @@ export async function aiExplain(
 export async function aiAsk(
   requestId: string,
   prompt: string,
-  history: { role: string; content: string; image_count?: number; doc_count?: number }[],
+  history: {
+    role: string;
+    content: string;
+    image_count?: number;
+    doc_count?: number;
+  }[],
   images: ImagePart[],
   context: TerminalContext,
   /** Whether `prompt` carries passages folded in from the user's document buckets. Only
    *  selects the prompt tier — the passages themselves are already in `prompt`. */
   docs: boolean,
   onEvent: (e: StreamEvent) => void,
+  mcpSelection: McpChatSelection = { server_ids: [], disabled_tools: {} },
 ): Promise<void> {
   const channel = new Channel<StreamEvent>();
   channel.onmessage = onEvent;
@@ -208,6 +236,7 @@ export async function aiAsk(
       images,
       context,
       docs,
+      mcpSelection,
       onEvent: channel,
     });
   } finally {
@@ -239,9 +268,16 @@ export async function agentStart(
   onEvent: (e: StreamEvent) => void,
   /** Optional immutable local/SSH target pair for a linked Agent turn. */
   sidecarTargets?: SidecarAgentTargets,
-  permissionModes: { single: PermissionMode; local: PermissionMode; remote: PermissionMode } = {
-    single: "ask", local: "ask", remote: "ask",
+  permissionModes: {
+    single: PermissionMode;
+    local: PermissionMode;
+    remote: PermissionMode;
+  } = {
+    single: "ask",
+    local: "ask",
+    remote: "ask",
   },
+  mcpSelection: McpChatSelection = { server_ids: [], disabled_tools: {} },
 ): Promise<ChatMessage[]> {
   const channel = new Channel<StreamEvent>();
   channel.onmessage = onEvent;
@@ -258,6 +294,7 @@ export async function agentStart(
       // `None`, which removes `search_docs` from the agent's tool vector.
       docBuckets,
       permissionModes,
+      mcpSelection,
       sidecarTargets: sidecarTargets ?? null,
       onEvent: channel,
     });
@@ -270,11 +307,12 @@ export const agentSetPermissionMode = (
   requestId: string,
   mode: PermissionMode,
   targetRole?: AgentTargetRole,
-) => invoke<void>("agent_set_permission_mode", {
-  request_id: requestId,
-  target_role: targetRole ?? null,
-  mode,
-});
+) =>
+  invoke<void>("agent_set_permission_mode", {
+    request_id: requestId,
+    target_role: targetRole ?? null,
+    mode,
+  });
 
 export const respondToApproval = (
   approvalId: string,
@@ -286,6 +324,100 @@ export const respondToApproval = (
     decision,
     edited_command: editedCommand ?? null,
   });
+
+export type McpApprovalDecision = "allow_once" | "always_allow" | "deny";
+export const respondToMcpApproval = (
+  approvalId: string,
+  decision: McpApprovalDecision,
+) =>
+  invoke<void>("respond_to_mcp_approval", {
+    approval_id: approvalId,
+    decision,
+  });
+
+// ---------- MCP ----------
+
+export const mcpServersList = () => invoke<McpServerView[]>("mcp_servers_list");
+
+export const mcpServerUpsert = (
+  server: McpServerConfig,
+  values: Record<string, string> = {},
+) => invoke<string>("mcp_servers_upsert", { server, secrets: { values } });
+
+export const mcpServerDelete = (id: string) =>
+  invoke<void>("mcp_servers_delete", { id });
+
+export const mcpServerSetSecret = (id: string, slot: string, value: string) =>
+  invoke<void>("mcp_servers_set_secret", { id, slot, value });
+
+export const mcpServerTrust = (id: string) =>
+  invoke<void>("mcp_servers_trust", { id });
+
+export const mcpOauthStart = (id: string) =>
+  invoke<import("./types").McpOAuthStartView>("mcp_oauth_start", { id });
+
+export const mcpOauthFinish = (id: string) =>
+  invoke<{ authenticated: boolean; granted_scopes: string[] }>(
+    "mcp_oauth_finish",
+    { id },
+  );
+
+export const mcpOauthRevoke = (id: string) =>
+  invoke<import("./types").McpOAuthRevokeView>("mcp_oauth_revoke", { id });
+
+export const mcpServerTest = (id: string) =>
+  invoke<McpToolView[]>("mcp_servers_test", { id });
+
+export const mcpServerConnect = (id: string) =>
+  invoke<McpToolView[]>("mcp_server_connect", { id });
+
+export const mcpServerDisconnect = (id: string) =>
+  invoke<void>("mcp_server_disconnect", { id });
+
+export const mcpToolsList = (conversationId: string, serverIds: string[]) =>
+  invoke<McpToolView[]>("mcp_tools_list", {
+    conversation_id: conversationId,
+    server_ids: serverIds,
+  });
+
+export const mcpToolsRefresh = (conversationId: string, serverId: string) =>
+  invoke<McpToolView[]>("mcp_tools_refresh", {
+    conversation_id: conversationId,
+    server_id: serverId,
+  });
+
+export const mcpToolCall = (
+  conversationId: string,
+  serverId: string,
+  toolName: string,
+  args: unknown,
+) =>
+  invoke<McpToolResultView>("mcp_tools_call", {
+    conversation_id: conversationId,
+    server_id: serverId,
+    tool_name: toolName,
+    arguments: args,
+  });
+
+export const mcpDisconnect = (conversationId: string, serverId?: string) =>
+  invoke<void>("mcp_disconnect", {
+    conversation_id: conversationId,
+    server_id: serverId ?? null,
+  });
+
+export const mcpLogs = (serverId: string) =>
+  invoke<string>("mcp_logs", { server_id: serverId });
+
+export const mcpSandboxStatus = () =>
+  invoke<McpSandboxStatus>("mcp_sandbox_status");
+
+export const mcpDefaultServerIds = () =>
+  invoke<string[]>("mcp_default_server_ids");
+
+export const mcpForgetApprovals = (serverId?: string) =>
+  invoke<void>("mcp_forget_approvals", { server_id: serverId ?? null });
+
+export const mcpExportRedacted = () => invoke<unknown>("mcp_export_redacted");
 
 /** Report a PTY-executed command back to the waiting agent loop. Snake_case
  *  like respond_to_approval — both are `rename_all = "snake_case"` on the Rust
@@ -322,7 +454,8 @@ export const agentSteer = (requestId: string, steerId: string, text: string) =>
     text,
   });
 
-export const aiCancel = (requestId: string) => invoke<void>("ai_cancel", { requestId });
+export const aiCancel = (requestId: string) =>
+  invoke<void>("ai_cancel", { requestId });
 
 /** Collected, not streamed — the result is a single short label, so there is no
  *  channel to retain. Rust sanitizes and rejects unusable output, so a resolved
@@ -450,7 +583,8 @@ export const modelStatus = () => invoke<ModelStatus>("model_status");
 /** Per-model reasoning effort, as `{ [catalogId]: Effort }`.
  *  Deliberately not part of saveSettings: a map there would turn every
  *  single-key write into a read-modify-write race. */
-export const getModelEffort = () => invoke<Record<string, Effort>>("get_model_effort");
+export const getModelEffort = () =>
+  invoke<Record<string, Effort>>("get_model_effort");
 
 export const setModelEffort = (modelId: string, effort: Effort) =>
   invoke<void>("set_model_effort", { model_id: modelId, effort });
@@ -463,7 +597,8 @@ export const historyRecord = (entry: HistoryEntryInput) =>
 export const historySearch = (query: string, limit = 50, offset = 0) =>
   invoke<HistoryEntry[]>("history_search", { query, limit, offset });
 
-export const historyRecent = (limit = 50) => invoke<HistoryEntry[]>("history_recent", { limit });
+export const historyRecent = (limit = 50) =>
+  invoke<HistoryEntry[]>("history_recent", { limit });
 
 /** Wipe recorded commands. `command_history` is never pruned automatically, so
  *  this is the only way it shrinks. */
@@ -475,14 +610,17 @@ export const historyClear = () => invoke<void>("history_clear");
 // payload keys are snake_case throughout.
 
 /** The configured servers. Never touches the network. */
-export const remoteServersList = () => invoke<RemoteServer[]>("remote_servers_list");
+export const remoteServersList = () =>
+  invoke<RemoteServer[]>("remote_servers_list");
 
 /** Returns the new server's id. `apiKey` may be sent HERE and only here: create
  *  is the one call where "leave the stored token alone" cannot arise, because
  *  there is nothing stored. Afterwards the token has exactly one mutation path,
  *  so an untouched password field can never silently clear one. */
-export const remoteServersCreate = (server: RemoteServerInput, apiKey: string | null) =>
-  invoke<string>("remote_servers_create", { server, api_key: apiKey });
+export const remoteServersCreate = (
+  server: RemoteServerInput,
+  apiKey: string | null,
+) => invoke<string>("remote_servers_create", { server, api_key: apiKey });
 
 /** Deliberately cannot touch the token or the enabled models — see
  *  `remoteServersSetApiKey` and `remoteServersSetModels`. */
@@ -514,7 +652,8 @@ export const remoteServersSetModels = (id: string, models: RemoteModel[]) =>
 export const sshHostsList = () => invoke<SshHost[]>("ssh_hosts_list");
 
 /** Null when the row was deleted since — a restored tab can outlive its host. */
-export const sshHostsGet = (id: string) => invoke<SshHost | null>("ssh_hosts_get", { id });
+export const sshHostsGet = (id: string) =>
+  invoke<SshHost | null>("ssh_hosts_get", { id });
 
 /** Create can accept the initial password because no keep-vs-clear ambiguity exists yet. */
 export const sshHostsCreate = (host: SshHostInput, password: string | null) =>
@@ -534,14 +673,16 @@ export const sshHostsWritePassword = (id: string, sessionId: string) =>
 export const sshHostsDelete = (id: string) => invoke<void>("ssh_hosts_delete", { id });
 
 /** Frecency bump — called when a connect command actually reaches a shell. */
-export const sshHostsTouch = (id: string) => invoke<void>("ssh_hosts_touch", { id });
+export const sshHostsTouch = (id: string) =>
+  invoke<void>("ssh_hosts_touch", { id });
 
 /** Read-only scan of ~/.ssh/config. The app never writes to that file. */
 export const sshHostsScanConfig = () =>
   invoke<SshConfigCandidate[]>("ssh_hosts_scan_config");
 
 /** Windows only: host-visible path to the default WSL user's ~/.ssh. */
-export const sshWslIdentityRoot = () => invoke<string | null>("ssh_wsl_identity_root");
+export const sshWslIdentityRoot = () =>
+  invoke<string | null>("ssh_wsl_identity_root");
 
 /** Convert a file selected through \\wsl.localhost into a validated Linux path. */
 export const sshWslPathFromHost = (path: string) =>
@@ -555,7 +696,8 @@ export const sshHostsImport = (hosts: SshHostInput[]) =>
 
 /** Metadata only — bumps the generation and arms the crash-loop guard.
  *  Call exactly once per boot. */
-export const workspaceRestore = () => invoke<WorkspaceRestore>("workspace_restore");
+export const workspaceRestore = () =>
+  invoke<WorkspaceRestore>("workspace_restore");
 
 export const workspaceSnapshot = (snapshot: WorkspaceSnapshotInput) =>
   invoke<void>("workspace_snapshot", { snapshot });
@@ -565,13 +707,16 @@ export const workspaceScrollback = (sessionId: string) =>
   invoke<string | null>("workspace_scrollback", { sessionId });
 
 /** Resets the crash-loop counter once a run has survived a few seconds. */
-export const workspaceMarkHealthy = () => invoke<void>("workspace_mark_healthy");
+export const workspaceMarkHealthy = () =>
+  invoke<void>("workspace_mark_healthy");
 
 /** Set only after the final workspace and archive writes are durable. */
-export const workspaceMarkCleanExit = () => invoke<void>("workspace_mark_clean_exit");
+export const workspaceMarkCleanExit = () =>
+  invoke<void>("workspace_mark_clean_exit");
 
 /** Re-arm crash reporting when a prepared exit is abandoned. */
-export const workspaceMarkRunning = () => invoke<void>("workspace_mark_running");
+export const workspaceMarkRunning = () =>
+  invoke<void>("workspace_mark_running");
 
 export const workspaceClear = () => invoke<void>("workspace_clear");
 
@@ -609,11 +754,13 @@ export const archivePutManyForExit = (sessions: ArchiveSessionInput[]) =>
 export const archiveDelete = (sessionId: string) =>
   trackArchiveWrite(() => invoke<void>("archive_delete", { sessionId }));
 
-export const archiveClear = () => trackArchiveWrite(() => invoke<void>("archive_clear"));
+export const archiveClear = () =>
+  trackArchiveWrite(() => invoke<void>("archive_clear"));
 
 /** Returns how many rows went. Called after a retention limit is lowered, so the
  *  change takes effect immediately rather than at the next archive write. */
-export const archivePrune = () => trackArchiveWrite(() => invoke<number>("archive_prune"));
+export const archivePrune = () =>
+  trackArchiveWrite(() => invoke<number>("archive_prune"));
 
 // ---------- Attachments ----------
 
@@ -652,11 +799,15 @@ export const rememberCommandPolicyRule = (
   command: string,
   effect: "allow" | "ask" | "deny",
   scope: string,
-) => invoke<import("./types").CommandPolicyRule[]>("remember_command_policy_rule", {
-  command,
-  effect,
-  scope,
-});
+) =>
+  invoke<import("./types").CommandPolicyRule[]>(
+    "remember_command_policy_rule",
+    {
+      command,
+      effect,
+      scope,
+    },
+  );
 
 export interface SystemInfo {
   total_ram_bytes: number;
@@ -721,7 +872,8 @@ export const appQuitForce = (token: number, reason?: string) =>
 
 // ---------- On-device vision sidecar ----------
 
-export const visionCatalog = () => invoke<VisionCatalogEntry[]>("vision_catalog");
+export const visionCatalog = () =>
+  invoke<VisionCatalogEntry[]>("vision_catalog");
 
 /** Two files under ONE download_id. Rust rebases the byte counts so the model
  * card can render one aggregate `DownloadProgress` stream. */
@@ -768,7 +920,11 @@ export const visionDelete = (modelId: string) =>
 /** Transcribe one image on-device. Collected, not streamed — the result is folded
  *  into a chat turn before anything is rendered. `requestId` puts it on the same
  *  cancel registry as a chat turn, so Stop reaches it. */
-export const visionDescribe = (requestId: string, imageBase64: string, prompt?: string) =>
+export const visionDescribe = (
+  requestId: string,
+  imageBase64: string,
+  prompt?: string,
+) =>
   invoke<string>("vision_describe", {
     request_id: requestId,
     image_base64: imageBase64,
@@ -832,7 +988,9 @@ export const docsReadSource = async (fileId: string): Promise<Uint8Array> => {
   const bytes = await invoke<ArrayBuffer | number[]>("docs_read_source", {
     file_id: fileId,
   });
-  return bytes instanceof ArrayBuffer ? new Uint8Array(bytes) : new Uint8Array(bytes);
+  return bytes instanceof ArrayBuffer
+    ? new Uint8Array(bytes)
+    : new Uint8Array(bytes);
 };
 
 export const docsPutText = (fileId: string, pages: DocPutPage[]) =>
@@ -842,7 +1000,11 @@ export const docsPutText = (fileId: string, pages: DocPutPage[]) =>
  *
  *  Returns structured hits, NOT the text the agent receives: that carries a
  *  "treat this as data" preamble written for a model reading a tool result. */
-export const docsSearch = (bucketIds: string[], query: string, limit?: number) =>
+export const docsSearch = (
+  bucketIds: string[],
+  query: string,
+  limit?: number,
+) =>
   invoke<DocSearchPreview[]>("docs_search", {
     bucket_ids: bucketIds,
     query,
@@ -863,7 +1025,9 @@ function commandIsUnavailable(error: unknown): boolean {
   );
 }
 
-export async function knowledgeBucketsList(): Promise<KnowledgeBucketDescriptor[]> {
+export async function knowledgeBucketsList(): Promise<
+  KnowledgeBucketDescriptor[]
+> {
   try {
     return await invoke<KnowledgeBucketDescriptor[]>("knowledge_buckets_list");
   } catch (error) {
@@ -885,7 +1049,11 @@ export async function knowledgeSearch(
       limit: limit ?? null,
     });
   } catch (error) {
-    if (!commandIsUnavailable(error) || refs.some((ref) => ref.source !== "local")) throw error;
+    if (
+      !commandIsUnavailable(error) ||
+      refs.some((ref) => ref.source !== "local")
+    )
+      throw error;
     return docsSearch(
       refs.map((ref) => (ref.source === "local" ? ref.bucket_id : "")),
       query,
@@ -924,7 +1092,12 @@ export async function knowledgeBucketCreate(
       profile_id: options.profileId ?? null,
     });
   } catch (error) {
-    if (!commandIsUnavailable(error) || options.connectionId || options.profileId) throw error;
+    if (
+      !commandIsUnavailable(error) ||
+      options.connectionId ||
+      options.profileId
+    )
+      throw error;
     return docsBucketCreate(name);
   }
 }
@@ -967,7 +1140,9 @@ export async function knowledgeEmbeddingModelInstall(
 export const knowledgeEmbeddingModelCancel = (modelId: string) => {
   const downloadId = embeddingDownloadIds.get(modelId);
   return downloadId
-    ? invoke<void>("knowledge_embedding_model_cancel", { download_id: downloadId })
+    ? invoke<void>("knowledge_embedding_model_cancel", {
+        download_id: downloadId,
+      })
     : Promise.resolve();
 };
 
@@ -1014,13 +1189,18 @@ export async function knowledgeQdrantConnectionSave(
 }
 
 export const knowledgeQdrantConnectionTest = (connectionId: string) =>
-  invoke<QdrantConnection>("knowledge_connections_refresh", { id: connectionId });
+  invoke<QdrantConnection>("knowledge_connections_refresh", {
+    id: connectionId,
+  });
 
 export const knowledgeQdrantConnectionDelete = (connectionId: string) =>
   invoke<void>("knowledge_connections_delete", { id: connectionId });
 
 export const knowledgeQdrantConnectionClearKey = (connectionId: string) =>
-  invoke<void>("knowledge_connections_set_api_key", { id: connectionId, api_key: "" });
+  invoke<void>("knowledge_connections_set_api_key", {
+    id: connectionId,
+    api_key: "",
+  });
 
 export const knowledgeDocumentsList = (
   bucket: KnowledgeBucketRef,
@@ -1059,13 +1239,17 @@ export const knowledgeDocumentUpdate = (
     update,
   });
 
-export const knowledgeDocumentDelete = (bucket: KnowledgeBucketRef, documentId: string) =>
+export const knowledgeDocumentDelete = (
+  bucket: KnowledgeBucketRef,
+  documentId: string,
+) =>
   invoke<void>("knowledge_document_delete", {
     bucket,
     document_id: documentId,
   });
 
-export const knowledgeJobsList = () => invoke<KnowledgeJob[]>("knowledge_jobs_list");
+export const knowledgeJobsList = () =>
+  invoke<KnowledgeJob[]>("knowledge_jobs_list");
 
 export const knowledgeJobCancel = (jobId: string) =>
   invoke<KnowledgeJob>("knowledge_jobs_cancel", { id: jobId });
@@ -1076,7 +1260,10 @@ export const knowledgeJobRetry = (jobId: string) =>
 export const knowledgeBucketEmbed = (bucketId: string) =>
   invoke<KnowledgeJob>("knowledge_bucket_embed", { bucket_id: bucketId });
 
-export const knowledgeBucketSemanticEnable = (bucketId: string, profileId: string) =>
+export const knowledgeBucketSemanticEnable = (
+  bucketId: string,
+  profileId: string,
+) =>
   invoke<KnowledgeJob>("knowledge_bucket_semantic_enable", {
     bucket_id: bucketId,
     profile_id: profileId,
@@ -1085,18 +1272,24 @@ export const knowledgeBucketSemanticEnable = (bucketId: string, profileId: strin
 export const knowledgeQdrantTurboQuantSet = (
   bucket: KnowledgeBucketRef,
   config: TurboQuantConfig | null,
-) => invoke<KnowledgeBucketDescriptor>("knowledge_qdrant_turbo_quant_set", { bucket, config });
+) =>
+  invoke<KnowledgeBucketDescriptor>("knowledge_qdrant_turbo_quant_set", {
+    bucket,
+    config,
+  });
 
 export const knowledgeQdrantImportRemove = (bucket: KnowledgeBucketRef) =>
   invoke<void>("knowledge_qdrant_import_remove", { bucket });
 
-export const knowledgeCliInstall = () => invoke<string>("knowledge_cli_install");
+export const knowledgeCliInstall = () =>
+  invoke<string>("knowledge_cli_install");
 export interface KnowledgeCliStatus {
   installed: boolean;
   path_ready: boolean;
   path: string;
 }
-export const knowledgeCliStatus = () => invoke<KnowledgeCliStatus>("knowledge_cli_status");
+export const knowledgeCliStatus = () =>
+  invoke<KnowledgeCliStatus>("knowledge_cli_status");
 
 /** Delete `docs.db` outright. The payoff of a separate database file: this cannot
  *  touch command history, saved hosts or archived transcripts. */
