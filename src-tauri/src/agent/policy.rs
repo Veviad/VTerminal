@@ -54,6 +54,82 @@
 //! which is the same line `CLAUDE.md` already draws for palette history and
 //! saved-host connects.
 
+use serde::{Deserialize, Serialize};
+
+/// The intended effect of a command. `SemanticRead` permits incidental cache or
+/// metadata refreshes; it means the operation's purpose is inspection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandEffect {
+    SemanticRead,
+    StateChange,
+    SensitiveRead,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssessmentSource {
+    Deterministic,
+    Model,
+    Rule,
+    Fallback,
+}
+
+/// Structured policy result shipped to the UI and consumed by the backend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandAssessment {
+    pub effect: CommandEffect,
+    pub network: bool,
+    pub network_unknown: bool,
+    pub privileged: bool,
+    pub opaque: bool,
+    pub source: AssessmentSource,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_rule_id: Option<String>,
+}
+
+impl CommandAssessment {
+    pub fn read_only(&self) -> bool {
+        self.effect == CommandEffect::SemanticRead && !self.privileged && !self.opaque
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyRuleEffect {
+    Allow,
+    Ask,
+    Deny,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandPolicyRule {
+    pub id: String,
+    pub effect: PolicyRuleEffect,
+    /// `local`, or `remote:<saved-host-id>`. Session-only rules stay in the UI.
+    pub scope: String,
+    /// Parsed argv pattern. `*` matches one argument and `**` the remainder.
+    pub argv: Vec<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub description: String,
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleDecision {
+    None,
+    Allow,
+    Ask,
+    Deny,
+}
+
 /// What we could prove about a proposed command.
 #[cfg_attr(not(feature = "local-llm"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +162,208 @@ pub fn classify(command: &str) -> CommandClass {
         read_only: segments.iter().all(segment_is_read_only),
         network: segments.iter().any(segment_is_network),
     }
+}
+
+/// Deterministic first pass. Unknown tools remain unknown instead of growing an
+/// unbounded per-CLI table; Smart mode may classify them independently later.
+pub fn assess(command: &str) -> CommandAssessment {
+    let class = classify(command);
+    let opaque = split_segments(command).is_none() || is_opaque(command);
+    let privileged = is_privileged(command);
+    let sensitive = is_sensitive_read(command);
+    let effect = if sensitive {
+        CommandEffect::SensitiveRead
+    } else if opaque {
+        CommandEffect::Unknown
+    } else if class.read_only {
+        CommandEffect::SemanticRead
+    } else if is_known_state_change(command) {
+        CommandEffect::StateChange
+    } else {
+        CommandEffect::Unknown
+    };
+    let reason = match effect {
+        CommandEffect::SemanticRead => "known inspection command",
+        CommandEffect::StateChange => "command has a known state-changing effect",
+        CommandEffect::SensitiveRead => "command may reveal credential or secret values",
+        CommandEffect::Unknown if opaque => "command contains opaque or dynamic shell execution",
+        CommandEffect::Unknown => "command effect is not known deterministically",
+    };
+    CommandAssessment {
+        effect,
+        network: class.network,
+        network_unknown: effect == CommandEffect::Unknown && !class.network,
+        privileged,
+        opaque,
+        source: AssessmentSource::Deterministic,
+        reason: reason.into(),
+        matched_rule_id: None,
+    }
+}
+
+fn is_opaque(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+    [
+        "eval ",
+        "sh -c",
+        "bash -c",
+        "zsh -c",
+        "python -c",
+        "python3 -c",
+        "node -e",
+        "ruby -e",
+        "perl -e",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn is_privileged(command: &str) -> bool {
+    split_segments(command).is_some_and(|segments| {
+        segments.iter().any(|segment| {
+            for word in tokenize(&segment.text) {
+                let base = word
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&word)
+                    .to_ascii_lowercase();
+                if matches!(base.as_str(), "sudo" | "doas" | "pkexec") {
+                    return true;
+                }
+                let assignment = word.split_once('=').is_some_and(|(name, _)| {
+                    !name.is_empty()
+                        && name
+                            .chars()
+                            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                });
+                if !assignment && !WRAPPERS.contains(&base.as_str()) {
+                    break;
+                }
+            }
+            false
+        })
+    })
+}
+
+fn is_sensitive_read(command: &str) -> bool {
+    let words = split_segments(command)
+        .map(|segments| {
+            segments
+                .into_iter()
+                .flat_map(|s| tokenize(&s.text))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let lower = words
+        .iter()
+        .map(|w| w.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let sensitive_path = lower.iter().any(|word| {
+        word == ".env"
+            || word.ends_with("/.env")
+            || word.contains("/.ssh/id_")
+            || word.contains("credentials")
+            || word.contains("keychain")
+            || word.contains(".netrc")
+            || word.contains(".npmrc")
+    });
+    let secret_output = lower.windows(2).any(|w| {
+        matches!(
+            (w[0].as_str(), w[1].as_str()),
+            ("gh", "auth") | ("security", "find-generic-password")
+        )
+    }) && lower.iter().any(|w| w == "token" || w == "-w");
+    let environment_dump = lower
+        .first()
+        .is_some_and(|w| matches!(w.as_str(), "env" | "printenv"));
+    sensitive_path || secret_output || environment_dump
+}
+
+fn is_known_state_change(command: &str) -> bool {
+    if split_segments(command).is_some_and(|segments| segments.iter().any(|s| writes_file(&s.bare)))
+    {
+        return true;
+    }
+    let mutating = [
+        "rm", "mv", "cp", "mkdir", "rmdir", "touch", "chmod", "chown", "kill", "pkill", "reboot",
+        "shutdown",
+    ];
+    split_segments(command).is_some_and(|segments| {
+        segments
+            .iter()
+            .any(|s| head_of(&s.text).is_some_and(|h| mutating.contains(&h.name.as_str())))
+    })
+}
+
+fn argv_matches(pattern: &[String], argv: &[String]) -> bool {
+    fn rec(pattern: &[String], argv: &[String]) -> bool {
+        match pattern.split_first() {
+            None => argv.is_empty(),
+            Some((head, tail)) if head == "**" => {
+                rec(tail, argv) || (!argv.is_empty() && rec(pattern, &argv[1..]))
+            }
+            Some((head, tail)) if head == "*" => !argv.is_empty() && rec(tail, &argv[1..]),
+            Some((head, tail)) => argv.first() == Some(head) && rec(tail, &argv[1..]),
+        }
+    }
+    rec(pattern, argv)
+}
+
+/// Rules match parsed argv per segment. A compound command needs an allow for
+/// every segment; ask/deny on any segment wins globally.
+pub fn evaluate_rules(
+    command: &str,
+    scope: &str,
+    rules: &[CommandPolicyRule],
+) -> (RuleDecision, Option<String>) {
+    let Some(segments) = split_segments(command).filter(|s| !s.is_empty()) else {
+        return (RuleDecision::None, None);
+    };
+    let mut every_allowed = true;
+    let mut allow_id = None;
+    let mut ask_id = None;
+    for segment in segments {
+        let argv = tokenize(&segment.text);
+        let matching = rules
+            .iter()
+            .filter(|rule| rule.enabled && rule.scope == scope && argv_matches(&rule.argv, &argv));
+        let mut segment_allowed = false;
+        for rule in matching {
+            match rule.effect {
+                PolicyRuleEffect::Deny => return (RuleDecision::Deny, Some(rule.id.clone())),
+                PolicyRuleEffect::Ask => ask_id = Some(rule.id.clone()),
+                PolicyRuleEffect::Allow => {
+                    segment_allowed = true;
+                    allow_id = Some(rule.id.clone());
+                }
+            }
+        }
+        every_allowed &= segment_allowed;
+    }
+    if ask_id.is_some() {
+        return (RuleDecision::Ask, ask_id);
+    }
+    if every_allowed {
+        (RuleDecision::Allow, allow_id)
+    } else {
+        (RuleDecision::None, None)
+    }
+}
+
+pub fn exact_argv_patterns(command: &str) -> Result<Vec<Vec<String>>, String> {
+    let segments = split_segments(command)
+        .filter(|segments| !segments.is_empty())
+        .ok_or_else(|| {
+            "dynamic or malformed shell commands cannot be remembered as argv rules".to_string()
+        })?;
+    let patterns = segments
+        .into_iter()
+        .map(|segment| tokenize(&segment.text))
+        .collect::<Vec<_>>();
+    if patterns.iter().any(Vec::is_empty) {
+        return Err("command contains an empty segment".into());
+    }
+    Ok(patterns)
 }
 
 /// Whether this command must be refused outright rather than proposed.
@@ -1686,5 +1964,81 @@ mod tests {
                 "should remain available in Sidecar mode: {cmd}"
             );
         }
+    }
+
+    #[test]
+    fn structured_assessment_separates_reads_secrets_and_opaque_commands() {
+        assert_eq!(assess("ls -la").effect, CommandEffect::SemanticRead);
+        assert_eq!(assess("cat .env").effect, CommandEffect::SensitiveRead);
+        assert_eq!(assess("printenv").effect, CommandEffect::SensitiveRead);
+        assert!(assess("sudo cat /etc/hosts").privileged);
+        assert!(assess("env LANG=C sudo cat /etc/hosts").privileged);
+        assert!(assess("sh -c 'ls'").opaque);
+        assert_eq!(
+            assess("acme inspect project").effect,
+            CommandEffect::Unknown
+        );
+    }
+
+    #[test]
+    fn argv_rules_use_token_boundaries_and_strongest_effect() {
+        let rules = vec![
+            CommandPolicyRule {
+                id: "ask".into(),
+                effect: PolicyRuleEffect::Ask,
+                scope: "local".into(),
+                argv: vec!["gh".into(), "repo".into(), "view".into(), "**".into()],
+                enabled: true,
+                description: String::new(),
+            },
+            CommandPolicyRule {
+                id: "allow".into(),
+                effect: PolicyRuleEffect::Allow,
+                scope: "local".into(),
+                argv: vec!["gh".into(), "repo".into(), "view".into(), "*".into()],
+                enabled: true,
+                description: String::new(),
+            },
+            CommandPolicyRule {
+                id: "deny".into(),
+                effect: PolicyRuleEffect::Deny,
+                scope: "local".into(),
+                argv: vec!["gh".into(), "repo".into(), "view".into(), "secret".into()],
+                enabled: true,
+                description: String::new(),
+            },
+        ];
+        assert_eq!(
+            evaluate_rules("gh repo view Veviad/app", "local", &rules).0,
+            RuleDecision::Ask
+        );
+        assert_eq!(
+            evaluate_rules("gh repo view secret", "local", &rules),
+            (RuleDecision::Deny, Some("deny".into()))
+        );
+        assert_eq!(
+            evaluate_rules("gh repo view secret", "remote:prod", &rules).0,
+            RuleDecision::None
+        );
+    }
+
+    #[test]
+    fn compound_allow_requires_every_segment_and_exact_patterns_strip_fd_plumbing() {
+        let rules = vec![CommandPolicyRule {
+            id: "read".into(),
+            effect: PolicyRuleEffect::Allow,
+            scope: "local".into(),
+            argv: vec!["tool".into(), "**".into()],
+            enabled: true,
+            description: String::new(),
+        }];
+        assert_eq!(
+            evaluate_rules("tool inspect; echo done", "local", &rules).0,
+            RuleDecision::None
+        );
+        assert_eq!(
+            exact_argv_patterns("gh repo view x 2>&1").unwrap(),
+            vec![vec!["gh", "repo", "view", "x"]]
+        );
     }
 }

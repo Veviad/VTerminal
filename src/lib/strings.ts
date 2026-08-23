@@ -145,13 +145,16 @@ export const S = {
     permission: {
       ask: "Confirm",
       auto_read: "Reads",
+      auto_smart: "Smart",
       auto_all: "All",
     },
     permissionHint: {
       ask: "Every command waits for your approval",
       auto_read:
         "Commands proven to only read run straight away, including network-backed reads. Writes and uncertain commands still wait for you.",
-      auto_all: "Every command runs without asking, including writes and network access",
+      auto_smart:
+        "Known reads and commands independently assessed as semantic reads run straight away. Uncertain, sensitive, privileged, and opaque commands still wait.",
+      auto_all: "Commands run without asking except protected, denied, or forced-confirmation operations",
     },
     // Document buckets. Deliberately says the agent "can search" rather than "will
     // read": attaching a bucket grants a lookup tool, it does not put the documents
@@ -166,6 +169,8 @@ export const S = {
       "Auto-accept is ON — commands run in your terminal, on the host it is connected to, without asking",
     autoReadNote:
       "Proven read-only commands run without asking, including network-backed reads. Writes and uncertain commands still stop here.",
+    autoSmartNote:
+      "Unknown commands receive an isolated AI safety review. Sensitive, privileged, opaque, and uncertain commands still stop here.",
     // Why a card is up even though an auto mode is armed. Without this the mode
     // just looks broken.
     askedBecause: {

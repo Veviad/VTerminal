@@ -633,6 +633,16 @@ pub fn respond_to_approval(
     )
 }
 
+#[tauri::command(rename_all = "snake_case")]
+pub fn agent_set_permission_mode(
+    permissions: State<'_, crate::agent::AgentPermissionState>,
+    request_id: String,
+    target_role: Option<crate::agent::AgentTargetRole>,
+    mode: crate::agent::PermissionMode,
+) -> Result<(), String> {
+    permissions.set(&request_id, target_role, mode)
+}
+
 fn agent_terminal_event(outcome: &crate::agent::run::AgentRunOutcome) -> StreamEvent {
     match &outcome.termination {
         crate::agent::run::AgentTermination::Completed => StreamEvent::Done {
@@ -674,6 +684,7 @@ pub async fn agent_start(
     app: tauri::AppHandle<Wry>,
     ai_state: State<'_, AiState>,
     approvals: State<'_, crate::agent::ApprovalState>,
+    permissions: State<'_, crate::agent::AgentPermissionState>,
     pty_exec: State<'_, crate::agent::PtyExecState>,
     steers: State<'_, crate::agent::SteerState>,
     docs: State<'_, crate::docs::db::DocsDb>,
@@ -692,6 +703,7 @@ pub async fn agent_start(
     history: Option<Vec<crate::provider::ChatMessage>>,
     // Images on the goal turn. Same `Option` reasoning as `history`.
     images: Option<Vec<crate::provider::ImagePart>>,
+    permission_modes: Option<crate::agent::AgentPermissionModes>,
     on_event: Channel<StreamEvent>,
 ) -> Result<Vec<crate::provider::ChatMessage>, String> {
     if let Some(targets) = &sidecar_targets {
@@ -707,10 +719,12 @@ pub async fn agent_start(
     // which takes seconds, and a steer typed in that window must not be refused
     // for a run the user can already see starting.
     steers.register(&request_id);
+    permissions.register(&request_id, permission_modes.unwrap_or_default());
     let resolved = match resolve_provider(&app).await {
         Ok(r) => r,
         Err(message) => {
             steers.drain_for_request(&request_id);
+            permissions.finish(&request_id);
             let _ = on_event.send(StreamEvent::Error {
                 message: message.clone(),
             });
@@ -787,6 +801,19 @@ pub async fn agent_start(
             120,
         )),
         web_access,
+        policy_rules: crate::commands::settings::read_command_policy_rules(&app),
+        policy_scope_single: context
+            .remote
+            .as_ref()
+            .and_then(|remote| remote.host_id.as_ref().or(remote.target.as_ref()))
+            .map(|identity| format!("remote:{identity}"))
+            .unwrap_or_else(|| "local".into()),
+        policy_scope_remote: sidecar_targets
+            .as_ref()
+            .and_then(|targets| targets.remote.remote.as_ref())
+            .and_then(|remote| remote.host_id.as_ref().or(remote.target.as_ref()))
+            .map(|identity| format!("remote:{identity}"))
+            .unwrap_or_else(|| "remote:unknown".into()),
         doc_buckets,
         // Always a user-established visible PTY. Sidecar freezes one session id
         // per role; ordinary runs retain their single destination.
@@ -859,6 +886,7 @@ pub async fn agent_start(
         goal_images,
         history,
         &approvals,
+        Some(&permissions),
         &pty_exec,
         &steers,
         Some(&app),
@@ -872,6 +900,7 @@ pub async fn agent_start(
 
     ai_state.finish(&request_id);
     approvals.drain_for_request(&request_id);
+    permissions.finish(&request_id);
     pty_exec.drain_for_request(&request_id);
     steers.drain_for_request(&request_id);
 

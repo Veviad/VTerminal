@@ -1,10 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   askReason,
-  autoRuns,
   PERMISSION_MODES,
   type CommandVerdict,
-  type PermissionMode,
 } from "../lib/permissionMode";
 
 // The three command shapes the modes have to tell apart. The backend
@@ -15,38 +13,9 @@ const NETWORK_READ: CommandVerdict = { readOnly: true, network: true };
 const WRITE: CommandVerdict = { readOnly: false, network: false };
 const UNKNOWN: CommandVerdict = { readOnly: false, network: false };
 
-describe("autoRuns — the full mode × command matrix", () => {
-  const cases: [PermissionMode, CommandVerdict, boolean, string][] = [
-    ["ask", LOCAL_READ, false, "confirm asks about a plain read"],
-    ["ask", NETWORK_READ, false, "confirm asks about a fetch"],
-    ["ask", WRITE, false, "confirm asks about a write"],
-    ["auto_read", LOCAL_READ, true, "reads mode runs a plain read"],
-    ["auto_read", NETWORK_READ, true, "reads mode runs a proven network read"],
-    ["auto_read", WRITE, false, "reads mode still asks about a write"],
-    ["auto_all", LOCAL_READ, true, "all runs a read"],
-    ["auto_all", NETWORK_READ, true, "all runs a fetch"],
-    ["auto_all", WRITE, true, "all runs a write"],
-  ];
-
-  it.each(cases)("%s + %o → %s (%s)", (mode, verdict, expected) => {
-    expect(autoRuns(mode, verdict)).toBe(expected);
-  });
-
-  /** `readOnly: false` covers both "writes" and "could not tell", and the
-   *  unprovable case must never auto-run below `auto_all`. */
-  it("an unclassifiable command never skips the human except under All", () => {
-    expect(autoRuns("ask", UNKNOWN)).toBe(false);
-    expect(autoRuns("auto_read", UNKNOWN)).toBe(false);
-    expect(autoRuns("auto_all", UNKNOWN)).toBe(true);
-  });
-
-  it("allows network access only when the backend also proves the command read-only", () => {
-    expect(autoRuns("auto_read", NETWORK_READ)).toBe(true);
-    expect(autoRuns("auto_read", { readOnly: false, network: true })).toBe(false);
-  });
-
-  it("every mode is covered by the matrix above", () => {
-    expect(new Set(cases.map(([m]) => m))).toEqual(new Set(PERMISSION_MODES));
+describe("permission modes", () => {
+  it("exposes every backend-owned permission mode", () => {
+    expect(PERMISSION_MODES).toEqual(["ask", "auto_read", "auto_smart", "auto_all"]);
   });
 });
 
@@ -55,6 +24,7 @@ describe("askReason", () => {
     expect(askReason("auto_read", NETWORK_READ)).toBeNull();
     expect(askReason("auto_read", WRITE)).toBe("writes");
     expect(askReason("auto_read", { readOnly: false, network: true })).toBe("writes");
+    expect(askReason("auto_smart", WRITE)).toBe("writes");
   });
 
   it("says nothing when the mode asks about everything anyway", () => {
@@ -71,7 +41,6 @@ describe("askReason", () => {
    *  mode reads as broken. */
   it("always has a reason when Reads mode declined to auto-run", () => {
     for (const verdict of [WRITE, UNKNOWN, { readOnly: false, network: true }]) {
-      expect(autoRuns("auto_read", verdict)).toBe(false);
       expect(askReason("auto_read", verdict)).not.toBeNull();
     }
   });

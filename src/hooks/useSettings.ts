@@ -51,6 +51,7 @@ export function useSettings() {
       aiPanelRatio: clampPanelRatio(s.ai_panel_ratio ?? s.ai_panel_width / window.innerWidth),
       agentMaxIterations: s.agent_max_iterations,
       agentCommandTimeoutSecs: s.agent_command_timeout_secs,
+      agentCommandPolicyRules: s.agent_command_policy_rules ?? [],
       aiWebAccess: s.ai_web_access,
       autoUpdateEnabled: s.auto_update_enabled,
       docsEnabled: s.docs_enabled,
@@ -167,6 +168,8 @@ export function useSettings() {
       useAppStore.setState({ agentMaxIterations: patch.agent_max_iterations });
     if (patch.agent_command_timeout_secs !== undefined)
       useAppStore.setState({ agentCommandTimeoutSecs: patch.agent_command_timeout_secs });
+    if (patch.agent_command_policy_rules !== undefined)
+      useAppStore.setState({ agentCommandPolicyRules: patch.agent_command_policy_rules });
     if (patch.ai_web_access !== undefined)
       useAppStore.setState({ aiWebAccess: patch.ai_web_access });
     if (patch.auto_update_enabled !== undefined)

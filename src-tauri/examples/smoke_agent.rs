@@ -133,6 +133,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // The smoke run drives a local GGUF, which has no server-side web tool
         // for this to switch on anyway.
         web_access: false,
+        policy_rules: vec![],
+        policy_scope_single: "local".into(),
+        policy_scope_remote: "remote:test".into(),
         // Headless: no buckets, so `tools()` offers `run_command` and `finish` only.
         // This example exercises tool calling against a real GGUF, and adding a third
         // tool would change what it is measuring — the `docs` argument below is `None`
@@ -171,6 +174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // continues a conversation or reopens an archived one.
         vec![],
         &approvals,
+        None,
         &pty_exec,
         &steers,
         // No Tauri app handle in this headless example; no knowledge buckets are

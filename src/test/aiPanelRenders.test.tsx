@@ -166,6 +166,7 @@ describe("AiPanel renders", () => {
     for (const label of [
       S.aiPanel.permission.ask,
       S.aiPanel.permission.auto_read,
+      S.aiPanel.permission.auto_smart,
       S.aiPanel.permission.auto_all,
     ]) {
       expect(screen.getByRole("option", { name: new RegExp(label) })).toBeTruthy();
@@ -192,6 +193,7 @@ describe("AiPanel renders", () => {
     for (const [mode, label] of [
       ["ask", S.aiPanel.permission.ask],
       ["auto_read", S.aiPanel.permission.auto_read],
+      ["auto_smart", S.aiPanel.permission.auto_smart],
       ["auto_all", S.aiPanel.permission.auto_all],
     ] as const) {
       useAppStore.setState({
