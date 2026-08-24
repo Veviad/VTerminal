@@ -189,6 +189,22 @@ function updateCurrentSummary(state: ChatState, summary: ChatSummary) {
   };
 }
 
+function completedTitlePairs(messages: ChatDisplayMessage[]) {
+  const pairs: Array<{ question: string; answer: string }> = [];
+  let question: string | null = null;
+  for (const message of messages) {
+    const content = message.content.trim();
+    if (!content) continue;
+    if (message.role === "user") {
+      question = content;
+    } else if (message.role === "assistant" && question) {
+      pairs.push({ question, answer: content });
+      question = null;
+    }
+  }
+  return pairs;
+}
+
 interface PreparedTurn {
   outgoing: Outgoing;
   staged: Attachment[];
@@ -476,12 +492,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const detail = state.current?.summary.id === targetId
       ? state.current
       : await api.chatGet(targetId);
-    if (!detail || (detail.summary.title_source === "manual" && !allowManualOverride)) return;
-    const question = detail.messages.find((message) => message.role === "user")?.content;
-    const answer = detail.messages.find((message) => message.role === "assistant")?.content;
-    if (!question || !answer) return;
+    if (!detail) {
+      if (allowManualOverride) throw new Error("This chat no longer exists.");
+      return;
+    }
+    if (detail.summary.title_source === "manual" && !allowManualOverride) return;
+    const pairs = completedTitlePairs(detail.messages);
+    const context = allowManualOverride ? pairs[pairs.length - 1] : pairs[0];
+    if (!context) {
+      if (allowManualOverride) {
+        throw new Error("A completed question and answer are needed to regenerate the title.");
+      }
+      return;
+    }
     const expected = detail.summary.title;
-    const title = await api.aiNameChat(id("name-chat"), question, answer);
+    const title = await api.aiNameChat(
+      id("name-chat"),
+      context.question,
+      context.answer,
+      allowManualOverride ? expected : undefined,
+    );
     const changed = await api.chatUpdateTitle(
       detail.summary.id,
       title,
@@ -489,7 +519,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
       expected,
       allowManualOverride,
     );
-    if (!changed) return;
+    if (!changed) {
+      if (allowManualOverride) {
+        throw new Error("The title changed while its replacement was being generated. Try again.");
+      }
+      return;
+    }
     const latest = get().summaries.find((chat) => chat.id === targetId) ?? detail.summary;
     const summary = { ...latest, title, title_source: "generated" as ChatTitleSource, updated_at: new Date().toISOString() };
     set((state) => updateCurrentSummary(state, summary));

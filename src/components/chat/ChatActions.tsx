@@ -2,6 +2,7 @@ import { useCallback, useRef, useState, type ReactNode } from "react";
 import {
   Archive,
   ArchiveRestore,
+  Loader2,
   MoreHorizontal,
   Pencil,
   RefreshCw,
@@ -50,19 +51,38 @@ export function ChatActions({
   const [open, setOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [regenerating, setRegenerating] = useState(false);
+  const [regenerateError, setRegenerateError] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   const streaming = useChatStore((state) => state.stream.status === "streaming");
   const busy = useChatStore(
     (state) => state.current?.summary.id === chat.id && state.stream.status === "streaming",
   );
-  const dismiss = useCallback(() => setOpen(false), []);
+  const dismiss = useCallback(() => {
+    setOpen(false);
+    setRegenerateError(null);
+  }, []);
   useDismissibleLayer(ref, dismiss, open);
 
   const act = (action: () => void) => {
     setOpen(false);
+    setRegenerateError(null);
     action();
   };
   const sidebar = placement === "sidebar";
+  const regenerate = async () => {
+    if (regenerating) return;
+    setRegenerating(true);
+    setRegenerateError(null);
+    try {
+      await useChatStore.getState().regenerateTitle(chat.id, true);
+      setOpen(false);
+    } catch (reason) {
+      setRegenerateError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setRegenerating(false);
+    }
+  };
 
   return (
     <>
@@ -73,7 +93,10 @@ export function ChatActions({
           aria-haspopup="menu"
           aria-expanded={open}
           className="rounded-md p-1.5 text-text-muted hover:bg-bg-elevated hover:text-text-primary"
-          onClick={() => setOpen((value) => !value)}
+          onClick={() => {
+            setRegenerateError(null);
+            setOpen((value) => !value);
+          }}
         >
           <MoreHorizontal size={sidebar ? 14 : 15} />
         </button>
@@ -90,25 +113,32 @@ export function ChatActions({
               </p>
             )}
             <MenuButton
-              disabled={busy}
+              disabled={busy || regenerating}
               icon={<Pencil size={12} />}
               label="Rename"
               onClick={() => act(() => setRenameOpen(true))}
             />
             <MenuButton
-              icon={<RefreshCw size={12} />}
-              label="Regenerate title"
-              disabled={streaming || chat.message_count < 2}
-              onClick={() => act(() => void useChatStore.getState().regenerateTitle(chat.id, true))}
+              icon={regenerating
+                ? <Loader2 size={12} className="animate-spin" />
+                : <RefreshCw size={12} />}
+              label={regenerating ? "Regenerating…" : "Regenerate title"}
+              disabled={streaming || regenerating || chat.message_count < 2}
+              onClick={() => void regenerate()}
             />
+            {regenerateError && (
+              <p role="alert" className="px-2 py-1 text-[10px] leading-snug text-danger">
+                {regenerateError}
+              </p>
+            )}
             <MenuButton
-              disabled={busy}
+              disabled={busy || regenerating}
               icon={chat.archived_at ? <ArchiveRestore size={12} /> : <Archive size={12} />}
               label={chat.archived_at ? "Unarchive" : "Archive"}
               onClick={() => act(() => void useChatStore.getState().archive(!chat.archived_at, chat.id))}
             />
             <MenuButton
-              disabled={busy}
+              disabled={busy || regenerating}
               danger
               icon={<Trash2 size={12} />}
               label="Delete"

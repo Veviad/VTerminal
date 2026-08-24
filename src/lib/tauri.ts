@@ -357,8 +357,17 @@ export async function chatStart(
   }
 }
 
-export const aiNameChat = (requestId: string, prompt: string, answer: string) =>
-  invoke<string>("ai_name_chat", { requestId, prompt, answer });
+export const aiNameChat = (
+  requestId: string,
+  prompt: string,
+  answer: string,
+  currentTitle?: string,
+) => invoke<string>("ai_name_chat", {
+  requestId,
+  prompt,
+  answer,
+  currentTitle: currentTitle ?? null,
+});
 
 export const chatList = () => invoke<ChatSummary[]>("chat_list");
 export const chatGet = (chatId: string) => invoke<ChatDetail | null>("chat_get", { chatId });
