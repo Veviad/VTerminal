@@ -30,9 +30,15 @@ import { refreshKnowledgeBuckets } from "../../lib/docsIndex";
 import { knowledgeBucketKey, sameKnowledgeBucket } from "../../lib/knowledge";
 import { sanitizeExternalWebUrl } from "../../lib/externalUrl";
 import * as api from "../../lib/tauri";
-import type { ChatDisplayMessage, ChatSummary, WebCitation } from "../../lib/types";
+import type {
+  ChatDisplayMessage,
+  ChatSummary,
+  KnowledgeBucketRef,
+  WebCitation,
+} from "../../lib/types";
 
 const CHAT_BOTTOM_THRESHOLD_PX = 48;
+const NO_ATTACHED_BUCKETS: readonly KnowledgeBucketRef[] = [];
 
 export function isNearChatBottom(
   viewport: Pick<HTMLElement, "scrollTop" | "scrollHeight" | "clientHeight">,
@@ -295,7 +301,13 @@ function MenuButton({ icon, label, onClick, disabled, danger }: { icon: React.Re
 function KnowledgePicker() {
   const enabled = useAppStore((state) => state.docsEnabled);
   const buckets = useAppStore((state) => state.knowledgeBuckets);
-  const attached = useChatStore((state) => state.current?.attached_bucket_refs ?? []);
+  // `ChatWorkspace` mounts before the asynchronous Chat restore completes.
+  // Keep the selector result stable while `current` is null: Zustand 5 passes
+  // it through useSyncExternalStore, where allocating `[]` for every snapshot
+  // is interpreted as a perpetual store change and hits React's update-depth
+  // guard before the restored chat can arrive.
+  const attached = useChatStore((state) => state.current?.attached_bucket_refs)
+    ?? NO_ATTACHED_BUCKETS;
   const [open, setOpen] = useState(false);
   useEffect(() => { if (enabled && buckets.length === 0) void refreshKnowledgeBuckets(); }, [enabled, buckets.length]);
   const attachable = useMemo(() => buckets.filter((bucket) => bucket.attachable), [buckets]);

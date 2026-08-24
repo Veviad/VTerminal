@@ -71,6 +71,17 @@ describe("Chat workspace autoscroll", () => {
     expect(isNearChatBottom({ scrollHeight: 1_000, clientHeight: 300, scrollTop: 600 })).toBe(false);
   });
 
+  it("renders while chat initialization has not selected a current chat yet", () => {
+    useChatStore.setState({
+      initialized: false,
+      summaries: [],
+      current: null,
+    });
+
+    expect(() => render(<ChatWorkspace />)).not.toThrow();
+    expect(screen.getByRole("heading", { name: "Start a chat" })).toBeInTheDocument();
+  });
+
   it("does not pull a reader back to the bottom while tokens stream", () => {
     render(<ChatWorkspace />);
     const timeline = screen.getByTestId("chat-timeline");
