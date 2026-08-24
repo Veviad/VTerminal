@@ -19,7 +19,20 @@ vi.mock("../hooks/useSessions", () => ({
 }));
 
 vi.mock("../components/terminal/TerminalPane", () => ({
-  TerminalPane: ({ sessionId }: { sessionId: string }) => <div>{sessionId}</div>,
+  TerminalPane: ({
+    sessionId,
+    showReconnect,
+  }: {
+    sessionId: string;
+    showReconnect?: boolean;
+  }) => (
+    <div
+      data-testid={`terminal-${sessionId}`}
+      data-show-reconnect={String(showReconnect ?? true)}
+    >
+      {sessionId}
+    </div>
+  ),
 }));
 
 vi.mock("../lib/tauri", () => ({
@@ -109,6 +122,30 @@ describe("Sidecar SSH reconnect", () => {
     });
   });
 
+  it("suppresses generic reconnect footers for both Sidecar panes", () => {
+    const historicalLocal = {
+      ...sessions[0],
+      hostId: savedHost.id,
+      hostLabel: savedHost.label,
+    };
+    useAppStore.setState({
+      sessions: [historicalLocal, sessions[1]],
+      sidecars: { local: { ...binding, degraded: null } },
+    });
+
+    render(<SidecarWorkspace binding={{ ...binding, degraded: null }} />);
+
+    expect(screen.getByTestId("terminal-local")).toHaveAttribute(
+      "data-show-reconnect",
+      "false",
+    );
+    expect(screen.getByTestId("terminal-remote")).toHaveAttribute(
+      "data-show-reconnect",
+      "false",
+    );
+    expect(screen.queryByRole("button", { name: "Reconnect" })).not.toBeInTheDocument();
+  });
+
   it("waits for a saved host lookup and reconnects with its full configuration", async () => {
     let resolveHost: (host: typeof savedHost) => void = () => {};
     mocks.sshHostsGet.mockReturnValue(
@@ -120,7 +157,9 @@ describe("Sidecar SSH reconnect", () => {
     useAppStore.setState({ sidecars: { local: saved } });
     render(<SidecarWorkspace binding={saved} />);
 
-    const reconnect = screen.getByRole("button", { name: "Reconnect" });
+    const reconnects = screen.getAllByRole("button", { name: "Reconnect" });
+    expect(reconnects).toHaveLength(1);
+    const [reconnect] = reconnects;
     expect(reconnect).toBeDisabled();
     fireEvent.click(reconnect);
     expect(mocks.connectToHost).not.toHaveBeenCalled();

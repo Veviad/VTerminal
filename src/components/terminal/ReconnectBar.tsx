@@ -37,14 +37,16 @@ export function ReconnectBar({ sessionId }: { sessionId: string }) {
   if (!show || !host) return null;
 
   const gate = canConnectHere(sessionId);
+  const target = describeSshTarget(host);
 
   return (
-    <div className="pointer-events-auto absolute inset-x-0 bottom-0 z-20 flex items-center justify-center gap-2 border-t border-border-subtle bg-bg-secondary/95 px-3 py-1.5 text-[11px] text-text-muted">
-      <span className="inline-block h-1.5 w-1.5 rounded-full border border-text-muted" />
-      <Server size={11} />
-      <span className="font-mono">{describeSshTarget(host)}</span>
-      <span>·</span>
-      <span>{S.terminal.notConnected}</span>
+    <div className="pointer-events-auto absolute inset-x-0 bottom-0 z-20 flex items-center justify-between gap-2 overflow-hidden border-t border-border-subtle bg-bg-secondary/95 px-3 py-1.5 text-[11px] text-text-muted">
+      <span className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
+        <Server aria-hidden="true" className="shrink-0" size={11} />
+        <span className="min-w-0 truncate font-mono" title={target}>
+          {target} · {S.terminal.notConnected}
+        </span>
+      </span>
       <button
         onClick={() => {
           setBusy(true);
@@ -54,7 +56,7 @@ export function ReconnectBar({ sessionId }: { sessionId: string }) {
         }}
         disabled={busy || !gate.ok}
         title={gate.ok ? undefined : gate.reason}
-        className="rounded-md border border-border-subtle px-2 py-0.5 text-accent transition-colors duration-150 hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-60"
+        className="shrink-0 rounded-md border border-border-subtle px-2 py-0.5 text-accent transition-colors duration-150 hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-60"
       >
         {S.terminal.reconnect}
       </button>
