@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ChatWorkspace, isNearChatBottom } from "../components/chat/ChatWorkspace";
 import type { ChatDetail } from "../lib/types";
+import * as api from "../lib/tauri";
 import { useAppStore } from "../stores/appStore";
 import { useChatStore } from "../stores/chatStore";
 
@@ -111,6 +112,42 @@ describe("Chat workspace autoscroll", () => {
       }));
     });
     expect(scrollTo).toHaveBeenCalledWith({ top: 1_000, behavior: "auto" });
+  });
+
+  it("refreshes a local generation fallback while the response is streaming", async () => {
+    useAppStore.setState({
+      activeModelId: "local/qwen-test",
+      loadedModelId: "local/qwen-test",
+      modelState: "ready",
+      localAcceleration: {
+        backend: "metal",
+        device_name: "Apple GPU",
+        device_memory_bytes: null,
+        fallback_reason: null,
+        generation_mode: "mtp",
+        generation_fallback_reason: null,
+      },
+    });
+    vi.spyOn(api, "modelStatus").mockResolvedValue({
+      loaded: "local/qwen-test",
+      state: "ready",
+      available: true,
+      acceleration: {
+        backend: "metal",
+        device_name: "Apple GPU",
+        device_memory_bytes: null,
+        fallback_reason: null,
+        generation_mode: "standard",
+        generation_fallback_reason: "MTP speculative operation failed",
+      },
+    });
+
+    render(<ChatWorkspace />);
+
+    await waitFor(() => {
+      expect(useAppStore.getState().localAcceleration?.generation_mode).toBe("standard");
+    });
+    expect(api.modelStatus).toHaveBeenCalled();
   });
 
   it("dismisses the Knowledge source menu on an outside pointer press", () => {
