@@ -2,6 +2,7 @@ import { useCallback, useRef, useState, type ReactNode } from "react";
 import {
   Archive,
   ArchiveRestore,
+  Loader2,
   MoreHorizontal,
   Pencil,
   RefreshCw,
@@ -50,6 +51,8 @@ export function ChatActions({
   const [open, setOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [regenerating, setRegenerating] = useState(false);
+  const [regenerateError, setRegenerateError] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   const streaming = useChatStore((state) => state.stream.status === "streaming");
   const busy = useChatStore(
@@ -63,6 +66,19 @@ export function ChatActions({
     action();
   };
   const sidebar = placement === "sidebar";
+  const regenerate = async () => {
+    if (regenerating) return;
+    setRegenerating(true);
+    setRegenerateError(null);
+    try {
+      await useChatStore.getState().regenerateTitle(chat.id, true);
+      setOpen(false);
+    } catch (reason) {
+      setRegenerateError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setRegenerating(false);
+    }
+  };
 
   return (
     <>
@@ -96,11 +112,18 @@ export function ChatActions({
               onClick={() => act(() => setRenameOpen(true))}
             />
             <MenuButton
-              icon={<RefreshCw size={12} />}
-              label="Regenerate title"
-              disabled={streaming || chat.message_count < 2}
-              onClick={() => act(() => void useChatStore.getState().regenerateTitle(chat.id, true))}
+              icon={regenerating
+                ? <Loader2 size={12} className="animate-spin" />
+                : <RefreshCw size={12} />}
+              label={regenerating ? "Regenerating…" : "Regenerate title"}
+              disabled={streaming || regenerating || chat.message_count < 2}
+              onClick={() => void regenerate()}
             />
+            {regenerateError && (
+              <p role="alert" className="px-2 py-1 text-[10px] leading-snug text-danger">
+                {regenerateError}
+              </p>
+            )}
             <MenuButton
               disabled={busy}
               icon={chat.archived_at ? <ArchiveRestore size={12} /> : <Archive size={12} />}

@@ -271,14 +271,32 @@ pub async fn ai_name_chat(
     request_id: String,
     prompt: String,
     answer: String,
+    current_title: Option<String>,
 ) -> Result<String, String> {
     use crate::provider::Effort;
 
     let resolved = resolve_provider(&app).await?;
     let provider = resolved.provider;
+    let replacement = current_title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty());
+    let replacing = replacement.is_some();
+    let system = if replacement.is_some() {
+        "Return only a concise replacement title of at most six words for this chat. It must be meaningfully different from the current title. No quotes, punctuation, explanation, or markdown."
+    } else {
+        "Return only a concise title of at most six words for this chat. No quotes, punctuation, explanation, or markdown."
+    };
+    let current = replacement
+        .map(|title| format!("Current title to replace:\n{title}\n\n"))
+        .unwrap_or_default();
     let messages = vec![
-        ChatMessage::system("Return only a concise title of at most six words for this chat. No quotes, punctuation, explanation, or markdown."),
-        ChatMessage::user(format!("First question:\n{}\n\nFirst answer:\n{}", prompt.trim(), answer.trim())),
+        ChatMessage::system(system),
+        ChatMessage::user(format!(
+            "{current}Chat question:\n{}\n\nChat answer:\n{}",
+            prompt.trim(),
+            answer.trim()
+        )),
     ];
     let cancel = ai_state.register(&request_id);
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
@@ -288,7 +306,7 @@ pub async fn ai_name_chat(
                 messages,
                 Vec::new(),
                 ChatParams {
-                    temperature: Some(0.3),
+                    temperature: Some(if replacing { 0.7 } else { 0.3 }),
                     max_tokens: Some(32),
                     tool_choice: ToolChoiceMode::None,
                     effort: Effort::Off,
@@ -312,7 +330,32 @@ pub async fn ai_name_chat(
         .map_err(|error| format!("naming task panicked: {error}"))?;
     ai_state.finish(&request_id);
     result.map_err(|error| error.to_string())?;
-    super::ai::sanitize_title(&title)
+    sanitize_replacement_title(&title, replacement)
+}
+
+fn title_key(title: &str) -> String {
+    title
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() || character.is_whitespace() {
+                character
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn sanitize_replacement_title(raw: &str, current: Option<&str>) -> Result<String, String> {
+    let title = super::ai::sanitize_title(raw)?;
+    if current.is_some_and(|value| title_key(value) == title_key(&title)) {
+        return Err("The model repeated the current title. Try again.".into());
+    }
+    Ok(title)
 }
 
 #[cfg(test)]
@@ -360,6 +403,25 @@ mod tests {
         assert_eq!(
             chat_web_policy(true, true, true),
             WebToolPolicy::SearchAndFetch
+        );
+    }
+
+    #[test]
+    fn title_comparison_ignores_case_spacing_and_punctuation() {
+        assert_eq!(title_key("  MTP: Token Drafting! "), "mtp token drafting");
+        assert_eq!(title_key("mtp token   drafting"), "mtp token drafting");
+    }
+
+    #[test]
+    fn replacement_title_must_differ_from_the_current_title() {
+        assert!(
+            sanitize_replacement_title("\"MTP token drafting\"", Some("MTP: Token Drafting!"),)
+                .is_err()
+        );
+        assert_eq!(
+            sanitize_replacement_title("multi token prediction", Some("MTP token drafting"))
+                .unwrap(),
+            "multi token prediction"
         );
     }
 }

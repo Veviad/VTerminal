@@ -221,6 +221,12 @@ describe("Chat workspace store", () => {
 
     await useChatStore.getState().regenerateTitle(manual.id, true);
 
+    expect(mocks.aiNameChat).toHaveBeenCalledWith(
+      expect.stringMatching(/^name-chat-/),
+      "How does MTP work?",
+      "It drafts multiple tokens.",
+      "My title",
+    );
     expect(mocks.chatUpdateTitle).toHaveBeenCalledWith(
       manual.id,
       "Generated title",
@@ -232,6 +238,76 @@ describe("Chat workspace store", () => {
       title: "Generated title",
       title_source: "generated",
     });
+  });
+
+  it("uses the latest completed turn when explicitly regenerating a title", async () => {
+    const generated = { ...summary("generated"), title: "Old topic", title_source: "generated" as const, message_count: 4 };
+    const conversation = detail(generated);
+    conversation.messages = [
+      {
+        id: "question-1",
+        sort_order: 0,
+        role: "user",
+        content: "What is the original topic?",
+        thinking: null,
+        model: null,
+        prompt_tokens: null,
+        completion_tokens: null,
+        citations: [],
+        attachments: [],
+        created_at: generated.created_at,
+      },
+      {
+        id: "answer-1",
+        sort_order: 1,
+        role: "assistant",
+        content: "The original topic is setup.",
+        thinking: null,
+        model: "Chat Test",
+        prompt_tokens: 4,
+        completion_tokens: 5,
+        citations: [],
+        attachments: [],
+        created_at: generated.created_at,
+      },
+      {
+        id: "question-2",
+        sort_order: 2,
+        role: "user",
+        content: "How should MTP fallback work?",
+        thinking: null,
+        model: null,
+        prompt_tokens: null,
+        completion_tokens: null,
+        citations: [],
+        attachments: [],
+        created_at: generated.updated_at,
+      },
+      {
+        id: "answer-2",
+        sort_order: 3,
+        role: "assistant",
+        content: "Continue with standard decoding.",
+        thinking: null,
+        model: "Chat Test",
+        prompt_tokens: 5,
+        completion_tokens: 6,
+        citations: [],
+        attachments: [],
+        created_at: generated.updated_at,
+      },
+    ];
+    mocks.chatUpdateTitle.mockResolvedValue(true);
+    useChatStore.setState({ current: conversation, summaries: [generated] });
+
+    await useChatStore.getState().regenerateTitle(generated.id, true);
+
+    expect(mocks.aiNameChat).toHaveBeenCalledWith(
+      expect.stringMatching(/^name-chat-/),
+      "How should MTP fallback work?",
+      "Continue with standard decoding.",
+      "Old topic",
+    );
   });
 
   it("does not let automatic naming replace a manual title", async () => {

@@ -207,6 +207,52 @@ describe("Chat workspace autoscroll", () => {
     expect(screen.getByRole("menuitem", { name: "Rename" })).toBeDisabled();
   });
 
+  it("keeps the menu open and reports title regeneration failures", async () => {
+    const completed: ChatDetail = {
+      ...detail,
+      summary: { ...detail.summary, message_count: 2 },
+      messages: [
+        ...detail.messages,
+        {
+          id: "answer-a",
+          sort_order: 1,
+          role: "assistant",
+          content: "Answer",
+          thinking: null,
+          model: "Chat Test",
+          prompt_tokens: 1,
+          completion_tokens: 1,
+          citations: [],
+          attachments: [],
+          created_at: "2026-08-23T10:01:00Z",
+        },
+      ],
+    };
+    useChatStore.setState({
+      summaries: [completed.summary],
+      current: completed,
+      stream: {
+        status: "idle",
+        requestId: null,
+        content: "",
+        thinking: "",
+        model: null,
+        citations: [],
+        lastError: null,
+      },
+    });
+    const regenerate = vi.spyOn(useChatStore.getState(), "regenerateTitle")
+      .mockRejectedValue(new Error("The model repeated the current title."));
+    render(<ChatWorkspace />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Chat list actions for Autoscroll test" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Regenerate title" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("The model repeated the current title.");
+    expect(regenerate).toHaveBeenCalledWith("chat-a", true);
+    expect(screen.getByRole("menuitem", { name: "Regenerate title" })).toBeInTheDocument();
+  });
+
   it("confirms sidebar deletion in an in-app dialog", async () => {
     useChatStore.setState((state) => ({
       stream: { ...state.stream, status: "idle", requestId: null },
