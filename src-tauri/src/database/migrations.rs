@@ -52,6 +52,9 @@ pub fn run(conn: &Connection) -> Result<(), String> {
     if version < 12 {
         migrate_v12(conn)?;
     }
+    if version < 13 {
+        migrate_v13(conn)?;
+    }
     crate::runbooks::db::ensure_v6_runtime_indexes(conn)?;
 
     Ok(())
@@ -112,10 +115,9 @@ fn migrate_v2(conn: &Connection) -> Result<(), String> {
         r#"
         BEGIN;
         -- Saved SSH hosts. Note what is NOT here: no password, no passphrase,
-        -- no key material. This file is on-disk plaintext, and even perfect
-        -- at-rest storage would still mean typing the secret into a PTY where
-        -- it echoes into scrollback. `identity_file` holds a PATH only; auth is
-        -- keys and ssh-agent.
+        -- no key material. This file is on-disk plaintext. `identity_file`
+        -- holds a PATH only. A later migration adds a presence flag for SSH
+        -- passwords stored in the operating-system credential vault.
         CREATE TABLE ssh_hosts (
             id TEXT PRIMARY KEY,
             label TEXT NOT NULL,
@@ -471,6 +473,21 @@ fn migrate_v12(conn: &Connection) -> Result<(), String> {
     .map_err(|e| format!("migration v12 failed: {e}"))
 }
 
+fn migrate_v13(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        BEGIN;
+        -- Presence only. The password itself lives in macOS Keychain or
+        -- Windows Credential Manager and never enters this plaintext database.
+        ALTER TABLE ssh_hosts ADD COLUMN has_password INTEGER NOT NULL DEFAULT 0
+            CHECK (has_password IN (0, 1));
+        INSERT INTO schema_version (version) VALUES (13);
+        COMMIT;
+        "#,
+    )
+    .map_err(|e| format!("migration v13 failed: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;
@@ -497,7 +514,7 @@ mod tests {
         let first = version(&conn);
         super::run(&conn).unwrap();
         assert_eq!(version(&conn), first);
-        assert_eq!(first, 12);
+        assert_eq!(first, 13);
     }
 
     #[test]
@@ -520,7 +537,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 12);
+        assert_eq!(version(&conn), 13);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'chat_%' ORDER BY name")
             .unwrap()
@@ -570,7 +587,7 @@ mod tests {
         .unwrap();
 
         super::run(&conn).unwrap();
-        assert_eq!(version(&conn), 12);
+        assert_eq!(version(&conn), 13);
         let migrated: (String, Option<String>, Option<String>) = conn
             .query_row(
                 "SELECT cmd_command, cmd_target_role, cmd_target_label
@@ -683,7 +700,7 @@ mod tests {
         )
         .unwrap();
         super::run(&conn).unwrap();
-        assert_eq!(version(&conn), 12);
+        assert_eq!(version(&conn), 13);
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM command_history", [], |r| r.get(0))
             .unwrap();
@@ -716,7 +733,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 12);
+        assert_eq!(version(&conn), 13);
         let migrated: (String, i64, Option<i64>, String, String) = conn
             .query_row(
                 "SELECT source_kind, hidden, builtin_order, created_at, updated_at
@@ -757,7 +774,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 12);
+        assert_eq!(version(&conn), 13);
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(runbook_drafts)")
             .unwrap()
@@ -791,7 +808,7 @@ mod tests {
         super::run(&conn).unwrap();
 
         // Upgrades run the whole chain, so this lands on the current head.
-        assert_eq!(version(&conn), 12);
+        assert_eq!(version(&conn), 13);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()
@@ -837,7 +854,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 12);
+        assert_eq!(version(&conn), 13);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()
@@ -910,6 +927,36 @@ mod tests {
             indices.contains(&"idx_history_session".to_string()),
             "got {indices:?}"
         );
+    }
+
+    #[test]
+    fn ssh_password_migration_adds_presence_without_secret_storage() {
+        let conn = mem();
+        super::run(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO ssh_hosts (id, label, hostname, created_at, updated_at)
+             VALUES ('h1', 'Prod', 'prod-01', 'now', 'now')",
+            [],
+        )
+        .unwrap();
+        let has_password: bool = conn
+            .query_row(
+                "SELECT has_password FROM ssh_hosts WHERE id = 'h1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!has_password);
+
+        let columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(ssh_hosts)")
+            .unwrap()
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(columns.contains(&"has_password".into()));
+        assert!(!columns.iter().any(|column| column == "password"));
     }
 
     #[test]

@@ -516,10 +516,20 @@ export const sshHostsList = () => invoke<SshHost[]>("ssh_hosts_list");
 /** Null when the row was deleted since — a restored tab can outlive its host. */
 export const sshHostsGet = (id: string) => invoke<SshHost | null>("ssh_hosts_get", { id });
 
-export const sshHostsCreate = (host: SshHostInput) => invoke<string>("ssh_hosts_create", { host });
+/** Create can accept the initial password because no keep-vs-clear ambiguity exists yet. */
+export const sshHostsCreate = (host: SshHostInput, password: string | null) =>
+  invoke<string>("ssh_hosts_create", { host, password });
 
 export const sshHostsUpdate = (id: string, host: SshHostInput) =>
   invoke<void>("ssh_hosts_update", { id, host });
+
+/** Write-only. An empty value clears the password, and the secret never reads back. */
+export const sshHostsSetPassword = (id: string, password: string) =>
+  invoke<void>("ssh_hosts_set_password", { id, password });
+
+/** Resolve a saved password in the backend and submit it directly to this PTY. */
+export const sshHostsWritePassword = (id: string, sessionId: string) =>
+  invoke<void>("ssh_hosts_write_password", { id, sessionId });
 
 export const sshHostsDelete = (id: string) => invoke<void>("ssh_hosts_delete", { id });
 

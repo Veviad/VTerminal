@@ -12,7 +12,11 @@ import {
 import { detectNesting } from "../lib/nesting";
 import { abortSession, resetSessionMode } from "../lib/ptyExec";
 import { sanitizeCommand } from "../lib/ptyExecShell";
-import { clearPendingConnect, takePendingConnect } from "../lib/sshConnect";
+import {
+  clearPendingConnect,
+  observeSshPasswordPrompt,
+  takePendingConnect,
+} from "../lib/sshConnect";
 import { replayScrollback, subscribeTerm } from "../lib/termRegistry";
 import { markTranscriptDirty, trackSession } from "../lib/sessionPersistence";
 import { archiveOnClose } from "../lib/sessionArchive";
@@ -359,6 +363,7 @@ export function useSessions() {
       },
       (buf) => {
         const bytes = new Uint8Array(buf);
+        observeSshPasswordPrompt(sessionId, bytes);
         entry.term.write(bytes, () => {
           entry.unackedBytes += bytes.byteLength;
           if (entry.unackedBytes >= 262_144) {

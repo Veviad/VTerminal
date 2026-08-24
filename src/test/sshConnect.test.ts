@@ -1,7 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { SshHost } from "../lib/types";
+
+const apiMocks = vi.hoisted(() => ({
+  writePassword: vi.fn(() => Promise.resolve()),
+}));
+
+vi.mock("../lib/tauri", () => ({
+  sshHostsWritePassword: apiMocks.writePassword,
+  ptyWrite: vi.fn(() => Promise.resolve()),
+}));
+
 import {
   clearPendingConnect,
+  isSshPasswordPrompt,
+  notePasswordAutofill,
   notePendingConnect,
+  observeSshPasswordPrompt,
   takePendingConnect,
 } from "../lib/sshConnect";
 
@@ -17,6 +31,7 @@ const note = (over: Partial<{ hostId: string; label: string; command: string }> 
 beforeEach(() => {
   clearPendingConnect("s1");
   clearPendingConnect("s2");
+  apiMocks.writePassword.mockClear();
 });
 
 afterEach(() => {
@@ -67,5 +82,58 @@ describe("pending connect binding", () => {
 
   it("returns null when nothing is pending", () => {
     expect(takePendingConnect("s1", "ssh prod-01")).toBeNull();
+  });
+});
+
+describe("SSH password prompt matching", () => {
+  it("accepts a direct password prompt and rejects private-key passphrases", () => {
+    expect(isSshPasswordPrompt("deploy@prod-01's password: ", "prod-01", false)).toBe(true);
+    expect(isSshPasswordPrompt("Enter passphrase for key '/tmp/id': ", "prod-01", false)).toBe(
+      false,
+    );
+  });
+
+  it("requires the destination hostname when a proxy may prompt first", () => {
+    expect(isSshPasswordPrompt("jump@bastion's password: ", "prod-01", true)).toBe(false);
+    expect(isSshPasswordPrompt("deploy@prod-01's password: ", "prod-01", true)).toBe(true);
+  });
+
+  it("ignores ANSI styling around a matching prompt", () => {
+    expect(
+      isSshPasswordPrompt("\u001b[33mdeploy@prod-01's password:\u001b[0m ", "prod-01", true),
+    ).toBe(true);
+  });
+
+  it("submits once when a prompt is split across PTY chunks", async () => {
+    const host: SshHost = {
+      id: "h1",
+      label: "Prod",
+      hostname: "prod-01",
+      username: "deploy",
+      port: null,
+      identity_file: null,
+      jump_host: null,
+      extra_args: null,
+      remote_dir: null,
+      post_connect: null,
+      tag: null,
+      color: null,
+      source: "manual",
+      config_alias: null,
+      use_count: 0,
+      last_used_at: null,
+      created_at: "now",
+      updated_at: "now",
+      has_password: true,
+    };
+    const encoder = new TextEncoder();
+    notePasswordAutofill("s1", host);
+    observeSshPasswordPrompt("s1", encoder.encode("deploy@prod"));
+    expect(apiMocks.writePassword).not.toHaveBeenCalled();
+    observeSshPasswordPrompt("s1", encoder.encode("-01's password: "));
+    await vi.waitFor(() => expect(apiMocks.writePassword).toHaveBeenCalledWith("h1", "s1"));
+
+    observeSshPasswordPrompt("s1", encoder.encode("deploy@prod-01's password: "));
+    expect(apiMocks.writePassword).toHaveBeenCalledTimes(1);
   });
 });

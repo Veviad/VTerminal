@@ -8,9 +8,46 @@
 //! The frontend adds POSIX single-quoting on top (see `src/lib/ssh.ts`); this
 //! layer rejects the shapes that quoting alone should never have to contain.
 
-use tauri::State;
+use tauri::{State, Wry};
 
 use crate::database::{queries, DbState};
+use crate::pty::PtyManager;
+
+const MAX_PASSWORD_BYTES: usize = 4096;
+
+fn credential_id(
+    id: &str,
+    hostname: &str,
+    username: Option<&str>,
+    port: Option<u16>,
+) -> crate::credentials::CredentialId {
+    crate::credentials::ssh_id(id, hostname, username, port)
+}
+
+fn host_credential_id(id: &str, host: &queries::SshHostInput) -> crate::credentials::CredentialId {
+    credential_id(id, &host.hostname, host.username.as_deref(), host.port)
+}
+
+fn saved_host_credential_id(host: &queries::SshHost) -> crate::credentials::CredentialId {
+    credential_id(
+        &host.id,
+        &host.hostname,
+        host.username.as_deref(),
+        host.port,
+    )
+}
+
+fn validate_password(password: &str) -> Result<(), String> {
+    if password.len() > MAX_PASSWORD_BYTES {
+        return Err(format!(
+            "the SSH password is too long (max {MAX_PASSWORD_BYTES} bytes)"
+        ));
+    }
+    if password.chars().any(char::is_control) {
+        return Err("the SSH password cannot contain control characters".into());
+    }
+    Ok(())
+}
 
 /// Same rule as the frontend's `sanitizeCommand`: an ESC could forge an OSC
 /// completion token, and \r / \n would split one command into several.
@@ -270,29 +307,141 @@ pub fn ssh_hosts_get(
 
 #[tauri::command]
 pub fn ssh_hosts_create(
+    app: tauri::AppHandle<Wry>,
     db: State<'_, DbState>,
     host: queries::SshHostInput,
+    password: Option<String>,
 ) -> Result<String, String> {
     let mut host = host;
     validate(&mut host)?;
-    let conn = db.0.lock().map_err(|_| "db poisoned")?;
-    queries::insert_ssh_host(&conn, &host)
+    let password = password.filter(|value| !value.trim().is_empty());
+    if let Some(password) = password.as_deref() {
+        validate_password(password)?;
+    }
+
+    let id = {
+        let conn = db.0.lock().map_err(|_| "db poisoned")?;
+        queries::insert_ssh_host(&conn, &host)?
+    };
+    let Some(password) = password else {
+        return Ok(id);
+    };
+
+    let credential = host_credential_id(&id, &host);
+    if let Err(error) = crate::credentials::state(&app).set_or_clear(&credential, password) {
+        if let Ok(conn) = db.0.lock() {
+            let _ = queries::delete_ssh_host(&conn, &id);
+        }
+        return Err(error);
+    }
+    let presence_result =
+        db.0.lock()
+            .map_err(|_| "db poisoned".to_string())
+            .and_then(|conn| queries::set_ssh_host_has_password(&conn, &id, true));
+    if let Err(error) = presence_result {
+        let _ = crate::credentials::state(&app).delete(&credential);
+        if let Ok(conn) = db.0.lock() {
+            let _ = queries::delete_ssh_host(&conn, &id);
+        }
+        return Err(error);
+    }
+    Ok(id)
 }
 
 #[tauri::command]
 pub fn ssh_hosts_update(
+    app: tauri::AppHandle<Wry>,
     db: State<'_, DbState>,
     id: String,
     host: queries::SshHostInput,
 ) -> Result<(), String> {
     let mut host = host;
     validate(&mut host)?;
+    let existing = {
+        let conn = db.0.lock().map_err(|_| "db poisoned")?;
+        queries::get_ssh_host(&conn, &id)?.ok_or_else(|| format!("no ssh host {id}"))?
+    };
+    let old_credential = saved_host_credential_id(&existing);
+    let new_credential = host_credential_id(&id, &host);
+    let origin_changed = old_credential != new_credential;
+    if origin_changed && existing.has_password {
+        crate::credentials::state(&app).delete(&old_credential)?;
+    }
     let conn = db.0.lock().map_err(|_| "db poisoned")?;
-    queries::update_ssh_host(&conn, &id, &host)
+    queries::update_ssh_host(&conn, &id, &host, origin_changed)
 }
 
 #[tauri::command]
-pub fn ssh_hosts_delete(db: State<'_, DbState>, id: String) -> Result<(), String> {
+pub fn ssh_hosts_set_password(
+    app: tauri::AppHandle<Wry>,
+    db: State<'_, DbState>,
+    id: String,
+    password: String,
+) -> Result<(), String> {
+    if !password.trim().is_empty() {
+        validate_password(&password)?;
+    }
+    let host = {
+        let conn = db.0.lock().map_err(|_| "db poisoned")?;
+        queries::get_ssh_host(&conn, &id)?.ok_or_else(|| format!("no ssh host {id}"))?
+    };
+    let credential = saved_host_credential_id(&host);
+    let has_password = !password.trim().is_empty();
+    crate::credentials::state(&app).set_or_clear(&credential, password)?;
+
+    let presence_result =
+        db.0.lock()
+            .map_err(|_| "db poisoned".to_string())
+            .and_then(|conn| queries::set_ssh_host_has_password(&conn, &id, has_password));
+    if let Err(error) = presence_result {
+        // A newly-created vault item must not become an unreachable orphan if
+        // SQLite could not record its presence. Existing replacements keep the
+        // old true flag and remain addressable.
+        if has_password && !host.has_password {
+            let _ = crate::credentials::state(&app).delete(&credential);
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Resolve and submit a saved password without ever serializing it through IPC.
+/// The frontend calls this once after observing a matching SSH password prompt.
+#[tauri::command]
+pub fn ssh_hosts_write_password(
+    app: tauri::AppHandle<Wry>,
+    db: State<'_, DbState>,
+    pty: State<'_, PtyManager>,
+    id: String,
+    session_id: String,
+) -> Result<(), String> {
+    let host = {
+        let conn = db.0.lock().map_err(|_| "db poisoned")?;
+        queries::get_ssh_host(&conn, &id)?.ok_or_else(|| format!("no ssh host {id}"))?
+    };
+    if !host.has_password {
+        return Err(format!("no SSH password is stored for {}", host.label));
+    }
+    let credential = saved_host_credential_id(&host);
+    let secret = crate::credentials::state(&app)
+        .get(&credential)?
+        .ok_or_else(|| format!("no SSH password is stored for {}", host.label))?;
+    pty.write_secret_line(&session_id, &secret)
+}
+
+#[tauri::command]
+pub fn ssh_hosts_delete(
+    app: tauri::AppHandle<Wry>,
+    db: State<'_, DbState>,
+    id: String,
+) -> Result<(), String> {
+    let host = {
+        let conn = db.0.lock().map_err(|_| "db poisoned")?;
+        queries::get_ssh_host(&conn, &id)?.ok_or_else(|| format!("no ssh host {id}"))?
+    };
+    if host.has_password {
+        crate::credentials::state(&app).delete(&saved_host_credential_id(&host))?;
+    }
     let conn = db.0.lock().map_err(|_| "db poisoned")?;
     queries::delete_ssh_host(&conn, &id)
 }
@@ -571,6 +720,14 @@ mod tests {
         let mut h = host("Prod", "prod-01");
         h.post_connect = Some("tmux attach\rrm -rf /".into());
         assert!(validate(&mut h).unwrap_err().contains("control characters"));
+    }
+
+    #[test]
+    fn password_validation_preserves_printable_bytes_and_rejects_terminal_input() {
+        assert!(validate_password(" leading and trailing ").is_ok());
+        assert!(validate_password("symbols !@#$%^&*()").is_ok());
+        assert!(validate_password("line one\nline two").is_err());
+        assert!(validate_password(&"x".repeat(MAX_PASSWORD_BYTES + 1)).is_err());
     }
 
     #[test]

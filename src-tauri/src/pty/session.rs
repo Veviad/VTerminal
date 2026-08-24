@@ -534,6 +534,16 @@ impl PtySession {
             .map_err(|e| format!("pty write failed: {e}"))
     }
 
+    /// Submit a vault-backed secret as one terminal line without copying it
+    /// into a serializable `String` or returning it across IPC.
+    pub fn write_secret_line(&self, secret: &crate::credentials::Secret) -> Result<(), String> {
+        let mut writer = self.writer.lock().map_err(|_| "writer poisoned")?;
+        writer
+            .write_all(secret.expose().as_bytes())
+            .and_then(|_| writer.write_all(b"\r"))
+            .map_err(|e| format!("pty secret write failed: {e}"))
+    }
+
     pub fn resize(&self, cols: u16, rows: u16) -> Result<(), String> {
         self.master
             .resize(PtySize {
