@@ -38,6 +38,7 @@ function toAiMessages(rows: ArchivedMessage[]): AiMessage[] {
           exitCode: r.command.exit_code,
           status: r.command.status,
           note: r.command.note ?? undefined,
+          outputPolicy: r.command.output_policy,
           // The live session id is intentionally not restored: archived cards
           // retain display provenance, never a runnable binding to an old PTY.
           targetRole: r.command.target_role ?? undefined,

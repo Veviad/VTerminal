@@ -9,7 +9,31 @@ import {
   sanitizeCommand,
   sentinelSuffix,
   shellFromProbe,
+  suppressPrivateOutput,
 } from "../lib/ptyExecShell";
+
+describe("suppressPrivateOutput", () => {
+  it("uses current-shell POSIX grouping so exports survive", () => {
+    expect(suppressPrivateOutput("export GENERATED=opaque", "posix")).toBe(
+      "{ eval 'export GENERATED=opaque'; } >/dev/null 2>/dev/null",
+    );
+  });
+
+  it("uses fish grouping and fish status syntax", () => {
+    expect(suppressPrivateOutput("set -gx GENERATED opaque", "fish")).toBe(
+      "begin; eval 'set -gx GENERATED opaque'; end >/dev/null 2>/dev/null",
+    );
+    expect(sentinelSuffix("fish", "nonce")).toContain("$status");
+  });
+
+  it("quotes shell syntax so comments and group tokens cannot escape suppression", () => {
+    const wrapped = suppressPrivateOutput("printf '%s' opaque # comment", "posix");
+    expect(wrapped).toBe(
+      `{ eval 'printf '"'"'%s'"'"' opaque # comment'; } >/dev/null 2>/dev/null`,
+    );
+  });
+
+});
 
 describe("sanitizeCommand", () => {
   it("accepts an ordinary one-line command", () => {

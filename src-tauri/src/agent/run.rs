@@ -4,7 +4,8 @@ use tauri::ipc::Channel;
 use super::exec;
 use super::{
     AgentPermissionState, AgentTargetRole, ApprovalDecision, ApprovalResponse, ApprovalState,
-    PauseReason, PermissionMode, PtyExecState, Steer, SteerState, StreamEvent,
+    OutputPolicy, PauseReason, PermissionMode, PtyExecState, Steer, SteerState, StreamEvent,
+    PRIVATE_OUTPUT_NOTICE,
 };
 use crate::provider::{
     ChatMessage, ChatParams, FinishReason, Provider, ProviderError, ProviderEvent, Role, ToolCall,
@@ -372,7 +373,15 @@ fn base_tools(sidecar: bool) -> Vec<ToolDef> {
         "explanation".into(),
         json!({ "type": "string", "description": "One sentence: what this does and why" }),
     );
-    let mut run_required = vec!["command", "explanation"];
+    run_properties.insert(
+        "output_policy".into(),
+        json!({
+            "type": "string",
+            "enum": ["normal", "private"],
+            "description": "Use private whenever the command generates, loads, transforms, or consumes secret material. Private stdout and stderr are discarded and never sent to the model."
+        }),
+    );
+    let mut run_required = vec!["command", "explanation", "output_policy"];
     if sidecar {
         run_properties.insert(
             "target".into(),
@@ -623,10 +632,12 @@ fn policy_auto_runs(
     mode: PermissionMode,
     assessment: &super::policy::CommandAssessment,
     rule: super::policy::RuleDecision,
+    output_policy: OutputPolicy,
 ) -> bool {
     let protected = assessment.privileged
         || assessment.opaque
-        || assessment.effect == super::policy::CommandEffect::SensitiveRead;
+        || assessment.effect == super::policy::CommandEffect::SensitiveRead
+        || output_policy == OutputPolicy::Private;
     if protected
         || rule == super::policy::RuleDecision::Ask
         || rule == super::policy::RuleDecision::Deny
@@ -712,41 +723,47 @@ async fn process_tool_calls(
                 return ToolBatchResult::Terminate(AgentTermination::Completed);
             }
             "run_command" => {
-                let parsed: Result<serde_json::Value, _> = serde_json::from_str(&call.arguments);
-                let (command, explanation) = match &parsed {
-                    Ok(v) => (
-                        v.get("command")
-                            .and_then(|c| c.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        v.get("explanation")
-                            .and_then(|c| c.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                    ),
-                    Err(_) => (String::new(), String::new()),
-                };
-                if command.trim().is_empty() {
+                #[derive(serde::Deserialize)]
+                struct RunCommandArguments {
+                    command: String,
+                    explanation: String,
+                    output_policy: OutputPolicy,
+                    #[serde(default)]
+                    target: Option<String>,
+                }
+
+                let parsed = serde_json::from_str::<RunCommandArguments>(&call.arguments);
+                let Ok(arguments) = parsed else {
                     messages.push(tool_result(
                         &call.id,
-                        "Error: run_command arguments were not valid JSON with a non-empty \"command\" string. Try again.",
+                        "Error: run_command arguments must be valid JSON with non-empty \"command\" and \"explanation\" strings plus output_policy set to exactly \"normal\" or \"private\". Nothing was executed; try again.",
+                    ));
+                    continue;
+                };
+                let RunCommandArguments {
+                    command,
+                    explanation,
+                    output_policy: requested_output_policy,
+                    target: requested_target,
+                } = arguments;
+                if command.trim().is_empty() || explanation.trim().is_empty() {
+                    messages.push(tool_result(
+                        &call.id,
+                        "Error: run_command needs non-empty \"command\" and \"explanation\" strings. Nothing was executed; try again.",
                     ));
                     continue;
                 }
 
-                let requested_target = parsed
-                    .as_ref()
-                    .ok()
-                    .and_then(|v| v.get("target"))
-                    .and_then(|target| target.as_str());
-                let command_target =
-                    match config.exec_target.resolve_command_target(requested_target) {
-                        Ok(target) => target,
-                        Err(message) => {
-                            messages.push(tool_result(&call.id, &message));
-                            continue;
-                        }
-                    };
+                let command_target = match config
+                    .exec_target
+                    .resolve_command_target(requested_target.as_deref())
+                {
+                    Ok(target) => target,
+                    Err(message) => {
+                        messages.push(tool_result(&call.id, &message));
+                        continue;
+                    }
+                };
                 let mut assessment = super::policy::assess(&command);
 
                 if config.exec_target.is_sidecar()
@@ -806,6 +823,13 @@ async fn process_tool_calls(
                     .into();
                 }
 
+                let mut effective_output_policy =
+                    if assessment.effect == super::policy::CommandEffect::SensitiveRead {
+                        OutputPolicy::Private
+                    } else {
+                        requested_output_policy
+                    };
+
                 if !config.web_access && assessment.network {
                     *network_blocked_count = network_blocked_count.saturating_add(1);
                     record_command_blocked(
@@ -825,7 +849,8 @@ async fn process_tool_calls(
 
                 *approval_counter = approval_counter.saturating_add(1);
                 let approval_id = format!("{}-ap{}", config.request_id, approval_counter);
-                let auto = policy_auto_runs(mode, &assessment, rule_decision);
+                let auto =
+                    policy_auto_runs(mode, &assessment, rule_decision, effective_output_policy);
                 let response = if auto {
                     ApprovalResponse {
                         decision: ApprovalDecision::Run,
@@ -836,6 +861,8 @@ async fn process_tool_calls(
                     let ask_reason =
                         if assessment.effect == super::policy::CommandEffect::SensitiveRead {
                             "this read may reveal credential or secret values"
+                        } else if effective_output_policy == OutputPolicy::Private {
+                            "private-output commands always require approval"
                         } else if assessment.privileged {
                             "privileged commands always require approval"
                         } else if assessment.opaque {
@@ -855,6 +882,7 @@ async fn process_tool_calls(
                         explanation: explanation.clone(),
                         read_only: assessment.read_only(),
                         network: assessment.network,
+                        output_policy: effective_output_policy,
                         assessment: assessment.clone(),
                         ask_reason: ask_reason.into(),
                         target_role,
@@ -912,6 +940,11 @@ async fn process_tool_calls(
                             .filter(|c| c.trim() != command.trim());
                         let was_edited = edited.is_some();
                         let final_command = edited.unwrap_or(command);
+                        if super::policy::assess(&final_command).effect
+                            == super::policy::CommandEffect::SensitiveRead
+                        {
+                            effective_output_policy = OutputPolicy::Private;
+                        }
                         stats.commands_executed = stats.commands_executed.saturating_add(1);
                         let result = match &config.exec_target {
                             ExecTarget::Pty { .. } | ExecTarget::Sidecar { .. } => {
@@ -927,6 +960,7 @@ async fn process_tool_calls(
                                     &approval_id,
                                     &config.request_id,
                                     config.command_timeout_secs,
+                                    effective_output_policy,
                                     pty_exec,
                                     cancel.clone(),
                                     on_event,
@@ -940,6 +974,7 @@ async fn process_tool_calls(
                                     approval_id: approval_id.clone(),
                                     command: final_command.clone(),
                                     explanation: explanation.clone(),
+                                    output_policy: effective_output_policy,
                                     target_role,
                                     target_session_id,
                                 });
@@ -949,6 +984,7 @@ async fn process_tool_calls(
                                     &final_command,
                                     &approval_id,
                                     config.command_timeout_secs,
+                                    effective_output_policy,
                                     cancel.clone(),
                                     on_event,
                                 )
@@ -960,6 +996,17 @@ async fn process_tool_calls(
                                 return ToolBatchResult::Terminate(AgentTermination::Cancelled);
                             }
                             Ok(r) => {
+                                if effective_output_policy == OutputPolicy::Private {
+                                    messages.push(command_tool_result(
+                                        &call.id,
+                                        &command_target,
+                                        &format!(
+                                            "exit code: {}\nduration_ms: {}\n{}",
+                                            r.exit_code, r.duration_ms, PRIVATE_OUTPUT_NOTICE
+                                        ),
+                                    ));
+                                    continue;
+                                }
                                 let edit_note = if was_edited {
                                     format!(
                                         "note: the user edited the command to: {final_command}\n"
@@ -992,6 +1039,17 @@ async fn process_tool_calls(
                                     target_role,
                                     target_session_id,
                                 });
+                                if effective_output_policy == OutputPolicy::Private {
+                                    messages.push(command_tool_result(
+                                        &call.id,
+                                        &command_target,
+                                        &format!(
+                                            "exit code: unknown\nduration_ms: 0\n{}",
+                                            PRIVATE_OUTPUT_NOTICE
+                                        ),
+                                    ));
+                                    continue;
+                                }
                                 messages.push(command_tool_result(
                                     &call.id,
                                     &command_target,
@@ -1693,7 +1751,7 @@ mod tests {
         assert!(single_run.parameters["properties"].get("target").is_none());
         assert_eq!(
             single_run.parameters["required"],
-            json!(["command", "explanation"])
+            json!(["command", "explanation", "output_policy"])
         );
 
         let linked = tools(&sidecar_config());
@@ -1711,7 +1769,7 @@ mod tests {
         );
         assert_eq!(
             linked_run.parameters["required"],
-            json!(["command", "explanation", "target"])
+            json!(["command", "explanation", "output_policy", "target"])
         );
     }
 
@@ -1795,6 +1853,7 @@ mod tests {
             explanation: "Check the remote directory".into(),
             read_only: true,
             network: false,
+            output_policy: OutputPolicy::Normal,
             assessment: super::super::policy::assess("pwd"),
             ask_reason: "test".into(),
             target_role: linked_role,
@@ -1803,6 +1862,7 @@ mod tests {
         .unwrap();
         assert_eq!(linked["target_role"], "remote");
         assert_eq!(linked["target_session_id"], "session-remote");
+        assert_eq!(linked["output_policy"], "normal");
 
         let single_target = ExecTarget::Pty {
             session_id: "single-session".into(),
@@ -1817,6 +1877,7 @@ mod tests {
             explanation: "Check the directory".into(),
             read_only: true,
             network: false,
+            output_policy: OutputPolicy::Normal,
             assessment: super::super::policy::assess("pwd"),
             ask_reason: "test".into(),
             target_role: single_role,
@@ -2205,37 +2266,63 @@ mod tests {
         assert!(!policy_auto_runs(
             PermissionMode::Ask,
             &read,
-            RuleDecision::Allow
+            RuleDecision::Allow,
+            OutputPolicy::Normal,
         ));
         assert!(policy_auto_runs(
             PermissionMode::AutoRead,
             &read,
-            RuleDecision::None
+            RuleDecision::None,
+            OutputPolicy::Normal,
         ));
         assert!(policy_auto_runs(
             PermissionMode::AutoRead,
             &unknown,
-            RuleDecision::Allow
+            RuleDecision::Allow,
+            OutputPolicy::Normal,
         ));
         assert!(!policy_auto_runs(
             PermissionMode::AutoSmart,
             &unknown,
-            RuleDecision::None
+            RuleDecision::None,
+            OutputPolicy::Normal,
         ));
         assert!(!policy_auto_runs(
             PermissionMode::AutoAll,
             &secret,
-            RuleDecision::None
+            RuleDecision::None,
+            OutputPolicy::Normal,
         ));
         assert!(!policy_auto_runs(
             PermissionMode::AutoAll,
             &read,
-            RuleDecision::Ask
+            RuleDecision::Ask,
+            OutputPolicy::Normal,
         ));
         assert!(!policy_auto_runs(
             PermissionMode::AutoAll,
             &read,
-            RuleDecision::Deny
+            RuleDecision::Deny,
+            OutputPolicy::Normal,
         ));
+        assert!(!policy_auto_runs(
+            PermissionMode::AutoAll,
+            &read,
+            RuleDecision::Allow,
+            OutputPolicy::Private,
+        ));
+        for mode in [
+            PermissionMode::Ask,
+            PermissionMode::AutoRead,
+            PermissionMode::AutoSmart,
+            PermissionMode::AutoAll,
+        ] {
+            assert!(!policy_auto_runs(
+                mode,
+                &read,
+                RuleDecision::Allow,
+                OutputPolicy::Private,
+            ));
+        }
     }
 }

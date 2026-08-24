@@ -106,6 +106,8 @@ export type PtyEvent =
 // ---------- AI streaming ----------
 
 export type AgentTargetRole = "local" | "remote";
+export type OutputPolicy = "normal" | "private";
+export const PRIVATE_OUTPUT_NOTICE = "[private output suppressed]";
 
 export type CommandEffect = "semantic_read" | "state_change" | "sensitive_read" | "unknown";
 export interface CommandAssessment {
@@ -142,6 +144,7 @@ export type StreamEvent =
       explanation: string;
       read_only: boolean;
       network: boolean;
+      output_policy: OutputPolicy;
       assessment?: CommandAssessment;
       ask_reason?: string;
       /** Present only for a linked Sidecar run. */
@@ -169,6 +172,7 @@ export type StreamEvent =
       /** Repeated from the proposal: an auto-run command never drew a card, so
        *  this is the only place its justification reaches the transcript. */
       explanation: string;
+      output_policy: OutputPolicy;
       target_role?: AgentTargetRole;
       target_session_id?: string;
     }
@@ -177,6 +181,7 @@ export type StreamEvent =
       approval_id: string;
       command: string;
       explanation: string;
+      output_policy: OutputPolicy;
       target_role?: AgentTargetRole;
       target_session_id?: string;
     }
@@ -336,6 +341,7 @@ export interface AiMessage {
     command: string;
     output: string;
     exitCode: number | null;
+    durationMs?: number;
     /** "timeout" = still running in the terminal, never killed.
      *  "blocked" = never executed (the terminal was busy, or policy refused it —
      *  see `agent::policy` and StreamEvent::CommandBlocked). */
@@ -347,6 +353,8 @@ export interface AiMessage {
      *  approval card to read it on. Not archived: `sessionArchive` maps command
      *  fields explicitly, and a restored transcript shows the command alone. */
     explanation?: string;
+    /** Private stdout and stderr were discarded before capture. */
+    outputPolicy?: OutputPolicy;
     /** Live hang classification while `status === "running"`. Never archived —
      *  `sessionArchive` maps command fields explicitly and skips this. */
     stall?: CommandStall;
@@ -765,6 +773,7 @@ export interface ArchivedMessage {
     exit_code: number | null;
     status: "running" | "done" | "skipped" | "timeout" | "blocked";
     note: string | null;
+    output_policy: OutputPolicy;
     target_role: AgentTargetRole | null;
     target_label: string | null;
   } | null;
@@ -831,6 +840,7 @@ export interface ArchiveMessageInput {
     exit_code: number | null;
     status: string;
     note: string | null;
+    output_policy: OutputPolicy;
     target_role: AgentTargetRole | null;
     target_label: string | null;
   } | null;

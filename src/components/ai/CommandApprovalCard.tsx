@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { Hourglass, Play, ServerCog, SkipForward, Square, Terminal } from "lucide-react";
+import { Hourglass, LockKeyhole, Play, ServerCog, SkipForward, Square, Terminal } from "lucide-react";
 import { S } from "../../lib/strings";
+import type { OutputPolicy } from "../../lib/types";
 
 export function CommandApprovalCard({
   command,
@@ -8,6 +9,7 @@ export function CommandApprovalCard({
   target,
   remote,
   targetRole = remote ? "remote" : "local",
+  outputPolicy,
   queuedSteers = 0,
   askedBecause = null,
   onRemember,
@@ -20,6 +22,7 @@ export function CommandApprovalCard({
   remote: boolean;
   /** Explicit in sidecar mode; inferred from `remote` for single-session cards. */
   targetRole?: "local" | "remote";
+  outputPolicy: OutputPolicy;
   /** Why this card is up even though an auto mode is armed. Null when the mode
    *  asks about everything, where no explanation is owed. Without it the "Reads"
    *  mode looks broken every time it correctly stops for a write. */
@@ -77,6 +80,15 @@ export function CommandApprovalCard({
           {askedBecause === "writes" ? S.aiPanel.askedBecause.writes : `asking: ${askedBecause}`}
         </p>
       )}
+      {outputPolicy === "private" && (
+        <div className="mb-2 flex items-start gap-1.5 rounded bg-accent/10 px-2 py-1 text-[10px] text-accent">
+          <LockKeyhole size={11} className="mt-0.5 shrink-0" />
+          <span>
+            <span className="font-semibold">{S.aiPanel.privateOutput}</span>
+            {` ${S.aiPanel.privateOutputHint}`}
+          </span>
+        </div>
+      )}
       {editing ? (
         <textarea
           value={edited}
@@ -129,7 +141,7 @@ export function CommandApprovalCard({
         </button>
         {changed && !empty && <span className="text-[10px] text-warning">edited</span>}
       </div>
-      {onRemember && !responded && (
+      {outputPolicy !== "private" && onRemember && !responded && (
         <details className="mt-2 text-[10px] text-text-muted">
           <summary className="cursor-pointer select-none hover:text-text-secondary">
             Remember policy for this exact argv shape

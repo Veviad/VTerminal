@@ -20,6 +20,7 @@ import * as api from "./tauri";
 import { useAppStore } from "../stores/appStore";
 import { getTerm, serializeSession } from "./termRegistry";
 import type { AiMessage, ArchiveMessageInput, ArchiveSessionInput } from "./types";
+import { PRIVATE_OUTPUT_NOTICE } from "./types";
 import { isRunbookTerminalProtected } from "./runbookTerminalPrivacy";
 
 /**
@@ -55,10 +56,17 @@ export function toArchiveMessages(messages: AiMessage[]): ArchiveMessageInput[] 
           // Tail, not head: the end of a command's output is what says whether it
           // worked. Rust caps this again — that is the guarantee, this is the
           // courtesy that keeps the IPC payload small.
-          output: m.command.output.slice(-CARD_OUTPUT_TAIL),
+          output:
+            m.command.outputPolicy === "private"
+              ? ""
+              : m.command.output.slice(-CARD_OUTPUT_TAIL),
           exit_code: m.command.exitCode,
           status: m.command.status,
-          note: m.command.note ?? null,
+          note:
+            m.command.outputPolicy === "private"
+              ? PRIVATE_OUTPUT_NOTICE
+              : (m.command.note ?? null),
+          output_policy: m.command.outputPolicy ?? "normal",
           target_role: m.command.targetRole ?? null,
           target_label: m.command.targetLabel ?? null,
         }

@@ -1,7 +1,7 @@
 use tauri::ipc::Channel;
 
 use super::exec::ExecResult;
-use super::{AgentTargetRole, PtyExecState, StreamEvent};
+use super::{AgentTargetRole, OutputPolicy, PtyExecState, StreamEvent};
 
 /// Slack added to the frontend's own timeout before the backend gives up.
 ///
@@ -27,6 +27,7 @@ pub async fn run_in_terminal(
     approval_id: &str,
     request_id: &str,
     timeout_secs: u64,
+    output_policy: OutputPolicy,
     pty_exec: &PtyExecState,
     mut cancel: tokio::sync::watch::Receiver<bool>,
     on_event: &Channel<StreamEvent>,
@@ -40,6 +41,7 @@ pub async fn run_in_terminal(
         command: command.to_string(),
         timeout_secs,
         explanation: explanation.to_string(),
+        output_policy,
         target_role,
         target_session_id: target_role.map(|_| session_id.to_string()),
     });

@@ -29,7 +29,14 @@ describe("agent stream lifecycle", () => {
     s.initAiStream("a", "agent", "req-1");
     s.setPendingProposal(
       "a",
-      { approvalId: "ap1", command: "ls", explanation: "list files", readOnly: true, network: false },
+      {
+        approvalId: "ap1",
+        command: "ls",
+        explanation: "list files",
+        readOnly: true,
+        network: false,
+        outputPolicy: "normal",
+      },
       "awaiting_approval",
     );
     let stream = useAppStore.getState().aiStreams["a"];
@@ -63,6 +70,19 @@ describe("agent stream lifecycle", () => {
     expect(msgs[msgs.length - 2].content).toBe("I will list the files.");
     expect(msgs[msgs.length - 1].id).toBe("cmd-ap2");
     expect(useAppStore.getState().aiStreams["a"].streamingContent).toBe("");
+  });
+
+  it("never accepts output updates for a private command card", () => {
+    const s = useAppStore.getState();
+    s.initAiStream("a", "agent", "req-private");
+    s.beginCommand("a", "private-ap", "generate secret", undefined, undefined, "private");
+    useAppStore.getState().appendCommandOutput("a", "private-ap", "raw-secret");
+    useAppStore.getState().setCommandOutput("a", "private-ap", "raw-secret-again");
+
+    const messages = useAppStore.getState().aiStreams.a.messages;
+    const command = messages[messages.length - 1]?.command;
+    expect(command?.outputPolicy).toBe("private");
+    expect(command?.output).toBe("");
   });
 
   it("thinking accumulates and folds into the finished message", () => {

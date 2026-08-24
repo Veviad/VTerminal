@@ -2,7 +2,7 @@ use std::process::Stdio;
 use tauri::ipc::Channel;
 use tokio::io::AsyncReadExt;
 
-use super::StreamEvent;
+use super::{OutputPolicy, StreamEvent, PRIVATE_OUTPUT_NOTICE};
 
 /// Cap on bytes streamed to the UI per command (the panel is not a terminal).
 const UI_STREAM_CAP: usize = 65_536;
@@ -35,6 +35,7 @@ pub async fn run_command(
     command: &str,
     approval_id: &str,
     timeout_secs: u64,
+    output_policy: OutputPolicy,
     mut cancel: tokio::sync::watch::Receiver<bool>,
     on_event: &Channel<StreamEvent>,
 ) -> Result<ExecResult, String> {
@@ -74,10 +75,15 @@ pub async fn run_command(
     let wsl_session_tag = cmd.1;
     #[cfg(target_os = "windows")]
     let mut cmd = cmd.0;
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+    cmd.stdin(Stdio::null()).kill_on_drop(true);
+    match output_policy {
+        OutputPolicy::Normal => {
+            cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        }
+        OutputPolicy::Private => {
+            cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+    }
     #[cfg(unix)]
     cmd.process_group(0);
     #[cfg(not(target_os = "windows"))]
@@ -109,6 +115,55 @@ pub async fn run_command(
             }
         }
     };
+
+    if output_policy == OutputPolicy::Private {
+        let timeout = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs.max(1)));
+        tokio::pin!(timeout);
+        let mut timed_out = false;
+        let mut cancelled = false;
+        let status = loop {
+            tokio::select! {
+                status = child.wait() => break status.map_err(|e| format!("wait failed: {e}"))?,
+                _ = &mut timeout, if !timed_out && !cancelled => {
+                    timed_out = true;
+                    kill_tree(process_id);
+                }
+                _ = cancel.changed(), if !timed_out && !cancelled => {
+                    if *cancel.borrow() {
+                        cancelled = true;
+                        kill_tree(process_id);
+                    }
+                }
+            }
+        };
+
+        #[cfg(target_os = "windows")]
+        if !crate::pty::session::cleanup_wsl_session(&wsl_session_tag) {
+            return Err("could not verify cleanup of the WSL agent process tree".into());
+        }
+
+        let exit_code = if timed_out || cancelled {
+            status.code().unwrap_or(124)
+        } else {
+            status.code().unwrap_or(-1)
+        };
+        let duration_ms = started.elapsed().as_millis() as u64;
+        let _ = on_event.send(StreamEvent::CommandResult {
+            approval_id: approval_id.to_string(),
+            exit_code: Some(exit_code),
+            duration_ms,
+            error: None,
+            target_role: None,
+            target_session_id: None,
+        });
+        return Ok(ExecResult {
+            exit_code,
+            duration_ms,
+            output_tail: PRIVATE_OUTPUT_NOTICE.into(),
+            timed_out,
+            cancelled,
+        });
+    }
 
     let mut stdout = child.stdout.take().ok_or("no stdout")?;
     let mut stderr = child.stderr.take().ok_or("no stderr")?;
@@ -261,6 +316,7 @@ mod tests {
             "echo hello-exec",
             "a1",
             30,
+            OutputPolicy::Normal,
             no_cancel(),
             &null_channel(),
         )
@@ -279,12 +335,89 @@ mod tests {
             "exit 3",
             "a2",
             30,
+            OutputPolicy::Normal,
             no_cancel(),
             &null_channel(),
         )
         .await
         .unwrap();
         assert_eq!(r.exit_code, 3);
+    }
+
+    #[tokio::test]
+    async fn private_output_is_discarded_before_event_capture() {
+        use std::sync::{Arc, Mutex};
+
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let callback_events = Arc::clone(&events);
+        let channel = Channel::new(move |body: InvokeResponseBody| {
+            if let InvokeResponseBody::Json(body) = body {
+                callback_events.lock().unwrap().push(body);
+            }
+            Ok(())
+        });
+        let r = run_command(
+            "/bin/zsh",
+            None,
+            "printf private-exec-marker; printf private-error-marker >&2; exit 7",
+            "private-a1",
+            30,
+            OutputPolicy::Private,
+            no_cancel(),
+            &channel,
+        )
+        .await
+        .unwrap();
+        let serialized = events.lock().unwrap().join("\n");
+
+        assert_eq!(r.exit_code, 7);
+        assert_eq!(r.output_tail, PRIVATE_OUTPUT_NOTICE);
+        assert!(!serialized.contains("CommandOutput"));
+        assert!(!serialized.contains("private-exec-marker"));
+        assert!(!serialized.contains("private-error-marker"));
+    }
+
+    #[tokio::test]
+    async fn private_timeout_returns_only_private_metadata() {
+        let r = run_command(
+            "/bin/zsh",
+            None,
+            "sleep 60",
+            "private-timeout",
+            1,
+            OutputPolicy::Private,
+            no_cancel(),
+            &null_channel(),
+        )
+        .await
+        .unwrap();
+
+        assert!(r.timed_out);
+        assert_eq!(r.output_tail, PRIVATE_OUTPUT_NOTICE);
+    }
+
+    #[tokio::test]
+    async fn private_cancellation_returns_only_private_metadata() {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let handle = tokio::spawn(async move {
+            run_command(
+                "/bin/zsh",
+                None,
+                "sleep 60",
+                "private-cancel",
+                120,
+                OutputPolicy::Private,
+                rx,
+                &null_channel(),
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let _ = tx.send(true);
+        let r = handle.await.unwrap().unwrap();
+
+        assert!(r.cancelled);
+        assert_eq!(r.output_tail, PRIVATE_OUTPUT_NOTICE);
     }
 
     #[tokio::test]
@@ -296,6 +429,7 @@ mod tests {
             "sleep 60",
             "a3",
             1,
+            OutputPolicy::Normal,
             no_cancel(),
             &null_channel(),
         )
@@ -318,6 +452,7 @@ mod tests {
             "sleep 60 >/dev/null 2>&1",
             "a3b",
             1,
+            OutputPolicy::Normal,
             no_cancel(),
             &null_channel(),
         )
@@ -334,7 +469,17 @@ mod tests {
     async fn kills_on_cancel() {
         let (tx, rx) = tokio::sync::watch::channel(false);
         let handle = tokio::spawn(async move {
-            run_command("/bin/zsh", None, "sleep 60", "a4", 120, rx, &null_channel()).await
+            run_command(
+                "/bin/zsh",
+                None,
+                "sleep 60",
+                "a4",
+                120,
+                OutputPolicy::Normal,
+                rx,
+                &null_channel(),
+            )
+            .await
         });
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         let _ = tx.send(true);
@@ -350,6 +495,7 @@ mod tests {
             "head -c 200000 /dev/urandom",
             "a6",
             30,
+            OutputPolicy::Normal,
             no_cancel(),
             &null_channel(),
         )
@@ -370,6 +516,7 @@ mod tests {
             "pwd",
             "a5",
             30,
+            OutputPolicy::Normal,
             no_cancel(),
             &null_channel(),
         )

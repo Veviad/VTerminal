@@ -13,10 +13,12 @@ import type {
   LocalAccelerationInfo,
   LocalModel,
   ModelState,
+  OutputPolicy,
   RemoteContext,
   Session,
   VisionCatalogEntry,
 } from "../lib/types";
+import { PRIVATE_OUTPUT_NOTICE } from "../lib/types";
 import type { EvidenceRecordingPolicy } from "../lib/runbooks";
 import {
   normalizeKnowledgeBucketRef,
@@ -137,6 +139,7 @@ export interface AiStreamState {
     explanation: string;
     readOnly: boolean;
     network: boolean;
+    outputPolicy: OutputPolicy;
     assessment?: import("../lib/types").CommandAssessment;
     askReason?: string;
     targetRole?: AgentTargetRole;
@@ -368,6 +371,7 @@ export interface AppState {
     command: string,
     explanation?: string,
     target?: CommandTargetMeta,
+    outputPolicy?: OutputPolicy,
   ): void;
   appendCommandOutput(sessionId: string, approvalId: string, chunk: string): void;
   /** REPLACE the card's output. The PTY path re-reads the live terminal tail
@@ -383,6 +387,7 @@ export interface AppState {
     exitCode: number | null,
     status?: "done" | "skipped" | "timeout" | "blocked",
     note?: string,
+    durationMs?: number,
   ): void;
   finishAiStream(
     sessionId: string,
@@ -1286,7 +1291,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   flushAiStreaming: (sessionId) =>
     set((state) => withAiStream(state, sessionId, (s) => flushStreaming(s))),
 
-  beginCommand: (sessionId, approvalId, command, explanation, target) =>
+  beginCommand: (sessionId, approvalId, command, explanation, target, outputPolicy = "normal") =>
     set((state) =>
       withAiStream(state, sessionId, (s) => {
         const flushed = flushStreaming(s);
@@ -1307,6 +1312,8 @@ export const useAppStore = create<AppState>((set, get) => ({
                 output: "",
                 exitCode: null,
                 status: "running" as const,
+                outputPolicy,
+                ...(outputPolicy === "private" ? { note: PRIVATE_OUTPUT_NOTICE } : {}),
                 ...(explanation ? { explanation } : {}),
                 ...(target
                   ? {
@@ -1328,6 +1335,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         ...s,
         messages: s.messages.map((m) =>
           m.id === `cmd-${approvalId}` && m.command
+            && m.command.outputPolicy !== "private"
             ? {
                 ...m,
                 command: {
@@ -1345,7 +1353,16 @@ export const useAppStore = create<AppState>((set, get) => ({
     ),
 
   setCommandOutput: (sessionId, approvalId, output) =>
-    set((state) => patchCommand(state, sessionId, approvalId, { output })),
+    set((state) =>
+      withAiStream(state, sessionId, (s) => ({
+        ...s,
+        messages: s.messages.map((m) =>
+          m.id === `cmd-${approvalId}` && m.command && m.command.outputPolicy !== "private"
+            ? { ...m, command: { ...m.command, output } }
+            : m,
+        ),
+      })),
+    ),
 
   setCommandStall: (sessionId, approvalId, stall) =>
     set((state) =>
@@ -1355,7 +1372,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   setCommandTyped: (sessionId, approvalId, typed) =>
     set((state) => patchCommand(state, sessionId, approvalId, { typed })),
 
-  finishCommand: (sessionId, approvalId, exitCode, status, note) =>
+  finishCommand: (sessionId, approvalId, exitCode, status, note, durationMs) =>
     set((state) =>
       withAiStream(state, sessionId, (s) => ({
         ...s,
@@ -1369,6 +1386,7 @@ export const useAppStore = create<AppState>((set, get) => ({
                   exitCode,
                   status: status ?? ("done" as const),
                   ...(note ? { note } : {}),
+                  ...(durationMs !== undefined ? { durationMs } : {}),
                   // A settled card must not keep offering to interrupt.
                   stall: undefined,
                 },

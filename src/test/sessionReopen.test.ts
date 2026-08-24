@@ -186,6 +186,7 @@ describe("reopenSession command provenance", () => {
             exit_code: 0,
             status: "done",
             note: null,
+            output_policy: "normal",
             target_role: "remote",
             target_label: "deploy@prod-01",
           },
@@ -200,6 +201,7 @@ describe("reopenSession command provenance", () => {
 
     const restored = useAppStore.getState().aiStreams["replacement-1"].messages[0].command;
     expect(restored).toMatchObject({
+      outputPolicy: "normal",
       targetRole: "remote",
       targetLabel: "deploy@prod-01",
     });
@@ -210,6 +212,7 @@ describe("reopenSession command provenance", () => {
     // one reopen/close cycle.
     const replacement = archivePutMock.mock.calls[0][0] as ArchiveSessionInput;
     expect(replacement.messages?.[0].command).toMatchObject({
+      output_policy: "normal",
       target_role: "remote",
       target_label: "deploy@prod-01",
     });

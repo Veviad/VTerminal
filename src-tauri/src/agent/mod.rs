@@ -110,6 +110,18 @@ impl AgentTargetRole {
     }
 }
 
+/// Whether command output may cross the execution boundary into the terminal
+/// card and model transcript. `Private` is an execution policy, not a redaction
+/// hint: stdout and stderr are discarded before capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputPolicy {
+    Normal,
+    Private,
+}
+
+pub const PRIVATE_OUTPUT_NOTICE: &str = "[private output suppressed]";
+
 /// Wire events for AI streaming (tagged union, Cowork idiom).
 #[cfg_attr(not(feature = "local-llm"), allow(dead_code))]
 #[derive(Clone, Serialize)]
@@ -144,6 +156,7 @@ pub enum StreamEvent {
         read_only: bool,
         /// Reaches the network, as far as the command text shows.
         network: bool,
+        output_policy: OutputPolicy,
         assessment: policy::CommandAssessment,
         ask_reason: String,
         /// Present only in Sidecar mode. Together these freeze the destination
@@ -173,6 +186,7 @@ pub enum StreamEvent {
         /// approval card, so this event is the only place its one-sentence
         /// justification can reach the transcript.
         explanation: String,
+        output_policy: OutputPolicy,
         #[serde(skip_serializing_if = "Option::is_none")]
         target_role: Option<AgentTargetRole>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -188,6 +202,7 @@ pub enum StreamEvent {
         timeout_secs: u64,
         /// See `CommandStarted::explanation`.
         explanation: String,
+        output_policy: OutputPolicy,
         #[serde(skip_serializing_if = "Option::is_none")]
         target_role: Option<AgentTargetRole>,
         #[serde(skip_serializing_if = "Option::is_none")]

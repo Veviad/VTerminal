@@ -219,6 +219,7 @@ describe("CommandApprovalCard Sidecar destinations", () => {
         target="ssh deploy@prod-01"
         remote={true}
         targetRole="remote"
+        outputPolicy="normal"
         onRespond={onRespond}
       />,
     );
@@ -245,6 +246,7 @@ describe("CommandApprovalCard Sidecar destinations", () => {
         target="~/code/project"
         remote={false}
         targetRole="local"
+        outputPolicy="normal"
         onRespond={onRespond}
       />,
     );
@@ -256,5 +258,22 @@ describe("CommandApprovalCard Sidecar destinations", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Run locally" }));
     expect(onRespond).toHaveBeenCalledWith("run", undefined);
+  });
+
+  it("labels private output and does not offer a persistent allow rule", () => {
+    render(
+      <CommandApprovalCard
+        command="umask 077; openssl rand -hex 32 > secret"
+        explanation="Generate an opaque secret file."
+        target="~/code/project"
+        remote={false}
+        outputPolicy="private"
+        onRemember={vi.fn()}
+        onRespond={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Private output.")).toBeInTheDocument();
+    expect(screen.queryByText("Always allow")).not.toBeInTheDocument();
   });
 });

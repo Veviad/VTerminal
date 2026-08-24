@@ -55,6 +55,9 @@ pub fn run(conn: &Connection) -> Result<(), String> {
     if version < 13 {
         migrate_v13(conn)?;
     }
+    if version < 14 {
+        migrate_v14(conn)?;
+    }
     crate::runbooks::db::ensure_v6_runtime_indexes(conn)?;
 
     Ok(())
@@ -488,6 +491,21 @@ fn migrate_v13(conn: &Connection) -> Result<(), String> {
     .map_err(|e| format!("migration v13 failed: {e}"))
 }
 
+fn migrate_v14(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        BEGIN;
+        -- Preserve the effective output boundary on restored Agent cards.
+        -- Existing cards predate private output and therefore remain normal.
+        ALTER TABLE archived_messages ADD COLUMN cmd_output_policy TEXT NOT NULL DEFAULT 'normal'
+            CHECK (cmd_output_policy IN ('normal','private'));
+        INSERT INTO schema_version (version) VALUES (14);
+        COMMIT;
+        "#,
+    )
+    .map_err(|e| format!("migration v14 failed: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;
@@ -514,7 +532,7 @@ mod tests {
         let first = version(&conn);
         super::run(&conn).unwrap();
         assert_eq!(version(&conn), first);
-        assert_eq!(first, 13);
+        assert_eq!(first, 14);
     }
 
     #[test]
@@ -537,7 +555,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 13);
+        assert_eq!(version(&conn), 14);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'chat_%' ORDER BY name")
             .unwrap()
@@ -587,7 +605,7 @@ mod tests {
         .unwrap();
 
         super::run(&conn).unwrap();
-        assert_eq!(version(&conn), 13);
+        assert_eq!(version(&conn), 14);
         let migrated: (String, Option<String>, Option<String>) = conn
             .query_row(
                 "SELECT cmd_command, cmd_target_role, cmd_target_label
@@ -700,7 +718,7 @@ mod tests {
         )
         .unwrap();
         super::run(&conn).unwrap();
-        assert_eq!(version(&conn), 13);
+        assert_eq!(version(&conn), 14);
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM command_history", [], |r| r.get(0))
             .unwrap();
@@ -733,7 +751,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 13);
+        assert_eq!(version(&conn), 14);
         let migrated: (String, i64, Option<i64>, String, String) = conn
             .query_row(
                 "SELECT source_kind, hidden, builtin_order, created_at, updated_at
@@ -774,7 +792,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 13);
+        assert_eq!(version(&conn), 14);
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(runbook_drafts)")
             .unwrap()
@@ -808,7 +826,7 @@ mod tests {
         super::run(&conn).unwrap();
 
         // Upgrades run the whole chain, so this lands on the current head.
-        assert_eq!(version(&conn), 13);
+        assert_eq!(version(&conn), 14);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()
@@ -854,7 +872,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 13);
+        assert_eq!(version(&conn), 14);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()

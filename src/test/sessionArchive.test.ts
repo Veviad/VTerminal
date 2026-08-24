@@ -16,6 +16,7 @@ import { archiveOnClose, buildArchiveRow, toArchiveMessages } from "../lib/sessi
 import { emptyAiStream, emptySessionUi, useAppStore } from "../stores/appStore";
 import type { AiMessage, ArchiveSessionInput, Session } from "../lib/types";
 import {
+  protectPrivateTerminal,
   protectRunbookTerminal,
   resetRunbookTerminalPrivacyForTests,
 } from "../lib/runbookTerminalPrivacy";
@@ -174,9 +175,26 @@ describe("toArchiveMessages", () => {
       exit_code: 0,
       status: "done",
       note: null,
+      output_policy: "normal",
       target_role: null,
       target_label: null,
     });
+  });
+
+  it("drops private command bytes before building the archive payload", () => {
+    const privateCard = cardMsg("cmd-private");
+    privateCard.command = {
+      ...privateCard.command!,
+      output: "must-never-enter-archive-ipc",
+      note: "raw note",
+      outputPolicy: "private",
+    };
+    const archived = toArchiveMessages([privateCard])[0].command!;
+
+    expect(archived.output).toBe("");
+    expect(archived.note).toBe("[private output suppressed]");
+    expect(archived.output_policy).toBe("private");
+    expect(JSON.stringify(archived)).not.toContain("must-never-enter-archive-ipc");
   });
 
   it("keeps the TAIL of a long command output", () => {
@@ -235,6 +253,20 @@ describe("buildArchiveRow", () => {
     expect(row.scrollback_lines).toBe(0);
     expect(serializeMock).not.toHaveBeenCalled();
     expect(row.messages).toHaveLength(1);
+  });
+
+  it("never archives raw scrollback after an Agent private command", () => {
+    seed(makeSession("a"), [cardMsg("cmd-private")]);
+    protectPrivateTerminal("a");
+    const row = buildArchiveRow("a", {
+      isOpen: false,
+      closeReason: "closed",
+      withScrollback: true,
+      withTranscript: true,
+    })!;
+    expect(row.scrollback).toBe("");
+    expect(row.scrollback_lines).toBe(0);
+    expect(serializeMock).not.toHaveBeenCalled();
   });
 
   it("sends null rather than empty for whatever it does not carry", () => {

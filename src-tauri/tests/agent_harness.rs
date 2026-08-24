@@ -134,6 +134,7 @@ fn finish(id: &str) -> ScriptedRound {
 struct ScenarioResult {
     outcome: AgentRunOutcome,
     events: Vec<Value>,
+    scratch: tempfile::TempDir,
 }
 
 async fn run_scenario(
@@ -240,6 +241,7 @@ async fn run_scenario_with_context(
     ScenarioResult {
         outcome,
         events: captured,
+        scratch,
     }
 }
 
@@ -266,13 +268,29 @@ fn assert_storage_safe_checkpoints(events: &[Value]) {
     }
 }
 
+#[test]
+fn private_posix_groups_preserve_an_opaque_export_for_later_consumption() {
+    let status = std::process::Command::new("/bin/zsh")
+        .args([
+            "-fc",
+            "{ eval 'export GENERATED=$(openssl rand -hex 32)'; } >/dev/null 2>/dev/null; { eval 'test -n \"$GENERATED\"'; } >/dev/null 2>/dev/null",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+}
+
 #[tokio::test]
 async fn approved_command_is_observed_then_the_run_completes() {
     let provider = ScriptedProvider::new([
         reply(vec![call(
             "command-1",
             "run_command",
-            json!({"command":"printf harness-ok", "explanation":"emit deterministic output"}),
+            json!({"command":"printf harness-ok", "explanation":"emit deterministic output", "output_policy":"normal"}),
         )]),
         finish("finish-1"),
     ]);
@@ -292,12 +310,86 @@ async fn approved_command_is_observed_then_the_run_completes() {
 }
 
 #[tokio::test]
+async fn private_generator_never_crosses_the_model_or_event_boundary() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let provider = ScriptedProvider::new([
+        reply(vec![call(
+            "command-private",
+            "run_command",
+            json!({
+                "command":"umask 077; openssl rand -hex 32 | tee generated.secret",
+                "explanation":"generate an opaque secret file",
+                "output_policy":"private"
+            }),
+        )]),
+        finish("finish-private"),
+    ]);
+    let result = run_scenario(&provider, vec![], false, 5, vec![]).await;
+    let generated_path = result.scratch.path().join("generated.secret");
+    let generated = std::fs::read_to_string(&generated_path).unwrap();
+
+    assert_eq!(
+        generated_path.metadata().unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(generated.trim().len() >= 64);
+    assert!(!event_types(&result.events).contains(&"CommandOutput"));
+    let serialized_events = serde_json::to_string(&result.events).unwrap();
+    let serialized_transcript = serde_json::to_string(&result.outcome.transcript).unwrap();
+    let serialized_inputs = serde_json::to_string(&provider.inputs()).unwrap();
+    for boundary in [serialized_events, serialized_transcript, serialized_inputs] {
+        assert!(!boundary.contains(generated.trim()));
+    }
+    assert!(provider.inputs()[1].iter().any(|message| {
+        message.role == Role::Tool
+            && message.content.contains("[private output suppressed]")
+            && message.content.contains("duration_ms:")
+            && !message.content.contains(generated.trim())
+    }));
+    let proposal = result
+        .events
+        .iter()
+        .find(|event| event["type"] == "CommandProposal")
+        .unwrap();
+    assert_eq!(proposal["output_policy"], "private");
+}
+
+#[tokio::test]
+async fn sensitive_read_is_forced_private_even_when_normal_was_requested() {
+    let provider = ScriptedProvider::new([
+        reply(vec![call(
+            "command-sensitive",
+            "run_command",
+            json!({
+                "command":"printenv",
+                "explanation":"exercise sensitive-read classification",
+                "output_policy":"normal"
+            }),
+        )]),
+        finish("finish-sensitive"),
+    ]);
+    let result = run_scenario(&provider, vec![], false, 5, vec![]).await;
+    let proposal = result
+        .events
+        .iter()
+        .find(|event| event["type"] == "CommandProposal")
+        .unwrap();
+
+    assert_eq!(proposal["output_policy"], "private");
+    assert!(!event_types(&result.events).contains(&"CommandOutput"));
+    assert!(provider.inputs()[1].iter().any(|message| {
+        message.role == Role::Tool && message.content.contains("[private output suppressed]")
+    }));
+}
+
+#[tokio::test]
 async fn skipped_command_is_fed_back_without_execution() {
     let provider = ScriptedProvider::new([
         reply(vec![call(
             "command-1",
             "run_command",
-            json!({"command":"printf should-not-run", "explanation":"skip fixture"}),
+            json!({"command":"printf should-not-run", "explanation":"skip fixture", "output_policy":"normal"}),
         )]),
         finish("finish-1"),
     ]);
@@ -326,7 +418,7 @@ async fn network_policy_refuses_before_an_approval_exists() {
         reply(vec![call(
             "command-1",
             "run_command",
-            json!({"command":"curl https://example.com", "explanation":"network fixture"}),
+            json!({"command":"curl https://example.com", "explanation":"network fixture", "output_policy":"normal"}),
         )]),
         finish("finish-1"),
     ]);
@@ -346,7 +438,7 @@ async fn provider_failure_after_execution_keeps_the_command_result() {
         reply(vec![call(
             "command-1",
             "run_command",
-            json!({"command":"printf recover-me", "explanation":"recovery fixture"}),
+            json!({"command":"printf recover-me", "explanation":"recovery fixture", "output_policy":"normal"}),
         )]),
         ScriptedRound::Error("provider sentinel body".into()),
     ]);
@@ -380,7 +472,7 @@ async fn stop_cancels_and_prunes_the_unanswered_call_from_the_checkpoint() {
     let provider = ScriptedProvider::new([reply(vec![call(
         "command-1",
         "run_command",
-        json!({"command":"printf never", "explanation":"stop fixture"}),
+        json!({"command":"printf never", "explanation":"stop fixture", "output_policy":"normal"}),
     )])]);
     let result = run_scenario(
         &provider,
@@ -426,7 +518,7 @@ async fn an_approved_edit_executes_and_reports_the_edited_command() {
         reply(vec![call(
             "command-1",
             "run_command",
-            json!({"command":"printf original-marker", "explanation":"edit fixture"}),
+            json!({"command":"printf original-marker", "explanation":"edit fixture", "output_policy":"normal"}),
         )]),
         finish("finish-1"),
     ]);
@@ -455,6 +547,44 @@ async fn an_approved_edit_executes_and_reports_the_edited_command() {
 }
 
 #[tokio::test]
+async fn a_sensitive_user_edit_is_upgraded_and_cannot_emit_output() {
+    let provider = ScriptedProvider::new([
+        reply(vec![call(
+            "command-edit-private",
+            "run_command",
+            json!({
+                "command":"printf ordinary",
+                "explanation":"edit privacy fixture",
+                "output_policy":"normal"
+            }),
+        )]),
+        finish("finish-edit-private"),
+    ]);
+    let result = run_scenario(
+        &provider,
+        vec![ApprovalResponse {
+            decision: ApprovalDecision::Run,
+            edited_command: Some("printenv".into()),
+        }],
+        false,
+        5,
+        vec![],
+    )
+    .await;
+
+    let started = result
+        .events
+        .iter()
+        .find(|event| event["type"] == "CommandStarted")
+        .unwrap();
+    assert_eq!(started["output_policy"], "private");
+    assert!(!event_types(&result.events).contains(&"CommandOutput"));
+    assert!(provider.inputs()[1].iter().any(|message| {
+        message.role == Role::Tool && message.content.contains("[private output suppressed]")
+    }));
+}
+
+#[tokio::test]
 async fn malformed_arguments_are_model_visible_without_drawing_an_approval() {
     let malformed = ToolCall {
         id: "malformed-1".into(),
@@ -469,7 +599,28 @@ async fn malformed_arguments_are_model_visible_without_drawing_an_approval() {
     assert!(!event_types(&result.events).contains(&"CommandProposal"));
     assert!(provider.inputs()[1]
         .iter()
-        .any(|message| message.content.contains("arguments were not valid JSON")));
+        .any(|message| message.content.contains("arguments must be valid JSON")));
+}
+
+#[tokio::test]
+async fn missing_or_invalid_output_policy_executes_nothing() {
+    for arguments in [
+        json!({"command":"printf never", "explanation":"missing policy"}),
+        json!({"command":"printf never", "explanation":"invalid policy", "output_policy":"redacted"}),
+    ] {
+        let provider = ScriptedProvider::new([
+            reply(vec![call("invalid-policy", "run_command", arguments)]),
+            finish("finish-invalid-policy"),
+        ]);
+        let result = run_scenario(&provider, vec![], false, 5, vec![]).await;
+
+        assert_eq!(result.outcome.stats.command_proposals, 0);
+        assert_eq!(result.outcome.stats.commands_executed, 0);
+        assert!(!event_types(&result.events).contains(&"CommandProposal"));
+        assert!(provider.inputs()[1].iter().any(|message| {
+            message.role == Role::Tool && message.content.contains("output_policy")
+        }));
+    }
 }
 
 #[tokio::test]
@@ -479,12 +630,12 @@ async fn multiple_calls_remain_paired_through_the_next_model_round() {
             call(
                 "command-1",
                 "run_command",
-                json!({"command":"printf first", "explanation":"first fixture"}),
+                json!({"command":"printf first", "explanation":"first fixture", "output_policy":"normal"}),
             ),
             call(
                 "command-2",
                 "run_command",
-                json!({"command":"printf second", "explanation":"second fixture"}),
+                json!({"command":"printf second", "explanation":"second fixture", "output_policy":"normal"}),
             ),
         ]),
         finish("finish-1"),
@@ -510,7 +661,7 @@ async fn a_nonzero_exit_is_preserved_as_observed_evidence() {
         reply(vec![call(
             "command-1",
             "run_command",
-            json!({"command":"printf failure-output; exit 7", "explanation":"nonzero fixture"}),
+            json!({"command":"printf failure-output; exit 7", "explanation":"nonzero fixture", "output_policy":"normal"}),
         )]),
         finish("finish-1"),
     ]);

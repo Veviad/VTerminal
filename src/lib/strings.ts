@@ -181,6 +181,8 @@ export const S = {
     editHint: "click command to edit",
     skipped: "skipped",
     running: "running…",
+    privateOutput: "Private output.",
+    privateOutputHint: "Standard output and errors are discarded and cannot be sent to the agent.",
     stillRunning: "still running",
     notRun: "not run",
     runsIn: "runs in",

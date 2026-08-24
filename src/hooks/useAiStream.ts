@@ -33,6 +33,8 @@ import { ownRecordValue } from "../lib/records";
 import { defaultShell, localOsLabel } from "../lib/platform";
 import { sessionIdForRole } from "../lib/sidecar";
 import { collapseHome, resolveSessionTitle } from "../lib/sessionTitle";
+import { isTerminalOutputProtected } from "../lib/runbookTerminalPrivacy";
+import { PRIVATE_OUTPUT_NOTICE } from "../lib/types";
 
 let requestCounter = 1;
 
@@ -55,6 +57,7 @@ const CONTEXT_BLOCKS = 3;
  *  markers (lines shift with scrollback trimming/reflow); the end marker sits
  *  on the next prompt's row, so it is treated as EXCLUSIVE. */
 export function readBlockOutput(sessionId: string, block: Block, limit = OUTPUT_TAIL_LIMIT): string {
+  if (isTerminalOutputProtected(sessionId)) return "";
   const entry = getTerm(sessionId);
   if (!entry) return "";
   const markers = entry.blockMarkers.get(block.id);
@@ -70,7 +73,8 @@ export function buildTerminalContext(sessionId: string): TerminalContext {
   const ui = s.sessionUi[sessionId];
   const session = s.sessions.find((x) => x.id === sessionId);
   const remote = ui?.remote ?? null;
-  const recentBlocks = (ui?.blocks ?? [])
+  const terminalOutputProtected = isTerminalOutputProtected(sessionId);
+  const recentBlocks = terminalOutputProtected ? [] : (ui?.blocks ?? [])
     // Agent-run commands are already in the model's own message history; sending
     // them back as "recent commands" just doubles them up.
     .filter((b) => b.state === "done" && b.command.trim() && b.origin !== "agent")
@@ -104,7 +108,7 @@ export function buildTerminalContext(sessionId: string): TerminalContext {
     os: remote ? "unknown (remote host)" : localOsLabel(),
     recent_blocks: recentBlocks,
     remote: remote ? { ...remote, host_id: ui?.remoteHost?.id ?? null } : null,
-    screen_tail: readScreenTail(sessionId),
+    screen_tail: terminalOutputProtected ? "" : readScreenTail(sessionId),
     shell_integration: (ui?.integrationActive ?? false) && !remote,
   };
 }
@@ -748,6 +752,7 @@ function dispatchPanelEvent(sessionId: string, requestId: string, e: StreamEvent
             explanation: e.explanation,
             readOnly: e.read_only,
             network: e.network,
+            outputPolicy: e.output_policy,
             ...(e.assessment ? { assessment: e.assessment } : {}),
             ...(e.ask_reason ? { askReason: e.ask_reason } : {}),
             ...(target.meta
@@ -782,6 +787,7 @@ function dispatchPanelEvent(sessionId: string, requestId: string, e: StreamEvent
         e.command,
         e.explanation,
         target.meta,
+        e.output_policy,
       );
       break;
     }
@@ -800,12 +806,14 @@ function dispatchPanelEvent(sessionId: string, requestId: string, e: StreamEvent
         e.command,
         e.explanation,
         target.meta,
+        e.output_policy,
       );
       // Fire-and-forget: this dispatcher is the Channel callback and must return
       // synchronously. The command is awaited on its own timeline and reported
       // back through submitCommandResult exactly once.
       void runInTerminal(target.sessionId, e.approval_id, e.command, {
         timeoutMs: e.timeout_secs * 1000,
+        outputPolicy: e.output_policy,
         // Revalidate after prompt probing and immediately before the one PTY
         // write. Pane focus is deliberately irrelevant; immutable session ids
         // and the live binding are the authority.
@@ -814,19 +822,24 @@ function dispatchPanelEvent(sessionId: string, requestId: string, e: StreamEvent
         .then((outcome) => {
           const s = useAppStore.getState();
           if (s.aiStreams[sessionId]?.requestId === requestId) {
-            s.setCommandOutput(sessionId, e.approval_id, outcome.output);
+            s.setCommandOutput(
+              sessionId,
+              e.approval_id,
+              e.output_policy === "private" ? "" : outcome.output,
+            );
             s.finishCommand(
               sessionId,
               e.approval_id,
               outcome.exitCode,
               cardStatus(outcome),
-              outcome.note,
+              e.output_policy === "private" ? PRIVATE_OUTPUT_NOTICE : outcome.note,
+              outcome.durationMs,
             );
           }
           return api.submitCommandResult(
             e.approval_id,
             outcome.exitCode,
-            modelResult(outcome),
+            modelResult(outcome, e.output_policy),
             outcome.durationMs,
             outcome.error ?? null,
           );
@@ -843,7 +856,14 @@ function dispatchPanelEvent(sessionId: string, requestId: string, e: StreamEvent
         rejectTargetedRun(sessionId, requestId, target.reason, e.approval_id);
         break;
       }
-      store.finishCommand(sessionId, e.approval_id, e.exit_code);
+      store.finishCommand(
+        sessionId,
+        e.approval_id,
+        e.exit_code,
+        undefined,
+        undefined,
+        e.duration_ms,
+      );
       break;
     }
     case "Started":
@@ -911,7 +931,8 @@ function cardStatus(o: PtyExecOutcome): "done" | "timeout" | "blocked" {
 }
 
 /** What the model sees: the note (if any) explains an unknown exit code. */
-function modelResult(o: PtyExecOutcome): string {
+function modelResult(o: PtyExecOutcome, outputPolicy: "normal" | "private" = "normal"): string {
+  if (outputPolicy === "private") return PRIVATE_OUTPUT_NOTICE;
   const where = o.mode && o.mode !== "integrated" ? "(ran in the nested/remote shell) " : "";
   if (o.note) return `${where}${o.note}\n${o.output}`.trim();
   return `${where}${o.output}`.trim();
