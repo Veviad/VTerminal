@@ -1522,6 +1522,23 @@ fn generate(
                         };
                         drafted = drafted.saturating_add(draft.len() as u64);
                         let base = n_past;
+
+                        // Qwen's embedded MTP context decodes `id_last` and the
+                        // proposed tokens while producing a draft. Rewind that
+                        // speculative region before feeding the target's verified
+                        // hidden states back through `process`. Otherwise the draft
+                        // context sees the same positions twice and llama.cpp rejects
+                        // its first state update.
+                        if let Err(error) = speculative.draft_context_mut().kv_cache_seq_rm(
+                            0,
+                            Some(mtp_draft_reset_position(base)),
+                            None,
+                        ) {
+                            fallback_reason =
+                                Some(format!("MTP draft verification reset failed: {error}"));
+                            break;
+                        }
+
                         batch.clear();
                         if let Err(error) = batch.add(id_last, base, &[0], true) {
                             fallback_reason = Some(format!("MTP batch add failed: {error}"));
@@ -1731,6 +1748,10 @@ fn mtp_next_position(base: i32, accepted_draft_tokens: usize) -> i32 {
         .saturating_add(i32::try_from(accepted_draft_tokens).unwrap_or(i32::MAX))
 }
 
+fn mtp_draft_reset_position(base: i32) -> u32 {
+    u32::try_from(base).unwrap_or_default()
+}
+
 fn update_generation_status(mode: &str, reason: Option<String>) {
     if let Ok(mut acceleration) = ACCELERATION
         .get_or_init(|| Mutex::new(LocalAcceleration::unloaded()))
@@ -1918,6 +1939,9 @@ mod tests {
 
     #[test]
     fn mtp_rollback_starts_at_the_first_unaccepted_position() {
+        // Draft generation temporarily writes `id_last` at base and must be
+        // rewound to base before the verified target batch is processed.
+        assert_eq!(mtp_draft_reset_position(17), 17);
         // `id_last` is decoded at base. With no accepted draft tokens, the
         // pending sampled replacement belongs at base + 1.
         assert_eq!(mtp_next_position(17, 0), 18);
