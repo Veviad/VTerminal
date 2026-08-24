@@ -35,6 +35,7 @@ import { GenerationModeBadge } from "../layout/GenerationModeBadge";
 import { ChatActions } from "./ChatActions";
 
 const CHAT_BOTTOM_THRESHOLD_PX = 48;
+const GENERATION_STATUS_POLL_MS = 500;
 const NO_ATTACHED_BUCKETS: readonly KnowledgeBucketRef[] = [];
 
 export function isNearChatBottom(
@@ -50,6 +51,7 @@ export function ChatWorkspace() {
   const attachError = useChatStore((state) => state.attachError);
   const attachStatus = useChatStore((state) => state.attachStatus);
   const knowledgeWarning = useChatStore((state) => state.knowledgeWarning);
+  const activeModelId = useAppStore((state) => state.activeModelId);
   const [composer, setComposer] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -70,6 +72,39 @@ export function ChatWorkspace() {
       behavior: stream.status === "streaming" ? "auto" : "smooth",
     });
   }, [current?.messages.length, stream.content, stream.thinking]);
+
+  useEffect(() => {
+    if (stream.status !== "streaming" || !activeModelId.startsWith("local/")) return;
+
+    let active = true;
+    let pending = false;
+    const refreshGenerationStatus = async () => {
+      if (pending) return;
+      pending = true;
+      try {
+        const status = await api.modelStatus();
+        if (active) {
+          useAppStore.getState().setModelStatus(
+            status.loaded,
+            status.state,
+            status.available,
+            status.acceleration,
+          );
+        }
+      } catch {
+        // Status visibility must never interrupt a response.
+      } finally {
+        pending = false;
+      }
+    };
+
+    void refreshGenerationStatus();
+    const timer = window.setInterval(refreshGenerationStatus, GENERATION_STATUS_POLL_MS);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [activeModelId, stream.status]);
 
   const send = () => {
     if ((!composer.trim() && pending.length === 0) || archived) return;

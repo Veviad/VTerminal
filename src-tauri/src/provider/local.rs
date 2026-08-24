@@ -357,8 +357,18 @@ pub struct LoadedModel {
 
 #[derive(Clone)]
 pub struct LoadedMtp {
-    pub draft_model: Option<Arc<LlamaModel>>,
+    pub drafter: LoadedMtpDrafter,
     pub draft_tokens: u32,
+}
+
+#[derive(Clone)]
+pub enum LoadedMtpDrafter {
+    /// Qwen stores its MTP head in the target GGUF. Its draft context must not
+    /// share recurrent state with the target context.
+    Embedded,
+    /// Gemma uses an assistant GGUF whose recurrent state is explicitly bound
+    /// to the target context.
+    Sidecar(Arc<LlamaModel>),
 }
 
 #[derive(Clone, Debug)]
@@ -532,7 +542,7 @@ impl ReadyModel {
         draft_tokens: u32,
     ) -> Result<Self, String> {
         let mut ready = Self::load_standalone(path, family, max_context)?;
-        let draft_model = match draft_path {
+        let drafter = match draft_path {
             Some(path) => {
                 let (model, draft_acceleration) = load_model_with_fallback(path, "MTP drafter")?;
                 if draft_acceleration.backend != ready.acceleration.backend
@@ -553,12 +563,12 @@ impl ReadyModel {
                             .unwrap_or("default")
                     ));
                 }
-                Some(Arc::new(model))
+                LoadedMtpDrafter::Sidecar(Arc::new(model))
             }
-            None => None,
+            None => LoadedMtpDrafter::Embedded,
         };
         ready.mtp = Some(LoadedMtp {
-            draft_model,
+            drafter,
             draft_tokens,
         });
         ready.acceleration.generation_mode = Some("mtp".into());
@@ -673,13 +683,13 @@ impl ModelHost {
             let context_len = max_context.min(model.n_ctx_train()).max(512);
             let (model, mut acceleration) =
                 prepare_chat_model(&gguf_path, model, acceleration, context_len)?;
-            let mtp = mtp_spec.map(|spec| {
-                let draft_model = spec.draft_path.as_deref().and_then(|path| {
-                    match load_model_with_fallback(path, "MTP drafter") {
+            let mtp = mtp_spec.and_then(|spec| {
+                let drafter = match spec.draft_path.as_deref() {
+                    Some(path) => match load_model_with_fallback(path, "MTP drafter") {
                         Ok((draft, draft_acceleration))
                             if draft_acceleration.backend == acceleration.backend =>
                         {
-                            Some(Arc::new(draft))
+                            Some(LoadedMtpDrafter::Sidecar(Arc::new(draft)))
                         }
                         Ok((_draft, draft_acceleration)) => {
                             acceleration.generation_fallback_reason = Some(format!(
@@ -693,14 +703,15 @@ impl ModelHost {
                                 Some(format!("MTP drafter could not load ({error})"));
                             None
                         }
-                    }
-                });
-                let usable = spec.draft_path.is_none() || draft_model.is_some();
+                    },
+                    None => Some(LoadedMtpDrafter::Embedded),
+                };
+                let usable = drafter.is_some();
                 acceleration.generation_mode = Some(if usable { "mtp" } else { "standard" }.into());
-                LoadedMtp {
-                    draft_model,
+                drafter.map(|drafter| LoadedMtp {
+                    drafter,
                     draft_tokens: spec.draft_tokens,
-                }
+                })
             }).filter(|_| acceleration.generation_mode.as_deref() == Some("mtp"));
             if mtp.is_none() && acceleration.generation_mode.is_none() {
                 acceleration.generation_mode = Some("standard".into());
@@ -1445,12 +1456,16 @@ fn generate(
             .new_context(backend, target_params)
             .map_err(|error| format!("target context creation failed: {error}"))
             .and_then(|target| {
-                let draft_model = config.draft_model.as_deref().unwrap_or(model);
                 let draft_params = chat_context_params(n_ctx)
                     .with_context_type(LlamaContextType::Mtp)
                     .with_n_rs_seq(0);
-                draft_model
-                    .new_context_with_ctx_other(backend, draft_params, &target)
+                let draft = match &config.drafter {
+                    LoadedMtpDrafter::Embedded => model.new_context(backend, draft_params),
+                    LoadedMtpDrafter::Sidecar(draft_model) => {
+                        draft_model.new_context_with_ctx_other(backend, draft_params, &target)
+                    }
+                };
+                draft
                     .map_err(|error| format!("draft context creation failed: {error}"))
                     .and_then(|draft| {
                         MtpSpeculative::new(
