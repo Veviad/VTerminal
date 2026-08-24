@@ -275,7 +275,11 @@ describe("AiPanel renders", () => {
     render(<AiPanel sessionId="s1" />);
 
     fireEvent.click(screen.getByRole("button", { name: S.aiPanel.permissionLabel }));
-    fireEvent.click(screen.getByRole("option", { name: new RegExp(S.aiPanel.permission.full) }));
+    fireEvent.click(
+      screen.getByRole("option", {
+        name: (accessibleName) => accessibleName.startsWith(S.aiPanel.permission.full),
+      }),
+    );
 
     await waitFor(() => {
       expect(setMode).toHaveBeenCalledWith("req-full", "full", undefined);
