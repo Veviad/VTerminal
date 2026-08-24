@@ -285,6 +285,7 @@ function SidecarPane({
           active={focused}
           visible
           showComposer={false}
+          showReconnect={false}
           rendererActive
         />
       ) : (

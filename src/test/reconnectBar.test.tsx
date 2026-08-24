@@ -94,7 +94,17 @@ describe("ReconnectBar", () => {
 
     const reconnect = await screen.findByRole("button", { name: "Reconnect" });
     const bar = reconnect.parentElement;
-    expect(bar).toHaveClass("pointer-events-auto", "z-20");
+    expect(bar).toHaveClass(
+      "pointer-events-auto",
+      "z-20",
+      "justify-between",
+      "overflow-hidden",
+    );
+    const target = screen.getByTitle("ansible@cluster2.maholick.com");
+    expect(target).toHaveTextContent("ansible@cluster2.maholick.com · not connected");
+    expect(target).toHaveClass("min-w-0", "truncate");
+    expect(target.parentElement).toHaveClass("min-w-0", "overflow-hidden");
+    expect(reconnect).toHaveClass("shrink-0");
     expect(reconnect).toBeDisabled();
 
     mocks.atPrompt = true;
