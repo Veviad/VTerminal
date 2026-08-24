@@ -20,6 +20,7 @@ pub enum PermissionMode {
     AutoRead,
     AutoSmart,
     AutoAll,
+    Full,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]

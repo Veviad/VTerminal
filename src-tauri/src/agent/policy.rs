@@ -38,7 +38,7 @@
 //!
 //! - **Two-step scripts.** Write `deploy.sh` in one step, run `./deploy.sh` in
 //!   the next. Both steps need approval in `Ask`, so the hole only really opens
-//!   under `Auto (all)` — where the user has accepted exactly that.
+//!   under `Auto` or `Full`, where the user has accepted exactly that.
 //! - **Obfuscation.** `$(echo Y3VybA== | base64 -d) url`, `C=curl; $C url`,
 //!   `sh -c '…'`. All three fail closed here, but on shape, not comprehension.
 //! - **Aliases and shell functions** from the user's own dotfiles: we see

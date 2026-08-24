@@ -40,7 +40,7 @@ export interface RunbookStoreState {
    *  frontend-only, never persisted and never inherited by another run — the
    *  same stance as `aiStreams[id].permissionMode` in appStore. Deliberately
    *  NOT the agent's permission mode: `RunbookApprovalState` is kept separate
-   *  in Rust so agent `Auto all` can never settle a runbook gate. */
+   *  in Rust so agent Full mode can never settle a runbook gate. */
   autoApproveRuns: Map<string, RunbookAutoApproveState>;
   hasAutoApproveRun(runId: string): boolean;
   getAutoApproveRunState(
@@ -96,7 +96,7 @@ interface RunbookStoreData {
    *  frontend-only, never persisted and never inherited by another run — the
    *  same stance as `aiStreams[id].permissionMode` in appStore. Deliberately
    *  NOT the agent's permission mode: `RunbookApprovalState` is kept separate
-   *  in Rust so agent `Auto all` can never settle a runbook gate. */
+   *  in Rust so agent Full mode can never settle a runbook gate. */
   autoApproveRuns: Map<string, RunbookAutoApproveState>;
   runRevisions: ReadonlyMap<string, number>;
   history: RunbookHistoryEntry[];

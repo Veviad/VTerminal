@@ -973,7 +973,7 @@
                 Native steps run in the terminal you can see, including an SSH
                 or container session you opened yourself. Every shell action
                 requires a fresh approval and target attestation; agent
-                <em>Auto all</em> never carries over.
+                permission modes never carry over.
               </p>
             </article>
             <article class="feature-card">
@@ -1061,7 +1061,7 @@
                 Every proposed command is checked for whether it is read-only and
                 whether it reaches the network independently, since a fetch
                 that writes no file still pulls unreviewed content into a loop
-                that proposes shell commands. Both are shown on the card.
+                that proposes shell commands. Both are shown when a card is required.
               </p>
             </article>
             <article class="security-item">
@@ -1071,9 +1071,10 @@
               <h3>Arming It Is the Authorization</h3>
               <p>
                 The permission mode is per session, never persisted, and never
-                inherited by a new tab. Auto-run of reads requires read-only
-                <em>and</em> no network. Unknown commands fail closed and cost
-                you one click.
+                inherited by a new tab. Reads and Smart retain approval gates,
+                Auto runs standard commands but protects sensitive operations,
+                and Full runs every executable command without approval. Deny
+                rules and disabled capabilities still block execution.
               </p>
             </article>
             <article class="security-item">

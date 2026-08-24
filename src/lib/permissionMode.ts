@@ -5,13 +5,21 @@
  * tab always starts at `ask`, which is the same safety property the boolean
  * `autoAccept` this replaced was guarding.
  *
- * The backend owns classification AND dispatch. The frontend stores the chosen
- * mode for the session, sends it to the active run, and renders explanations;
- * it never auto-clicks an approval proposal.
+ * The backend owns classification and dispatch. The frontend stores the chosen
+ * mode for the session, sends it to the active run, and renders explanations.
+ * It never infers approval from proposal fields. Explicitly selecting Full may
+ * release the exact approval already on screen as part of that user gesture.
  */
-export type PermissionMode = "ask" | "auto_read" | "auto_smart" | "auto_all";
+/** `auto_all` is the stable wire id for the guarded mode now labelled Auto. */
+export type PermissionMode = "ask" | "auto_read" | "auto_smart" | "auto_all" | "full";
 
-export const PERMISSION_MODES: readonly PermissionMode[] = ["ask", "auto_read", "auto_smart", "auto_all"];
+export const PERMISSION_MODES: readonly PermissionMode[] = [
+  "ask",
+  "auto_read",
+  "auto_smart",
+  "auto_all",
+  "full",
+];
 
 /** The backend's verdict on one command. */
 export interface CommandVerdict {

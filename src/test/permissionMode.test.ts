@@ -15,7 +15,7 @@ const UNKNOWN: CommandVerdict = { readOnly: false, network: false };
 
 describe("permission modes", () => {
   it("exposes every backend-owned permission mode", () => {
-    expect(PERMISSION_MODES).toEqual(["ask", "auto_read", "auto_smart", "auto_all"]);
+    expect(PERMISSION_MODES).toEqual(["ask", "auto_read", "auto_smart", "auto_all", "full"]);
   });
 });
 

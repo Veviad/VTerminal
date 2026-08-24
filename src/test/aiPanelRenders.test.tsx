@@ -152,7 +152,7 @@ describe("AiPanel renders", () => {
     expect(screen.queryByRole("button", { name: S.aiPanel.permissionLabel })).toBeNull();
   });
 
-  it("offers three permission modes in agent mode, defaulting to the safe one", () => {
+  it("offers every permission mode in agent mode, defaulting to the safe one", () => {
     useAppStore.setState({
       sessions: [session("s1")],
       aiStreams: { s1: { ...emptyAiStream(), mode: "agent" } },
@@ -170,6 +170,7 @@ describe("AiPanel renders", () => {
       S.aiPanel.permission.auto_read,
       S.aiPanel.permission.auto_smart,
       S.aiPanel.permission.auto_all,
+      S.aiPanel.permission.full,
     ]) {
       expect(screen.getByRole("option", { name: new RegExp(label) })).toBeTruthy();
     }
@@ -197,6 +198,7 @@ describe("AiPanel renders", () => {
       ["auto_read", S.aiPanel.permission.auto_read],
       ["auto_smart", S.aiPanel.permission.auto_smart],
       ["auto_all", S.aiPanel.permission.auto_all],
+      ["full", S.aiPanel.permission.full],
     ] as const) {
       useAppStore.setState({
         sessions: [session("s1")],
@@ -208,15 +210,16 @@ describe("AiPanel renders", () => {
       expect(trigger.textContent).toContain(label);
       // Closed: the options are not in the document at all.
       expect(screen.queryAllByRole("option")).toHaveLength(0);
-      // And the one mode that runs writes unattended is the one that looks different.
-      expect(trigger.className.includes("warning")).toBe(mode === "auto_all");
+      // Both modes that run writes unattended look different from confirmation modes.
+      expect(trigger.className.includes("warning")).toBe(
+        mode === "auto_all" || mode === "full",
+      );
       unmount();
     }
   });
 
-  /** Each auto mode states what it will do unattended, and the two banners make
-   *  deliberately different promises — "reads run without asking" is not
-   *  "everything runs without asking". */
+  /** Each auto mode states what it will do unattended, and the banners make
+   *  deliberately different promises about guarded and full execution. */
   it("banners Reads mode without claiming everything auto-runs", () => {
     useAppStore.setState({
       sessions: [session("s1")],
@@ -227,13 +230,57 @@ describe("AiPanel renders", () => {
     expect(screen.queryByText(/Auto-accept is ON/i)).toBeNull();
   });
 
-  it("banners All mode with the standing warning", () => {
+  it("banners Auto mode with its guarded warning", () => {
     useAppStore.setState({
       sessions: [session("s1")],
       aiStreams: { s1: { ...emptyAiStream(), mode: "agent", permissionMode: "auto_all" } },
     });
     render(<AiPanel sessionId="s1" />);
-    expect(screen.getByText(/Auto-accept is ON/i)).toBeTruthy();
+    expect(screen.getByText(/Auto mode is ON/i)).toBeTruthy();
+    expect(screen.getByText(/protected commands still require approval/i)).toBeTruthy();
+  });
+
+  it("banners Full mode with the no-approval warning", () => {
+    useAppStore.setState({
+      sessions: [session("s1")],
+      aiStreams: { s1: { ...emptyAiStream(), mode: "agent", permissionMode: "full" } },
+    });
+    render(<AiPanel sessionId="s1" />);
+    expect(screen.getByText(/Full access is ON/i)).toBeTruthy();
+    expect(screen.getByText(/without approval/i)).toBeTruthy();
+  });
+
+  it("releases the approval already on screen when Full is selected", async () => {
+    const setMode = vi.spyOn(api, "agentSetPermissionMode").mockResolvedValue(undefined);
+    const approve = vi.spyOn(api, "respondToApproval").mockResolvedValue(undefined);
+    useAppStore.setState({
+      sessions: [session("s1")],
+      aiStreams: {
+        s1: {
+          ...emptyAiStream(),
+          mode: "agent",
+          status: "awaiting_approval",
+          requestId: "req-full",
+          pendingProposal: {
+            approvalId: "approval-full",
+            command: "printenv",
+            explanation: "read the environment",
+            readOnly: false,
+            network: false,
+            outputPolicy: "private",
+          },
+        },
+      },
+    });
+    render(<AiPanel sessionId="s1" />);
+
+    fireEvent.click(screen.getByRole("button", { name: S.aiPanel.permissionLabel }));
+    fireEvent.click(screen.getByRole("option", { name: new RegExp(S.aiPanel.permission.full) }));
+
+    await waitFor(() => {
+      expect(setMode).toHaveBeenCalledWith("req-full", "full", undefined);
+      expect(approve).toHaveBeenCalledWith("approval-full", "run", undefined);
+    });
   });
 
   /** A card standing while "Reads" is armed has to say why, or the mode reads as
@@ -922,7 +969,7 @@ describe("AiPanel renders", () => {
    *  it must never resume a run that spent its budget, or the step cap becomes no
    *  cap at all, unattended. Nothing polls the paused state and the `Paused` event
    *  arm never reads `permissionMode` — this pins the outcome. */
-  it("never auto-continues a paused run, even with All armed", () => {
+  it("never auto-continues a paused run, even with Full armed", () => {
     useAppStore.setState({
       sessions: [session("s1")],
       aiStreams: {
@@ -930,7 +977,7 @@ describe("AiPanel renders", () => {
           ...emptyAiStream(),
           mode: "agent",
           status: "paused",
-          permissionMode: "auto_all",
+          permissionMode: "full",
           pause: { reason: "step_limit", steps: 10, limit: 10 },
         },
       },
