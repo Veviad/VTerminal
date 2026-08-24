@@ -12,7 +12,7 @@ use super::definition::is_unsafe_single_line_character;
 use super::redact::{FULL_EVIDENCE_BYTES, OUTPUT_TAIL_BYTES};
 use super::state::{
     ApprovalStatus, AttemptStatus, EvidenceAvailability, RunStatus, RunbookPhase, StepStatus,
-    VerificationAssurance, Waiver,
+    TargetBinding, VerificationAssurance, Waiver,
 };
 
 pub const REPORT_API_VERSION: &str = "runbooks.veviad.com/report/v1alpha1";
@@ -35,12 +35,88 @@ pub struct ReportDefinition {
 #[serde(deny_unknown_fields)]
 pub struct ReportTarget {
     pub kind: String,
+    #[serde(default)]
     pub session_id: String,
+    #[serde(default)]
     pub shell: Option<String>,
+    #[serde(default)]
     pub cwd: Option<String>,
+    #[serde(default)]
     pub remote_kind: Option<String>,
+    #[serde(default)]
     pub remote_target: Option<String>,
+    #[serde(default)]
     pub context_marker: Option<String>,
+    #[serde(default)]
+    pub source_id: Option<String>,
+    #[serde(default)]
+    pub controller_path: Option<String>,
+    #[serde(default)]
+    pub controller_version: Option<String>,
+    #[serde(default)]
+    pub inventory_path: Option<String>,
+    #[serde(default)]
+    pub inventory_digest: Option<String>,
+    #[serde(default)]
+    pub project_digest: Option<String>,
+    #[serde(default)]
+    pub limit: Option<String>,
+}
+
+impl From<&TargetBinding> for ReportTarget {
+    fn from(target: &TargetBinding) -> Self {
+        match target {
+            TargetBinding::ActiveTerminal {
+                session_id,
+                shell,
+                cwd,
+                remote_kind,
+                remote_target,
+                context_marker,
+                ..
+            } => Self {
+                kind: "active-terminal".into(),
+                session_id: session_id.clone(),
+                shell: shell.clone(),
+                cwd: cwd.clone(),
+                remote_kind: remote_kind.clone(),
+                remote_target: remote_target.clone(),
+                context_marker: context_marker.clone(),
+                source_id: None,
+                controller_path: None,
+                controller_version: None,
+                inventory_path: None,
+                inventory_digest: None,
+                project_digest: None,
+                limit: None,
+            },
+            TargetBinding::AnsibleInventory {
+                source_id,
+                controller_path,
+                controller_version,
+                inventory_path,
+                inventory_digest,
+                project_digest,
+                limit,
+                ..
+            } => Self {
+                kind: "ansible-inventory".into(),
+                session_id: String::new(),
+                shell: None,
+                cwd: None,
+                remote_kind: None,
+                remote_target: None,
+                context_marker: None,
+                source_id: Some(source_id.clone()),
+                controller_path: Some(controller_path.clone()),
+                controller_version: Some(controller_version.clone()),
+                inventory_path: inventory_path.clone(),
+                inventory_digest: inventory_digest.clone(),
+                project_digest: Some(project_digest.clone()),
+                limit: limit.clone(),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -699,6 +775,16 @@ fn bullet_section<'a>(out: &mut String, title: &str, values: impl Iterator<Item 
 }
 
 fn target_label(target: &ReportTarget) -> String {
+    if target.kind == "ansible-inventory" {
+        let inventory = target
+            .inventory_path
+            .as_deref()
+            .unwrap_or("implicit inventory");
+        return match target.limit.as_deref() {
+            Some(limit) => format!("Ansible {inventory}, limit {limit}"),
+            None => format!("Ansible {inventory}"),
+        };
+    }
     match (&target.remote_kind, &target.remote_target) {
         (Some(kind), Some(remote)) => format!(
             "{} / {}:{} ({})",
@@ -852,6 +938,13 @@ mod tests {
                 remote_kind: Some("ssh".into()),
                 remote_target: Some("prod".into()),
                 context_marker: Some("ctx".into()),
+                source_id: None,
+                controller_path: None,
+                controller_version: None,
+                inventory_path: None,
+                inventory_digest: None,
+                project_digest: None,
+                limit: None,
             },
             inputs: serde_json::json!({"port": 22}),
             environment: ReportEnvironment {

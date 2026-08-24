@@ -15,11 +15,13 @@ import { useRunbooks } from "../../hooks/useRunbooks";
 import {
   chooseRunbookExportFolder,
   chooseRunbookPackage,
+  runbooksAnsibleReimport,
   type EvidenceMode,
 } from "../../lib/runbooks";
 import { useRunbookStore } from "../../stores/runbookStore";
 import { RunbookDefinitionPreview } from "./RunbookDefinitionPreview";
 import { NewRunbookWizard } from "./NewRunbookWizard";
+import { AnsibleImportWizard } from "./AnsibleImportWizard";
 import { RunbookPreflight } from "./RunbookPreflight";
 import { secondaryButton } from "./runbookUi";
 
@@ -62,15 +64,32 @@ export function RunbookLibrary({ sessionId }: { sessionId: string | null }) {
     inputs: Record<string, string | number | boolean>,
     evidence: EvidenceMode,
   ) => {
-    if (!selected || !sessionId) return;
+    if (!selected) return;
+    if (definition?.spec.target.kind !== "ansible-inventory" && !sessionId) return;
     await start(selected.source_id, sessionId, inputs, evidence);
+  };
+
+  const reimportAnsible = async () => {
+    if (!selected?.managed_ansible) return;
+    useRunbookStore.getState().setBusyAction(`reimport:${selected.source_id}`);
+    useRunbookStore.getState().setError(null);
+    try {
+      const source = await runbooksAnsibleReimport(selected.source_id);
+      await loadLibrary();
+      await selectSource(source.source_id);
+      useRunbookStore.getState().setNotice(`Ansible project re-imported as v${source.version}.`);
+    } catch (error) {
+      useRunbookStore.getState().setError(String(error));
+    } finally {
+      useRunbookStore.getState().setBusyAction(null);
+    }
   };
 
   return (
     <div className="flex min-h-0 flex-1">
       <aside className="flex w-48 shrink-0 flex-col border-e border-border-subtle bg-bg-primary">
         <div className="space-y-1 border-b border-border-subtle p-2">
-          <div className="flex items-center gap-1">
+          <div className="grid grid-cols-2 gap-1">
             <NewRunbookWizard
               onPublished={async (source) => {
                 await loadLibrary();
@@ -85,6 +104,13 @@ export function RunbookLibrary({ sessionId }: { sessionId: string | null }) {
             >
               <FolderOpen size={12} /> Import
             </button>
+            <AnsibleImportWizard
+              onImported={async (source) => {
+                await loadLibrary();
+                await selectSource(source.source_id);
+                useRunbookStore.getState().setNotice("Ansible project imported into the Runbook Library.");
+              }}
+            />
             <button
               onClick={() => void loadLibrary()}
               disabled={loadingLibrary || busyAction !== null}
@@ -149,6 +175,11 @@ export function RunbookLibrary({ sessionId }: { sessionId: string | null }) {
                       Included with VTerminal
                     </span>
                   )}
+                  {(source.managed_ansible || source.definition_id === "ansible-localhost-example") && (
+                    <span className="mt-1 inline-block rounded border border-warning/30 bg-warning/10 px-1 py-0.5 text-[8px] leading-none text-warning">
+                      Ansible
+                    </span>
+                  )}
                 </span>
               </button>
             );
@@ -186,6 +217,11 @@ export function RunbookLibrary({ sessionId }: { sessionId: string | null }) {
                     Included with VTerminal
                   </span>
                 )}
+                {(selected.managed_ansible || selected.definition_id === "ansible-localhost-example") && (
+                  <span className="mt-1 inline-block rounded border border-warning/30 bg-warning/10 px-1.5 py-0.5 text-[9px] text-warning">
+                    Managed Ansible project
+                  </span>
+                )}
               </div>
               <div className="flex shrink-0 flex-wrap justify-end gap-1">
                 <button
@@ -201,7 +237,17 @@ export function RunbookLibrary({ sessionId }: { sessionId: string | null }) {
                   )}
                   {busyAction === `export-package:${selected.source_id}` ? "Exporting…" : "Export runbook"}
                 </button>
-                {selected.source_kind !== "builtin" && (
+                {selected.managed_ansible ? (
+                  <button
+                    onClick={() => void reimportAnsible()}
+                    disabled={busyAction !== null}
+                    title="Replace the managed snapshot from its original project and increment the patch version"
+                    className={secondaryButton}
+                  >
+                    <RefreshCw size={11} className={busyAction === `reimport:${selected.source_id}` ? "animate-spin" : ""} />
+                    Re-import
+                  </button>
+                ) : selected.source_kind !== "builtin" && (
                   <button
                     onClick={() => void refreshSource(selected.source_id)}
                     disabled={busyAction !== null}
@@ -231,7 +277,9 @@ export function RunbookLibrary({ sessionId }: { sessionId: string | null }) {
                       ? `Click again to confirm ${selected.source_kind === "builtin" ? "hiding" : "removal"}`
                       : selected.source_kind === "builtin"
                         ? "Hide included example"
-                        : "Remove registration"
+                        : selected.managed_ansible
+                          ? "Remove the managed copy. The original project is not changed"
+                          : "Remove registration"
                   }
                   className={`inline-flex items-center gap-1 rounded px-1.5 py-1 text-[10px] hover:bg-bg-hover disabled:opacity-40 ${
                     confirmRemove === selected.source_id ? "text-error" : "text-text-muted hover:text-error"
@@ -257,6 +305,7 @@ export function RunbookLibrary({ sessionId }: { sessionId: string | null }) {
               <RunbookPreflight
                 definition={definition}
                 sessionId={sessionId}
+                packageDigest={selected.digest_sha256}
                 busy={busyAction === "start"}
                 onBack={() => setScreen("definition")}
                 onStart={(inputs, evidence) => void begin(inputs, evidence)}
@@ -264,7 +313,7 @@ export function RunbookLibrary({ sessionId }: { sessionId: string | null }) {
             ) : definition ? (
               <RunbookDefinitionPreview
                 definition={definition}
-                startDisabled={!sessionId}
+                startDisabled={definition.spec.target.kind !== "ansible-inventory" && !sessionId}
                 onStart={() => setScreen("preflight")}
               />
             ) : (

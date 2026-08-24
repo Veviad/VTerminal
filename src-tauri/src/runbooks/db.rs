@@ -321,6 +321,27 @@ pub fn migrate_v10(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// Main-database migration v16 records the reproducible source of app-managed
+/// Ansible imports without changing ordinary user package registrations.
+pub fn migrate_v16(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        BEGIN;
+        CREATE TABLE runbook_ansible_imports (
+            source_id            TEXT PRIMARY KEY
+                                 REFERENCES runbook_sources(id) ON DELETE CASCADE,
+            origin_project_path  TEXT NOT NULL,
+            spec_json            TEXT NOT NULL,
+            created_at           TEXT NOT NULL,
+            updated_at           TEXT NOT NULL
+        );
+        INSERT INTO schema_version (version) VALUES (16);
+        COMMIT;
+        "#,
+    )
+    .map_err(|error| format!("migration v16 failed: {error}"))
+}
+
 /// Refresh the one v6 partial index whose predicate changed during the
 /// unreleased experimental cycle. Fresh databases already have this shape;
 /// existing developer/test v6 databases are repaired without altering data.
@@ -564,6 +585,7 @@ pub struct SourceRegistration {
     pub builtin_order: Option<u32>,
     pub created_at: String,
     pub updated_at: String,
+    pub managed_ansible: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -579,6 +601,59 @@ pub struct SourceRegistrationInput {
     pub source_kind: SourceKind,
     pub hidden: bool,
     pub builtin_order: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AnsibleImportRecord {
+    pub source_id: String,
+    pub origin_project_path: String,
+    pub spec_json: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+pub fn upsert_ansible_import(
+    conn: &Connection,
+    source_id: &str,
+    origin_project_path: &str,
+    spec_json: &str,
+) -> Result<AnsibleImportRecord, String> {
+    let timestamp = now();
+    conn.execute(
+        "INSERT INTO runbook_ansible_imports
+           (source_id, origin_project_path, spec_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?4)
+         ON CONFLICT(source_id) DO UPDATE SET
+           origin_project_path=excluded.origin_project_path,
+           spec_json=excluded.spec_json,
+           updated_at=excluded.updated_at",
+        params![source_id, origin_project_path, spec_json, timestamp],
+    )
+    .map_err(|error| format!("save Ansible import metadata: {error}"))?;
+    get_ansible_import(conn, source_id)?
+        .ok_or_else(|| "saved Ansible import metadata disappeared".into())
+}
+
+pub fn get_ansible_import(
+    conn: &Connection,
+    source_id: &str,
+) -> Result<Option<AnsibleImportRecord>, String> {
+    conn.query_row(
+        "SELECT source_id, origin_project_path, spec_json, created_at, updated_at
+         FROM runbook_ansible_imports WHERE source_id=?1",
+        [source_id],
+        |row| {
+            Ok(AnsibleImportRecord {
+                source_id: row.get(0)?,
+                origin_project_path: row.get(1)?,
+                spec_json: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|error| format!("load Ansible import metadata: {error}"))
 }
 
 pub fn upsert_source(
@@ -672,7 +747,8 @@ pub fn get_source(conn: &Connection, id: &str) -> Result<Option<SourceRegistrati
     conn.query_row(
         "SELECT id, package_path, definition_id, definition_version, title, source_sha256,
                 canonical_sha256, valid, validation_error, source_kind, hidden, builtin_order,
-                created_at, updated_at
+                created_at, updated_at,
+                EXISTS(SELECT 1 FROM runbook_ansible_imports ai WHERE ai.source_id=runbook_sources.id)
          FROM runbook_sources WHERE id = ?1",
         [id],
         source_row,
@@ -688,7 +764,8 @@ pub fn get_source_by_package_path(
     conn.query_row(
         "SELECT id, package_path, definition_id, definition_version, title, source_sha256,
                 canonical_sha256, valid, validation_error, source_kind, hidden, builtin_order,
-                created_at, updated_at
+                created_at, updated_at,
+                EXISTS(SELECT 1 FROM runbook_ansible_imports ai WHERE ai.source_id=runbook_sources.id)
          FROM runbook_sources WHERE package_path = ?1",
         [package_path],
         source_row,
@@ -702,7 +779,8 @@ pub fn list_sources(conn: &Connection) -> Result<Vec<SourceRegistration>, String
         .prepare(
             "SELECT id, package_path, definition_id, definition_version, title, source_sha256,
                     canonical_sha256, valid, validation_error, source_kind, hidden, builtin_order,
-                    created_at, updated_at
+                    created_at, updated_at,
+                    EXISTS(SELECT 1 FROM runbook_ansible_imports ai WHERE ai.source_id=runbook_sources.id)
              FROM runbook_sources
              WHERE hidden = 0
              ORDER BY CASE source_kind WHEN 'builtin' THEN 0 ELSE 1 END,
@@ -770,6 +848,7 @@ fn source_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceRegistration> {
         builtin_order: row.get(11)?,
         created_at: row.get(12)?,
         updated_at: row.get(13)?,
+        managed_ansible: row.get(14)?,
     })
 }
 
@@ -1060,7 +1139,7 @@ pub fn create_run(conn: &mut Connection, input: &RunCreation) -> Result<RunRecor
             input.source_sha256,
             input.canonical_sha256,
             target_json,
-            input.target.session_id,
+            input.target.lock_key(),
             inputs_json,
             input.evidence_mode.as_str(),
             input.app_version,
@@ -3603,7 +3682,7 @@ pub fn rebind_interrupted_run(
         .execute(
             "UPDATE runbook_runs SET status='ready',target_json=?2,target_session_id=?3,
                           pause_reason=NULL,updated_at=?4 WHERE id=?1 AND status='interrupted'",
-            params![run_id, target_json, target.session_id, timestamp],
+            params![run_id, target_json, target.lock_key(), timestamp],
         )
         .map_err(|e| e.to_string())?;
     if count != 1 {
@@ -3616,7 +3695,8 @@ pub fn rebind_interrupted_run(
         None,
         None,
         &serde_json::json!({
-            "session_id":target.session_id,
+            "session_id":target.session_id(),
+            "target_label":target.label(),
             "environment": {
                 "app_version": resume_app_version,
                 "model": resume_model,
@@ -3946,15 +4026,7 @@ fn assemble_report(
             source_sha256: run.source_sha256,
             canonical_sha256: run.canonical_sha256,
         },
-        target: ReportTarget {
-            kind: run.target.kind,
-            session_id: run.target.session_id,
-            shell: run.target.shell,
-            cwd: run.target.cwd,
-            remote_kind: run.target.remote_kind,
-            remote_target: run.target.remote_target,
-            context_marker: run.target.context_marker,
-        },
+        target: ReportTarget::from(&run.target),
         inputs: run.inputs,
         environment,
         timing: ReportTiming {
@@ -4167,15 +4239,7 @@ fn report_environment(conn: &Connection, run: &RunRecord) -> Result<ReportEnviro
 }
 
 fn report_target(target: TargetBinding) -> ReportTarget {
-    ReportTarget {
-        kind: target.kind,
-        session_id: target.session_id,
-        shell: target.shell,
-        cwd: target.cwd,
-        remote_kind: target.remote_kind,
-        remote_target: target.remote_target,
-        context_marker: target.context_marker,
-    }
+    ReportTarget::from(&target)
 }
 
 fn timestamp_duration_ms(start: &str, finish: &str) -> Result<u64, String> {
@@ -4357,19 +4421,19 @@ mod tests {
         migrate_v8(&conn).unwrap();
         migrate_v9(&conn).unwrap();
         migrate_v10(&conn).unwrap();
+        migrate_v16(&conn).unwrap();
         conn
     }
     fn target(session: &str) -> TargetBinding {
-        TargetBinding {
-            kind: "active-terminal".into(),
-            session_id: session.into(),
-            shell: Some("zsh".into()),
-            cwd: Some("/srv".into()),
-            remote_kind: Some("ssh".into()),
-            remote_target: Some("prod".into()),
-            context_marker: Some("ctx".into()),
-            observed_at: "now".into(),
-        }
+        TargetBinding::active_terminal(
+            session.into(),
+            Some("zsh".into()),
+            Some("/srv".into()),
+            Some("ssh".into()),
+            Some("prod".into()),
+            Some("ctx".into()),
+            "now".into(),
+        )
     }
     fn creation(session: &str) -> RunCreation {
         RunCreation {
@@ -4457,7 +4521,7 @@ mod tests {
     }
 
     #[test]
-    fn migration_is_v10_and_enforces_one_active_run_per_session() {
+    fn migration_is_v16_and_enforces_one_active_run_per_target() {
         let mut conn = db();
         let first = create_run(&mut conn, &creation("s1")).unwrap();
         assert_eq!(first.status, RunStatus::Created);
@@ -4468,7 +4532,7 @@ mod tests {
         assert_eq!(first.canonical_json, "{\"kind\":\"Runbook\"}");
         assert_eq!(first.source_sha256, "a".repeat(64));
         assert_eq!(first.canonical_sha256, "b".repeat(64));
-        assert_eq!(first.target.session_id, "s1");
+        assert_eq!(first.target.session_id(), Some("s1"));
         assert_eq!(first.inputs, serde_json::json!({}));
         assert_eq!(first.evidence_mode, EvidenceCaptureMode::Tail);
         assert_eq!(first.app_version, "test");
@@ -4487,9 +4551,7 @@ mod tests {
         let version: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        // Runbooks keep their own schema_version table. The session archive's
-        // v11 migration is in database::migrations and does not advance this DB.
-        assert_eq!(version, 10);
+        assert_eq!(version, 16);
         assert!(table_has_column(&conn, "runbook_attempts", "structured_outcomes").unwrap());
         assert!(table_has_column(&conn, "runbook_approvals", "project_digest").unwrap());
         assert!(table_has_column(&conn, "runbook_approvals", "inventory_digest").unwrap());
@@ -4501,6 +4563,43 @@ mod tests {
             )
             .unwrap();
         assert!(steps_sql.contains("ansible_runner"));
+    }
+
+    #[test]
+    fn ansible_import_metadata_is_linked_to_an_ordinary_user_source() {
+        let conn = db();
+        let source = upsert_source(
+            &conn,
+            &SourceRegistrationInput {
+                package_path: "/tmp/managed-ansible".into(),
+                definition_id: "managed-ansible".into(),
+                definition_version: "1.0.0".into(),
+                title: "Managed Ansible".into(),
+                source_sha256: "a".repeat(64),
+                canonical_sha256: "b".repeat(64),
+                valid: true,
+                validation_error: None,
+                source_kind: SourceKind::User,
+                hidden: false,
+                builtin_order: None,
+            },
+        )
+        .unwrap();
+        assert!(!source.managed_ansible);
+        upsert_ansible_import(
+            &conn,
+            &source.id,
+            "/original/project",
+            r#"{"projectPath":"/original/project"}"#,
+        )
+        .unwrap();
+        let linked = get_source(&conn, &source.id).unwrap().unwrap();
+        assert_eq!(linked.source_kind, SourceKind::User);
+        assert!(linked.managed_ansible);
+        let import = get_ansible_import(&conn, &source.id).unwrap().unwrap();
+        assert_eq!(import.origin_project_path, "/original/project");
+        assert!(remove_source(&conn, &source.id).unwrap());
+        assert!(get_ansible_import(&conn, &source.id).unwrap().is_none());
     }
 
     #[test]

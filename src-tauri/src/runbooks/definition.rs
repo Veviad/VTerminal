@@ -100,6 +100,7 @@ pub struct Target {
 #[serde(rename_all = "kebab-case")]
 pub enum TargetKind {
     ActiveTerminal,
+    AnsibleInventory,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -686,11 +687,112 @@ impl RunbookDefinition {
             validate_spec_context(context, "spec.context", self, &mut errors);
         }
 
+        if self.spec.target.kind == TargetKind::AnsibleInventory {
+            validate_ansible_inventory_target(self, &mut errors);
+        }
+
         if errors.is_empty() {
             Ok(())
         } else {
             Err(errors)
         }
+    }
+}
+
+/// A terminal-free target is deliberately narrow. Manual gates remain useful,
+/// but every executable phase must be owned by the native Ansible adapter and
+/// must describe one stable inventory boundary for the complete run.
+fn validate_ansible_inventory_target(
+    definition: &RunbookDefinition,
+    errors: &mut Vec<ValidationError>,
+) {
+    if definition.spec.context.is_some() {
+        error(
+            errors,
+            "spec.context",
+            "is unavailable for ansible-inventory targets because discovery runs in a terminal",
+        );
+    }
+
+    let mut expected: Option<(Option<&str>, Option<&str>)> = None;
+    let mut saw_ansible = false;
+    for (index, step) in definition.spec.steps.iter().enumerate() {
+        let path = format!("spec.steps[{index}]");
+        if step.goal.is_some() {
+            error(
+                errors,
+                format!("{path}.goal"),
+                "is unavailable for ansible-inventory targets because goal checks run in a terminal",
+            );
+        }
+        if step.context.is_some() {
+            error(
+                errors,
+                format!("{path}.context"),
+                "is unavailable for ansible-inventory targets",
+            );
+        }
+
+        let actions = [
+            step.check.as_ref().map(|action| match action {
+                CheckAction::AnsiblePlaybook { action } => Some(action),
+                CheckAction::Manual { .. } => None,
+                CheckAction::Shell { .. } | CheckAction::Agent { .. } => {
+                    error(
+                        errors,
+                        format!("{path}.check"),
+                        "must use ansible.playbook or manual for an ansible-inventory target",
+                    );
+                    None
+                }
+            }),
+            step.apply.as_ref().map(|action| match action {
+                ApplyAction::AnsiblePlaybook { action } => Some(action),
+                ApplyAction::Manual { .. } => None,
+                ApplyAction::Shell { .. } | ApplyAction::Agent { .. } => {
+                    error(
+                        errors,
+                        format!("{path}.apply"),
+                        "must use ansible.playbook or manual for an ansible-inventory target",
+                    );
+                    None
+                }
+            }),
+            step.verify.as_ref().map(|action| match action {
+                VerifyAction::AnsiblePlaybook { action } => Some(action),
+                VerifyAction::Manual { .. } => None,
+                VerifyAction::Shell { .. } | VerifyAction::Agent { .. } => {
+                    error(
+                        errors,
+                        format!("{path}.verify"),
+                        "must use ansible.playbook or manual for an ansible-inventory target",
+                    );
+                    None
+                }
+            }),
+        ];
+        for action in actions.into_iter().flatten().flatten() {
+            saw_ansible = true;
+            let boundary = (action.inventory.as_deref(), action.limit.as_deref());
+            if let Some(expected) = expected {
+                if boundary != expected {
+                    error(
+                        errors,
+                        &path,
+                        "all Ansible phases in an ansible-inventory runbook must use the same inventory and limit",
+                    );
+                }
+            } else {
+                expected = Some(boundary);
+            }
+        }
+    }
+    if !saw_ansible {
+        error(
+            errors,
+            "spec.steps",
+            "an ansible-inventory target requires at least one ansible.playbook action",
+        );
     }
 }
 
@@ -1961,6 +2063,53 @@ spec:
         );
         let definition = parse_and_validate(&source).unwrap();
         assert!(!definition.uses_unavailable_executor());
+    }
+
+    #[test]
+    fn ansible_inventory_target_rejects_terminal_actions_and_mixed_boundaries() {
+        let terminal_action = VALID
+            .replace("kind: active-terminal", "kind: ansible-inventory")
+            .replace(
+                "uses: agent\n        instructions: |\n          Make the smallest safe change and validate sshd configuration.",
+                "uses: ansible.playbook\n        with:\n          playbook: ansible/site.yml",
+            );
+        let error = parse_and_validate(&terminal_action)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("must use ansible.playbook or manual"));
+
+        let mixed = r#"apiVersion: runbooks.veviad.com/v1alpha1
+kind: Runbook
+metadata:
+  id: mixed-ansible
+  version: 1.0.0
+  title: Mixed Ansible
+spec:
+  target:
+    kind: ansible-inventory
+  steps:
+    - id: one
+      title: One
+      check:
+        uses: ansible.playbook
+        with:
+          playbook: ansible/site.yml
+          inventory: ansible/a.ini
+      apply:
+        uses: ansible.playbook
+        with:
+          playbook: ansible/site.yml
+          inventory: ansible/b.ini
+      verify:
+        uses: ansible.playbook
+        with:
+          playbook: ansible/site.yml
+          inventory: ansible/a.ini
+"#;
+        assert!(parse_and_validate(mixed)
+            .unwrap_err()
+            .to_string()
+            .contains("same inventory and limit"));
     }
 
     #[test]
