@@ -156,7 +156,7 @@ interface ChatState {
   rename(title: string, chatId?: string): Promise<void>;
   regenerateTitle(chatId?: string, allowManualOverride?: boolean): Promise<void>;
   archive(archived: boolean, chatId?: string): Promise<void>;
-  deleteCurrent(chatId?: string): Promise<void>;
+  deleteChat(chatId?: string): Promise<void>;
   attachBuckets(ref: KnowledgeBucketRef): Promise<void>;
   detachBucket(ref: KnowledgeBucketRef): Promise<void>;
   addAttachments(attachments: Attachment[]): Attachment[];
@@ -506,7 +506,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((state) => updateCurrentSummary(state, summary));
   },
 
-  deleteCurrent: async (chatId) => {
+  deleteChat: async (chatId) => {
     const state = get();
     const targetId = chatId ?? state.current?.summary.id;
     if (!targetId || (state.current?.summary.id === targetId && state.stream.status === "streaming")) return;

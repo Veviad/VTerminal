@@ -161,4 +161,28 @@ describe("Chat workspace autoscroll", () => {
 
     await waitFor(() => expect(rename).toHaveBeenCalledWith("A better chat title", "chat-a"));
   });
+
+  it("blocks renaming the active chat while a response is streaming", () => {
+    render(<ChatWorkspace />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Chat list actions for Autoscroll test" }));
+
+    expect(screen.getByRole("menuitem", { name: "Rename" })).toBeDisabled();
+  });
+
+  it("confirms sidebar deletion in an in-app dialog", async () => {
+    useChatStore.setState((state) => ({
+      stream: { ...state.stream, status: "idle", requestId: null },
+    }));
+    const deleteChat = vi.spyOn(useChatStore.getState(), "deleteChat").mockResolvedValue(undefined);
+    render(<ChatWorkspace />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Chat list actions for Autoscroll test" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+    expect(screen.getByRole("alertdialog", { name: "Delete chat?" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => expect(deleteChat).toHaveBeenCalledWith("chat-a"));
+  });
 });

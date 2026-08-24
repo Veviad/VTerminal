@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { ChevronDown } from "lucide-react";
 
-import type { SegmentedOption } from "./Segmented";
+import type { SingleSelectProps } from "./Segmented";
 
 /**
  * A single-choice dropdown, taking the same options as {@link Segmented}.
@@ -32,14 +32,7 @@ export function Dropdown<T extends string>({
   size = "md",
   icon,
   align = "right",
-}: {
-  value: T;
-  options: readonly SegmentedOption<T>[];
-  onChange: (value: T) => void;
-  ariaLabel: string;
-  hint?: string;
-  disabled?: boolean;
-  size?: "sm" | "md";
+}: SingleSelectProps<T> & {
   /** Optional leading glyph, for a control whose label alone is ambiguous. */
   icon?: React.ReactNode;
   /** Which trigger edge the menu follows. */

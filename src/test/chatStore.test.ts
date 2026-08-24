@@ -88,6 +88,7 @@ describe("Chat workspace store", () => {
     mocks.chatSave.mockResolvedValue(undefined);
     mocks.chatSetArchived.mockResolvedValue(undefined);
     mocks.chatUpdateTitle.mockResolvedValue(false);
+    mocks.chatDelete.mockResolvedValue(undefined);
     mocks.aiNameChat.mockResolvedValue("Generated title");
     mocks.saveSettings.mockResolvedValue(undefined);
     mocks.modelStatus.mockResolvedValue({
@@ -170,6 +171,18 @@ describe("Chat workspace store", () => {
       title: "Manual title",
       title_source: "manual",
     });
+  });
+
+  it("deletes a non-current chat without changing the current chat", async () => {
+    const current = summary("current");
+    const other = summary("other");
+    useChatStore.setState({ current: detail(current), summaries: [current, other] });
+
+    await useChatStore.getState().deleteChat(other.id);
+
+    expect(mocks.chatDelete).toHaveBeenCalledWith(other.id);
+    expect(useChatStore.getState().current?.summary.id).toBe(current.id);
+    expect(useChatStore.getState().summaries).toEqual([current]);
   });
 
   it("lets an explicit regeneration replace a manual title safely", async () => {

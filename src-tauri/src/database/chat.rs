@@ -393,8 +393,15 @@ pub fn update_title(
         )
     } else {
         conn.execute(
-            "UPDATE chat_threads SET title = ?2, title_source = ?3, updated_at = ?4 WHERE id = ?1",
-            params![id, title, source, chrono::Utc::now().to_rfc3339()],
+            "UPDATE chat_threads SET title = ?2, title_source = ?3, updated_at = ?4 \
+             WHERE id = ?1 AND (?3 = 'manual' OR ?5 OR title_source <> 'manual')",
+            params![
+                id,
+                title,
+                source,
+                chrono::Utc::now().to_rfc3339(),
+                allow_manual_override
+            ],
         )
     }
     .map_err(|e| e.to_string())?;
@@ -612,5 +619,21 @@ mod tests {
         let detail = get(&conn, "chat-a").unwrap().unwrap();
         assert_eq!(detail.summary.title, "New manual title");
         assert_eq!(detail.summary.title_source, "manual");
+    }
+
+    #[test]
+    fn explicit_manual_override_is_consistent_without_an_expected_title() {
+        let mut conn = db();
+        save(&mut conn, &input("chat-a", "question")).unwrap();
+        assert!(update_title(&conn, "chat-a", "My title", "manual", None, false).unwrap());
+        let automatic =
+            update_title(&conn, "chat-a", "Automatic title", "generated", None, false).unwrap();
+        assert!(!automatic);
+        let explicit =
+            update_title(&conn, "chat-a", "Explicit title", "generated", None, true).unwrap();
+        assert!(explicit);
+        let detail = get(&conn, "chat-a").unwrap().unwrap();
+        assert_eq!(detail.summary.title, "Explicit title");
+        assert_eq!(detail.summary.title_source, "generated");
     }
 }
