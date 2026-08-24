@@ -368,6 +368,7 @@ pub fn update_title(
     title: &str,
     source: &str,
     expected_title: Option<&str>,
+    allow_manual_override: bool,
 ) -> Result<bool, String> {
     if !["fallback", "generated", "manual"].contains(&source) {
         return Err("invalid chat title source".into());
@@ -379,13 +380,28 @@ pub fn update_title(
     let changed = if let Some(expected) = expected_title {
         conn.execute(
             "UPDATE chat_threads SET title = ?2, title_source = ?3, updated_at = ?4 \
-             WHERE id = ?1 AND title = ?5 AND (?3 = 'manual' OR title_source <> 'manual')",
-            params![id, title, source, chrono::Utc::now().to_rfc3339(), expected],
+             WHERE id = ?1 AND title = ?5 \
+               AND (?3 = 'manual' OR ?6 OR title_source <> 'manual')",
+            params![
+                id,
+                title,
+                source,
+                chrono::Utc::now().to_rfc3339(),
+                expected,
+                allow_manual_override
+            ],
         )
     } else {
         conn.execute(
-            "UPDATE chat_threads SET title = ?2, title_source = ?3, updated_at = ?4 WHERE id = ?1",
-            params![id, title, source, chrono::Utc::now().to_rfc3339()],
+            "UPDATE chat_threads SET title = ?2, title_source = ?3, updated_at = ?4 \
+             WHERE id = ?1 AND (?3 = 'manual' OR ?5 OR title_source <> 'manual')",
+            params![
+                id,
+                title,
+                source,
+                chrono::Utc::now().to_rfc3339(),
+                allow_manual_override
+            ],
         )
     }
     .map_err(|e| e.to_string())?;
@@ -558,7 +574,7 @@ mod tests {
     fn generated_title_cannot_overwrite_a_manual_rename() {
         let mut conn = db();
         save(&mut conn, &input("chat-a", "question")).unwrap();
-        assert!(update_title(&conn, "chat-a", "My title", "manual", None).unwrap());
+        assert!(update_title(&conn, "chat-a", "My title", "manual", None, false).unwrap());
         // A response checkpoint captured before the rename still carries the
         // fallback title. Saving it must not roll the manual edit back.
         save(&mut conn, &input("chat-a", "question plus checkpoint")).unwrap();
@@ -568,10 +584,56 @@ mod tests {
             "Late generated title",
             "generated",
             Some("My title"),
+            false,
         )
         .unwrap());
         let detail = get(&conn, "chat-a").unwrap().unwrap();
         assert_eq!(detail.summary.title, "My title");
         assert_eq!(detail.summary.title_source, "manual");
+    }
+
+    #[test]
+    fn explicit_regeneration_can_replace_a_manual_title_but_not_a_newer_rename() {
+        let mut conn = db();
+        save(&mut conn, &input("chat-a", "question")).unwrap();
+        assert!(update_title(&conn, "chat-a", "My title", "manual", None, false).unwrap());
+        assert!(update_title(
+            &conn,
+            "chat-a",
+            "Generated title",
+            "generated",
+            Some("My title"),
+            true,
+        )
+        .unwrap());
+        assert!(update_title(&conn, "chat-a", "New manual title", "manual", None, false).unwrap());
+        assert!(!update_title(
+            &conn,
+            "chat-a",
+            "Stale generated title",
+            "generated",
+            Some("Generated title"),
+            true,
+        )
+        .unwrap());
+        let detail = get(&conn, "chat-a").unwrap().unwrap();
+        assert_eq!(detail.summary.title, "New manual title");
+        assert_eq!(detail.summary.title_source, "manual");
+    }
+
+    #[test]
+    fn explicit_manual_override_is_consistent_without_an_expected_title() {
+        let mut conn = db();
+        save(&mut conn, &input("chat-a", "question")).unwrap();
+        assert!(update_title(&conn, "chat-a", "My title", "manual", None, false).unwrap());
+        let automatic =
+            update_title(&conn, "chat-a", "Automatic title", "generated", None, false).unwrap();
+        assert!(!automatic);
+        let explicit =
+            update_title(&conn, "chat-a", "Explicit title", "generated", None, true).unwrap();
+        assert!(explicit);
+        let detail = get(&conn, "chat-a").unwrap().unwrap();
+        assert_eq!(detail.summary.title, "Explicit title");
+        assert_eq!(detail.summary.title_source, "generated");
     }
 }

@@ -153,10 +153,10 @@ interface ChatState {
   setArchivedOpen(open: boolean): void;
   createChat(): Promise<void>;
   selectChat(chatId: string): Promise<void>;
-  rename(title: string): Promise<void>;
-  regenerateTitle(): Promise<void>;
-  archive(archived: boolean): Promise<void>;
-  deleteCurrent(): Promise<void>;
+  rename(title: string, chatId?: string): Promise<void>;
+  regenerateTitle(chatId?: string, allowManualOverride?: boolean): Promise<void>;
+  archive(archived: boolean, chatId?: string): Promise<void>;
+  deleteChat(chatId?: string): Promise<void>;
   attachBuckets(ref: KnowledgeBucketRef): Promise<void>;
   detachBucket(ref: KnowledgeBucketRef): Promise<void>;
   addAttachments(attachments: Attachment[]): Attachment[];
@@ -458,43 +458,64 @@ export const useChatStore = create<ChatState>((set, get) => ({
     await api.saveSettings({ active_chat_id: chatId });
   },
 
-  rename: async (title) => {
-    const detail = get().current;
+  rename: async (title, chatId) => {
+    const state = get();
+    const targetId = chatId ?? state.current?.summary.id;
     const clean = title.trim();
-    if (!detail || !clean) return;
-    await api.chatUpdateTitle(detail.summary.id, clean, "manual");
-    const summary = { ...detail.summary, title: clean, title_source: "manual" as ChatTitleSource, updated_at: new Date().toISOString() };
+    const existing = state.summaries.find((chat) => chat.id === targetId);
+    if (!targetId || !existing || !clean) return;
+    await api.chatUpdateTitle(targetId, clean, "manual");
+    const summary = { ...existing, title: clean, title_source: "manual" as ChatTitleSource, updated_at: new Date().toISOString() };
     set((state) => updateCurrentSummary(state, summary));
   },
 
-  regenerateTitle: async () => {
-    const detail = get().current;
-    if (!detail || detail.summary.title_source === "manual" || get().stream.status === "streaming") return;
+  regenerateTitle: async (chatId, allowManualOverride = false) => {
+    const state = get();
+    const targetId = chatId ?? state.current?.summary.id;
+    if (!targetId || state.stream.status === "streaming") return;
+    const detail = state.current?.summary.id === targetId
+      ? state.current
+      : await api.chatGet(targetId);
+    if (!detail || (detail.summary.title_source === "manual" && !allowManualOverride)) return;
     const question = detail.messages.find((message) => message.role === "user")?.content;
     const answer = detail.messages.find((message) => message.role === "assistant")?.content;
     if (!question || !answer) return;
     const expected = detail.summary.title;
     const title = await api.aiNameChat(id("name-chat"), question, answer);
-    const changed = await api.chatUpdateTitle(detail.summary.id, title, "generated", expected);
+    const changed = await api.chatUpdateTitle(
+      detail.summary.id,
+      title,
+      "generated",
+      expected,
+      allowManualOverride,
+    );
     if (!changed) return;
-    const summary = { ...detail.summary, title, title_source: "generated" as ChatTitleSource, updated_at: new Date().toISOString() };
+    const latest = get().summaries.find((chat) => chat.id === targetId) ?? detail.summary;
+    const summary = { ...latest, title, title_source: "generated" as ChatTitleSource, updated_at: new Date().toISOString() };
     set((state) => updateCurrentSummary(state, summary));
   },
 
-  archive: async (archived) => {
-    const detail = get().current;
-    if (!detail || get().stream.status === "streaming") return;
+  archive: async (archived, chatId) => {
+    const state = get();
+    const targetId = chatId ?? state.current?.summary.id;
+    const existing = state.summaries.find((chat) => chat.id === targetId);
+    if (!targetId || !existing || (state.current?.summary.id === targetId && state.stream.status === "streaming")) return;
     const archivedAt = archived ? new Date().toISOString() : null;
-    await api.chatSetArchived(detail.summary.id, archivedAt);
-    const summary = { ...detail.summary, archived_at: archivedAt, updated_at: new Date().toISOString() };
+    await api.chatSetArchived(targetId, archivedAt);
+    const summary = { ...existing, archived_at: archivedAt, updated_at: new Date().toISOString() };
     set((state) => updateCurrentSummary(state, summary));
   },
 
-  deleteCurrent: async () => {
-    const detail = get().current;
-    if (!detail || get().stream.status === "streaming") return;
-    await api.chatDelete(detail.summary.id);
-    const remaining = get().summaries.filter((chat) => chat.id !== detail.summary.id);
+  deleteChat: async (chatId) => {
+    const state = get();
+    const targetId = chatId ?? state.current?.summary.id;
+    if (!targetId || (state.current?.summary.id === targetId && state.stream.status === "streaming")) return;
+    await api.chatDelete(targetId);
+    const remaining = get().summaries.filter((chat) => chat.id !== targetId);
+    if (state.current?.summary.id !== targetId) {
+      set({ summaries: remaining });
+      return;
+    }
     set({ summaries: remaining, current: null, pendingAttachments: [] });
     const next = remaining.find((chat) => !chat.archived_at);
     if (next) await get().selectChat(next.id);
@@ -578,8 +599,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
       };
     });
     set((state) => ({ stream: { ...idleStream(), lastError: state.stream.lastError } }));
+    if (useAppStore.getState().activeModelId.startsWith("local/")) {
+      void api.modelStatus().then((status) => {
+        useAppStore.getState().setModelStatus(
+          status.loaded,
+          status.state,
+          status.available,
+          status.acceleration,
+        );
+      }).catch(() => {});
+    }
     if (appended.isFirst && live.summary.title_source === "fallback" && live.messages.some((message) => message.role === "assistant")) {
-      void get().regenerateTitle().catch(() => {});
+      void get().regenerateTitle(live.summary.id).catch(() => {});
     }
   },
 

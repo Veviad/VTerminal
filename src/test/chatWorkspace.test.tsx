@@ -1,5 +1,5 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ChatWorkspace, isNearChatBottom } from "../components/chat/ChatWorkspace";
 import type { ChatDetail } from "../lib/types";
@@ -66,6 +66,8 @@ describe("Chat workspace autoscroll", () => {
     });
   });
 
+  afterEach(() => vi.restoreAllMocks());
+
   it("classifies only viewports within the bottom threshold as sticky", () => {
     expect(isNearChatBottom({ scrollHeight: 1_000, clientHeight: 300, scrollTop: 652 })).toBe(true);
     expect(isNearChatBottom({ scrollHeight: 1_000, clientHeight: 300, scrollTop: 600 })).toBe(false);
@@ -109,5 +111,78 @@ describe("Chat workspace autoscroll", () => {
       }));
     });
     expect(scrollTo).toHaveBeenCalledWith({ top: 1_000, behavior: "auto" });
+  });
+
+  it("dismisses the Knowledge source menu on an outside pointer press", () => {
+    useAppStore.setState({
+      docsEnabled: true,
+      knowledgeBuckets: [{
+        ref: { source: "local", bucket_id: "handbook" },
+        label: "Engineering handbook",
+        connection_label: null,
+        profile: null,
+        compatibility: "managed_compatible",
+        compatibility_reason: null,
+        attachable: true,
+        writable: true,
+        manageable: true,
+        file_count: 1,
+        chunk_count: 12,
+        pending_count: 0,
+        stale: false,
+        error: null,
+      }],
+    });
+    useChatStore.setState((state) => ({
+      stream: { ...state.stream, status: "idle", requestId: null },
+    }));
+    render(<ChatWorkspace />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Knowledge" }));
+    expect(screen.getByRole("menu", { name: "Knowledge sources" })).toBeInTheDocument();
+
+    fireEvent.pointerDown(screen.getByTestId("chat-timeline"));
+    expect(screen.queryByRole("menu", { name: "Knowledge sources" })).toBeNull();
+  });
+
+  it("opens a working rename dialog from the sidebar chat action menu", async () => {
+    useChatStore.setState((state) => ({
+      stream: { ...state.stream, status: "idle", requestId: null },
+    }));
+    const rename = vi.spyOn(useChatStore.getState(), "rename").mockResolvedValue(undefined);
+    render(<ChatWorkspace />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Chat list actions for Autoscroll test" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Chat title" }), {
+      target: { value: "A better chat title" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(rename).toHaveBeenCalledWith("A better chat title", "chat-a"));
+  });
+
+  it("blocks renaming the active chat while a response is streaming", () => {
+    render(<ChatWorkspace />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Chat list actions for Autoscroll test" }));
+
+    expect(screen.getByRole("menuitem", { name: "Rename" })).toBeDisabled();
+  });
+
+  it("confirms sidebar deletion in an in-app dialog", async () => {
+    useChatStore.setState((state) => ({
+      stream: { ...state.stream, status: "idle", requestId: null },
+    }));
+    const deleteChat = vi.spyOn(useChatStore.getState(), "deleteChat").mockResolvedValue(undefined);
+    render(<ChatWorkspace />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Chat list actions for Autoscroll test" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+    expect(screen.getByRole("alertdialog", { name: "Delete chat?" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => expect(deleteChat).toHaveBeenCalledWith("chat-a"));
   });
 });

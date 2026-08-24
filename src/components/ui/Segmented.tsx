@@ -24,6 +24,16 @@ export interface SegmentedOption<T extends string> {
   tone?: "accent" | "warning";
 }
 
+export interface SingleSelectProps<T extends string> {
+  value: T;
+  options: readonly SegmentedOption<T>[];
+  onChange: (value: T) => void;
+  ariaLabel: string;
+  hint?: string;
+  disabled?: boolean;
+  size?: "sm" | "md";
+}
+
 export function Segmented<T extends string>({
   value,
   options,
@@ -32,15 +42,7 @@ export function Segmented<T extends string>({
   hint,
   disabled,
   size = "md",
-}: {
-  value: T;
-  options: readonly SegmentedOption<T>[];
-  onChange: (value: T) => void;
-  ariaLabel: string;
-  hint?: string;
-  disabled?: boolean;
-  size?: "sm" | "md";
-}) {
+}: SingleSelectProps<T>) {
   const pad = size === "sm" ? "px-1.5 py-0.5 text-[9px]" : "px-2 py-1 text-[10px]";
 
   return (
@@ -58,6 +60,7 @@ export function Segmented<T extends string>({
         return (
           <button
             key={opt.value}
+            type="button"
             role="radio"
             aria-checked={active}
             disabled={disabled}

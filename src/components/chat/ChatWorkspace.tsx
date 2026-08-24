@@ -1,20 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Archive,
-  ArchiveRestore,
   BookOpen,
   ChevronDown,
   ChevronRight,
   Globe2,
-  MoreHorizontal,
   Paperclip,
-  Pencil,
   Plus,
-  RefreshCw,
   Search,
   Send,
   Square,
-  Trash2,
   X,
 } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -36,6 +30,9 @@ import type {
   KnowledgeBucketRef,
   WebCitation,
 } from "../../lib/types";
+import { useDismissibleLayer } from "../../hooks/useDismissibleLayer";
+import { GenerationModeBadge } from "../layout/GenerationModeBadge";
+import { ChatActions } from "./ChatActions";
 
 const CHAT_BOTTOM_THRESHOLD_PX = 48;
 const NO_ATTACHED_BUCKETS: readonly KnowledgeBucketRef[] = [];
@@ -227,13 +224,19 @@ function ChatSidebar() {
 
 function ChatRow({ chat, selected }: { chat: ChatSummary; selected: boolean }) {
   return (
-    <button
-      className={`mb-0.5 block w-full rounded-md px-2.5 py-2 text-left ${selected ? "bg-bg-hover text-text-primary" : "text-text-secondary hover:bg-bg-hover/60"}`}
-      onClick={() => void useChatStore.getState().selectChat(chat.id)}
+    <div
+      className={`group relative mb-0.5 flex w-full items-center rounded-md ${selected ? "bg-bg-hover text-text-primary" : "text-text-secondary hover:bg-bg-hover/60"}`}
     >
-      <span className="block truncate text-xs">{chat.title}</span>
-      <span className="mt-0.5 block truncate text-[9px] text-text-muted">{new Date(chat.updated_at).toLocaleDateString()}</span>
-    </button>
+      <button
+        type="button"
+        className="min-w-0 flex-1 px-2.5 py-2 text-left"
+        onClick={() => void useChatStore.getState().selectChat(chat.id)}
+      >
+        <span className="block truncate text-xs">{chat.title}</span>
+        <span className="mt-0.5 block truncate text-[9px] text-text-muted">{new Date(chat.updated_at).toLocaleDateString()}</span>
+      </button>
+      <ChatActions chat={chat} placement="sidebar" />
+    </div>
   );
 }
 
@@ -241,7 +244,6 @@ function ChatToolbar() {
   const detail = useChatStore((state) => state.current);
   const stream = useChatStore((state) => state.stream);
   const app = useAppStore();
-  const [menu, setMenu] = useState(false);
   if (!detail) return <div className="h-11 border-b border-border-subtle" />;
   const model = app.catalog.find((entry) => entry.id === app.activeModelId);
   const effort = app.modelEffort[app.activeModelId] ?? model?.default_effort ?? "off";
@@ -264,38 +266,19 @@ function ChatToolbar() {
         <h2 className="truncate text-xs font-medium text-text-primary">{detail.summary.title}</h2>
         <p className="mt-0.5 flex items-center gap-2 text-[9px] text-text-muted">
           <span>{stream.model ?? model?.label ?? "No model"}</span>
+          <GenerationModeBadge verbose />
           <span className="flex items-center gap-1"><Globe2 size={9} /> {web}</span>
           <span className="flex items-center gap-1"><BookOpen size={9} /> {detail.attached_bucket_refs.length ? `${detail.attached_bucket_refs.length} Knowledge` : "No Knowledge"}</span>
         </p>
       </div>
-      <div className="relative flex items-center gap-2">
+      <div className="flex items-center gap-2">
         {model && <EffortPicker value={effort} available={model.efforts} layout="dropdown" size="sm" disabled={busy} onChange={(value) => {
           void api.setModelEffort(model.id, value).then(() => app.setModelEffortLocal(model.id, value));
         }} />}
-        <button className="rounded-md p-1.5 text-text-muted hover:bg-bg-hover hover:text-text-primary" onClick={() => setMenu(!menu)}><MoreHorizontal size={15} /></button>
-        {menu && (
-          <div className="absolute right-0 top-9 z-30 w-44 rounded-md border border-border-subtle bg-bg-card p-1 shadow-lg">
-            {busy && <p className="px-2 py-1.5 text-[10px] leading-snug text-text-muted">Stop the running response before archiving or deleting this chat.</p>}
-            <MenuButton icon={<Pencil size={12} />} label="Rename" onClick={() => {
-              const title = window.prompt("Rename chat", detail.summary.title);
-              if (title) void useChatStore.getState().rename(title);
-              setMenu(false);
-            }} />
-            <MenuButton icon={<RefreshCw size={12} />} label="Regenerate title" disabled={busy || detail.summary.title_source === "manual" || detail.messages.length < 2} onClick={() => { void useChatStore.getState().regenerateTitle(); setMenu(false); }} />
-            <MenuButton disabled={busy} icon={detail.summary.archived_at ? <ArchiveRestore size={12} /> : <Archive size={12} />} label={detail.summary.archived_at ? "Unarchive" : "Archive"} onClick={() => { void useChatStore.getState().archive(!detail.summary.archived_at); setMenu(false); }} />
-            <MenuButton disabled={busy} danger icon={<Trash2 size={12} />} label="Delete" onClick={() => {
-              if (window.confirm(`Delete “${detail.summary.title}” permanently?`)) void useChatStore.getState().deleteCurrent();
-              setMenu(false);
-            }} />
-          </div>
-        )}
+        <ChatActions chat={detail.summary} placement="toolbar" />
       </div>
     </div>
   );
-}
-
-function MenuButton({ icon, label, onClick, disabled, danger }: { icon: React.ReactNode; label: string; onClick(): void; disabled?: boolean; danger?: boolean }) {
-  return <button disabled={disabled} onClick={onClick} className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-bg-hover disabled:opacity-35 ${danger ? "text-danger" : "text-text-secondary"}`}>{icon}{label}</button>;
 }
 
 function KnowledgePicker() {
@@ -309,13 +292,17 @@ function KnowledgePicker() {
   const attached = useChatStore((state) => state.current?.attached_bucket_refs)
     ?? NO_ATTACHED_BUCKETS;
   const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const dismiss = useCallback(() => setOpen(false), []);
+  useDismissibleLayer(ref, dismiss, open);
   useEffect(() => { if (enabled && buckets.length === 0) void refreshKnowledgeBuckets(); }, [enabled, buckets.length]);
+  useEffect(() => { if (!enabled) setOpen(false); }, [enabled]);
   const attachable = useMemo(() => buckets.filter((bucket) => bucket.attachable), [buckets]);
   if (!enabled) return null;
   return (
-    <div className="relative">
-      <button type="button" onClick={() => setOpen(!open)} className={`flex items-center gap-1 rounded-md px-1.5 py-1 text-[10px] ${attached.length ? "bg-accent/10 text-accent" : "text-text-muted hover:bg-bg-hover"}`}><BookOpen size={13} />{attached.length || "Knowledge"}</button>
-      {open && <div className="absolute bottom-8 left-0 z-30 max-h-64 w-72 overflow-y-auto rounded-md border border-border-subtle bg-bg-card p-1 shadow-lg">
+    <div ref={ref} className="relative">
+      <button type="button" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)} className={`flex items-center gap-1 rounded-md px-1.5 py-1 text-[10px] ${attached.length ? "bg-accent/10 text-accent" : "text-text-muted hover:bg-bg-hover"}`}><BookOpen size={13} />{attached.length || "Knowledge"}</button>
+      {open && <div role="menu" aria-label="Knowledge sources" className="absolute bottom-8 left-0 z-30 max-h-64 w-72 overflow-y-auto rounded-md border border-border-subtle bg-bg-card p-1 shadow-lg">
         {attachable.length === 0 ? <p className="p-2 text-xs text-text-muted">No searchable Knowledge sources.</p> : attachable.map((bucket) => {
           const selected = attached.some((ref) => sameKnowledgeBucket(ref, bucket.ref));
           return <label key={knowledgeBucketKey(bucket.ref)} className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-xs text-text-secondary hover:bg-bg-hover">

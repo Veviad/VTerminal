@@ -371,11 +371,13 @@ export const chatUpdateTitle = (
   title: string,
   source: ChatSaveInput["title_source"],
   expectedTitle?: string,
+  allowManualOverride = false,
 ) => trackArchiveWrite(() => invoke<boolean>("chat_update_title", {
   chatId,
   title,
   source,
   expectedTitle: expectedTitle ?? null,
+  allowManualOverride,
 }));
 export const chatDelete = (chatId: string) =>
   trackArchiveWrite(() => invoke<void>("chat_delete", { chatId }));
