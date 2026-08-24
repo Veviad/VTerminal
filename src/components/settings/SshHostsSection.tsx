@@ -29,6 +29,7 @@ const EMPTY: SshHostInput = {
  *  create/cancel/validate semantics. ModelsSettings is the precedent. */
 export function SshHostsSection() {
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
+  const credentialStoreStatus = useAppStore((s) => s.credentialStoreStatus);
   const { createSession } = useSessions();
   const [hosts, setHosts] = useState<SshHost[]>([]);
   const [editing, setEditing] = useState<SshHost | "new" | null>(null);
@@ -48,11 +49,17 @@ export function SshHostsSection() {
     void reload();
   }, [reload]);
 
-  const onSave = async (draft: SshHostInput) => {
+  const onSave = async (draft: SshHostInput, credentialChange: string | null) => {
     setError(null);
     try {
-      if (editing === "new") await api.sshHostsCreate(draft);
-      else if (editing) await api.sshHostsUpdate(editing.id, draft);
+      if (editing === "new") {
+        await api.sshHostsCreate(draft, credentialChange);
+      } else if (editing) {
+        await api.sshHostsUpdate(editing.id, draft);
+        if (credentialChange !== null) {
+          await api.sshHostsSetPassword(editing.id, credentialChange);
+        }
+      }
       setEditing(null);
       await reload();
     } catch (e) {
@@ -109,6 +116,7 @@ export function SshHostsSection() {
     return (
       <HostForm
         initial={editing === "new" ? EMPTY : editing}
+        vaultAvailable={credentialStoreStatus === "ready"}
         error={error}
         onSave={onSave}
         onCancel={() => {
@@ -149,7 +157,16 @@ export function SshHostsSection() {
             >
               <Server size={12} className="shrink-0 text-text-muted" />
               <div className="min-w-0 flex-1">
-                <p className="truncate text-[12px] text-text-primary">{h.label}</p>
+                <p className="flex items-center gap-1 truncate text-[12px] text-text-primary">
+                  <span className="truncate">{h.label}</span>
+                  {h.has_password && (
+                    <KeyRound
+                      size={10}
+                      className="shrink-0 text-accent"
+                      aria-label={S.settings.sshHosts.passwordBadge}
+                    />
+                  )}
+                </p>
                 <p className="truncate font-mono text-[10px] text-text-muted">
                   {describeSshTarget(h)}
                   {h.tag ? ` · ${h.tag}` : ""}
@@ -219,21 +236,31 @@ export function SshHostsSection() {
 
 function HostForm({
   initial,
+  vaultAvailable,
   error,
   onSave,
   onCancel,
 }: {
-  initial: SshHostInput;
+  initial: SshHostInput | SshHost;
+  vaultAvailable: boolean;
   error: string | null;
-  onSave(draft: SshHostInput): void;
+  onSave(draft: SshHostInput, credentialChange: string | null): void;
   onCancel(): void;
 }) {
   const [draft, setDraft] = useState<SshHostInput>(initial);
+  const [secretDraft, setSecretDraft] = useState("");
+  const [removeStoredCredential, setRemoveStoredCredential] = useState(false);
   const [touched, setTouched] = useState(false);
   const [identityError, setIdentityError] = useState<string | null>(null);
 
   const errors = useMemo(() => validateSshHost(draft), [draft]);
   const errorFor = (field: string) => errors.find((e) => e.field === field)?.message;
+  const hasStoredCredential = "has_password" in initial && initial.has_password;
+  const destinationChanged =
+    hasStoredCredential &&
+    (initial.hostname.trim().toLowerCase() !== draft.hostname.trim().toLowerCase() ||
+      (initial.username?.trim() ?? "") !== (draft.username?.trim() ?? "") ||
+      (initial.port ?? 22) !== (draft.port ?? 22));
   const preview = useMemo(() => {
     try {
       return buildSshCommand(draft);
@@ -312,6 +339,45 @@ function HostForm({
           placeholder="deploy"
           className={`${inputClass} font-mono`}
         />
+      </Field>
+
+      <Field
+        label={S.settings.sshHosts.password}
+        hint={
+          vaultAvailable
+            ? S.settings.sshHosts.passwordHint
+            : S.settings.sshHosts.passwordUnavailable
+        }
+      >
+        <input
+          type="password"
+          value={secretDraft}
+          onChange={(e) => {
+            setSecretDraft(e.target.value);
+            if (e.target.value.length > 0) setRemoveStoredCredential(false);
+          }}
+          placeholder={hasStoredCredential ? S.settings.sshHosts.passwordStored : "SSH password"}
+          aria-label={S.settings.sshHosts.password}
+          autoComplete="new-password"
+          disabled={!vaultAvailable}
+          className={`${inputClass} font-mono`}
+        />
+        {hasStoredCredential && secretDraft.length === 0 && vaultAvailable && (
+          <button
+            type="button"
+            onClick={() => setRemoveStoredCredential((remove) => !remove)}
+            className={`mt-1 text-[10px] ${removeStoredCredential ? "text-warning" : "text-text-muted hover:text-text-secondary"}`}
+          >
+            {removeStoredCredential
+              ? S.settings.sshHosts.keepPassword
+              : S.settings.sshHosts.removePassword}
+          </button>
+        )}
+        {destinationChanged && secretDraft.length === 0 && !removeStoredCredential && (
+          <p className="mt-1 rounded border border-warning/30 bg-warning/10 px-2 py-1 text-[10px] text-warning">
+            {S.settings.sshHosts.originPasswordWarning}
+          </p>
+        )}
       </Field>
 
       <Field
@@ -404,7 +470,11 @@ function HostForm({
         <button
           onClick={() => {
             setTouched(true);
-            if (errors.length === 0) onSave(draft);
+            if (errors.length === 0) {
+              const credentialChange =
+                secretDraft.length > 0 ? secretDraft : removeStoredCredential ? "" : null;
+              onSave(draft, credentialChange);
+            }
           }}
           disabled={touched && errors.length > 0}
           className="rounded-md bg-accent px-3 py-1.5 text-[12px] font-medium text-bg-primary disabled:opacity-60"

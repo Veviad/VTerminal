@@ -216,6 +216,8 @@ pub fn run() {
             commands::ssh_hosts::ssh_hosts_get,
             commands::ssh_hosts::ssh_hosts_create,
             commands::ssh_hosts::ssh_hosts_update,
+            commands::ssh_hosts::ssh_hosts_set_password,
+            commands::ssh_hosts::ssh_hosts_write_password,
             commands::ssh_hosts::ssh_hosts_delete,
             commands::ssh_hosts::ssh_hosts_touch,
             commands::ssh_hosts::ssh_hosts_scan_config,

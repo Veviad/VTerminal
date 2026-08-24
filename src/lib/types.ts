@@ -644,8 +644,8 @@ export interface HistoryEntry extends HistoryEntryInput {
 
 // ---------- SSH hosts ----------
 
-/** A saved server. Note what is absent: no password, no passphrase, no key
- *  material — `identity_file` is a PATH. Auth is keys and ssh-agent. */
+/** A saved server's non-secret fields. Passwords use separate write-only IPC,
+ *  and `identity_file` is a path rather than key material. */
 export interface SshHostInput {
   label: string;
   hostname: string;
@@ -682,6 +682,8 @@ export interface SshHost extends SshHostInput {
   last_used_at: string | null;
   created_at: string;
   updated_at: string;
+  /** Presence only. The password itself never crosses from the backend vault. */
+  has_password: boolean;
 }
 
 // ---------- Session restore ----------

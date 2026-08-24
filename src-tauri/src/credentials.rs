@@ -42,6 +42,7 @@ pub enum CredentialId {
     HuggingFace,
     RemoteServer(String),
     Qdrant(String),
+    SshHost(String),
 }
 
 impl CredentialId {
@@ -53,6 +54,7 @@ impl CredentialId {
             Self::HuggingFace => "provider/huggingface".into(),
             Self::RemoteServer(id) => format!("remote-model/{id}"),
             Self::Qdrant(id) => format!("qdrant/{id}"),
+            Self::SshHost(id) => format!("ssh/{id}"),
         }
     }
 
@@ -61,6 +63,27 @@ impl CredentialId {
             .iter()
             .find_map(|(legacy, id)| (*legacy == key).then(|| id.clone()))
     }
+}
+
+/// Bind a saved password to both the immutable row id and the SSH destination.
+/// Editing a host, user, or effective port therefore resolves a different vault
+/// item and can never silently send the old destination's password elsewhere.
+pub fn ssh_id(
+    host_id: &str,
+    hostname: &str,
+    username: Option<&str>,
+    port: Option<u16>,
+) -> CredentialId {
+    let hostname = hostname.trim().to_ascii_lowercase();
+    let username = username.map(str::trim).unwrap_or_default();
+    let port = port.unwrap_or(22);
+    let origin = format!("{username}@{hostname}:{port}");
+    let digest = Sha256::digest(origin.as_bytes());
+    let fingerprint = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    CredentialId::SshHost(format!("{host_id}/{fingerprint}"))
 }
 
 /// Bind a Qdrant credential to the connection id *and network origin*. During an
@@ -985,6 +1008,10 @@ mod tests {
             CredentialId::Qdrant("connection-uuid".into()).account(),
             "qdrant/connection-uuid"
         );
+        assert_eq!(
+            CredentialId::SshHost("host-uuid/fingerprint".into()).account(),
+            "ssh/host-uuid/fingerprint"
+        );
     }
 
     #[test]
@@ -998,5 +1025,15 @@ mod tests {
         assert_ne!(base, qdrant_id("id", "https://example.com:8443").unwrap());
         assert_ne!(base, qdrant_id("id", "https://other.example.com").unwrap());
         assert_ne!(base, qdrant_id("other-id", "https://example.com").unwrap());
+    }
+
+    #[test]
+    fn ssh_accounts_are_scoped_to_the_normalized_destination() {
+        let base = ssh_id("id", " PROD-01 ", Some(" deploy "), None);
+        assert_eq!(base, ssh_id("id", "prod-01", Some("deploy"), Some(22)));
+        assert_ne!(base, ssh_id("id", "prod-02", Some("deploy"), Some(22)));
+        assert_ne!(base, ssh_id("id", "prod-01", Some("root"), Some(22)));
+        assert_ne!(base, ssh_id("id", "prod-01", Some("deploy"), Some(2222)));
+        assert_ne!(base, ssh_id("other", "prod-01", Some("deploy"), Some(22)));
     }
 }

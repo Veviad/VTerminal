@@ -33,9 +33,21 @@ export interface PendingConnect {
 
 const pending = new Map<string, PendingConnect>();
 
+interface PendingPasswordAutofill {
+  hostId: string;
+  hostname: string;
+  requireHostMatch: boolean;
+  decoder: TextDecoder;
+  tail: string;
+  expiresAt: number;
+}
+
+const passwordAutofill = new Map<string, PendingPasswordAutofill>();
+
 /** Long enough to survive a slow prompt, short enough that an abandoned connect
  *  cannot label an unrelated ssh five minutes later. */
 const PENDING_TTL_MS = 30_000;
+const PASSWORD_AUTOFILL_TTL_MS = 60_000;
 
 export function notePendingConnect(sessionId: string, p: PendingConnect): void {
   pending.set(sessionId, p);
@@ -61,6 +73,72 @@ export function takePendingConnect(sessionId: string, command: string): PendingC
 
 export function clearPendingConnect(sessionId: string): void {
   pending.delete(sessionId);
+  passwordAutofill.delete(sessionId);
+}
+
+/** A password prompt can be split across PTY chunks and may contain ANSI
+ *  styling. Match only the final visible line, and require the target hostname
+ *  when a proxy could prompt before the destination does. */
+export function isSshPasswordPrompt(
+  text: string,
+  hostname: string,
+  requireHostMatch: boolean,
+): boolean {
+  const visible = text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+  const lines = visible.split(/[\r\n]/);
+  const line = lines[lines.length - 1] ?? "";
+  if (!/\bpassword:\s*$/i.test(line)) return false;
+  if (!requireHostMatch) return true;
+  const host = hostname.trim().replace(/^\[|\]$/g, "").toLowerCase();
+  return host.length > 0 && line.toLowerCase().includes(host);
+}
+
+export function notePasswordAutofill(sessionId: string, host: SshHost): void {
+  if (!host.has_password) {
+    passwordAutofill.delete(sessionId);
+    return;
+  }
+  const proxyConfigured =
+    Boolean(host.jump_host?.trim()) ||
+    /(?:^|\s)-J|proxyjump|proxycommand/i.test(host.extra_args ?? "");
+  passwordAutofill.set(sessionId, {
+    hostId: host.id,
+    hostname: host.hostname,
+    requireHostMatch: proxyConfigured,
+    decoder: new TextDecoder(),
+    tail: "",
+    expiresAt: Date.now() + PASSWORD_AUTOFILL_TTL_MS,
+  });
+}
+
+/** Inspect terminal output for one matching prompt. The frontend observes only
+ *  prompt text. The backend resolves and writes the secret directly to the PTY. */
+export function observeSshPasswordPrompt(sessionId: string, bytes: Uint8Array): void {
+  const pendingPassword = passwordAutofill.get(sessionId);
+  if (!pendingPassword) return;
+  if (Date.now() > pendingPassword.expiresAt) {
+    passwordAutofill.delete(sessionId);
+    return;
+  }
+  pendingPassword.tail = `${pendingPassword.tail}${pendingPassword.decoder.decode(bytes, { stream: true })}`.slice(
+    -1024,
+  );
+  if (
+    !isSshPasswordPrompt(
+      pendingPassword.tail,
+      pendingPassword.hostname,
+      pendingPassword.requireHostMatch,
+    )
+  ) {
+    return;
+  }
+
+  // Consume before invoking so duplicate chunks or React lifecycle work can
+  // never submit the same password twice after a failed authentication.
+  passwordAutofill.delete(sessionId);
+  void api
+    .sshHostsWritePassword(pendingPassword.hostId, sessionId)
+    .catch((error) => console.error(`SSH password autofill failed (${sessionId}):`, error));
 }
 
 /**
@@ -136,6 +214,7 @@ export async function connectToHost(
       initialCommand: gated.command,
     });
     notePendingConnect(sessionId, { ...note, at: Date.now() });
+    notePasswordAutofill(sessionId, hostRow);
     return sessionId;
   }
 
@@ -149,6 +228,7 @@ export async function connectToHost(
   }
 
   notePendingConnect(sessionId, { ...note, at: Date.now() });
+  notePasswordAutofill(sessionId, hostRow);
   useAppStore.getState().updateSession(sessionId, {
     hostId: hostRow.id,
     hostLabel: hostRow.label,

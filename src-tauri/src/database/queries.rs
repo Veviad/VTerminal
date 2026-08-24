@@ -127,8 +127,8 @@ pub fn clear_history(conn: &Connection) -> Result<(), String> {
 
 // ---------- SSH hosts ----------
 
-/// What the frontend sends. No password/passphrase field exists by design —
-/// see the `ssh_hosts` table comment in migrations.rs.
+/// What the frontend sends. Passwords use a separate write-only IPC path and
+/// never enter this serializable database input.
 ///
 /// Also `Serialize`, because the ~/.ssh/config importer hands parsed candidates
 /// back to the UI for review in exactly this shape before they are inserted.
@@ -175,11 +175,13 @@ pub struct SshHost {
     pub last_used_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Presence only. The secret is stored in the operating-system vault.
+    pub has_password: bool,
 }
 
 const SSH_HOST_COLS: &str = "id, label, hostname, username, port, identity_file, jump_host, \
      extra_args, remote_dir, post_connect, tag, color, source, config_alias, use_count, \
-     last_used_at, created_at, updated_at";
+     last_used_at, created_at, updated_at, has_password";
 
 fn row_to_ssh_host(row: &rusqlite::Row<'_>) -> rusqlite::Result<SshHost> {
     Ok(SshHost {
@@ -201,6 +203,7 @@ fn row_to_ssh_host(row: &rusqlite::Row<'_>) -> rusqlite::Result<SshHost> {
         last_used_at: row.get(15)?,
         created_at: row.get(16)?,
         updated_at: row.get(17)?,
+        has_password: row.get(18)?,
     })
 }
 
@@ -275,14 +278,20 @@ pub fn insert_ssh_host(conn: &Connection, h: &SshHostInput) -> Result<String, St
 
 /// Config edit. Deliberately leaves `use_count`/`last_used_at` alone — those
 /// belong to `touch_ssh_host`.
-pub fn update_ssh_host(conn: &Connection, id: &str, h: &SshHostInput) -> Result<(), String> {
+pub fn update_ssh_host(
+    conn: &Connection,
+    id: &str,
+    h: &SshHostInput,
+    clear_password: bool,
+) -> Result<(), String> {
     let now = chrono::Utc::now().to_rfc3339();
     let n = conn
         .execute(
             "UPDATE ssh_hosts SET
                 label = ?2, hostname = ?3, username = ?4, port = ?5, identity_file = ?6,
                 jump_host = ?7, extra_args = ?8, remote_dir = ?9, post_connect = ?10,
-                tag = ?11, color = ?12, updated_at = ?13
+                tag = ?11, color = ?12, updated_at = ?13,
+                has_password = CASE WHEN ?14 THEN 0 ELSE has_password END
              WHERE id = ?1",
             params![
                 id,
@@ -298,9 +307,27 @@ pub fn update_ssh_host(conn: &Connection, id: &str, h: &SshHostInput) -> Result<
                 h.tag,
                 h.color,
                 now,
+                clear_password,
             ],
         )
         .map_err(|e| map_ssh_host_err(e, &h.label))?;
+    if n == 0 {
+        return Err(format!("no ssh host {id}"));
+    }
+    Ok(())
+}
+
+pub fn set_ssh_host_has_password(
+    conn: &Connection,
+    id: &str,
+    has_password: bool,
+) -> Result<(), String> {
+    let n = conn
+        .execute(
+            "UPDATE ssh_hosts SET has_password = ?2 WHERE id = ?1",
+            params![id, has_password],
+        )
+        .map_err(|e| format!("update ssh password presence: {e}"))?;
     if n == 0 {
         return Err(format!("no ssh host {id}"));
     }
@@ -471,7 +498,7 @@ mod tests {
 
         let mut edited = host("Prod", "prod-02");
         edited.username = Some("root".into());
-        update_ssh_host(&conn, &id, &edited).unwrap();
+        update_ssh_host(&conn, &id, &edited, false).unwrap();
 
         let got = get_ssh_host(&conn, &id).unwrap().unwrap();
         assert_eq!(got.hostname, "prod-02");
@@ -480,9 +507,23 @@ mod tests {
     }
 
     #[test]
+    fn password_presence_is_explicit_and_can_be_reset_with_an_origin_edit() {
+        let conn = mem();
+        let id = insert_ssh_host(&conn, &host("Prod", "prod-01")).unwrap();
+        assert!(!get_ssh_host(&conn, &id).unwrap().unwrap().has_password);
+
+        set_ssh_host_has_password(&conn, &id, true).unwrap();
+        assert!(get_ssh_host(&conn, &id).unwrap().unwrap().has_password);
+
+        let edited = host("Prod", "prod-02");
+        update_ssh_host(&conn, &id, &edited, true).unwrap();
+        assert!(!get_ssh_host(&conn, &id).unwrap().unwrap().has_password);
+    }
+
+    #[test]
     fn update_of_a_missing_row_errors() {
         let conn = mem();
-        assert!(update_ssh_host(&conn, "nope", &host("X", "x")).is_err());
+        assert!(update_ssh_host(&conn, "nope", &host("X", "x"), false).is_err());
     }
 
     #[test]

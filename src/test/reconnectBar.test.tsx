@@ -65,6 +65,7 @@ const host: SshHost = {
   last_used_at: null,
   created_at: "2026-08-13T00:00:00.000Z",
   updated_at: "2026-08-13T00:00:00.000Z",
+  has_password: false,
 };
 
 describe("ReconnectBar", () => {

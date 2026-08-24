@@ -389,10 +389,8 @@ export const S = {
       title: "Saved SSH hosts",
       intro: `Connect from the command palette (${shortcutGlyph("K")}) without retyping the ssh line.`,
       empty: "No saved hosts yet.",
-      // Stated up front rather than buried: there is no safe way to store a
-      // password for a command that gets typed into a live terminal.
       keyAuthHint:
-        "Password authentication isn't supported — no passwords or passphrases are ever stored. Set up a key with `ssh-copy-id user@host`, or use ssh-agent.",
+        "Passwords are kept in the operating-system credential vault and submitted only at this host's SSH password prompt. SSH keys and ssh-agent remain the recommended option.",
       add: "Add host",
       edit: "Edit",
       remove: "Remove",
@@ -407,6 +405,16 @@ export const S = {
       hostname: "Host",
       username: "User",
       port: "Port",
+      password: "Password",
+      passwordHint:
+        "Stored in the operating-system credential vault. The saved value is never shown again.",
+      passwordStored: "Password stored, type to replace",
+      passwordUnavailable: "The operating-system credential vault is unavailable.",
+      removePassword: "Remove stored password",
+      keepPassword: "Keep stored password",
+      originPasswordWarning:
+        "Changing the host, user, or port removes the stored password unless you enter a replacement.",
+      passwordBadge: "Password stored",
       identityFile: "Identity file",
       identityFileHint: "Path to a private key — the key itself is never stored",
       chooseFile: "Choose…",
