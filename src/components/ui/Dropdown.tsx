@@ -15,8 +15,8 @@ import type { SingleSelectProps } from "./Segmented";
  *
  * **The trigger always renders the current value, with its `tone`.** That is the whole
  * reason a safety control can live in here: hiding the *options* is fine, hiding the
- * *state* is not. Arming auto-accept has to stay visible at a glance, so "All" shows in
- * warning colour on the trigger exactly as it did on the segment.
+ * *state* is not. Arming unattended execution has to stay visible at a glance, so the
+ * relevant modes show in warning colour on the trigger exactly as they did on the segment.
  *
  * Deliberately no portal. The popover is absolutely positioned inside a relative wrapper,
  * which is what `BucketPicker` already does in this same header — a portal would need

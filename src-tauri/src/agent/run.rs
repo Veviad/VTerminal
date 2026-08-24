@@ -634,14 +634,23 @@ fn policy_auto_runs(
     rule: super::policy::RuleDecision,
     output_policy: OutputPolicy,
 ) -> bool {
+    // A deny rule is a refusal, not an approval gate. The caller handles it
+    // before reaching this function, but keeping it false here makes the policy
+    // total and prevents a future caller from turning a deny into execution.
+    if rule == super::policy::RuleDecision::Deny {
+        return false;
+    }
+    // Full is the explicit unattended mode. Selecting it is the authorization
+    // for every command that remains executable after capability and deny-rule
+    // checks, including commands that the guarded auto mode treats as protected.
+    if mode == PermissionMode::Full {
+        return true;
+    }
     let protected = assessment.privileged
         || assessment.opaque
         || assessment.effect == super::policy::CommandEffect::SensitiveRead
         || output_policy == OutputPolicy::Private;
-    if protected
-        || rule == super::policy::RuleDecision::Ask
-        || rule == super::policy::RuleDecision::Deny
-    {
+    if protected || rule == super::policy::RuleDecision::Ask {
         return false;
     }
     match mode {
@@ -650,6 +659,7 @@ fn policy_auto_runs(
         PermissionMode::AutoRead | PermissionMode::AutoSmart => {
             assessment.read_only() || rule == super::policy::RuleDecision::Allow
         }
+        PermissionMode::Full => unreachable!("full mode returned before guarded policy checks"),
     }
 }
 
@@ -2257,7 +2267,7 @@ mod tests {
     }
 
     #[test]
-    fn backend_permission_matrix_keeps_protected_commands_gated() {
+    fn guarded_auto_keeps_protected_commands_gated_and_full_does_not() {
         use crate::agent::policy::{assess, RuleDecision};
         let read = assess("ls -la");
         let secret = assess("cat .env");
@@ -2324,5 +2334,23 @@ mod tests {
                 OutputPolicy::Private,
             ));
         }
+        for (assessment, rule, output_policy) in [
+            (&secret, RuleDecision::None, OutputPolicy::Normal),
+            (&read, RuleDecision::Ask, OutputPolicy::Normal),
+            (&read, RuleDecision::Allow, OutputPolicy::Private),
+        ] {
+            assert!(policy_auto_runs(
+                PermissionMode::Full,
+                assessment,
+                rule,
+                output_policy,
+            ));
+        }
+        assert!(!policy_auto_runs(
+            PermissionMode::Full,
+            &read,
+            RuleDecision::Deny,
+            OutputPolicy::Normal,
+        ));
     }
 }

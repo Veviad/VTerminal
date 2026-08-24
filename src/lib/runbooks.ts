@@ -8,7 +8,7 @@ import { prefixCommandEnvironment } from "./ptyExecShell";
  * Runbooks intentionally do not share the agent stream's event or approval
  * types. A run is durable and can outlive the component (or the process), while
  * an AI stream belongs to one mounted session panel. Keeping the contracts
- * separate makes it impossible for "Auto all" or a stale chat approval to
+ * separate makes it impossible for agent Full mode or a stale chat approval to
  * answer a runbook gate.
  */
 

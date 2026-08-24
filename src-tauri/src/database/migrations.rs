@@ -948,6 +948,66 @@ mod tests {
     }
 
     #[test]
+    fn v13_to_v14_preserves_password_presence_and_adds_private_output_policy() {
+        let conn = mem();
+        conn.execute_batch("CREATE TABLE schema_version (version INTEGER PRIMARY KEY);")
+            .unwrap();
+        super::migrate_v1(&conn).unwrap();
+        super::migrate_v2(&conn).unwrap();
+        super::migrate_v3(&conn).unwrap();
+        super::migrate_v4(&conn).unwrap();
+        super::migrate_v5(&conn).unwrap();
+        crate::runbooks::db::migrate_v6(&conn).unwrap();
+        super::migrate_v7(&conn).unwrap();
+        crate::runbooks::db::migrate_v8(&conn).unwrap();
+        crate::runbooks::db::migrate_v9(&conn).unwrap();
+        crate::runbooks::db::migrate_v10(&conn).unwrap();
+        super::migrate_v11(&conn).unwrap();
+        super::migrate_v12(&conn).unwrap();
+        super::migrate_v13(&conn).unwrap();
+        assert_eq!(version(&conn), 13);
+
+        conn.execute_batch(
+            r#"
+            INSERT INTO ssh_hosts
+                (id, label, hostname, has_password, created_at, updated_at)
+            VALUES ('h1', 'Prod', 'prod-01', 1, 'now', 'now');
+            INSERT INTO archived_sessions
+                (session_id, title, shell, cwd, cols, rows, opened_at, closed_at,
+                 updated_at, is_open)
+            VALUES ('s1', 't', '/bin/zsh', NULL, 80, 24, '2026-01-01T00:00:00Z',
+                    '2026-01-01T00:01:00Z', '2026-01-01T00:01:00Z', 0);
+            INSERT INTO archived_messages
+                (id, session_id, sort_order, role, kind, content, cmd_command,
+                 cmd_output, cmd_exit_code, cmd_status, created_at)
+            VALUES ('s1:0', 's1', 0, 'assistant', 'command', '', 'pwd', '/srv', 0,
+                    'done', '2026-01-01T00:00:01Z');
+            "#,
+        )
+        .unwrap();
+
+        super::run(&conn).unwrap();
+
+        assert_eq!(version(&conn), 14);
+        let has_password: bool = conn
+            .query_row(
+                "SELECT has_password FROM ssh_hosts WHERE id = 'h1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let output_policy: String = conn
+            .query_row(
+                "SELECT cmd_output_policy FROM archived_messages WHERE id = 's1:0'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(has_password);
+        assert_eq!(output_policy, "normal");
+    }
+
+    #[test]
     fn ssh_password_migration_adds_presence_without_secret_storage() {
         let conn = mem();
         super::run(&conn).unwrap();

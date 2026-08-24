@@ -424,7 +424,7 @@ cannot drive the same terminal at once.
   ends it at any point, including mid-wait. If a run goes quiet for longer than
   one command's timeout allows, the flow hands the remaining approvals back to
   you rather than holding the button indefinitely. The same approval is never
-  approved twice. Runbooks do not mirror the agent panel's `Auto all`.
+  approved twice. Runbooks do not mirror the agent panel's `Full` mode.
 - **Abort run** stops an active run and returns you to the Library. It is two
   clicks, it sends SIGINT to an owned foreground command, and it cannot prove
   the process stopped or undo a mutation already made. The active step is

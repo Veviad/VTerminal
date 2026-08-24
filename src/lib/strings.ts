@@ -104,8 +104,10 @@ export const S = {
       degradedHint: "Reconnect or replace this target before continuing the combined run.",
       reconnect: "Reconnect",
       reconnecting: "Reconnecting…",
-      remoteAll: (host: string) =>
-        `All commands for ${host} run without asking, including writes and network access.`,
+      remoteAuto: (host: string) =>
+        `Standard commands for ${host} run without asking. Protected commands still require approval.`,
+      remoteFull: (host: string) =>
+        `Full access is on for ${host}. Every executable command runs without approval.`,
       divider: "Resize local and SSH terminals",
     },
     placeholder: "Ask about your terminal…",
@@ -147,7 +149,8 @@ export const S = {
       ask: "Confirm",
       auto_read: "Reads",
       auto_smart: "Smart",
-      auto_all: "All",
+      auto_all: "Auto",
+      full: "Full",
     },
     permissionHint: {
       ask: "Every command waits for your approval",
@@ -155,7 +158,10 @@ export const S = {
         "Commands proven to only read run straight away, including network-backed reads. Writes and uncertain commands still wait for you.",
       auto_smart:
         "Known reads and commands independently assessed as semantic reads run straight away. Uncertain, sensitive, privileged, and opaque commands still wait.",
-      auto_all: "Commands run without asking except protected, denied, or forced-confirmation operations",
+      auto_all:
+        "Standard commands, including writes and network access, run without asking. Sensitive, privileged, opaque, private-output, and saved always-ask operations still wait.",
+      full:
+        "Every executable command runs without approval, including protected and saved always-ask operations. Deny rules and disabled capabilities remain blocked.",
     },
     // Document buckets. Deliberately says the agent "can search" rather than "will
     // read": attaching a bucket grants a lookup tool, it does not put the documents
@@ -167,7 +173,9 @@ export const S = {
       `${label} — ${chunks} passage${chunks === 1 ? "" : "s"} the agent can search`,
     docsDetach: (label: string) => `Detach ${label}`,
     autoAllWarning:
-      "Auto-accept is ON — commands run in your terminal, on the host it is connected to, without asking",
+      "Auto mode is ON. Standard commands run without asking, while protected commands still require approval.",
+    fullWarning:
+      "Full access is ON. Every executable command runs in your terminal without approval.",
     autoReadNote:
       "Proven read-only commands run without asking, including network-backed reads. Writes and uncertain commands still stop here.",
     autoSmartNote:

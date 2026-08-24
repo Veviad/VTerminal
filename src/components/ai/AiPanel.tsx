@@ -118,6 +118,12 @@ const PERMISSION_OPTIONS = [
     title: S.aiPanel.permissionHint.auto_all,
     tone: "warning",
   },
+  {
+    value: "full",
+    label: S.aiPanel.permission.full,
+    title: S.aiPanel.permissionHint.full,
+    tone: "warning",
+  },
 ] as const;
 
 /** Dragging selected TEXT across the panel also fires the drag events. Checking
@@ -274,6 +280,39 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const attachStatus = stream?.attachStatus ?? null;
   const knowledgeWarning = stream?.knowledgeWarning ?? null;
   const hasChat = streamHasConversation(stream);
+
+  /** Change the standing mode and, when Full is selected, release the exact
+   *  approval already on screen. That release is part of the user's Full-mode
+   *  gesture. CommandProposal events themselves remain backend-owned and are
+   *  never auto-clicked by classification logic in the frontend. */
+  const changePermissionMode = (next: (typeof PERMISSION_OPTIONS)[number]["value"], role?: AgentTargetRole) => {
+    if (!sessionId) return;
+    const proposalToRelease =
+      next === "full" &&
+      pendingProposal &&
+      (role === undefined || pendingProposal.targetRole === role)
+        ? pendingProposal.approvalId
+        : null;
+    if (role && sidecar) {
+      setSidecarPermission(sidecar.ownerSessionId, role, next);
+    } else {
+      useAppStore.getState().setPermissionMode(sessionId, next);
+    }
+    if (!stream?.requestId) return;
+    void api
+      .agentSetPermissionMode(stream.requestId, next, role)
+      .then(() => {
+        const current = useAppStore.getState().aiStreams[sessionId];
+        if (
+          proposalToRelease &&
+          current?.requestId === stream.requestId &&
+          current.pendingProposal?.approvalId === proposalToRelease
+        ) {
+          void respondToProposal(sessionId, "run");
+        }
+      })
+      .catch(() => {});
+  };
 
   // Text files cost nothing special on any model — they are folded into the
   // prompt as text. Only images need a reader.
@@ -596,8 +635,8 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
               floors at 320px, in a fixed-height row with no wrap and no scroll.
 
               Collapsing a SAFETY control is only acceptable because the trigger still
-              renders the current mode in its own tone — "All" stays warning-coloured —
-              and the auto_all banner below this row is untouched. Hiding the options is
+              renders the current mode in its own tone. Unattended modes stay warning-coloured,
+              and the matching warning banner below this row is untouched. Hiding the options is
               fine; hiding the state would break the promise that arming auto-accept is a
               deliberate, visible act. The per-mode explanations also read better here:
               as a segmented control they were tooltips nobody hovered. */}
@@ -605,12 +644,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             <Dropdown
               value={permissionMode}
               options={PERMISSION_OPTIONS}
-              onChange={(next) => {
-                useAppStore.getState().setPermissionMode(sessionId, next);
-                if (stream?.requestId) {
-                  void api.agentSetPermissionMode(stream.requestId, next).catch(() => {});
-                }
-              }}
+              onChange={(next) => changePermissionMode(next)}
               ariaLabel={S.aiPanel.permissionLabel}
               hint={S.aiPanel.permissionLabel}
               size="sm"
@@ -660,10 +694,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             setSidecarFocusedSession(sidecar.ownerSessionId, targetSessionId)
           }
           onPermission={(role, next) => {
-            setSidecarPermission(sidecar.ownerSessionId, role, next);
-            if (stream?.requestId) {
-              void api.agentSetPermissionMode(stream.requestId, next, role).catch(() => {});
-            }
+            changePermissionMode(next, role);
           }}
         />
       )}
@@ -671,6 +702,11 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
       {agentMode && !sidecar && permissionMode === "auto_all" && (
         <div className="shrink-0 border-b border-border-subtle bg-warning/10 px-3 py-1 text-[10px] text-warning">
           {S.aiPanel.autoAllWarning}
+        </div>
+      )}
+      {agentMode && !sidecar && permissionMode === "full" && (
+        <div className="shrink-0 border-b border-border-subtle bg-warning/10 px-3 py-1 text-[10px] text-warning">
+          {S.aiPanel.fullWarning}
         </div>
       )}
       {agentMode && !sidecar && permissionMode === "auto_read" && (
@@ -685,7 +721,12 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
       )}
       {agentMode && sidecar?.permissions.remote === "auto_all" && (
         <div className="shrink-0 border-b border-border-subtle bg-warning/10 px-3 py-1 text-[10px] text-warning">
-          {S.aiPanel.sidecar.remoteAll(sidecar.remoteIdentity.label)}
+          {S.aiPanel.sidecar.remoteAuto(sidecar.remoteIdentity.label)}
+        </div>
+      )}
+      {agentMode && sidecar?.permissions.remote === "full" && (
+        <div className="shrink-0 border-b border-border-subtle bg-warning/10 px-3 py-1 text-[10px] text-warning">
+          {S.aiPanel.sidecar.remoteFull(sidecar.remoteIdentity.label)}
         </div>
       )}
 

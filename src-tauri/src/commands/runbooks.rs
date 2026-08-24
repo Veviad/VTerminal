@@ -106,7 +106,7 @@ const BUILTIN_PACKAGES: &[BuiltinPackage] = &[
 ];
 
 /// The Runbooks engine deliberately owns independent rendezvous registries. In
-/// particular, ordinary AI approvals and `Auto all` cannot reach these maps.
+/// particular, ordinary AI approvals and agent Full mode cannot reach these maps.
 pub struct RunbookCommandState {
     pub coordinator: RunCoordinator,
     pub approvals: RunbookApprovalState,

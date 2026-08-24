@@ -953,7 +953,7 @@ fn command_fingerprint(command: &str) -> String {
 }
 
 /// Pending approval responses. Kept separate from the normal AI approval map so
-/// `Auto all` and cancelling an AI request cannot settle a runbook gate.
+/// Agent Full mode and cancelling an AI request cannot settle a runbook gate.
 #[derive(Default)]
 pub struct RunbookApprovalState {
     pending: Mutex<HashMap<String, (String, tokio::sync::oneshot::Sender<ApprovalResponse>)>>,

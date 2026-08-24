@@ -187,9 +187,11 @@ Local embedding stays on the device. Qdrant and cloud-provider credentials stay 
 
 This matters more in a terminal than anywhere else, so it is worth being precise:
 
-- Every command a model proposes is **classified** on two independent axes — is it read-only, and does it reach the network — and both are shown on the approval card.
+- Every command a model proposes is **classified** on two independent axes — is it read-only, and does it reach the network — and both are shown when an approval card is required.
 - The **permission mode** is per-session, never persisted, and never inherited. Arming it *is* the authorization.
 - **Reads** mode can auto-run network-backed commands only when their shape is proven read-only and web access is enabled. GitHub CLI writes, GraphQL, request bodies, method overrides, browser launches, and unknown shapes remain approval-gated.
+- **Auto** mode runs standard commands, including writes and network access, but still asks for sensitive, privileged, opaque, private-output, and saved always-ask operations.
+- **Full** mode runs every executable command without an approval card. Explicit deny rules and disabled capabilities still block execution instead of asking.
 - Commands run in your **visible PTY**, so you see exactly what ran, and it runs wherever that tab is — including over `ssh`.
 - Commands you edit before approving are treated as *your* text, not the model's.
 
