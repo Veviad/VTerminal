@@ -1,4 +1,4 @@
-import { Settings, Cpu, History, ListChecks, ScanText } from "lucide-react";
+import { Settings, Cpu, History, ListChecks, MessageCircle, ScanText, SquareTerminal } from "lucide-react";
 import { useState } from "react";
 import { useAppStore } from "../../stores/appStore";
 import { ModelMenu } from "./ModelMenu";
@@ -9,6 +9,13 @@ import { RunbookStatusIndicator } from "../runbooks";
 import { selectLiveRunbookRun, useRunbookStore } from "../../stores/runbookStore";
 import { useChatStore } from "../../stores/chatStore";
 import { getTerm } from "../../lib/termRegistry";
+import { Dropdown } from "../ui/Dropdown";
+import { GenerationModeBadge } from "./GenerationModeBadge";
+
+const WORKSPACE_OPTIONS = [
+  { value: "terminal", label: "Terminal", title: "Terminal tabs with the AI panel." },
+  { value: "chat", label: "Chat", title: "Standalone conversations without terminal access." },
+] as const;
 
 export function Header() {
   const settingsOpen = useAppStore((s) => s.settingsOpen);
@@ -67,14 +74,22 @@ export function Header() {
       <div className="flex items-center gap-2" data-tauri-drag-region>
         <img src="/vterminal-mark.svg" alt="" className="h-5 w-[14px]" />
         <span className="text-[13px] font-medium text-text-secondary">{S.app.name}</span>
+        <span className="mx-0.5 h-4 border-l border-border-subtle" />
+        <div data-tauri-drag-region="false">
+          <Dropdown
+            value={workspaceMode}
+            options={WORKSPACE_OPTIONS}
+            onChange={switchWorkspace}
+            ariaLabel="Workspace"
+            size="sm"
+            align="left"
+            icon={workspaceMode === "terminal" ? <SquareTerminal size={10} /> : <MessageCircle size={10} />}
+          />
+        </div>
       </div>
 
-      {/* Center: workspace switch plus the active workspace's navigation. */}
+      {/* Center: the active workspace's navigation. */}
       <div className="flex min-w-0 items-center gap-2 px-2">
-        <div className="flex rounded-lg bg-bg-hover p-0.5 text-[10px]" data-tauri-drag-region="false">
-          <button onClick={() => switchWorkspace("terminal")} className={`rounded-md px-2.5 py-1 ${workspaceMode === "terminal" ? "bg-bg-card text-text-primary shadow-sm" : "text-text-muted hover:text-text-secondary"}`}>Terminal</button>
-          <button onClick={() => switchWorkspace("chat")} className={`rounded-md px-2.5 py-1 ${workspaceMode === "chat" ? "bg-bg-card text-text-primary shadow-sm" : "text-text-muted hover:text-text-secondary"}`}>Chat</button>
-        </div>
         {workspaceMode === "terminal" && <TabStrip />}
       </div>
 
@@ -108,6 +123,7 @@ export function Header() {
         >
           <Cpu size={12} />
           <span className="max-w-[160px] truncate">{modelLabel}</span>
+          <GenerationModeBadge />
         </button>
         {visionMenuOpen && <VisionMenu onClose={() => setVisionMenuOpen(false)} />}
         {menuOpen && <ModelMenu onClose={() => setMenuOpen(false)} />}

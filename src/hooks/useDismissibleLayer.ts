@@ -4,8 +4,10 @@ import { useEffect, type RefObject } from "react";
 export function useDismissibleLayer(
   layerRef: RefObject<HTMLElement | null>,
   onDismiss: () => void,
+  enabled = true,
 ) {
   useEffect(() => {
+    if (!enabled) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") onDismiss();
     };
@@ -20,5 +22,5 @@ export function useDismissibleLayer(
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("pointerdown", onPointerDown);
     };
-  }, [layerRef, onDismiss]);
+  }, [enabled, layerRef, onDismiss]);
 }

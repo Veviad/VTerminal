@@ -40,9 +40,17 @@ pub fn chat_update_title(
     title: String,
     source: String,
     expected_title: Option<String>,
+    allow_manual_override: bool,
 ) -> Result<bool, String> {
     let conn = db.0.lock().map_err(|_| "db poisoned")?;
-    chat::update_title(&conn, &chat_id, &title, &source, expected_title.as_deref())
+    chat::update_title(
+        &conn,
+        &chat_id,
+        &title,
+        &source,
+        expected_title.as_deref(),
+        allow_manual_override,
+    )
 }
 
 #[tauri::command]

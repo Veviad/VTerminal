@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => ({
   attachmentRead: vi.fn(),
   visionDescribe: vi.fn(),
   saveSettings: vi.fn(),
+  modelStatus: vi.fn(),
 }));
 
 vi.mock("../lib/tauri", () => ({
@@ -89,6 +90,12 @@ describe("Chat workspace store", () => {
     mocks.chatUpdateTitle.mockResolvedValue(false);
     mocks.aiNameChat.mockResolvedValue("Generated title");
     mocks.saveSettings.mockResolvedValue(undefined);
+    mocks.modelStatus.mockResolvedValue({
+      loaded: null,
+      state: "idle",
+      available: true,
+      acceleration: undefined,
+    });
     useAppStore.setState({
       catalog: [chatModel()],
       activeModelId: "anthropic/chat-test",
@@ -147,6 +154,81 @@ describe("Chat workspace store", () => {
 
     expect(mocks.chatSetArchived).not.toHaveBeenCalled();
     expect(useChatStore.getState().current?.summary.archived_at).toBeNull();
+  });
+
+  it("renames a chat selected from the sidebar without changing the current chat", async () => {
+    const current = summary("current");
+    const other = summary("other");
+    mocks.chatUpdateTitle.mockResolvedValue(true);
+    useChatStore.setState({ current: detail(current), summaries: [current, other] });
+
+    await useChatStore.getState().rename("Manual title", other.id);
+
+    expect(mocks.chatUpdateTitle).toHaveBeenCalledWith(other.id, "Manual title", "manual");
+    expect(useChatStore.getState().current?.summary.id).toBe(current.id);
+    expect(useChatStore.getState().summaries.find((chat) => chat.id === other.id)).toMatchObject({
+      title: "Manual title",
+      title_source: "manual",
+    });
+  });
+
+  it("lets an explicit regeneration replace a manual title safely", async () => {
+    const manual = { ...summary("manual"), title: "My title", title_source: "manual" as const, message_count: 2 };
+    const conversation = detail(manual);
+    conversation.messages = [
+      {
+        id: "question",
+        sort_order: 0,
+        role: "user",
+        content: "How does MTP work?",
+        thinking: null,
+        model: null,
+        prompt_tokens: null,
+        completion_tokens: null,
+        citations: [],
+        attachments: [],
+        created_at: manual.created_at,
+      },
+      {
+        id: "answer",
+        sort_order: 1,
+        role: "assistant",
+        content: "It drafts multiple tokens.",
+        thinking: null,
+        model: "Chat Test",
+        prompt_tokens: 4,
+        completion_tokens: 5,
+        citations: [],
+        attachments: [],
+        created_at: manual.updated_at,
+      },
+    ];
+    mocks.chatUpdateTitle.mockResolvedValue(true);
+    useChatStore.setState({ current: conversation, summaries: [manual] });
+
+    await useChatStore.getState().regenerateTitle(manual.id, true);
+
+    expect(mocks.chatUpdateTitle).toHaveBeenCalledWith(
+      manual.id,
+      "Generated title",
+      "generated",
+      "My title",
+      true,
+    );
+    expect(useChatStore.getState().current?.summary).toMatchObject({
+      title: "Generated title",
+      title_source: "generated",
+    });
+  });
+
+  it("does not let automatic naming replace a manual title", async () => {
+    const manual = { ...summary("manual"), title: "My title", title_source: "manual" as const };
+    useChatStore.setState({ current: detail(manual), summaries: [manual] });
+
+    await useChatStore.getState().regenerateTitle(manual.id);
+
+    expect(mocks.aiNameChat).not.toHaveBeenCalled();
+    expect(mocks.chatUpdateTitle).not.toHaveBeenCalled();
   });
 
   it("persists the user turn, tool checkpoint, and streamed assistant response", async () => {

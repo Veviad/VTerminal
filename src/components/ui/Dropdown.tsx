@@ -31,6 +31,7 @@ export function Dropdown<T extends string>({
   disabled,
   size = "md",
   icon,
+  align = "right",
 }: {
   value: T;
   options: readonly SegmentedOption<T>[];
@@ -41,6 +42,8 @@ export function Dropdown<T extends string>({
   size?: "sm" | "md";
   /** Optional leading glyph, for a control whose label alone is ambiguous. */
   icon?: React.ReactNode;
+  /** Which trigger edge the menu follows. */
+  align?: "left" | "right";
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -101,7 +104,9 @@ export function Dropdown<T extends string>({
           id={listId}
           role="listbox"
           aria-label={ariaLabel}
-          className="absolute right-0 z-30 mt-1 min-w-[11rem] rounded-md border border-border-subtle bg-bg-card p-1 shadow-lg"
+          className={`absolute z-30 mt-1 min-w-[11rem] rounded-md border border-border-subtle bg-bg-card p-1 shadow-lg ${
+            align === "left" ? "left-0" : "right-0"
+          }`}
         >
           {hint && (
             <p className="px-1.5 py-1 text-[10px] leading-snug text-text-muted">{hint}</p>
