@@ -105,6 +105,7 @@ import { archiveOnClose } from "../lib/sessionArchive";
 import { startNewChat } from "../lib/newChat";
 import { useSessions } from "../hooks/useSessions";
 import {
+  protectPrivateTerminal,
   protectRunbookTerminal,
   resetRunbookTerminalPrivacyForTests,
 } from "../lib/runbookTerminalPrivacy";
@@ -319,6 +320,18 @@ describe("scrollback capture", () => {
   it("actively clears stored scrollback and never serializes a Runbook-bound terminal", async () => {
     startPersistence();
     protectRunbookTerminal("a");
+    markScrollbackDirty("a");
+    await vi.advanceTimersByTimeAsync(3500);
+
+    expect(serializeMock).not.toHaveBeenCalled();
+    const arg = lastSnapshot();
+    expect(arg.sessions[0].scrollback).toBe("");
+    expect(arg.sessions[0].scrollback_lines).toBe(0);
+  });
+
+  it("actively clears stored scrollback after an Agent private command", async () => {
+    startPersistence();
+    protectPrivateTerminal("a");
     markScrollbackDirty("a");
     await vi.advanceTimersByTimeAsync(3500);
 

@@ -512,6 +512,7 @@ describe("single-terminal command routing", () => {
         explanation: "Clone the requested project",
         read_only: false,
         network: true,
+        output_policy: "normal",
       });
     });
 
@@ -530,6 +531,7 @@ describe("single-terminal command routing", () => {
         command: "git clone https://example.test/project.git",
         timeout_secs: 120,
         explanation: "Clone the requested project",
+        output_policy: "normal",
       });
     });
     await flushPreflight();
@@ -596,6 +598,7 @@ describe("AI Sidecar routing", () => {
         explanation: "Read the issue with local credentials",
         read_only: true,
         network: true,
+        output_policy: "normal",
         target_role: "local",
         target_session_id: SID,
       });
@@ -627,6 +630,7 @@ describe("AI Sidecar routing", () => {
         command: "docker compose up -d api",
         timeout_secs: 120,
         explanation: "Apply the requested service update",
+        output_policy: "private",
         target_role: "remote",
         target_session_id: REMOTE_SID,
       });
@@ -639,6 +643,7 @@ describe("AI Sidecar routing", () => {
       "remote-run",
       "docker compose up -d api",
     ]);
+    expect(pty.runInTerminal.mock.calls[0][3]).toMatchObject({ outputPolicy: "private" });
   });
 
   it("rejects mismatched backend target metadata before terminal dispatch", async () => {
@@ -660,6 +665,7 @@ describe("AI Sidecar routing", () => {
         command: "uname -a",
         timeout_secs: 30,
         explanation: "Inspect the remote host",
+        output_policy: "normal",
         target_role: "remote",
         // A stale/corrupt event cannot redirect `remote` into the local PTY.
         target_session_id: SID,
@@ -716,6 +722,7 @@ describe("AI Sidecar routing", () => {
         command: "pwd",
         timeout_secs: 30,
         explanation: "Confirm the deployment directory",
+        output_policy: "normal",
         target_role: "remote",
         target_session_id: REMOTE_SID,
       });

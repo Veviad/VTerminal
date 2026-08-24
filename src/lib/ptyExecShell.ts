@@ -10,6 +10,19 @@
 // characters are rejected outright rather than escaped.
 
 export type ExecMode = "integrated" | "hook" | "sentinel";
+export type ShellDialect = "posix" | "fish";
+
+/**
+ * Group a private command in the current interactive shell and discard both
+ * output streams. Grouping is deliberate: exports and other shell mutations
+ * remain available to later private commands in the same session.
+ */
+export function suppressPrivateOutput(command: string, dialect: ShellDialect): string {
+  const quoted = `'${command.replaceAll("'", `'"'"'`)}'`;
+  return dialect === "fish"
+    ? `begin; eval ${quoted}; end >/dev/null 2>/dev/null`
+    : `{ eval ${quoted}; } >/dev/null 2>/dev/null`;
+}
 
 /** Private OSC 6973 subtypes. `CMD;` is the shell integration's own and is
  *  handled by BlockTracker; everything here is the remote-exec channel. */

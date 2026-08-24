@@ -3,7 +3,8 @@ import type { IDisposable, IMarker } from "@xterm/xterm";
 import { getTerm, subscribeTerm, type TermEvent } from "./termRegistry";
 import { readLineRangeResult, type ReadRangeResult } from "./terminalSnapshot";
 import { useAppStore } from "../stores/appStore";
-import type { CommandStall } from "./types";
+import { PRIVATE_OUTPUT_NOTICE, type CommandStall, type OutputPolicy } from "./types";
+import { protectPrivateTerminal } from "./runbookTerminalPrivacy";
 import {
   PROBE,
   canSentinel,
@@ -14,9 +15,11 @@ import {
   sanitizeCommand,
   sentinelSuffix,
   shellFromProbe,
+  suppressPrivateOutput,
   type HardenedCommand,
   type ExecMode,
   type PrivateToken,
+  type ShellDialect,
 } from "./ptyExecShell";
 
 // Running an approved agent command in the user's LIVE terminal.
@@ -119,7 +122,12 @@ interface Job {
 
 const jobs = new Map<string, Job>();
 /** Resolved exec mode per session; cleared when a nested session exits. */
-const sessionModes = new Map<string, ExecMode>();
+interface ResolvedExecMode {
+  mode: ExecMode;
+  dialect: ShellDialect;
+}
+
+const sessionModes = new Map<string, ResolvedExecMode>();
 
 interface ApprovalPromptSnapshot {
   sessionId: string;
@@ -336,6 +344,8 @@ export interface RunOptions {
   nonceCompletion?: boolean;
   /** One-shot terminal epoch captured by the operator's Runbook approval. */
   approvalPromptBinding?: string;
+  /** Discard stdout and stderr before either can be harvested into app state. */
+  outputPolicy?: OutputPolicy;
 }
 
 export async function runInTerminal(
@@ -347,6 +357,7 @@ export async function runInTerminal(
   const timeoutMs = opts.timeoutMs ?? 120_000;
   const idleWaitMs = opts.idleWaitMs ?? IDLE_WAIT_MAX_MS;
   const tailLimit = opts.tailLimit ?? MODEL_TAIL;
+  const privateOutput = opts.outputPolicy === "private";
   const startedAt = Date.now();
 
   const sanitized = sanitizeCommand(rawCommand);
@@ -409,7 +420,8 @@ export async function runInTerminal(
   // every attempt to reject stale/replayed completion output. The active shell
   // remains operator-trusted and the result is labelled shell-observed, not a
   // deterministic executor attestation.
-  const mode: ExecMode = opts.nonceCompletion ? "sentinel" : resolvedMode;
+  const mode = resolvedMode.mode;
+  const dialect = resolvedMode.dialect;
   const readyEntry = getTerm(sessionId);
   if (!readyEntry || readyEntry.disposed) return closedOutcome(startedAt, mode);
   const readyBuffer = readyEntry.term.buffer.active;
@@ -452,7 +464,8 @@ export async function runInTerminal(
       note: `Nothing was executed: ${String(error)}`,
     };
   }
-  const line = mode === "sentinel" ? typed + sentinelSuffix("posix", nonce) : typed;
+  if (privateOutput) typed = suppressPrivateOutput(typed, dialect);
+  const line = mode === "sentinel" ? typed + sentinelSuffix(dialect, nonce) : typed;
   if (line.length > 4_096) {
     return {
       exitCode: null,
@@ -501,7 +514,7 @@ export async function runInTerminal(
     dispatchBuffer.cursorX === promptSnapshot.cursorX &&
     dispatchEntry.lastDataAt === promptSnapshot.lastDataAt &&
     dispatchEntry.lastUserInputAt === promptSnapshot.lastUserInputAt &&
-    (resolvedMode !== "integrated" ||
+    (mode !== "integrated" ||
       dispatchEntry.tracker.isAtEmptyPrompt() ||
       dispatchEntry.tracker.isAtPromptColumn());
   if (!promptStillBound) {
@@ -566,7 +579,18 @@ export async function runInTerminal(
       if (refresh) clearInterval(refresh);
       unsubscribe();
       jobs.delete(sessionId);
-      resolve(outcome);
+      resolve(
+        privateOutput
+          ? {
+              ...outcome,
+              output: "",
+              outputTruncated: false,
+              outputObservedBytes: 0,
+              outputCapturedBytes: 0,
+              note: PRIVATE_OUTPUT_NOTICE,
+            }
+          : outcome,
+      );
     };
     jobs.set(sessionId, job);
 
@@ -580,6 +604,14 @@ export async function runInTerminal(
       limit: number,
       from = captureStartLine() + 1,
     ): ReadRangeResult => {
+      if (privateOutput) {
+        return {
+          text: "",
+          truncated: false,
+          observedBytes: 0,
+          capturedBytes: 0,
+        };
+      }
       const captured = readLineRangeResult(sessionId, from, toInclusive, { limit });
       const text = captured.text.trimEnd();
       const capturedBytes = new TextEncoder().encode(text).length;
@@ -789,6 +821,7 @@ export async function runInTerminal(
       }
     }
     job.injected = true;
+    if (privateOutput) protectPrivateTerminal(sessionId);
     if (opts.nonceCompletion) entry.tracker.beginRunbookOutputIsolation();
     // Show what the guards changed: the user approved `systemctl status x`, and
     // the terminal is about to echo an env prefix and a redirect they never saw.
@@ -821,7 +854,9 @@ export async function runInTerminal(
       const e = getTerm(sessionId);
       if (!e || e.disposed) return;
       const store = useAppStore.getState();
-      store.setCommandOutput(sessionId, approvalId, harvest(cursorRow(), CARD_TAIL).text);
+      if (!privateOutput) {
+        store.setCommandOutput(sessionId, approvalId, harvest(cursorRow(), CARD_TAIL).text);
+      }
 
       const now = Date.now();
       // Charge the interval just elapsed to the pause budget if it was spent
@@ -875,7 +910,12 @@ export async function runInTerminal(
 
 // ---------------------------------------------------------------------------
 
-type ModeResolution = ExecMode | "busy" | "closed" | "not_a_shell";
+type ModeResolution = ResolvedExecMode | "busy" | "closed" | "not_a_shell";
+
+function configuredShellDialect(sessionId: string): ShellDialect {
+  const shell = useAppStore.getState().sessions.find((session) => session.id === sessionId)?.shell;
+  return shell?.split("/").pop() === "fish" ? "fish" : "posix";
+}
 
 async function resolveSentinelPrompt(
   sessionId: string,
@@ -883,7 +923,9 @@ async function resolveSentinelPrompt(
 ): Promise<ModeResolution> {
   const remote = useAppStore.getState().sessionUi[sessionId]?.remote ?? null;
   const ready = await waitForPrompt(sessionId, idleWaitMs, remote ? "nested" : "integrated");
-  return ready === "ok" ? "sentinel" : ready;
+  return ready === "ok"
+    ? { mode: "sentinel", dialect: configuredShellDialect(sessionId) }
+    : ready;
 }
 
 /** Wait for a safe prompt, then work out how this session reports exit codes. */
@@ -893,7 +935,7 @@ async function resolveMode(sessionId: string, idleWaitMs: number): Promise<ModeR
   if (!remote) {
     const ready = await waitForPrompt(sessionId, idleWaitMs, "integrated");
     if (ready !== "ok") return ready;
-    return "integrated";
+    return { mode: "integrated", dialect: configuredShellDialect(sessionId) };
   }
 
   const cached = sessionModes.get(sessionId);
@@ -905,15 +947,18 @@ async function resolveMode(sessionId: string, idleWaitMs: number): Promise<ModeR
   // which is the one case where typing a command would be actively harmful.
   const rs = await sendAndAwait(sessionId, PROBE, PROBE_WAIT_MS, (t) => (t.t === "RS" ? t : null));
   if (!rs) return "not_a_shell";
+  const dialect: ShellDialect = rs.fish ? "fish" : "posix";
   if (rs.installed) {
-    sessionModes.set(sessionId, "hook");
-    return "hook";
+    const resolved = { mode: "hook", dialect } as const;
+    sessionModes.set(sessionId, resolved);
+    return resolved;
   }
 
   const shell = shellFromProbe(rs);
   if (!shell) {
-    sessionModes.set(sessionId, "sentinel");
-    return "sentinel";
+    const resolved = { mode: "sentinel", dialect } as const;
+    sessionModes.set(sessionId, resolved);
+    return resolved;
   }
   const nonce = makeNonce();
   const rh = await sendAndAwait(
@@ -922,9 +967,9 @@ async function resolveMode(sessionId: string, idleWaitMs: number): Promise<ModeR
     HANDSHAKE_WAIT_MS,
     (t) => (t.t === "RH" && t.nonce === nonce ? t : null),
   );
-  const mode: ExecMode = rh ? "hook" : "sentinel";
-  sessionModes.set(sessionId, mode);
-  return mode;
+  const resolved: ResolvedExecMode = { mode: rh ? "hook" : "sentinel", dialect };
+  sessionModes.set(sessionId, resolved);
+  return resolved;
 }
 
 /** Write a setup line and wait for its private token. */

@@ -9,6 +9,7 @@ import {
   Keyboard,
   Link2,
   Link2Off,
+  LockKeyhole,
   MessageSquarePlus,
   MonitorX,
   Paperclip,
@@ -738,12 +739,13 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             explanation={pendingProposal.explanation}
             remote={proposalRole ? proposalRole === "remote" : !!remote}
             targetRole={proposalRole ?? undefined}
+            outputPolicy={pendingProposal.outputPolicy}
             target={proposalTarget}
             queuedSteers={queuedSteers}
             // Why this is asking despite an armed auto mode. Null in Confirm,
             // where no explanation is owed.
             askedBecause={pendingProposal.askReason ?? askReason(proposalPermissionMode, pendingProposal)}
-            onRemember={(effect) => {
+            onRemember={pendingProposal.outputPolicy === "private" ? undefined : (effect) => {
               const activeSession = Object.entries(sessionUi)
                 .find(([id]) => id === sessionId)?.[1];
               const remoteTarget = proposalRole === "remote" && sidecar
@@ -1378,6 +1380,15 @@ function CommandMessage({
           mode: there was no approval card to read this on. */}
       {cmd.explanation && (
         <p className="bg-bg-elevated px-2.5 py-1 text-[10px] text-text-muted">{cmd.explanation}</p>
+      )}
+      {cmd.outputPolicy === "private" && (
+        <p className="flex items-center gap-1.5 bg-accent/10 px-2.5 py-1 text-[10px] text-accent">
+          <LockKeyhole size={11} />
+          {S.aiPanel.privateOutput}
+          {cmd.durationMs !== undefined && (
+            <span className="text-text-muted">({cmd.durationMs.toLocaleString()} ms)</span>
+          )}
+        </p>
       )}
       {/* What actually went in. The user approved `systemctl status x`; the
           terminal echoes an env prefix and a redirect they never saw. */}

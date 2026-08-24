@@ -30,7 +30,11 @@ const {
   interruptJob,
   resetSessionMode,
 } = await import("../lib/ptyExec");
-const { hardenCommand } = await import("../lib/ptyExecShell");
+const { hardenCommand, suppressPrivateOutput } = await import("../lib/ptyExecShell");
+const {
+  isTerminalOutputProtected,
+  resetRunbookTerminalPrivacyForTests,
+} = await import("../lib/runbookTerminalPrivacy");
 const { useAppStore } = await import("../stores/appStore");
 
 /**
@@ -148,6 +152,7 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
 beforeEach(() => {
   ptyWrite.mockClear();
   listeners.clear();
+  resetRunbookTerminalPrivacyForTests();
   resetSessionMode("s1");
   useAppStore.setState({
     sessions: [
@@ -211,6 +216,31 @@ describe("runInTerminal — integrated session", () => {
     emit({ type: "blockStart", blockId: "b1", command: typed("false") });
     emit({ type: "blockEnd", blockId: "b1", exitCode: 127, endLine: 2 });
     expect((await promise).exitCode).toBe(127);
+  });
+
+  it("groups private commands in the current shell and never harvests their bytes", async () => {
+    const command = "export GENERATED=$(openssl rand -hex 32)";
+    const wrapped = suppressPrivateOutput(typed(command), "posix");
+    entry = makeEntry(["$ ", "must-not-be-captured", "$ "]);
+    const promise = runInTerminal("s1", "private-ap1", command, {
+      timeoutMs: 5000,
+      outputPolicy: "private",
+    });
+    await flush();
+
+    expect(ptyWrite).toHaveBeenCalledWith("s1", `${wrapped}\r`);
+    expect(isTerminalOutputProtected("s1")).toBe(true);
+    entry.blockMarkers.set("private-b1", {
+      start: { line: 1, isDisposed: false },
+      end: { line: 2, isDisposed: false },
+    });
+    emit({ type: "blockStart", blockId: "private-b1", command: wrapped });
+    emit({ type: "blockEnd", blockId: "private-b1", exitCode: 0, endLine: 2 });
+
+    const outcome = await promise;
+    expect(outcome.output).toBe("");
+    expect(outcome.outputObservedBytes).toBe(0);
+    expect(outcome.note).toBe("[private output suppressed]");
   });
 
   it("marks output as truncated when the bound block was trimmed", async () => {
@@ -500,6 +530,22 @@ describe("runInTerminal — timeout and cancellation", () => {
     }
   });
 
+  it("suppresses live terminal bytes even when a private command times out", async () => {
+    vi.useFakeTimers();
+    entry = makeEntry(["$ ", "private-partial"]);
+    const promise = runInTerminal("s1", "private-timeout", "sleep 999", {
+      timeoutMs: 1000,
+      outputPolicy: "private",
+    });
+    await vi.advanceTimersByTimeAsync(1500);
+
+    const outcome = await promise;
+    expect(outcome.error).toBe("timeout");
+    expect(outcome.output).toBe("");
+    expect(outcome.outputObservedBytes).toBe(0);
+    expect(outcome.note).toBe("[private output suppressed]");
+  });
+
   it("abortSession resolves the pending command without touching the terminal", async () => {
     entry = makeEntry(["$ "]);
     const promise = runInTerminal("s1", "ap1", "sleep 999", { timeoutMs: 60_000 });
@@ -717,6 +763,29 @@ describe("runInTerminal — remote session", () => {
     const outcome = await promise;
     expect(outcome.exitCode).toBe(9);
     expect(outcome.mode).toBe("sentinel");
+  });
+
+  it("uses fish grouping for a private command in a remote fish shell", async () => {
+    entry = makeEntry(["$ ", "private bytes", "$ "]);
+    const promise = runInTerminal("s1", "private-fish", "set -gx GENERATED opaque", {
+      timeoutMs: 60_000,
+      outputPolicy: "private",
+    });
+
+    await flush();
+    emit({ type: "osc", payload: "RS;;;3.7;" });
+    await flush();
+
+    const written = ptyWrite.mock.calls[1][1];
+    expect(written).toContain("begin; eval 'set -gx GENERATED opaque < /dev/null'");
+    expect(written).toContain("end >/dev/null 2>/dev/null");
+    expect(written).toContain("$status");
+    const nonce = /;([a-z0-9]+)\\007/.exec(written)?.[1];
+    emit({ type: "osc", payload: `RD;0;${nonce}` });
+
+    const outcome = await promise;
+    expect(outcome.output).toBe("");
+    expect(outcome.note).toBe("[private output suppressed]");
   });
 
   it("refuses to run at all when nothing answers the probe", async () => {

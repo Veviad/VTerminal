@@ -49,10 +49,10 @@
 //!   the remote host identically, but the session itself is a live connection
 //!   this setting cannot retract.
 //!
-//! A command the USER edited in the approval card is deliberately not
-//! re-classified. That is their own authorization on a gesture they just made,
-//! which is the same line `CLAUDE.md` already draws for palette history and
-//! saved-host connects.
+//! A command the USER edited in the approval card is re-checked for sensitive
+//! reads immediately before execution. This privacy check can upgrade output to
+//! private but can never downgrade an already-private command. Other policy
+//! effects remain covered by the operator's explicit approval gesture.
 
 use serde::{Deserialize, Serialize};
 

@@ -34,6 +34,9 @@ Rules:\n\
 Be especially careful when the session is remote: it may be a production host.\n\
 - Unless the context says the session is local macOS, prefer POSIX-portable commands and flags.\n\
 - The user may skip a command; respect that and find another way or finish.\n\
+- Secret material is opaque to you. Never invent a password, private key, token, recovery code, or similar secret in prose or in a command. Generate it inside the user's environment with an operating-system cryptographic tool, and set run_command output_policy to `private`.\n\
+- A private command may store a secret in a purpose-built secret manager, an environment variable, stdin, or a file created with restrictive permissions such as `umask 077`. Later commands may consume only the opaque variable, path, reference, or file descriptor. They must also use `private` whenever stdout or stderr could reveal the value.\n\
+- Never echo, cat, printenv, attach, summarize, hash, encode, decode, or otherwise inspect secret material. Verify work using exit status, file existence and permissions, or intentionally public material such as a public key. Do not use programs that write secret output directly to `/dev/tty` or an external log.\n\
 - When the goal is achieved (or cannot be), call finish with a short summary of what happened.\n\
 - Do not invent output you have not seen. Keep prose between steps to one or two sentences.";
 
