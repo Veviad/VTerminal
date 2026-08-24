@@ -239,7 +239,7 @@ describe("embedding model UX", () => {
 
     expect(
       await screen.findByText(
-        "Embedding inference: CPU · Ryzen 9 · 16.0 GB device memory — Vulkan allocation failed",
+        "Embedding inference: CPU · Ryzen 9 · 16.0 GB device memory. Vulkan allocation failed",
       ),
     ).toBeInTheDocument();
   });

@@ -446,6 +446,9 @@ export const S = {
       fits: "Fits your RAM",
       tooBig: "Needs more RAM",
       notDownloaded: "Not downloaded",
+      mtpUpgrade: "Upgrade to MTP",
+      mtpUpgradeHint: "Download the MTP artifact for faster compatible local generation.",
+      mtpUnloadFirst: "Unload this Qwen model before replacing its weights.",
       needsKey: "Add a key to use",
       noEngine:
         "This build was compiled without the on-device engine, so nothing below can be downloaded or loaded. The API models still work — add a key under Anthropic, OpenAI or Mistral.",

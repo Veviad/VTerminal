@@ -56,9 +56,20 @@ function chatModel(id: string, label: string): CatalogEntry {
     native_web_fetch: false,
     supports_vision: false,
     local: {
-      repo_id: "shared/repository",
-      filename: "shared.gguf",
-      size_bytes: 100_000_000,
+      artifact: {
+        repo_id: "shared/repository",
+        filename: "shared.gguf",
+        size_bytes: 100_000_000,
+      },
+      mtp: {
+        kind: "embedded",
+        legacy: {
+          repo_id: "shared/repository",
+          filename: "legacy.gguf",
+          size_bytes: 90_000_000,
+        },
+        draft_tokens: 6,
+      },
       min_ram_gb: 1,
       family: "qwen",
     },
@@ -202,8 +213,8 @@ describe("inline model download progress", () => {
         "dl-first": {
           kind: "chat",
           modelId: entry.id,
-          repoId: entry.local!.repo_id,
-          filename: entry.local!.filename,
+          repoId: entry.local!.artifact.repo_id,
+          filename: entry.local!.artifact.filename,
           downloaded: 25,
           total: 100,
           bps: 10,
@@ -237,6 +248,24 @@ describe("inline model download progress", () => {
     render(<ModelRow entry={chatModel("local/first", "First model")} />);
     expect(screen.getByText("checksum mismatch")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Retry" })).toBeEnabled();
+  });
+
+  it("offers an explicit MTP upgrade and blocks Qwen replacement while loaded", () => {
+    const entry = chatModel("local/first", "First model");
+    entry.downloaded = true;
+    entry.mtp = {
+      kind: "embedded",
+      state: "upgrade_available",
+      download_bytes: 2_800_000_000,
+      disk_delta_bytes: 94_000_000,
+      draft_tokens: 6,
+    };
+    useAppStore.setState({ loadedModelId: entry.id, modelState: "ready" });
+    render(<ModelRow entry={entry} />);
+
+    expect(screen.getByText(/MTP upgrade available/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Upgrade to MTP" })).toBeDisabled();
+    expect(screen.getByTitle("Unload this Qwen model before replacing its weights.")).toBeTruthy();
   });
 
   it("renders the backend's aggregate two-file vision transfer on its card", async () => {

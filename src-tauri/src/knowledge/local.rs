@@ -327,7 +327,7 @@ mod runtime {
             artifact_sha256: String,
             path: String,
             model: Arc<LlamaModel>,
-            acceleration: crate::provider::local::LocalAcceleration,
+            acceleration: Box<crate::provider::local::LocalAcceleration>,
         },
     }
 
@@ -394,7 +394,7 @@ mod runtime {
 
         pub async fn acceleration_snapshot(&self) -> serde_json::Value {
             let acceleration = match &*self.inner.lock().await {
-                HostSlot::Ready { acceleration, .. } => acceleration.clone(),
+                HostSlot::Ready { acceleration, .. } => acceleration.as_ref().clone(),
                 HostSlot::Empty => crate::provider::local::LocalAcceleration::unloaded(),
             };
             serde_json::to_value(acceleration)
@@ -427,7 +427,7 @@ mod runtime {
                     {
                         return Ok(ReadyEmbedding {
                             model: Arc::clone(model),
-                            acceleration: acceleration.clone(),
+                            acceleration: acceleration.as_ref().clone(),
                         });
                     }
                 }
@@ -474,7 +474,7 @@ mod runtime {
                 artifact_sha256: installed.sha256.clone(),
                 path: installed.path.clone(),
                 model: Arc::clone(&model),
-                acceleration: acceleration.clone(),
+                acceleration: Box::new(acceleration.clone()),
             };
             Ok(ReadyEmbedding {
                 model,
@@ -572,7 +572,7 @@ mod runtime {
                 artifact_sha256: installed.sha256.clone(),
                 path: installed.path.clone(),
                 model: Arc::clone(&model),
-                acceleration: acceleration.clone(),
+                acceleration: Box::new(acceleration.clone()),
             };
             Ok(ReadyEmbedding {
                 model,
@@ -811,6 +811,8 @@ mod runtime {
                 device_name: None,
                 device_memory_bytes: None,
                 fallback_reason: None,
+                generation_mode: None,
+                generation_fallback_reason: None,
             }
         }
 

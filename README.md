@@ -39,6 +39,7 @@ Modern AI terminals tend to be Electron apps that phone home for every completio
 - Restored tabs never reconnect on their own — an `ssh` tab offers *Reconnect* instead
 
 **AI**
+- **Faster local generation with MTP:** VTerminal automatically accelerates supported Qwen3.5, Qwen3.6, and Gemma 4 models using Multi-Token Prediction, with safe fallback to standard decoding.
 - **Command suggestion** (⌘I on macOS, Ctrl+Shift+I on Windows, or `#` at an empty prompt) — describe the goal, get a command inserted into your prompt
 - **Explain & fix** — one click on a failed block streams a diagnosis and a corrected command
 - **Ask** — a chat panel with your blocks, output, and files as context
@@ -139,11 +140,13 @@ Chat, vision and embedding models have separate jobs. Chat models write answers 
 cards keep their own live progress, speed, ETA, cancel, failure and retry controls directly beneath
 the model being downloaded.
 
-| Model | Notes |
-|---|---|
-| Qwen3.5 4B / 9B | 9B is the default — sized to run on a 32 GB machine |
-| Qwen3.6 27B | needs a large-memory machine |
-| Gemma 4 E2B / E4B / 31B | |
+| Model | MTP acceleration | Notes |
+|---|---|---|
+| Qwen3.5 4B / 9B | Built into the optimized GGUF | 9B is the default, sized to run on a 32 GB machine |
+| Qwen3.6 27B | Built into the optimized GGUF | Needs a large-memory machine |
+| Gemma 4 E2B / E4B / 31B | Small companion MTP download | |
+
+MTP is selected automatically when its artifacts are installed. Existing local downloads remain usable with standard decoding, and Settings offers an optional performance upgrade. Draft tokens are verified by the target model before they are streamed. Performance gains vary by model, prompt, context, and hardware.
 
 **Cloud** — bring your own API key; provider keys, Hugging Face tokens, and remote-server tokens are stored by the Rust backend in macOS Keychain or Windows Credential Manager (service `com.veviad.terminal`) and never round-trip to the UI or `settings.json`.
 

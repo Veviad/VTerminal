@@ -295,8 +295,7 @@
           >
             <span class="announcement-badge" data-release-text="version">Latest</span>
             <span class="announcement-label">
-              <span data-release-text="release_label">Latest release</span> ·
-              Read the release notes
+              New in v0.4.0 · Faster on-device generation with MTP
             </span>
             <svg class="ui-icon" aria-hidden="true"><use href="#i-arrow-right" /></svg>
           </a>
@@ -1172,6 +1171,9 @@
                 macOS or Vulkan with automatic CPU fallback on Windows. Downloads
                 are resumable and range-checked, with live progress, speed, ETA,
                 cancel and retry directly on each chat or vision model card.
+                Multi-Token Prediction accelerates compatible models automatically,
+                verifies every draft with the target, and safely falls back to
+                standard decoding. Gains vary by model, prompt, context and hardware.
               </p>
               <ul>
                 <li>
@@ -1185,6 +1187,10 @@
                 <li>
                   <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
                   <span>Gemma 4 E2B / E4B / 31B</span>
+                </li>
+                <li>
+                  <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
+                  <span>Automatic MTP acceleration for all six local chat models</span>
                 </li>
                 <li>
                   <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>

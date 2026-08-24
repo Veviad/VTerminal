@@ -18,12 +18,13 @@
 use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use llama_cpp_2::context::params::{KvCacheType, LlamaContextParams};
+use llama_cpp_2::context::params::{KvCacheType, LlamaContextParams, LlamaContextType};
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
+use llama_cpp_2::speculative::{MtpSpeculative, MtpSpeculativeParams};
 use serde_json::{Map, Value};
 use tauri::ipc::Channel;
 
@@ -46,6 +47,8 @@ pub struct LocalAcceleration {
     pub device_name: Option<String>,
     pub device_memory_bytes: Option<u64>,
     pub fallback_reason: Option<String>,
+    pub generation_mode: Option<String>,
+    pub generation_fallback_reason: Option<String>,
 }
 
 impl LocalAcceleration {
@@ -55,6 +58,8 @@ impl LocalAcceleration {
             device_name: None,
             device_memory_bytes: None,
             fallback_reason: None,
+            generation_mode: None,
+            generation_fallback_reason: None,
         }
     }
 
@@ -64,6 +69,36 @@ impl LocalAcceleration {
 }
 
 static ACCELERATION: OnceLock<Mutex<LocalAcceleration>> = OnceLock::new();
+static LAST_GENERATION_METRICS: OnceLock<Mutex<Option<GenerationMetrics>>> = OnceLock::new();
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct GenerationMetrics {
+    pub mode: String,
+    pub drafted_tokens: u64,
+    pub accepted_tokens: u64,
+    pub acceptance_rate: f64,
+    pub completion_tokens: u32,
+    pub first_token_ms: u128,
+    pub elapsed_ms: u128,
+    pub backend: String,
+}
+
+pub fn last_generation_metrics() -> Option<GenerationMetrics> {
+    LAST_GENERATION_METRICS
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|metrics| metrics.clone())
+}
+
+fn store_generation_metrics(metrics: GenerationMetrics) {
+    if let Ok(mut slot) = LAST_GENERATION_METRICS
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+    {
+        *slot = Some(metrics);
+    }
+}
 
 fn set_acceleration(value: LocalAcceleration) {
     if let Ok(mut current) = ACCELERATION
@@ -175,6 +210,8 @@ pub(crate) fn load_model_with_fallback(
                         device_name: Some(device_name),
                         device_memory_bytes: Some(device.memory_total as u64),
                         fallback_reason: None,
+                        generation_mode: None,
+                        generation_fallback_reason: None,
                     };
                     set_acceleration(acceleration.clone());
                     return Ok((model, acceleration));
@@ -205,6 +242,8 @@ pub(crate) fn load_model_with_fallback(
             device_name: None,
             device_memory_bytes: None,
             fallback_reason: None,
+            generation_mode: None,
+            generation_fallback_reason: None,
         };
         set_acceleration(acceleration.clone());
         Ok((model, acceleration))
@@ -225,6 +264,8 @@ fn load_model_on_cpu(
         device_name: None,
         device_memory_bytes: None,
         fallback_reason: Some(fallback_reason),
+        generation_mode: None,
+        generation_fallback_reason: None,
     };
     set_acceleration(acceleration.clone());
     Ok((model, acceleration))
@@ -311,6 +352,19 @@ pub struct LoadedModel {
     pub context_len: u32,
     pub sampling: Sampling,
     pub acceleration: LocalAcceleration,
+    pub mtp: Option<LoadedMtp>,
+}
+
+#[derive(Clone)]
+pub struct LoadedMtp {
+    pub draft_model: Option<Arc<LlamaModel>>,
+    pub draft_tokens: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct MtpLoadSpec {
+    pub draft_path: Option<String>,
+    pub draft_tokens: u32,
 }
 
 type ModelParts = (
@@ -319,13 +373,14 @@ type ModelParts = (
     u32,
     Sampling,
     LocalAcceleration,
+    Option<LoadedMtp>,
 );
 
 /// Sampling parameters, preferring what the GGUF itself declares.
 ///
 /// llama.cpp reads `general.sampling.*` out of the file and applies it unless
-/// the user explicitly overrode each knob (`common/common.cpp`). We do not link
-/// `common`, so we read the same keys ourselves — otherwise a model that ships
+/// the user explicitly overrode each knob (`common/common.cpp`). We do not use
+/// common's sampler builder, so we read the same keys ourselves. Otherwise a model that ships
 /// a tuned config (Gemma 4 declares top_k 64 / top_p 0.95 / temp 1.0) silently
 /// gets llama.cpp's generic CLI defaults instead.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -399,6 +454,7 @@ pub struct ReadyModel {
     pub context_len: u32,
     pub sampling: Sampling,
     pub acceleration: LocalAcceleration,
+    pub mtp: Option<LoadedMtp>,
     /// Serializes generations — see `ModelHost::gate`.
     pub gate: Arc<tokio::sync::Semaphore>,
 }
@@ -461,8 +517,54 @@ impl ReadyModel {
             context_len,
             sampling,
             acceleration,
+            mtp: None,
             gate: Arc::new(tokio::sync::Semaphore::new(1)),
         })
+    }
+
+    /// Developer benchmark loader. `draft_path = None` selects an embedded
+    /// Qwen MTP head; Gemma supplies its assistant GGUF path.
+    pub fn load_standalone_with_mtp(
+        path: &str,
+        draft_path: Option<&str>,
+        family: LocalFamily,
+        max_context: u32,
+        draft_tokens: u32,
+    ) -> Result<Self, String> {
+        let mut ready = Self::load_standalone(path, family, max_context)?;
+        let draft_model = match draft_path {
+            Some(path) => {
+                let (model, draft_acceleration) = load_model_with_fallback(path, "MTP drafter")?;
+                if draft_acceleration.backend != ready.acceleration.backend
+                    || draft_acceleration.device_name != ready.acceleration.device_name
+                {
+                    return Err(format!(
+                        "MTP drafter used {} ({}) while target used {} ({})",
+                        draft_acceleration.backend,
+                        draft_acceleration
+                            .device_name
+                            .as_deref()
+                            .unwrap_or("default"),
+                        ready.acceleration.backend,
+                        ready
+                            .acceleration
+                            .device_name
+                            .as_deref()
+                            .unwrap_or("default")
+                    ));
+                }
+                Some(Arc::new(model))
+            }
+            None => None,
+        };
+        ready.mtp = Some(LoadedMtp {
+            draft_model,
+            draft_tokens,
+        });
+        ready.acceleration.generation_mode = Some("mtp".into());
+        ready.acceleration.generation_fallback_reason = None;
+        set_acceleration(ready.acceleration.clone());
+        Ok(ready)
     }
 }
 
@@ -513,12 +615,13 @@ impl ModelHost {
     }
 
     pub async fn acceleration_snapshot(&self) -> serde_json::Value {
-        let acceleration = match &*self.inner.lock().await {
-            HostSlot::Ready(model) => model.acceleration.clone(),
-            HostSlot::Empty | HostSlot::Loading { .. } => LocalAcceleration::unloaded(),
-        };
-        serde_json::to_value(acceleration)
-            .unwrap_or_else(|_| serde_json::json!({ "backend": "unknown" }))
+        match &*self.inner.lock().await {
+            HostSlot::Ready(_) => acceleration_snapshot(),
+            HostSlot::Empty | HostSlot::Loading { .. } => {
+                serde_json::to_value(LocalAcceleration::unloaded())
+                    .unwrap_or_else(|_| serde_json::json!({ "backend": "unknown" }))
+            }
+        }
     }
 
     pub async fn unload(&self) {
@@ -526,6 +629,7 @@ impl ModelHost {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut slot = self.inner.lock().await;
         *slot = HostSlot::Empty;
+        set_acceleration(LocalAcceleration::unloaded());
     }
 
     /// Load a GGUF from a local path. The registry always hands us local files,
@@ -536,6 +640,7 @@ impl ModelHost {
         gguf_path: String,
         family: LocalFamily,
         max_context: u32,
+        mtp_spec: Option<MtpLoadSpec>,
         on_event: &Channel<LoadEvent>,
     ) -> Result<(), String> {
         let my_generation = {
@@ -566,14 +671,50 @@ impl ModelHost {
             let sampling = Sampling::from_metadata(&model);
             // Never promise more context than the model was trained for.
             let context_len = max_context.min(model.n_ctx_train()).max(512);
-            let (model, acceleration) =
+            let (model, mut acceleration) =
                 prepare_chat_model(&gguf_path, model, acceleration, context_len)?;
+            let mtp = mtp_spec.map(|spec| {
+                let draft_model = spec.draft_path.as_deref().and_then(|path| {
+                    match load_model_with_fallback(path, "MTP drafter") {
+                        Ok((draft, draft_acceleration))
+                            if draft_acceleration.backend == acceleration.backend =>
+                        {
+                            Some(Arc::new(draft))
+                        }
+                        Ok((_draft, draft_acceleration)) => {
+                            acceleration.generation_fallback_reason = Some(format!(
+                                "MTP drafter used {} while the target used {}; using standard decoding",
+                                draft_acceleration.backend, acceleration.backend
+                            ));
+                            None
+                        }
+                        Err(error) => {
+                            acceleration.generation_fallback_reason =
+                                Some(format!("MTP drafter could not load ({error})"));
+                            None
+                        }
+                    }
+                });
+                let usable = spec.draft_path.is_none() || draft_model.is_some();
+                acceleration.generation_mode = Some(if usable { "mtp" } else { "standard" }.into());
+                LoadedMtp {
+                    draft_model,
+                    draft_tokens: spec.draft_tokens,
+                }
+            }).filter(|_| acceleration.generation_mode.as_deref() == Some("mtp"));
+            if mtp.is_none() && acceleration.generation_mode.is_none() {
+                acceleration.generation_mode = Some("standard".into());
+                acceleration.generation_fallback_reason =
+                    Some("MTP artifacts are not installed".into());
+            }
+            set_acceleration(acceleration.clone());
             Ok((
                 Arc::new(model),
                 Arc::new(template),
                 context_len,
                 sampling,
                 acceleration,
+                mtp,
             ))
         })
         .await
@@ -591,7 +732,7 @@ impl ModelHost {
             return Err(message);
         }
         match build {
-            Ok((model, template, context_len, sampling, acceleration)) => {
+            Ok((model, template, context_len, sampling, acceleration, mtp)) => {
                 *slot = HostSlot::Ready(LoadedModel {
                     model_id,
                     model,
@@ -600,6 +741,7 @@ impl ModelHost {
                     context_len,
                     sampling,
                     acceleration,
+                    mtp,
                 });
                 let _ = on_event.send(LoadEvent::Ready { context_len });
                 Ok(())
@@ -624,6 +766,7 @@ impl ModelHost {
                 context_len: m.context_len,
                 sampling: m.sampling,
                 acceleration: m.acceleration.clone(),
+                mtp: m.mtp.clone(),
                 gate: Arc::clone(&self.gate),
             }),
             _ => Err(ProviderError::NoModel),
@@ -1133,6 +1276,7 @@ impl Provider for LocalLlamaCpp {
         // turn, Gemma 4 only after a tool response).
         let thinking_prefilled = Markers::for_family(family).opens_thought(&prompt);
         let sampling = self.ready.sampling.with_override(params.temperature);
+        let mtp = self.ready.mtp.clone();
         let budget = params
             .max_tokens
             .unwrap_or(2048)
@@ -1143,6 +1287,7 @@ impl Provider for LocalLlamaCpp {
         tokio::task::spawn_blocking(move || {
             generate(
                 &model,
+                mtp.as_ref(),
                 &prompt,
                 Params {
                     context_len,
@@ -1224,6 +1369,7 @@ fn validate_chat_context(model: &LlamaModel, n_ctx: u32) -> Result<(), String> {
 
 fn generate(
     model: &LlamaModel,
+    mtp_config: Option<&LoadedMtp>,
     prompt: &str,
     p: Params,
     cancel: &tokio::sync::watch::Receiver<bool>,
@@ -1256,41 +1402,18 @@ fn generate(
         )));
     }
 
-    let n_batch: u32 = 512;
-    let mut ctx = model
-        .new_context(backend, chat_context_params(n_ctx))
-        .map_err(|e| ProviderError::Inference(format!("context creation failed: {e}")))?;
-
-    // Prefill, chunked so a long prompt cannot overflow the batch. Only the
-    // very last token needs logits.
-    let mut batch = LlamaBatch::new(n_batch as usize, 1);
-    let last = tokens.len() - 1;
-    for (chunk_start, chunk) in tokens.chunks(n_batch as usize).enumerate() {
-        batch.clear();
-        let base = chunk_start * n_batch as usize;
-        for (i, token) in chunk.iter().enumerate() {
-            let pos = base + i;
-            batch
-                .add(*token, pos as i32, &[0], pos == last)
-                .map_err(|e| ProviderError::Inference(format!("batch add: {e}")))?;
-        }
-        ctx.decode(&mut batch)
-            .map_err(|e| ProviderError::Inference(format!("prefill decode: {e}")))?;
-        if *cancel.borrow() {
-            let _ = tx.blocking_send(ProviderEvent::Done {
-                finish_reason: FinishReason::Cancelled,
-            });
-            return Err(ProviderError::Cancelled);
-        }
-    }
-
     // Values come from the GGUF where it declares them (`Sampling`), not from
     // hardcoded CLI defaults. Order follows llama.cpp: penalties, truncate the
     // tail, then temperature, then sample.
-    let seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
+    let seed = std::env::var("VTERMINAL_MTP_BENCH_SEED")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.subsec_nanos())
+                .unwrap_or(0)
+        });
     let mut chain = Vec::new();
     if (p.sampling.penalty_repeat - 1.0).abs() > f32::EPSILON {
         chain.push(LlamaSampler::penalties(
@@ -1310,73 +1433,451 @@ fn generate(
         LlamaSampler::dist(seed),
     ]);
     let mut sampler = LlamaSampler::chain_simple(chain);
-
     let mut decoder = encoding_rs::UTF_8.new_decoder();
     let mut splitter = OutputSplitter::new(p.family, p.thinking_prefilled);
-    let mut n_cur = tokens.len() as i32;
     let mut produced: u32 = 0;
-    let mut finish = FinishReason::Stop;
+    let started = std::time::Instant::now();
+    let mut first_token_ms = None;
 
-    loop {
-        if *cancel.borrow() {
-            let _ = tx.blocking_send(ProviderEvent::Done {
-                finish_reason: FinishReason::Cancelled,
+    if let Some(config) = mtp_config {
+        let target_params = chat_context_params(n_ctx).with_n_rs_seq(config.draft_tokens);
+        let mtp_setup = model
+            .new_context(backend, target_params)
+            .map_err(|error| format!("target context creation failed: {error}"))
+            .and_then(|target| {
+                let draft_model = config.draft_model.as_deref().unwrap_or(model);
+                let draft_params = chat_context_params(n_ctx)
+                    .with_context_type(LlamaContextType::Mtp)
+                    .with_n_rs_seq(0);
+                draft_model
+                    .new_context_with_ctx_other(backend, draft_params, &target)
+                    .map_err(|error| format!("draft context creation failed: {error}"))
+                    .and_then(|draft| {
+                        MtpSpeculative::new(
+                            target,
+                            draft,
+                            MtpSpeculativeParams {
+                                n_max: config.draft_tokens as i32,
+                                n_min: 0,
+                                p_min: 0.0,
+                            },
+                        )
+                        .map_err(|error| error.to_string())
+                    })
             });
-            return Err(ProviderError::Cancelled);
-        }
 
-        let token = sampler.sample(&ctx, -1);
-        sampler.accept(token);
+        match mtp_setup {
+            Ok(mut speculative) => {
+                update_generation_status("mtp", None);
+                let mut batch = LlamaBatch::new(512, 1);
+                let prompt_prefix = &tokens[..tokens.len() - 1];
+                let prefill = prefill_mtp(&mut speculative, prompt_prefix, &mut batch, cancel, tx);
+                if let Err(error) = prefill {
+                    update_generation_status("standard", Some(error.to_string()));
+                } else if let Err(error) = speculative.begin(prompt_prefix) {
+                    update_generation_status("standard", Some(error.to_string()));
+                } else {
+                    let mut prompt_tokens = prompt_prefix.to_vec();
+                    prompt_tokens.reserve(n_ctx as usize);
+                    let mut id_last = *tokens.last().expect("non-empty tokens");
+                    let mut n_past = prompt_prefix.len() as i32;
+                    let mut drafted = 0_u64;
+                    let mut accepted = 0_u64;
+                    let mut fallback_reason = None;
+                    let mut finish = FinishReason::Stop;
 
-        if model.is_eog_token(token) {
-            break;
-        }
-        if produced >= p.budget || n_cur as u32 >= n_ctx {
-            finish = FinishReason::Length;
-            break;
-        }
+                    'generate: loop {
+                        if *cancel.borrow() {
+                            let _ = tx.blocking_send(ProviderEvent::Done {
+                                finish_reason: FinishReason::Cancelled,
+                            });
+                            return Err(ProviderError::Cancelled);
+                        }
+                        if produced >= p.budget || n_past as u32 >= n_ctx.saturating_sub(1) {
+                            finish = FinishReason::Length;
+                            break;
+                        }
 
-        let piece = model
-            .token_to_piece(token, &mut decoder, true, None)
-            .map_err(|e| ProviderError::Inference(format!("detokenize failed: {e}")))?;
-        for event in splitter.push(&piece) {
-            if tx.blocking_send(event).is_err() {
-                // Receiver dropped — the request was abandoned.
-                return Err(ProviderError::Cancelled);
+                        let draft = match speculative.draft(n_past, id_last, &prompt_tokens) {
+                            Ok(tokens) => tokens,
+                            Err(error) => {
+                                fallback_reason = Some(format!("MTP draft failed: {error}"));
+                                break;
+                            }
+                        };
+                        drafted = drafted.saturating_add(draft.len() as u64);
+                        let base = n_past;
+                        batch.clear();
+                        if let Err(error) = batch.add(id_last, base, &[0], true) {
+                            fallback_reason = Some(format!("MTP batch add failed: {error}"));
+                            break;
+                        }
+                        for (index, token) in draft.iter().enumerate() {
+                            if let Err(error) =
+                                batch.add(*token, base + 1 + index as i32, &[0], true)
+                            {
+                                fallback_reason = Some(format!("MTP batch add failed: {error}"));
+                                break 'generate;
+                            }
+                        }
+                        if let Err(error) = speculative.target_context_mut().decode(&mut batch) {
+                            fallback_reason = Some(format!("MTP target decode failed: {error}"));
+                            break;
+                        }
+                        if let Err(error) = speculative.process(&batch) {
+                            fallback_reason = Some(format!("MTP state update failed: {error}"));
+                            break;
+                        }
+
+                        let mut sampled = Vec::with_capacity(draft.len() + 1);
+                        for index in 0..=draft.len() {
+                            let token = sampler.sample(speculative.target_context(), index as i32);
+                            sampler.accept(token);
+                            sampled.push(token);
+                            if index == draft.len() || token != draft[index] {
+                                break;
+                            }
+                        }
+                        let accepted_now = accepted_draft_prefix(&sampled, &draft);
+                        let acceptance_error = speculative
+                            .accept(accepted_now as u16)
+                            .err()
+                            .map(|error| format!("MTP acceptance failed: {error}"));
+                        accepted = accepted.saturating_add(accepted_now as u64);
+                        // The target batch decoded `id_last` at `base`, followed by the
+                        // draft. Keep that token and the accepted draft prefix. The next
+                        // sampled token remains pending for the following decode.
+                        n_past = mtp_next_position(base, accepted_now);
+
+                        for token in sampled {
+                            prompt_tokens.push(id_last);
+                            id_last = token;
+                            if model.is_eog_token(token) {
+                                break 'generate;
+                            }
+                            if produced >= p.budget || n_past as u32 >= n_ctx {
+                                finish = FinishReason::Length;
+                                break 'generate;
+                            }
+                            stream_token(model, token, &mut decoder, &mut splitter, tx)?;
+                            first_token_ms.get_or_insert_with(|| started.elapsed().as_millis());
+                            produced += 1;
+                        }
+
+                        if let Some(reason) = acceptance_error {
+                            fallback_reason = Some(reason);
+                            break;
+                        }
+
+                        if let Err(error) = speculative.target_context_mut().kv_cache_seq_rm(
+                            0,
+                            Some(n_past as u32),
+                            None,
+                        ) {
+                            fallback_reason = Some(format!("MTP target rollback failed: {error}"));
+                            break;
+                        }
+                        if let Err(error) = speculative.draft_context_mut().kv_cache_seq_rm(
+                            0,
+                            Some(n_past as u32),
+                            None,
+                        ) {
+                            fallback_reason = Some(format!("MTP draft rollback failed: {error}"));
+                            break;
+                        }
+                    }
+
+                    let fell_back = fallback_reason.is_some();
+                    if let Some(reason) = fallback_reason {
+                        log::warn!("{reason}; continuing with standard decoding");
+                        update_generation_status("standard", Some(reason));
+                        // Rebuild from confirmed history instead of trusting partially
+                        // updated speculative KV or recurrent state. This also makes a
+                        // failed rollback recoverable without duplicating streamed text.
+                        speculative.target_context_mut().clear_kv_cache();
+                        if !prompt_tokens.is_empty() {
+                            prefill_standard(
+                                speculative.target_context_mut(),
+                                &prompt_tokens,
+                                &mut batch,
+                                cancel,
+                                tx,
+                            )?;
+                        }
+                        n_past = prompt_tokens.len() as i32;
+                        finish = standard_decode(
+                            speculative.target_context_mut(),
+                            model,
+                            &mut sampler,
+                            &mut batch,
+                            Some((id_last, n_past)),
+                            n_past,
+                            n_ctx,
+                            p.budget,
+                            &mut produced,
+                            &started,
+                            &mut first_token_ms,
+                            &mut decoder,
+                            &mut splitter,
+                            cancel,
+                            tx,
+                        )?;
+                    }
+
+                    log::info!(
+                        "MTP generation: drafted={drafted}, accepted={accepted}, acceptance={:.1}%, completion_tokens={produced}, elapsed_ms={}",
+                        if drafted == 0 { 0.0 } else { accepted as f64 * 100.0 / drafted as f64 },
+                        started.elapsed().as_millis()
+                    );
+                    store_generation_metrics(GenerationMetrics {
+                        mode: if fell_back { "standard" } else { "mtp" }.into(),
+                        drafted_tokens: drafted,
+                        accepted_tokens: accepted,
+                        acceptance_rate: if drafted == 0 {
+                            0.0
+                        } else {
+                            accepted as f64 / drafted as f64
+                        },
+                        completion_tokens: produced,
+                        first_token_ms: first_token_ms.unwrap_or(0),
+                        elapsed_ms: started.elapsed().as_millis(),
+                        backend: acceleration_backend(),
+                    });
+                    return finish_generation(tokens.len() as u32, produced, finish, splitter, tx);
+                }
             }
+            Err(error) => update_generation_status(
+                "standard",
+                Some(format!("MTP initialization failed: {error}")),
+            ),
         }
+    }
 
+    let mut ctx = model
+        .new_context(backend, chat_context_params(n_ctx))
+        .map_err(|e| ProviderError::Inference(format!("context creation failed: {e}")))?;
+    let mut batch = LlamaBatch::new(512, 1);
+    prefill_standard(&mut ctx, &tokens, &mut batch, cancel, tx)?;
+    let finish = standard_decode(
+        &mut ctx,
+        model,
+        &mut sampler,
+        &mut batch,
+        None,
+        tokens.len() as i32,
+        n_ctx,
+        p.budget,
+        &mut produced,
+        &started,
+        &mut first_token_ms,
+        &mut decoder,
+        &mut splitter,
+        cancel,
+        tx,
+    )?;
+    log::info!(
+        "standard generation: completion_tokens={produced}, elapsed_ms={}",
+        started.elapsed().as_millis()
+    );
+    store_generation_metrics(GenerationMetrics {
+        mode: "standard".into(),
+        drafted_tokens: 0,
+        accepted_tokens: 0,
+        acceptance_rate: 0.0,
+        completion_tokens: produced,
+        first_token_ms: first_token_ms.unwrap_or(0),
+        elapsed_ms: started.elapsed().as_millis(),
+        backend: acceleration_backend(),
+    });
+    finish_generation(tokens.len() as u32, produced, finish, splitter, tx)
+}
+
+fn acceleration_backend() -> String {
+    ACCELERATION
+        .get_or_init(|| Mutex::new(LocalAcceleration::unloaded()))
+        .lock()
+        .map(|acceleration| acceleration.backend.clone())
+        .unwrap_or_else(|_| "unknown".into())
+}
+
+fn accepted_draft_prefix(
+    sampled: &[llama_cpp_2::token::LlamaToken],
+    draft: &[llama_cpp_2::token::LlamaToken],
+) -> usize {
+    sampled
+        .iter()
+        .zip(draft)
+        .take_while(|(sampled, drafted)| sampled == drafted)
+        .count()
+}
+
+fn mtp_next_position(base: i32, accepted_draft_tokens: usize) -> i32 {
+    base.saturating_add(1)
+        .saturating_add(i32::try_from(accepted_draft_tokens).unwrap_or(i32::MAX))
+}
+
+fn update_generation_status(mode: &str, reason: Option<String>) {
+    if let Ok(mut acceleration) = ACCELERATION
+        .get_or_init(|| Mutex::new(LocalAcceleration::unloaded()))
+        .lock()
+    {
+        acceleration.generation_mode = Some(mode.into());
+        acceleration.generation_fallback_reason = reason;
+    }
+}
+
+fn cancelled(
+    cancel: &tokio::sync::watch::Receiver<bool>,
+    tx: &tokio::sync::mpsc::Sender<ProviderEvent>,
+) -> Result<(), ProviderError> {
+    if *cancel.borrow() {
+        let _ = tx.blocking_send(ProviderEvent::Done {
+            finish_reason: FinishReason::Cancelled,
+        });
+        Err(ProviderError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+fn prefill_standard(
+    ctx: &mut llama_cpp_2::context::LlamaContext<'_>,
+    tokens: &[llama_cpp_2::token::LlamaToken],
+    batch: &mut LlamaBatch<'_>,
+    cancel: &tokio::sync::watch::Receiver<bool>,
+    tx: &tokio::sync::mpsc::Sender<ProviderEvent>,
+) -> Result<(), ProviderError> {
+    let last = tokens.len() - 1;
+    for (chunk_index, chunk) in tokens.chunks(512).enumerate() {
+        batch.clear();
+        let base = chunk_index * 512;
+        for (index, token) in chunk.iter().enumerate() {
+            let position = base + index;
+            batch
+                .add(*token, position as i32, &[0], position == last)
+                .map_err(|error| ProviderError::Inference(format!("batch add: {error}")))?;
+        }
+        ctx.decode(batch)
+            .map_err(|error| ProviderError::Inference(format!("prefill decode: {error}")))?;
+        cancelled(cancel, tx)?;
+    }
+    Ok(())
+}
+
+fn prefill_mtp(
+    speculative: &mut MtpSpeculative<'_>,
+    tokens: &[llama_cpp_2::token::LlamaToken],
+    batch: &mut LlamaBatch<'_>,
+    cancel: &tokio::sync::watch::Receiver<bool>,
+    tx: &tokio::sync::mpsc::Sender<ProviderEvent>,
+) -> Result<(), ProviderError> {
+    for (chunk_index, chunk) in tokens.chunks(512).enumerate() {
+        batch.clear();
+        let base = chunk_index * 512;
+        for (index, token) in chunk.iter().enumerate() {
+            batch
+                .add(*token, (base + index) as i32, &[0], false)
+                .map_err(|error| ProviderError::Inference(format!("MTP batch add: {error}")))?;
+        }
+        speculative
+            .target_context_mut()
+            .decode(batch)
+            .map_err(|error| ProviderError::Inference(format!("MTP prefill decode: {error}")))?;
+        speculative
+            .process(batch)
+            .map_err(|error| ProviderError::Inference(format!("MTP prefill state: {error}")))?;
+        cancelled(cancel, tx)?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn standard_decode(
+    ctx: &mut llama_cpp_2::context::LlamaContext<'_>,
+    model: &LlamaModel,
+    sampler: &mut LlamaSampler,
+    batch: &mut LlamaBatch<'_>,
+    pending: Option<(llama_cpp_2::token::LlamaToken, i32)>,
+    mut n_cur: i32,
+    n_ctx: u32,
+    budget: u32,
+    produced: &mut u32,
+    started: &std::time::Instant,
+    first_token_ms: &mut Option<u128>,
+    decoder: &mut encoding_rs::Decoder,
+    splitter: &mut OutputSplitter,
+    cancel: &tokio::sync::watch::Receiver<bool>,
+    tx: &tokio::sync::mpsc::Sender<ProviderEvent>,
+) -> Result<FinishReason, ProviderError> {
+    if let Some((token, position)) = pending {
+        batch.clear();
+        batch
+            .add(token, position, &[0], true)
+            .map_err(|error| ProviderError::Inference(format!("fallback batch add: {error}")))?;
+        ctx.decode(batch)
+            .map_err(|error| ProviderError::Inference(format!("fallback decode: {error}")))?;
+        n_cur = position + 1;
+    }
+    loop {
+        cancelled(cancel, tx)?;
+        let token = sampler.sample(ctx, -1);
+        sampler.accept(token);
+        if model.is_eog_token(token) {
+            return Ok(FinishReason::Stop);
+        }
+        if *produced >= budget || n_cur as u32 >= n_ctx {
+            return Ok(FinishReason::Length);
+        }
+        stream_token(model, token, decoder, splitter, tx)?;
+        first_token_ms.get_or_insert_with(|| started.elapsed().as_millis());
         batch.clear();
         batch
             .add(token, n_cur, &[0], true)
-            .map_err(|e| ProviderError::Inference(format!("batch add: {e}")))?;
-        ctx.decode(&mut batch)
-            .map_err(|e| ProviderError::Inference(format!("decode failed: {e}")))?;
+            .map_err(|error| ProviderError::Inference(format!("batch add: {error}")))?;
+        ctx.decode(batch)
+            .map_err(|error| ProviderError::Inference(format!("decode failed: {error}")))?;
         n_cur += 1;
-        produced += 1;
+        *produced += 1;
     }
+}
 
+fn stream_token(
+    model: &LlamaModel,
+    token: llama_cpp_2::token::LlamaToken,
+    decoder: &mut encoding_rs::Decoder,
+    splitter: &mut OutputSplitter,
+    tx: &tokio::sync::mpsc::Sender<ProviderEvent>,
+) -> Result<(), ProviderError> {
+    let piece = model
+        .token_to_piece(token, decoder, true, None)
+        .map_err(|error| ProviderError::Inference(format!("detokenize failed: {error}")))?;
+    for event in splitter.push(&piece) {
+        tx.blocking_send(event)
+            .map_err(|_| ProviderError::Cancelled)?;
+    }
+    Ok(())
+}
+
+fn finish_generation(
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    mut finish: FinishReason,
+    mut splitter: OutputSplitter,
+    tx: &tokio::sync::mpsc::Sender<ProviderEvent>,
+) -> Result<(), ProviderError> {
     for event in splitter.finish() {
         let _ = tx.blocking_send(event);
     }
-
-    // Tool calls go out COMPLETE in a single event — the agent loop treats a
-    // ToolCalls event as the whole set for this turn.
     if !splitter.calls.is_empty() {
         finish = FinishReason::ToolCalls;
-        if tx
-            .blocking_send(ProviderEvent::ToolCalls(std::mem::take(
-                &mut splitter.calls,
-            )))
-            .is_err()
-        {
-            return Err(ProviderError::Cancelled);
-        }
+        tx.blocking_send(ProviderEvent::ToolCalls(std::mem::take(
+            &mut splitter.calls,
+        )))
+        .map_err(|_| ProviderError::Cancelled)?;
     }
-
     let _ = tx.blocking_send(ProviderEvent::Usage {
-        prompt_tokens: tokens.len() as u32,
-        completion_tokens: produced,
+        prompt_tokens,
+        completion_tokens,
     });
     let _ = tx.blocking_send(ProviderEvent::Done {
         finish_reason: finish,
@@ -1387,6 +1888,28 @@ fn generate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mtp_acceptance_stops_at_the_first_target_mismatch() {
+        use llama_cpp_2::token::LlamaToken;
+        let draft = [LlamaToken(10), LlamaToken(11), LlamaToken(12)];
+        assert_eq!(
+            accepted_draft_prefix(&[LlamaToken(10), LlamaToken(11), LlamaToken(99)], &draft),
+            2
+        );
+        assert_eq!(accepted_draft_prefix(&draft, &draft), 3);
+        assert_eq!(accepted_draft_prefix(&[LlamaToken(99)], &draft), 0);
+    }
+
+    #[test]
+    fn mtp_rollback_starts_at_the_first_unaccepted_position() {
+        // `id_last` is decoded at base. With no accepted draft tokens, the
+        // pending sampled replacement belongs at base + 1.
+        assert_eq!(mtp_next_position(17, 0), 18);
+        // Accepted draft tokens stay in the cache. Rollback begins immediately
+        // after them, where the pending target-sampled token will be decoded.
+        assert_eq!(mtp_next_position(17, 3), 21);
+    }
 
     fn drain(splitter: &mut OutputSplitter, chunks: &[&str]) -> (String, String) {
         let (mut text, mut think) = (String::new(), String::new());

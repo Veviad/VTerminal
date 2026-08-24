@@ -89,8 +89,8 @@ export function startDownload(entry: CatalogEntry): void {
     {
       kind: "chat",
       modelId: entry.id,
-      repoId: spec.repo_id,
-      filename: spec.filename,
+      repoId: spec.artifact.repo_id,
+      filename: spec.artifact.filename,
     },
   );
 }
@@ -121,6 +121,12 @@ export function ModelRow({ entry }: { entry: CatalogEntry }) {
   // In a build without the on-device engine every local control is dead: Load
   // only errors, and Download would fetch gigabytes nothing here can run.
   const noEngine = !!entry.local && engineMissing;
+  const mtpUpgrade = entry.mtp?.state === "upgrade_available";
+  const mtpReady = entry.mtp?.state === "ready";
+  const localBytes = entry.local
+    ? entry.local.artifact.size_bytes +
+      (entry.local.mtp.kind === "sidecar" ? entry.local.mtp.artifact.size_bytes : 0)
+    : 0;
 
   const setEffort = (e: Effort) => {
     useAppStore.getState().setModelEffortLocal(entry.id, e);
@@ -146,6 +152,11 @@ export function ModelRow({ entry }: { entry: CatalogEntry }) {
               </span>
             )}
             {isActive && <Check size={12} className="text-accent" />}
+            {mtpReady && (
+              <span className="rounded bg-success/10 px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-success">
+                MTP ready
+              </span>
+            )}
           </div>
           <p className="mt-0.5 text-[10px] leading-relaxed text-text-muted">{entry.description}</p>
           <p className="mt-1 flex flex-wrap items-center gap-x-2 text-[10px] text-text-muted">
@@ -160,7 +171,7 @@ export function ModelRow({ entry }: { entry: CatalogEntry }) {
             {entry.remote?.supports_tools === false && (
               <span className="text-warning">· {S.settings.remoteServers.noToolsTag}</span>
             )}
-            {entry.local && <span>· {formatBytes(entry.local.size_bytes)}</span>}
+            {entry.local && <span>· {formatBytes(localBytes)}</span>}
             {entry.local && !entry.fits && (
               <span className="text-warning">
                 · {S.settings.models.tooBig} ({entry.local.min_ram_gb} GB)
@@ -168,6 +179,11 @@ export function ModelRow({ entry }: { entry: CatalogEntry }) {
             )}
             {entry.local && entry.fits && !entry.downloaded && !noEngine && (
               <span>· {S.settings.models.notDownloaded}</span>
+            )}
+            {mtpUpgrade && (
+              <span className="text-accent">
+                · MTP upgrade available ({formatBytes(entry.mtp!.download_bytes)} download)
+              </span>
             )}
             {noEngine && <span className="text-warning">· {S.settings.models.noEngineTag}</span>}
             {/* Never on a remote row: there is no API-key field behind that
@@ -192,6 +208,17 @@ export function ModelRow({ entry }: { entry: CatalogEntry }) {
             )}
             {entry.local && entry.downloaded && (
               <>
+                {mtpUpgrade && (
+                  <button
+                    disabled={!!download || !entry.fits || noEngine || isLoaded}
+                    title={isLoaded ? S.settings.models.mtpUnloadFirst : S.settings.models.mtpUpgradeHint}
+                    onClick={() => startDownload(entry)}
+                    className="flex items-center gap-1 rounded-md border border-accent/40 px-2 py-1 text-[10px] text-accent hover:bg-accent-subtle disabled:opacity-60"
+                  >
+                    {download ? <Loader2 size={11} className="animate-spin" /> : <Download size={11} />}
+                    {download ? "Downloading…" : S.settings.models.mtpUpgrade}
+                  </button>
+                )}
                 {isLoaded && !loading ? (
                   <button
                     onClick={() => void api.modelUnload().then(refresh)}
