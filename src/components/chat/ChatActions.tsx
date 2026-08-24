@@ -58,11 +58,15 @@ export function ChatActions({
   const busy = useChatStore(
     (state) => state.current?.summary.id === chat.id && state.stream.status === "streaming",
   );
-  const dismiss = useCallback(() => setOpen(false), []);
+  const dismiss = useCallback(() => {
+    setOpen(false);
+    setRegenerateError(null);
+  }, []);
   useDismissibleLayer(ref, dismiss, open);
 
   const act = (action: () => void) => {
     setOpen(false);
+    setRegenerateError(null);
     action();
   };
   const sidebar = placement === "sidebar";
@@ -89,7 +93,10 @@ export function ChatActions({
           aria-haspopup="menu"
           aria-expanded={open}
           className="rounded-md p-1.5 text-text-muted hover:bg-bg-elevated hover:text-text-primary"
-          onClick={() => setOpen((value) => !value)}
+          onClick={() => {
+            setRegenerateError(null);
+            setOpen((value) => !value);
+          }}
         >
           <MoreHorizontal size={sidebar ? 14 : 15} />
         </button>
@@ -106,7 +113,7 @@ export function ChatActions({
               </p>
             )}
             <MenuButton
-              disabled={busy}
+              disabled={busy || regenerating}
               icon={<Pencil size={12} />}
               label="Rename"
               onClick={() => act(() => setRenameOpen(true))}
@@ -125,13 +132,13 @@ export function ChatActions({
               </p>
             )}
             <MenuButton
-              disabled={busy}
+              disabled={busy || regenerating}
               icon={chat.archived_at ? <ArchiveRestore size={12} /> : <Archive size={12} />}
               label={chat.archived_at ? "Unarchive" : "Archive"}
               onClick={() => act(() => void useChatStore.getState().archive(!chat.archived_at, chat.id))}
             />
             <MenuButton
-              disabled={busy}
+              disabled={busy || regenerating}
               danger
               icon={<Trash2 size={12} />}
               label="Delete"

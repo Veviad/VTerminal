@@ -241,16 +241,29 @@ describe("Chat workspace autoscroll", () => {
         lastError: null,
       },
     });
+    let rejectRegeneration!: (reason: Error) => void;
+    const regeneration = new Promise<void>((_resolve, reject) => {
+      rejectRegeneration = reject;
+    });
     const regenerate = vi.spyOn(useChatStore.getState(), "regenerateTitle")
-      .mockRejectedValue(new Error("The model repeated the current title."));
+      .mockReturnValue(regeneration);
     render(<ChatWorkspace />);
 
     fireEvent.click(screen.getByRole("button", { name: "Chat list actions for Autoscroll test" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Regenerate title" }));
 
+    expect(screen.getByRole("menuitem", { name: "Regenerating…" })).toBeDisabled();
+    expect(screen.getByRole("menuitem", { name: "Rename" })).toBeDisabled();
+    expect(screen.getByRole("menuitem", { name: "Archive" })).toBeDisabled();
+    expect(screen.getByRole("menuitem", { name: "Delete" })).toBeDisabled();
+    rejectRegeneration(new Error("The model repeated the current title."));
     expect(await screen.findByRole("alert")).toHaveTextContent("The model repeated the current title.");
     expect(regenerate).toHaveBeenCalledWith("chat-a", true);
     expect(screen.getByRole("menuitem", { name: "Regenerate title" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Chat list actions for Autoscroll test" }));
+    fireEvent.click(screen.getByRole("button", { name: "Chat list actions for Autoscroll test" }));
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("confirms sidebar deletion in an in-app dialog", async () => {
