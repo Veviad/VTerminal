@@ -55,4 +55,25 @@ describe("Updates settings", () => {
       expect(saveSettings).toHaveBeenCalledWith({ auto_update_enabled: true }),
     );
   });
+
+  it("does not duplicate the update details while the update modal is open", () => {
+    const metadata = {
+      current_version: "0.4.2",
+      version: "0.4.3",
+      published_at: "2026-08-24T16:51:09Z",
+      prerelease: false,
+      notes: "## What's Changed\n\n- Fix update presentation.",
+    };
+    useUpdateStore.setState({ status: "available", metadata, promptOpen: true });
+
+    const { rerender } = render(<SettingsPage />);
+    fireEvent.click(screen.getByRole("button", { name: S.settings.tabs.updates }));
+    expect(screen.queryByText(S.settings.updates.available(metadata.version))).not.toBeInTheDocument();
+    expect(screen.queryByText("What's Changed")).not.toBeInTheDocument();
+
+    useUpdateStore.setState({ promptOpen: false });
+    rerender(<SettingsPage />);
+    expect(screen.getByText(S.settings.updates.available(metadata.version))).toBeVisible();
+    expect(screen.getByRole("heading", { name: "What's Changed", level: 2 })).toBeVisible();
+  });
 });

@@ -59,6 +59,7 @@ export function UpdatesSection() {
   const enabled = useAppStore((state) => state.autoUpdateEnabled);
   const status = useUpdateStore((state) => state.status);
   const metadata = useUpdateStore((state) => state.metadata);
+  const promptOpen = useUpdateStore((state) => state.promptOpen);
   const lastCheckedAt = useUpdateStore((state) => state.lastCheckedAt);
   const error = useUpdateStore((state) => state.error);
   const workspaceReady = useUpdateStore((state) => state.workspaceReady);
@@ -126,7 +127,7 @@ export function UpdatesSection() {
         </button>
       </section>
 
-      {metadata && (
+      {metadata && !promptOpen && (
         <section className="space-y-3 rounded-lg border border-accent/30 bg-accent/5 p-3">
           <div className="flex items-center gap-2">
             <p className="text-[13px] font-medium text-text-primary">
