@@ -1067,11 +1067,18 @@ pub async fn runbooks_ai_generate(
     let model = crate::commands::ai::active_model(&app);
     let resolved = crate::commands::ai::resolve_provider_for_model(&app, model).await?;
     let cancel = ai_state.register(&request_id);
+    let effort = authoring::authoring_effort(resolved.effort);
+    let started = std::time::Instant::now();
+    log::info!(
+        "generating runbook with {} at {} effort",
+        resolved.model.label,
+        effort.as_str()
+    );
     let authored = authoring::author_draft(
         resolved.provider.as_ref(),
         &requirements,
         terminal_context.as_deref(),
-        resolved.effort,
+        effort,
         cancel,
         &|document| validate_draft_preview(document).issues,
     )
@@ -1079,6 +1086,11 @@ pub async fn runbooks_ai_generate(
     ai_state.finish(&request_id);
 
     let authored = authored?;
+    log::info!(
+        "generated runbook with {} in {}ms",
+        resolved.model.label,
+        started.elapsed().as_millis()
+    );
     if !authored.issues.is_empty() {
         log::info!(
             "generated runbook has {} unresolved issue(s) after one repair round",

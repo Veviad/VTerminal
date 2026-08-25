@@ -1258,7 +1258,7 @@ impl Provider for LocalLlamaCpp {
         messages: Vec<ChatMessage>,
         tools: Vec<ToolDef>,
         params: ChatParams,
-        cancel: tokio::sync::watch::Receiver<bool>,
+        mut cancel: tokio::sync::watch::Receiver<bool>,
         tx: tokio::sync::mpsc::Sender<ProviderEvent>,
     ) -> Result<(), ProviderError> {
         let effort = params.effort;
@@ -1272,10 +1272,20 @@ impl Provider for LocalLlamaCpp {
         // Hold a permit for the whole generation: one local decode at a time.
         // Acquired AFTER rendering so a queued request is not holding the gate
         // while it templates.
-        let _permit = Arc::clone(&self.ready.gate)
-            .acquire_owned()
-            .await
-            .map_err(|_| ProviderError::Inference("model host shut down".into()))?;
+        let acquire = Arc::clone(&self.ready.gate).acquire_owned();
+        tokio::pin!(acquire);
+        let _permit = loop {
+            tokio::select! {
+                biased;
+                changed = cancel.changed() => match changed {
+                    Ok(()) if *cancel.borrow() => return Err(ProviderError::Cancelled),
+                    Ok(()) => continue,
+                    Err(_) => return Err(ProviderError::Cancelled),
+                },
+                permit = &mut acquire => break permit
+                    .map_err(|_| ProviderError::Inference("model host shut down".into()))?,
+            }
+        };
 
         let model = Arc::clone(&self.ready.model);
         let context_len = self.ready.context_len;

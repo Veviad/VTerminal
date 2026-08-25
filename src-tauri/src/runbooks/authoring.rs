@@ -33,6 +33,15 @@ pub const MAX_CONTEXT_CHARS: usize = 24_000;
 /// model's ceiling, and a truncated JSON object simply fails to parse.
 const MAX_OUTPUT_TOKENS: u32 = 8_192;
 
+/// Runbook authoring already has a deterministic validator and one targeted
+/// repair round. Letting a globally selected High or Max reasoning setting
+/// loose on both JSON passes can turn this bounded operation into several
+/// silent minutes without making validation any stronger. Preserve Off, Low,
+/// and Medium choices, but cap this workflow at Medium.
+pub fn authoring_effort(configured: Effort) -> Effort {
+    configured.min(Effort::Medium)
+}
+
 pub struct AuthoredDraft {
     pub document: RunbookDraftDocument,
     /// Whatever the validator still objects to after the repair round.
@@ -311,6 +320,15 @@ mod tests {
         let wide = "☃".repeat(MAX_CONTEXT_CHARS + 10);
         let request = author_request("x", Some(&wide));
         assert!(request.contains("…truncated…"));
+    }
+
+    #[test]
+    fn authoring_effort_is_capped_at_medium() {
+        assert_eq!(authoring_effort(Effort::Off), Effort::Off);
+        assert_eq!(authoring_effort(Effort::Low), Effort::Low);
+        assert_eq!(authoring_effort(Effort::Medium), Effort::Medium);
+        assert_eq!(authoring_effort(Effort::High), Effort::Medium);
+        assert_eq!(authoring_effort(Effort::Max), Effort::Medium);
     }
 
     /// The paths the validator reports index the DEFINITION, which for a

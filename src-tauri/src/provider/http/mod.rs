@@ -11,6 +11,7 @@ pub mod openai_compat;
 
 use std::sync::OnceLock;
 use std::time::Duration;
+use std::{future::Future, pin::pin};
 
 use futures::StreamExt;
 
@@ -87,14 +88,22 @@ pub(crate) async fn send_with_retry(
         if *cancel.borrow() {
             return Err(ProviderError::Cancelled);
         }
-        match build().send().await {
+        // `RequestBuilder::send` includes the wait for response headers. A
+        // provider that accepts the connection but never answers can therefore
+        // sit here until reqwest's two-minute read timeout. Selecting the
+        // cancellation receiver alongside every HTTP await is what makes Stop
+        // immediate during that otherwise silent part of a request.
+        match wait_for_or_cancel(build().send(), cancel).await? {
             Ok(resp) if resp.status().is_success() => return Ok(resp),
             Ok(resp) => {
                 let status = resp.status();
                 // Read the headers BEFORE the body: `text()` consumes the
                 // response and `retry-after` would be gone with it.
                 let wait = backoff(attempt, parse_retry_after(resp.headers()));
-                let err = status_error(status, resp.text().await.unwrap_or_default(), secret);
+                let body = wait_for_or_cancel(resp.text(), cancel)
+                    .await?
+                    .unwrap_or_default();
+                let err = status_error(status, body, secret);
                 if !is_transient(status.as_u16()) || attempt == MAX_ATTEMPTS {
                     return Err(err);
                 }
@@ -119,6 +128,31 @@ pub(crate) async fn send_with_retry(
         }
     }
     Err(last.unwrap_or_else(|| ProviderError::Http("request failed".into())))
+}
+
+/// Await provider I/O while retaining a live cancellation edge.
+///
+/// This is intentionally below reqwest rather than a total request deadline.
+/// Long generations are legitimate as long as bytes continue to arrive, while
+/// an explicit operator stop must interrupt any stage immediately.
+async fn wait_for_or_cancel<T>(
+    future: impl Future<Output = T>,
+    cancel: &mut tokio::sync::watch::Receiver<bool>,
+) -> Result<T, ProviderError> {
+    let mut future = pin!(future);
+    loop {
+        tokio::select! {
+            biased;
+            changed = cancel.changed() => match changed {
+                Ok(()) if *cancel.borrow() => return Err(ProviderError::Cancelled),
+                Ok(()) => continue,
+                // The sender disappearing means the owner no longer has a way
+                // to manage this request. Fail closed instead of orphaning I/O.
+                Err(_) => return Err(ProviderError::Cancelled),
+            },
+            result = &mut future => return Ok(result),
+        }
+    }
 }
 
 /// Sleep, but wake immediately if the user cancels. Returns true if cancelled.
@@ -288,5 +322,32 @@ mod tests {
         )
         .to_string();
         assert!(!error.contains("sentinel-provider-secret"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn cancellation_interrupts_the_wait_for_response_headers() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/chat", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            // Keep the connection open without sending headers. Before the
+            // cancellation select this held `send_with_retry` until the shared
+            // client's 120-second read timeout.
+            std::future::pending::<()>().await;
+        });
+        let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
+
+        let request = tokio::spawn(async move {
+            send_with_retry(|| client().unwrap().get(&url), &mut cancel_rx, None).await
+        });
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        cancel_tx.send(true).unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(1), request)
+            .await
+            .expect("cancel should not wait for the HTTP idle timeout")
+            .unwrap();
+        assert!(matches!(result, Err(ProviderError::Cancelled)));
+        server.abort();
     }
 }

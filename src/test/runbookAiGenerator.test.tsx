@@ -64,6 +64,7 @@ const draft = {
 beforeEach(() => {
   resetRunbookTerminalPrivacyForTests();
   Object.values(mocks).forEach((mock) => mock.mockReset());
+  mocks.aiCancel.mockResolvedValue(undefined);
   mocks.readBlockOutput.mockImplementation((_s, b) => `output-${b.id}`);
   mocks.generate.mockResolvedValue({ definitionId: "nginx" });
   mocks.create.mockResolvedValue(draft);
@@ -213,7 +214,28 @@ describe("RunbookAiGenerator", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: /^stop$/i }));
     expect(mocks.aiCancel).toHaveBeenCalledWith(mocks.generate.mock.calls[0][0]);
+    expect(screen.getByRole("status")).toHaveTextContent(/Stopping generation/i);
+    expect(screen.getByRole("button", { name: /Stopping/i })).toBeDisabled();
     release({ definitionId: "nginx" });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /generate draft/i })).toBeEnabled();
+    });
+    expect(mocks.create).not.toHaveBeenCalled();
+  });
+
+  it("cancels generation when the wizard unmounts", async () => {
+    mocks.generate.mockReturnValue(new Promise(() => undefined));
+    const onGenerated = vi.fn().mockResolvedValue(undefined);
+    const view = render(<RunbookAiGenerator onGenerated={onGenerated} />);
+    fireEvent.click(screen.getByRole("button", { name: /generate with ai/i }));
+    requirement("verify nginx");
+    clickGenerate();
+    await waitFor(() => {
+      expect(mocks.generate).toHaveBeenCalled();
+    });
+
+    view.unmount();
+    expect(mocks.aiCancel).toHaveBeenCalledWith(mocks.generate.mock.calls[0][0]);
   });
 
   it("keeps the request open and reports a failure", async () => {
