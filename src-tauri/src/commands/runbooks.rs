@@ -10,7 +10,7 @@ use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 #[cfg(not(target_os = "windows"))]
 use std::fs::OpenOptions;
@@ -19,6 +19,7 @@ use std::io::Seek;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tauri::ipc::Channel;
 use tauri::{Manager, State, Wry};
 
@@ -29,7 +30,11 @@ use crate::runbooks::db::{
     self, ApprovalRecord, AttemptRecord, RunCreation, RunRecord, SourceKind, SourceRegistration,
     SourceRegistrationInput, StepRecord, StepSeed,
 };
-use crate::runbooks::definition::{ApplyAction, CheckAction, RunbookDefinition, VerifyAction};
+use crate::runbooks::definition::{
+    AnsiblePlaybookAction, ApplyAction, CheckAction, DeclaredCapabilities, Defaults, FailurePolicy,
+    InputDefinition, InputType, Metadata, Privilege, RunbookDefinition, Spec, Step, Target,
+    TargetKind, VerifyAction, API_VERSION, KIND,
+};
 use crate::runbooks::drafts::{
     DraftPlatform, RunbookDraft, RunbookDraftDocument, RunbookDraftPreview, RunbookDraftSummary,
 };
@@ -66,12 +71,22 @@ const MAX_CLEANUP_ERRORS: usize = 100;
 const BUILTIN_LIBRARY_DIRECTORY: &str = "runbook-library";
 const BUILTIN_PACKAGES_DIRECTORY: &str = "builtins";
 const AUTHORED_PACKAGES_DIRECTORY: &str = "authored";
+const ANSIBLE_IMPORTS_DIRECTORY: &str = "ansible-imports";
+const MAX_ANSIBLE_IMPORT_BYTES: u64 = 250 * 1024 * 1024;
+const ANSIBLE_RUNNER_INSTALL_URL: &str =
+    "https://ansible.readthedocs.io/projects/runner/en/latest/install/";
 
 struct BuiltinPackage {
     id: &'static str,
     order: u32,
     definition: &'static [u8],
     readme: &'static [u8],
+    assets: &'static [BuiltinAsset],
+}
+
+struct BuiltinAsset {
+    path: &'static str,
+    bytes: &'static [u8],
 }
 
 const BUILTIN_PACKAGES: &[BuiltinPackage] = &[
@@ -82,6 +97,7 @@ const BUILTIN_PACKAGES: &[BuiltinPackage] = &[
             "../../../examples/runbooks/macos-security-posture/runbook.vrun.yaml"
         ),
         readme: include_bytes!("../../../examples/runbooks/macos-security-posture/README.md"),
+        assets: &[],
     },
     BuiltinPackage {
         id: "macos-developer-workstation-health",
@@ -92,6 +108,7 @@ const BUILTIN_PACKAGES: &[BuiltinPackage] = &[
         readme: include_bytes!(
             "../../../examples/runbooks/macos-developer-workstation-health/README.md"
         ),
+        assets: &[],
     },
     BuiltinPackage {
         id: "macos-backup-storage-readiness",
@@ -102,6 +119,29 @@ const BUILTIN_PACKAGES: &[BuiltinPackage] = &[
         readme: include_bytes!(
             "../../../examples/runbooks/macos-backup-storage-readiness/README.md"
         ),
+        assets: &[],
+    },
+    BuiltinPackage {
+        id: "ansible-localhost-example",
+        order: 3,
+        definition: include_bytes!(
+            "../../../examples/runbooks/ansible-localhost-example/runbook.vrun.yaml"
+        ),
+        readme: include_bytes!("../../../examples/runbooks/ansible-localhost-example/README.md"),
+        assets: &[
+            BuiltinAsset {
+                path: "ansible/site.yml",
+                bytes: include_bytes!(
+                    "../../../examples/runbooks/ansible-localhost-example/ansible/site.yml"
+                ),
+            },
+            BuiltinAsset {
+                path: "ansible/inventory.ini",
+                bytes: include_bytes!(
+                    "../../../examples/runbooks/ansible-localhost-example/ansible/inventory.ini"
+                ),
+            },
+        ],
     },
 ];
 
@@ -203,14 +243,10 @@ fn materialize_builtin_package(
                     .as_ref()
                     .and_then(|path| read_managed_file(path).ok())
                     .is_some_and(|bytes| bytes == builtin.readme);
-                let ansible_absent = match fs::symlink_metadata(destination.join("ansible")) {
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
-                    Ok(_) | Err(_) => false,
-                };
                 if package.snapshot.source_yaml.as_bytes() == builtin.definition
                     && package.definition.metadata.id == builtin.id
                     && readme_matches
-                    && ansible_absent
+                    && builtin_assets_match(&destination, builtin.assets)
                 {
                     return Ok(package);
                 }
@@ -237,6 +273,7 @@ fn materialize_builtin_package(
     if let Err(error) = restrict_builtin_directory(&staging)
         .and_then(|()| write_builtin_file(&staging.join("runbook.vrun.yaml"), builtin.definition))
         .and_then(|()| write_builtin_file(&staging.join("README.md"), builtin.readme))
+        .and_then(|()| write_builtin_assets(&staging, builtin.assets))
         .and_then(|()| {
             let package = load_and_check_package(&staging)?;
             if package.definition.metadata.id != builtin.id
@@ -285,6 +322,44 @@ fn materialize_builtin_package(
     }
     sync_directory(package_root)?;
     load_and_check_package(&destination)
+}
+
+fn write_builtin_assets(root: &Path, assets: &[BuiltinAsset]) -> Result<(), String> {
+    for asset in assets {
+        let relative = portable_relative_path(Path::new(asset.path))?;
+        if relative != asset.path {
+            return Err(format!(
+                "built-in asset path is not normalized: {}",
+                asset.path
+            ));
+        }
+        let destination = root.join(&relative);
+        if let Some(parent) = destination.parent() {
+            ensure_managed_directory(parent, "built-in asset directory")?;
+            restrict_builtin_directory(parent)?;
+        }
+        write_builtin_file(&destination, asset.bytes)?;
+    }
+    Ok(())
+}
+
+fn builtin_assets_match(root: &Path, assets: &[BuiltinAsset]) -> bool {
+    let ansible_root = root.join("ansible");
+    if assets.is_empty() {
+        return matches!(
+            fs::symlink_metadata(ansible_root),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        );
+    }
+    if !assets.iter().all(|asset| {
+        read_managed_file(&root.join(asset.path)).is_ok_and(|bytes| bytes == asset.bytes)
+    }) {
+        return false;
+    }
+    let Ok(inspection) = inspect_ansible_project(&ansible_root) else {
+        return false;
+    };
+    inspection.included_files as usize == assets.len()
 }
 
 #[cfg(target_os = "windows")]
@@ -361,7 +436,36 @@ fn read_managed_file(path: &Path) -> Result<Vec<u8>, String> {
 
 #[cfg(not(target_os = "windows"))]
 fn read_managed_file(path: &Path) -> Result<Vec<u8>, String> {
-    fs::read(path).map_err(|error| format!("read managed file {}: {error}", path.display()))
+    #[cfg(unix)]
+    {
+        use std::io::Read as _;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        let mut file = options
+            .open(path)
+            .map_err(|error| format!("open managed file {}: {error}", path.display()))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| format!("inspect managed file {}: {error}", path.display()))?;
+        if !metadata.is_file() {
+            return Err(format!(
+                "managed path is not an ordinary file: {}",
+                path.display()
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .map_err(|error| format!("read managed file {}: {error}", path.display()))?;
+        Ok(bytes)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::read(path).map_err(|error| format!("read managed file {}: {error}", path.display()))
+    }
 }
 
 fn write_builtin_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -642,8 +746,10 @@ fn publish_authored_package(
 #[serde(deny_unknown_fields)]
 pub struct RunbookStartRequest {
     pub source_id: String,
-    pub session_id: String,
-    pub target_context: TargetBinding,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub target_context: Option<TargetBinding>,
     pub inputs: BTreeMap<String, Value>,
     pub evidence_mode: EvidenceCaptureMode,
 }
@@ -741,6 +847,8 @@ pub struct PendingApprovalView {
     pub explanation: String,
     pub classification: CommandClassificationView,
     pub requested_at: String,
+    pub project_digest: Option<String>,
+    pub inventory_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -803,6 +911,7 @@ pub struct RunbookHistoryView {
     pub definition_version: String,
     pub definition_title: String,
     pub target_session_id: String,
+    pub target_label: String,
     pub status: RunStatus,
     pub created_at: String,
     pub started_at: Option<String>,
@@ -850,6 +959,696 @@ fn gate(app: &tauri::AppHandle<Wry>) -> Result<(), String> {
     } else {
         Err("runbooks are switched off — enable them in Settings → Runbooks".into())
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnsibleRunnerStatus {
+    pub supported: bool,
+    pub installed: bool,
+    pub path: Option<String>,
+    pub version: Option<String>,
+    pub error: Option<String>,
+    pub install_url: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnsibleProjectInspection {
+    pub project_path: String,
+    pub playbooks: Vec<String>,
+    pub inventory_candidates: Vec<String>,
+    pub included_files: u32,
+    pub total_bytes: u64,
+    pub excluded: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AnsibleImportInput {
+    pub id: String,
+    pub variable: String,
+    #[serde(rename = "type")]
+    pub input_type: InputType,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub default: Option<Value>,
+    #[serde(default)]
+    pub values: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AnsibleImportRequest {
+    pub project_path: String,
+    pub definition_id: String,
+    pub title: String,
+    pub apply_playbook: String,
+    #[serde(default)]
+    pub check_playbook: Option<String>,
+    #[serde(default)]
+    pub verify_playbook: Option<String>,
+    #[serde(default)]
+    pub inventory: Option<String>,
+    #[serde(default)]
+    pub limit: Option<String>,
+    #[serde(default)]
+    pub inputs: Vec<AnsibleImportInput>,
+}
+
+#[tauri::command]
+pub fn runbooks_ansible_status(app: tauri::AppHandle<Wry>) -> Result<AnsibleRunnerStatus, String> {
+    gate(&app)?;
+    Ok(ansible_runner_status())
+}
+
+fn ansible_runner_status() -> AnsibleRunnerStatus {
+    ansible_runner_status_with(
+        cfg!(target_os = "windows"),
+        crate::runbooks::engine::find_ansible_runner,
+        bounded_program_version,
+    )
+}
+
+fn ansible_runner_status_with<F, P>(
+    windows: bool,
+    find_runner: F,
+    probe_version: P,
+) -> AnsibleRunnerStatus
+where
+    F: FnOnce() -> Result<PathBuf, String>,
+    P: FnOnce(&Path) -> Result<String, String>,
+{
+    if windows {
+        return AnsibleRunnerStatus {
+            supported: false,
+            installed: false,
+            path: None,
+            version: None,
+            error: Some(
+                "Ansible control nodes are supported on macOS and Linux. Windows WSL support is planned."
+                    .into(),
+            ),
+            install_url: ANSIBLE_RUNNER_INSTALL_URL,
+        };
+    }
+    let runner = match find_runner() {
+        Ok(path) => path,
+        Err(error) => {
+            return AnsibleRunnerStatus {
+                supported: true,
+                installed: false,
+                path: None,
+                version: None,
+                error: Some(error),
+                install_url: ANSIBLE_RUNNER_INSTALL_URL,
+            };
+        }
+    };
+    match probe_version(&runner) {
+        Ok(version) => AnsibleRunnerStatus {
+            supported: true,
+            installed: true,
+            path: Some(runner.to_string_lossy().into_owned()),
+            version: Some(version),
+            error: None,
+            install_url: ANSIBLE_RUNNER_INSTALL_URL,
+        },
+        Err(error) => AnsibleRunnerStatus {
+            supported: true,
+            installed: false,
+            path: Some(runner.to_string_lossy().into_owned()),
+            version: None,
+            error: Some(error),
+            install_url: ANSIBLE_RUNNER_INSTALL_URL,
+        },
+    }
+}
+
+fn bounded_program_version(program: &Path) -> Result<String, String> {
+    bounded_program_version_with_timeout(program, Duration::from_secs(3))
+}
+
+fn bounded_program_version_with_timeout(
+    program: &Path,
+    timeout: Duration,
+) -> Result<String, String> {
+    let mut child = std::process::Command::new(program)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("start ansible-runner version probe: {error}"))?;
+    let started = Instant::now();
+    loop {
+        match child
+            .try_wait()
+            .map_err(|error| format!("poll ansible-runner version probe: {error}"))?
+        {
+            Some(status) if status.success() => {
+                let output = child
+                    .wait_with_output()
+                    .map_err(|error| format!("read ansible-runner version: {error}"))?;
+                let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if version.is_empty() {
+                    return Err("ansible-runner returned an empty version".into());
+                }
+                return Ok(version.lines().next().unwrap_or_default().to_string());
+            }
+            Some(status) => {
+                return Err(format!(
+                    "ansible-runner --version exited with {}",
+                    status
+                        .code()
+                        .map_or_else(|| "no status".into(), |code| code.to_string())
+                ));
+            }
+            None if started.elapsed() < timeout => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("ansible-runner version probe timed out".into());
+            }
+        }
+    }
+}
+
+#[tauri::command]
+pub fn runbooks_ansible_inspect(
+    app: tauri::AppHandle<Wry>,
+    project_path: String,
+) -> Result<AnsibleProjectInspection, String> {
+    gate(&app)?;
+    inspect_ansible_project(Path::new(&project_path))
+}
+
+#[derive(Debug)]
+struct InspectedAnsibleFile {
+    relative: PathBuf,
+    source: PathBuf,
+    bytes: u64,
+}
+
+fn inspect_ansible_project(path: &Path) -> Result<AnsibleProjectInspection, String> {
+    let (root, files, excluded) = collect_ansible_import_files(path)?;
+    let mut playbooks = Vec::new();
+    let mut inventory_candidates = Vec::new();
+    let mut total_bytes = 0_u64;
+    for file in &files {
+        total_bytes = total_bytes
+            .checked_add(file.bytes)
+            .ok_or("Ansible project size overflow")?;
+        let relative = portable_relative_path(&file.relative)?;
+        let extension = file
+            .relative
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        if matches!(extension, "yml" | "yaml") {
+            playbooks.push(relative.clone());
+        }
+        let parent_inventory = file.relative.components().any(|component| {
+            component.as_os_str() == "inventory" || component.as_os_str() == "inventories"
+        });
+        let name = file
+            .relative
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        if parent_inventory || matches!(name, "hosts" | "hosts.ini" | "inventory") {
+            inventory_candidates.push(relative);
+        }
+    }
+    playbooks.sort();
+    inventory_candidates.sort();
+    Ok(AnsibleProjectInspection {
+        project_path: root.to_string_lossy().into_owned(),
+        playbooks,
+        inventory_candidates,
+        included_files: u32::try_from(files.len()).unwrap_or(u32::MAX),
+        total_bytes,
+        excluded,
+    })
+}
+
+fn portable_relative_path(path: &Path) -> Result<String, String> {
+    let mut parts = Vec::new();
+    for component in path.components() {
+        let Component::Normal(value) = component else {
+            return Err("Ansible project contains an unsafe relative path".into());
+        };
+        parts.push(
+            value
+                .to_str()
+                .ok_or("Ansible project paths must be UTF-8")?,
+        );
+    }
+    Ok(parts.join("/"))
+}
+
+fn excluded_ansible_entry(relative: &Path, is_dir: bool) -> bool {
+    let name = relative
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if is_dir
+        && matches!(
+            name,
+            ".git"
+                | ".hg"
+                | ".svn"
+                | ".venv"
+                | "venv"
+                | "__pycache__"
+                | ".pytest_cache"
+                | ".mypy_cache"
+                | ".tox"
+                | ".ansible"
+                | "artifacts"
+        )
+    {
+        return true;
+    }
+    !is_dir && name.ends_with(".retry")
+}
+
+fn collect_ansible_import_files(
+    requested_root: &Path,
+) -> Result<(PathBuf, Vec<InspectedAnsibleFile>, Vec<String>), String> {
+    let metadata = fs::symlink_metadata(requested_root)
+        .map_err(|error| format!("inspect Ansible project: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("Ansible project root must be an ordinary directory".into());
+    }
+    #[cfg(target_os = "windows")]
+    if crate::windows_fs::is_reparse(&metadata) {
+        return Err("Ansible project root cannot be a Windows reparse point".into());
+    }
+    let root = fs::canonicalize(requested_root)
+        .map_err(|error| format!("resolve Ansible project: {error}"))?;
+    let mut stack = vec![root.clone()];
+    let mut files = Vec::new();
+    let mut excluded = HashSet::new();
+    let mut total_bytes = 0_u64;
+    let mut entries_seen = 0_usize;
+    while let Some(directory) = stack.pop() {
+        let mut entries = fs::read_dir(&directory)
+            .map_err(|error| format!("read Ansible project {}: {error}", directory.display()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("read Ansible project entry: {error}"))?;
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        for entry in entries {
+            entries_seen = entries_seen.saturating_add(1);
+            if entries_seen > MAX_PACKAGE_ENTRIES {
+                return Err(format!(
+                    "Ansible project contains more than {MAX_PACKAGE_ENTRIES} entries"
+                ));
+            }
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(&root)
+                .map_err(|_| "Ansible project entry escaped its root")?
+                .to_path_buf();
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|error| format!("inspect Ansible project entry: {error}"))?;
+            #[cfg(target_os = "windows")]
+            let is_link =
+                metadata.file_type().is_symlink() || crate::windows_fs::is_reparse(&metadata);
+            #[cfg(not(target_os = "windows"))]
+            let is_link = metadata.file_type().is_symlink();
+            if is_link {
+                return Err(format!(
+                    "symlinks and reparse points are not allowed in Ansible imports: {}",
+                    relative.display()
+                ));
+            }
+            if excluded_ansible_entry(&relative, metadata.is_dir()) {
+                excluded.insert(portable_relative_path(&relative)?);
+                continue;
+            }
+            if metadata.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !metadata.is_file() {
+                return Err(format!(
+                    "unsupported special file in Ansible project: {}",
+                    relative.display()
+                ));
+            }
+            total_bytes = total_bytes
+                .checked_add(metadata.len())
+                .ok_or("Ansible project size overflow")?;
+            if total_bytes > MAX_ANSIBLE_IMPORT_BYTES {
+                return Err(format!(
+                    "Ansible project exceeds the {} MiB import limit",
+                    MAX_ANSIBLE_IMPORT_BYTES / 1024 / 1024
+                ));
+            }
+            files.push(InspectedAnsibleFile {
+                relative,
+                source: path,
+                bytes: metadata.len(),
+            });
+        }
+    }
+    files.sort_by(|left, right| left.relative.cmp(&right.relative));
+    let mut excluded = excluded.into_iter().collect::<Vec<_>>();
+    excluded.sort();
+    Ok((root, files, excluded))
+}
+
+fn selected_ansible_path(
+    field: &str,
+    value: &str,
+    available: &HashSet<String>,
+    require_yaml: bool,
+) -> Result<String, String> {
+    let normalized = portable_relative_path(Path::new(value))?;
+    if normalized != value || !available.contains(value) {
+        return Err(format!(
+            "{field} must name an included file beneath the Ansible project"
+        ));
+    }
+    if require_yaml
+        && !matches!(
+            Path::new(value).extension().and_then(|v| v.to_str()),
+            Some("yml" | "yaml")
+        )
+    {
+        return Err(format!("{field} must be a .yml or .yaml file"));
+    }
+    Ok(format!("ansible/{value}"))
+}
+
+fn generated_ansible_definition(
+    request: &AnsibleImportRequest,
+    version: &str,
+    available: &HashSet<String>,
+) -> Result<RunbookDefinition, String> {
+    let apply = selected_ansible_path("apply playbook", &request.apply_playbook, available, true)?;
+    let check = selected_ansible_path(
+        "check playbook",
+        request
+            .check_playbook
+            .as_deref()
+            .unwrap_or(&request.apply_playbook),
+        available,
+        true,
+    )?;
+    let verify = selected_ansible_path(
+        "verify playbook",
+        request
+            .verify_playbook
+            .as_deref()
+            .unwrap_or(&request.apply_playbook),
+        available,
+        true,
+    )?;
+    let inventory = request
+        .inventory
+        .as_deref()
+        .map(|value| selected_ansible_path("inventory", value, available, false))
+        .transpose()?;
+    let limit = request
+        .limit
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    let mut inputs = BTreeMap::new();
+    let mut input_vars = BTreeMap::new();
+    for input in &request.inputs {
+        if inputs.contains_key(&input.id) {
+            return Err(format!("duplicate Runbook input ID: {}", input.id));
+        }
+        if input_vars
+            .insert(input.variable.clone(), input.id.clone())
+            .is_some()
+        {
+            return Err(format!("duplicate Ansible variable: {}", input.variable));
+        }
+        inputs.insert(
+            input.id.clone(),
+            InputDefinition {
+                input_type: input.input_type,
+                description: input.description.clone(),
+                required: input.required,
+                default: input.default.clone(),
+                values: input.values.clone(),
+            },
+        );
+    }
+    let action = |playbook: String| AnsiblePlaybookAction {
+        playbook,
+        inventory: inventory.clone(),
+        limit: limit.clone(),
+        input_vars: input_vars.clone(),
+    };
+    let definition = RunbookDefinition {
+        api_version: API_VERSION.into(),
+        kind: KIND.into(),
+        metadata: Metadata {
+            id: request.definition_id.clone(),
+            version: version.into(),
+            title: request.title.clone(),
+            description:
+                "Imported Ansible project executed by the local Ansible Runner controller.".into(),
+            tags: vec!["ansible".into()],
+        },
+        spec: Spec {
+            target: Target {
+                kind: TargetKind::AnsibleInventory,
+            },
+            inputs,
+            declared_capabilities: DeclaredCapabilities {
+                network: true,
+                privilege: Privilege::Root,
+                writes: Vec::new(),
+            },
+            defaults: Defaults {
+                on_failure: FailurePolicy::Pause,
+                constraints: None,
+            },
+            audit: None,
+            context: None,
+            steps: vec![Step {
+                id: "run-playbook".into(),
+                title: request.title.clone(),
+                required: true,
+                check: Some(CheckAction::AnsiblePlaybook {
+                    action: action(check),
+                }),
+                apply: Some(ApplyAction::AnsiblePlaybook {
+                    action: action(apply),
+                }),
+                verify: Some(VerifyAction::AnsiblePlaybook {
+                    action: action(verify),
+                }),
+                goal: None,
+                constraints: None,
+                context: None,
+                on_failure: None,
+            }],
+        },
+    };
+    definition.validate().map_err(format_validation_errors)?;
+    Ok(definition)
+}
+
+fn copy_ansible_project(files: &[InspectedAnsibleFile], destination: &Path) -> Result<(), String> {
+    fs::create_dir(destination)
+        .map_err(|error| format!("create managed Ansible project: {error}"))?;
+    for file in files {
+        let target = destination.join(&file.relative);
+        let parent = target
+            .parent()
+            .ok_or("managed Ansible file has no parent")?;
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("create managed Ansible directory: {error}"))?;
+        let bytes = read_managed_file(&file.source)?;
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) != file.bytes {
+            return Err(format!(
+                "Ansible project file changed during import: {}",
+                file.relative.display()
+            ));
+        }
+        write_builtin_file(&target, &bytes)?;
+    }
+    Ok(())
+}
+
+fn publish_ansible_import(
+    imports_root: &Path,
+    destination: &Path,
+    request: &AnsibleImportRequest,
+    version: &str,
+) -> Result<AuthoredPublication, String> {
+    ensure_managed_directory(imports_root, "managed Ansible Runbook library")?;
+    restrict_builtin_directory(imports_root)?;
+    let (project_root, files, _) = collect_ansible_import_files(Path::new(&request.project_path))?;
+    let available = files
+        .iter()
+        .map(|file| portable_relative_path(&file.relative))
+        .collect::<Result<HashSet<_>, _>>()?;
+    let definition = generated_ansible_definition(request, version, &available)?;
+    let source_yaml = serde_saphyr::to_string(&definition)
+        .map_err(|error| format!("serialize generated Ansible Runbook: {error}"))?;
+    let readme = format!(
+        "# {}\n\nManaged Ansible Runbook imported by VTerminal.\n\nThe local `ansible-runner` controller executes the packaged project. Remote hosts are reached through the packaged inventory and normal Ansible SSH configuration. VTerminal SSH sessions are not reused.\n",
+        definition.metadata.title
+    );
+
+    let suffix = uuid::Uuid::new_v4();
+    let staging = imports_root.join(format!(".ansible-staging-{suffix}"));
+    create_managed_directory(
+        imports_root,
+        staging
+            .file_name()
+            .ok_or("Ansible import staging path has no filename")?,
+        "Ansible import staging directory",
+    )?;
+    restrict_builtin_directory(&staging)?;
+    let result = copy_ansible_project(&files, &staging.join("ansible"))
+        .and_then(|()| {
+            write_builtin_file(&staging.join("runbook.vrun.yaml"), source_yaml.as_bytes())
+        })
+        .and_then(|()| write_builtin_file(&staging.join("README.md"), readme.as_bytes()))
+        .and_then(|()| load_and_check_package(&staging).map(|_| ()))
+        .and_then(|()| sync_directory(&staging));
+    if let Err(error) = result {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    if project_root.to_string_lossy() != request.project_path {
+        let _ = fs::remove_dir_all(&staging);
+        return Err("Ansible project path changed after inspection; inspect it again".into());
+    }
+
+    let mut backup = None;
+    if destination.exists() {
+        let backup_path = imports_root.join(format!(".ansible-backup-{suffix}"));
+        promote_managed_directory(destination, &backup_path)
+            .map_err(|error| format!("move previous Ansible import aside: {error}"))?;
+        backup = Some(backup_path);
+    }
+    if let Err(error) = promote_managed_directory(&staging, destination) {
+        if let Some(backup_path) = backup.as_ref() {
+            let _ = promote_managed_directory(backup_path, destination);
+        }
+        let _ = fs::remove_dir_all(&staging);
+        return Err(format!("publish managed Ansible Runbook: {error}"));
+    }
+    sync_directory(imports_root)?;
+    Ok(AuthoredPublication {
+        root: imports_root.to_path_buf(),
+        destination: destination.to_path_buf(),
+        staging,
+        backup,
+        committed: false,
+    })
+}
+
+#[tauri::command]
+pub fn runbooks_ansible_import(
+    app: tauri::AppHandle<Wry>,
+    db_state: State<'_, DbState>,
+    command_state: State<'_, Arc<RunbookCommandState>>,
+    request: AnsibleImportRequest,
+) -> Result<SourceRegistration, String> {
+    gate(&app)?;
+    if cfg!(target_os = "windows") {
+        return Err("guided Ansible imports are supported on macOS and Linux".into());
+    }
+    validate_path_argument(&request.project_path, "Ansible project path")?;
+    let inspection = inspect_ansible_project(Path::new(&request.project_path))?;
+    let mut request = request;
+    request.project_path = inspection.project_path;
+    let imports_root = command_state
+        .app_data_dir
+        .join(BUILTIN_LIBRARY_DIRECTORY)
+        .join(ANSIBLE_IMPORTS_DIRECTORY);
+    let destination = imports_root.join(uuid::Uuid::new_v4().to_string());
+    let mut publication = publish_ansible_import(&imports_root, &destination, &request, "1.0.0")?;
+    let package = load_and_check_package(&destination)?;
+    let input = registration_input(&package, true, None)?;
+    let spec_json = serde_json::to_string(&request)
+        .map_err(|error| format!("serialize Ansible import settings: {error}"))?;
+    let connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| format!("begin Ansible import transaction: {error}"))?;
+    let source = db::upsert_source(&transaction, &input)?;
+    db::upsert_ansible_import(&transaction, &source.id, &request.project_path, &spec_json)?;
+    transaction
+        .commit()
+        .map_err(|error| format!("commit Ansible import: {error}"))?;
+    publication.commit();
+    db::get_source(&connection, &source.id)?
+        .ok_or_else(|| "imported Ansible source disappeared".into())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn runbooks_ansible_reimport(
+    app: tauri::AppHandle<Wry>,
+    db_state: State<'_, DbState>,
+    command_state: State<'_, Arc<RunbookCommandState>>,
+    source_id: String,
+    replacement_path: Option<String>,
+) -> Result<SourceRegistration, String> {
+    gate(&app)?;
+    validate_identifier(&source_id, "source id")?;
+    let connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
+    let source = db::get_source(&connection, &source_id)?
+        .ok_or_else(|| format!("unknown runbook source: {source_id}"))?;
+    let record = db::get_ansible_import(&connection, &source_id)?
+        .ok_or("the selected source is not a managed Ansible import")?;
+    let mut request: AnsibleImportRequest = serde_json::from_str(&record.spec_json)
+        .map_err(|error| format!("stored Ansible import settings are invalid: {error}"))?;
+    if let Some(path) = replacement_path {
+        validate_path_argument(&path, "replacement Ansible project path")?;
+        request.project_path = inspect_ansible_project(Path::new(&path))?.project_path;
+    }
+    let mut version = semver::Version::parse(&source.definition_version)
+        .map_err(|error| format!("stored Ansible Runbook version is invalid: {error}"))?;
+    version.patch = version.patch.saturating_add(1);
+    version.pre = semver::Prerelease::EMPTY;
+    version.build = semver::BuildMetadata::EMPTY;
+    let imports_root = command_state
+        .app_data_dir
+        .join(BUILTIN_LIBRARY_DIRECTORY)
+        .join(ANSIBLE_IMPORTS_DIRECTORY);
+    let destination = PathBuf::from(&source.package_path);
+    if destination.parent() != Some(imports_root.as_path()) {
+        return Err("managed Ansible source path is outside the app-owned import library".into());
+    }
+    let mut publication =
+        publish_ansible_import(&imports_root, &destination, &request, &version.to_string())?;
+    let package = load_and_check_package(&destination)?;
+    let input = registration_input(&package, true, None)?;
+    let spec_json = serde_json::to_string(&request)
+        .map_err(|error| format!("serialize Ansible import settings: {error}"))?;
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| format!("begin Ansible re-import transaction: {error}"))?;
+    let updated = db::upsert_source(&transaction, &input)?;
+    if updated.id != source_id {
+        return Err("Ansible re-import changed the source identity".into());
+    }
+    db::upsert_ansible_import(&transaction, &source_id, &request.project_path, &spec_json)?;
+    transaction
+        .commit()
+        .map_err(|error| format!("commit Ansible re-import: {error}"))?;
+    publication.commit();
+    db::get_source(&connection, &source_id)?
+        .ok_or_else(|| "re-imported Ansible source disappeared".into())
 }
 
 #[tauri::command]
@@ -930,15 +1729,60 @@ pub fn runbooks_list(
 pub fn runbooks_remove(
     app: tauri::AppHandle<Wry>,
     db_state: State<'_, DbState>,
+    command_state: State<'_, Arc<RunbookCommandState>>,
     source_id: String,
+    confirmed: Option<bool>,
 ) -> Result<(), String> {
     gate(&app)?;
     validate_identifier(&source_id, "source id")?;
     let connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
-    if db::remove_source(&connection, &source_id)? {
+    let source = db::get_source(&connection, &source_id)?
+        .ok_or_else(|| format!("unknown runbook source: {source_id}"))?;
+    if !source.managed_ansible {
+        return if db::remove_source(&connection, &source_id)? {
+            Ok(())
+        } else {
+            Err(format!("unknown runbook source: {source_id}"))
+        };
+    }
+    if confirmed != Some(true) {
+        return Err("explicit confirmation is required to remove a managed Ansible import".into());
+    }
+    let imports_root = command_state
+        .app_data_dir
+        .join(BUILTIN_LIBRARY_DIRECTORY)
+        .join(ANSIBLE_IMPORTS_DIRECTORY);
+    let package_path = fs::canonicalize(&source.package_path)
+        .map_err(|error| format!("resolve managed Ansible package: {error}"))?;
+    let canonical_imports = fs::canonicalize(&imports_root)
+        .map_err(|error| format!("resolve managed Ansible imports directory: {error}"))?;
+    if package_path.parent() != Some(canonical_imports.as_path()) {
+        return Err("managed Ansible package is outside the application import directory".into());
+    }
+    let removal_path = canonical_imports.join(format!(".remove-{}", uuid::Uuid::new_v4()));
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| format!("begin managed Ansible removal: {error}"))?;
+    if !db::remove_source(&transaction, &source_id)? {
+        return Err(format!("unknown runbook source: {source_id}"));
+    }
+    fs::rename(&package_path, &removal_path)
+        .map_err(|error| format!("stage managed Ansible package removal: {error}"))?;
+    if let Err(error) = transaction.commit() {
+        let restore_error = fs::rename(&removal_path, &package_path).err();
+        return Err(match restore_error {
+            Some(restore_error) => format!(
+                "commit managed Ansible removal: {error}; restore managed package: {restore_error}"
+            ),
+            None => format!("commit managed Ansible removal: {error}"),
+        });
+    }
+    fs::remove_dir_all(&removal_path)
+        .map_err(|error| format!("remove managed Ansible package: {error}"))?;
+    if db::get_source(&connection, &source_id)?.is_none() {
         Ok(())
     } else {
-        Err(format!("unknown runbook source: {source_id}"))
+        Err("managed Ansible source remained registered after removal".into())
     }
 }
 
@@ -1252,7 +2096,6 @@ pub fn runbooks_start(
 ) -> Result<RunbookRunView, String> {
     gate(&app)?;
     validate_identifier(&request.source_id, "source id")?;
-    validate_target(&request.session_id, &request.target_context, &pty_manager)?;
 
     let source = {
         let connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
@@ -1284,6 +2127,28 @@ pub fn runbooks_start(
         mark_source_invalid(&db_state, &source, &error)?;
         return Err(error);
     }
+    let target = match package.definition.spec.target.kind {
+        TargetKind::ActiveTerminal => {
+            let session_id = request
+                .session_id
+                .as_deref()
+                .ok_or("an active-terminal Runbook requires a terminal session")?;
+            let target = request
+                .target_context
+                .as_ref()
+                .ok_or("an active-terminal Runbook requires a target observation")?;
+            validate_target(session_id, target, &pty_manager)?;
+            target.clone()
+        }
+        TargetKind::AnsibleInventory => {
+            if request.session_id.is_some() || request.target_context.is_some() {
+                return Err(
+                    "an ansible-inventory Runbook cannot be bound to a terminal session".into(),
+                );
+            }
+            build_ansible_target(&source, &package.definition, &package_root)?
+        }
+    };
     let resolved = package
         .definition
         .resolve_inputs(&request.inputs)
@@ -1307,7 +2172,7 @@ pub fn runbooks_start(
         canonical_json: package.snapshot.canonical_json.clone(),
         source_sha256: package.snapshot.source_sha256.clone(),
         canonical_sha256: package.snapshot.canonical_sha256.clone(),
-        target: request.target_context.clone(),
+        target: target.clone(),
         inputs: Value::Object(resolved.clone().into_iter().collect()),
         evidence_mode: request.evidence_mode,
         app_version: env!("CARGO_PKG_VERSION").into(),
@@ -1335,7 +2200,7 @@ pub fn runbooks_start(
         definition: package.definition,
         definition_snapshot: package.snapshot,
         package_root: Some(package_root),
-        target: request.target_context,
+        target,
         inputs: resolved,
         evidence_mode: request.evidence_mode,
         app_version: creation.app_version,
@@ -1376,19 +2241,18 @@ pub fn runbooks_resume(
     pty_manager: State<'_, PtyManager>,
     command_state: State<'_, Arc<RunbookCommandState>>,
     run_id: String,
-    session_id: String,
-    target_context: TargetBinding,
+    session_id: Option<String>,
+    target_context: Option<TargetBinding>,
     on_event: Channel<RunbookEvent>,
 ) -> Result<RunbookRunView, String> {
     gate(&app)?;
     validate_identifier(&run_id, "run id")?;
-    validate_target(&session_id, &target_context, &pty_manager)?;
     let engine_database = open_engine_database(&command_state.app_data_dir)?;
 
     let active_model = crate::commands::ai::active_model(&app);
     let resume_app_version = env!("CARGO_PKG_VERSION");
     let resume_model = active_model.id;
-    let (record, definition, inputs, package_root, view) = {
+    let (record, definition, inputs, package_root, effective_target, view) = {
         let mut connection = db_state.0.lock().map_err(|_| "runbook database poisoned")?;
         let stored = db::get_run(&connection, &run_id)?
             .ok_or_else(|| format!("unknown runbook run: {run_id}"))?;
@@ -1410,27 +2274,92 @@ pub fn runbooks_resume(
             );
         }
         reject_sensitive_value(&stored.inputs, "stored runbook inputs")?;
-        let package_root = match &stored.source_id {
+        let source_and_root = match &stored.source_id {
             Some(source_id) => {
                 let source = db::get_source(&connection, source_id)?.ok_or_else(|| {
                     format!("runbook source {source_id} for run {run_id} no longer exists")
                 })?;
-                Some(fs::canonicalize(&source.package_path).map_err(|error| {
+                let root = fs::canonicalize(&source.package_path).map_err(|error| {
                     format!("resolve runbook package root for run {run_id}: {error}")
-                })?)
+                })?;
+                Some((source, root))
             }
             None => None,
         };
+        let effective_target = match &stored.target {
+            TargetBinding::ActiveTerminal { .. } => {
+                let supplied_session = session_id
+                    .as_deref()
+                    .ok_or("resuming an active-terminal Runbook requires a terminal session")?;
+                let supplied_target = target_context
+                    .as_ref()
+                    .ok_or("resuming an active-terminal Runbook requires a target observation")?;
+                validate_target(supplied_session, supplied_target, &pty_manager)?;
+                supplied_target.clone()
+            }
+            TargetBinding::AnsibleInventory {
+                source_id,
+                project_digest,
+                inventory_digest,
+                inventory_path,
+                limit,
+                ..
+            } => {
+                if session_id.is_some() || target_context.is_some() {
+                    return Err(
+                        "resuming an Ansible Runbook does not accept a terminal binding".into(),
+                    );
+                }
+                let (source, root) = source_and_root
+                    .as_ref()
+                    .ok_or("the managed Ansible source is unavailable; this run cannot resume")?;
+                if &source.id != source_id {
+                    return Err("the stored Ansible source identity changed".into());
+                }
+                let current_package = load_and_check_package(root)?;
+                require_registered_snapshot(source, &current_package)?;
+                let current = build_ansible_target(source, &definition, root)?;
+                let TargetBinding::AnsibleInventory {
+                    project_digest: current_project,
+                    inventory_digest: current_inventory,
+                    inventory_path: current_inventory_path,
+                    limit: current_limit,
+                    ..
+                } = &current
+                else {
+                    unreachable!();
+                };
+                if current_project != project_digest
+                    || current_inventory != inventory_digest
+                    || current_inventory_path != inventory_path
+                    || current_limit != limit
+                {
+                    return Err(
+                        "the Ansible project or inventory changed since the interrupted run; start a new run after reviewing the new digests"
+                            .into(),
+                    );
+                }
+                current
+            }
+        };
+        let package_root = source_and_root.map(|(_, root)| root);
         let record = db::rebind_interrupted_run(
             &mut connection,
             &run_id,
-            &target_context,
+            &effective_target,
             true,
             resume_app_version,
             Some(resume_model),
         )?;
         let view = run_view(&connection, &record)?;
-        (record, definition, inputs, package_root, view)
+        (
+            record,
+            definition,
+            inputs,
+            package_root,
+            effective_target,
+            view,
+        )
     };
     if definition.uses_unavailable_executor() && package_root.is_none() {
         return Err("runbook package root is unavailable for this run; restart the run".into());
@@ -1446,7 +2375,7 @@ pub fn runbooks_resume(
             canonical_sha256: record.canonical_sha256,
         },
         package_root,
-        target: target_context,
+        target: effective_target,
         inputs,
         evidence_mode: record.evidence_mode,
         app_version: resume_app_version.into(),
@@ -1559,6 +2488,10 @@ pub enum ApprovalAcknowledgement {
     /// command runs.
     #[serde(rename = "model_once")]
     ModelOnce,
+    /// The operator approved immutable execution through the validated local
+    /// Ansible Runner controller, without a terminal prompt binding.
+    #[serde(rename = "native_controller")]
+    NativeController,
 }
 
 fn approval_reason(
@@ -1631,14 +2564,27 @@ pub fn runbooks_respond_approval(
         .proposed_command
         .as_deref()
         .is_some_and(|value| value.starts_with("model://configured-agent/"));
+    let native_ansible = matches!(target, TargetBinding::AnsibleInventory { .. });
     if approved && acknowledgement == ApprovalAcknowledgement::PreAuthorized && command.is_some() {
         return Err("a pre-authorized approval cannot carry an edited command".into());
     }
-    if approved
+    if approved && native_ansible {
+        if model_invocation {
+            return Err("a native Ansible approval cannot authorize a model invocation".into());
+        }
+        if acknowledgement != ApprovalAcknowledgement::NativeController {
+            return Err("Ansible approval requires a native_controller acknowledgement".into());
+        }
+        if command.is_some() {
+            return Err("commands cannot be edited for a native Ansible controller".into());
+        }
+    } else if approved
         && matches!(
             (model_invocation, acknowledgement),
             (true, ApprovalAcknowledgement::Acknowledged)
                 | (false, ApprovalAcknowledgement::ModelOnce)
+                | (true, ApprovalAcknowledgement::NativeController)
+                | (false, ApprovalAcknowledgement::NativeController)
         )
     {
         return Err(
@@ -1646,24 +2592,25 @@ pub fn runbooks_respond_approval(
                 .into(),
         );
     }
-    let edited_command = if approved {
+    let edited_command = if approved && !native_ansible {
         normalize_edited_command(command, approval.proposed_command.as_deref())?
     } else {
         None
     };
-    let target_basis = match (&target.remote_kind, &target.remote_target, &target.cwd) {
-        (Some(kind), Some(remote), _) => format!("{kind} {remote}"),
-        (Some(kind), None, _) => format!("{kind} session {}", target.session_id),
-        (_, _, Some(cwd)) => format!("local session {} at {cwd}", target.session_id),
-        _ => format!("session {}", target.session_id),
+    let target_basis = target.label();
+    let reason = if approved && native_ansible {
+        format!(
+            "operator acknowledged the native Ansible Runner controller for {target_basis} and approved the immutable playbook execution"
+        )
+    } else {
+        approval_reason(
+            approved,
+            model_invocation,
+            edited_command.is_some(),
+            acknowledgement,
+            &target_basis,
+        )
     };
-    let reason = approval_reason(
-        approved,
-        model_invocation,
-        edited_command.is_some(),
-        acknowledgement,
-        &target_basis,
-    );
     command_state.approvals.respond(
         &approval_id,
         ApprovalResponse {
@@ -1964,6 +2911,7 @@ pub fn runbooks_history(
                 definition_version: summary.definition_version,
                 definition_title: summary.definition_title,
                 target_session_id: summary.target_session_id,
+                target_label: run.target.label(),
                 status: summary.status,
                 created_at: summary.created_at,
                 started_at: summary.started_at,
@@ -2223,7 +3171,15 @@ struct LiveTargetObserver {
 
 impl TargetObserver for LiveTargetObserver {
     fn observe(&self, session_id: &str) -> Result<TargetBinding, String> {
-        if session_id != self.expected.session_id {
+        let TargetBinding::ActiveTerminal {
+            session_id: expected_session,
+            context_marker,
+            ..
+        } = &self.expected
+        else {
+            return Ok(self.expected.clone());
+        };
+        if session_id != expected_session {
             return Err("engine requested a terminal other than its bound target".into());
         }
         let manager = self.app.state::<PtyManager>();
@@ -2231,11 +3187,18 @@ impl TargetObserver for LiveTargetObserver {
             return Ok(self.expected.clone());
         }
         let mut closed = self.expected.clone();
-        closed.context_marker = Some(format!(
-            "{}#closed",
-            self.expected.context_marker.as_deref().unwrap_or("runbook")
-        ));
-        closed.observed_at = now();
+        if let TargetBinding::ActiveTerminal {
+            context_marker: closed_marker,
+            observed_at,
+            ..
+        } = &mut closed
+        {
+            *closed_marker = Some(format!(
+                "{}#closed",
+                context_marker.as_deref().unwrap_or("runbook")
+            ));
+            *observed_at = now();
+        }
         Ok(closed)
     }
 }
@@ -2666,6 +3629,8 @@ fn pending_approval_view(approval: &ApprovalRecord) -> PendingApprovalView {
             opaque: approval.opaque,
         },
         requested_at: approval.requested_at.clone(),
+        project_digest: approval.project_digest.clone(),
+        inventory_digest: approval.inventory_digest.clone(),
     }
 }
 
@@ -2785,31 +3750,120 @@ fn mark_source_invalid(
     Ok(())
 }
 
+fn build_ansible_target(
+    source: &SourceRegistration,
+    definition: &RunbookDefinition,
+    package_root: &Path,
+) -> Result<TargetBinding, String> {
+    if !source.managed_ansible {
+        return Err(
+            "terminal-free Ansible execution requires a project imported with Import Ansible"
+                .into(),
+        );
+    }
+    if definition.spec.target.kind != TargetKind::AnsibleInventory {
+        return Err("the Runbook does not declare an ansible-inventory target".into());
+    }
+    let status = ansible_runner_status();
+    if !status.supported {
+        return Err(status
+            .error
+            .unwrap_or_else(|| "Ansible Runbooks are supported on macOS and Linux only".into()));
+    }
+    if !status.installed {
+        return Err(format!(
+            "Ansible Runner is required before this Runbook can execute. Install it using {ANSIBLE_RUNNER_INSTALL_URL}. {}",
+            status.error.unwrap_or_default()
+        ));
+    }
+    let controller_path = status
+        .path
+        .ok_or("Ansible Runner readiness did not return its executable path")?;
+    let controller_version = status
+        .version
+        .ok_or("Ansible Runner readiness did not return its version")?;
+    let (inventory_path, limit) = ansible_target_selection(definition)?;
+    let project_root = package_root.join("ansible");
+    let project_digest = crate::runbooks::engine::ansible_project_digest(&project_root)?;
+    let inventory_digest = inventory_path
+        .as_deref()
+        .map(|inventory| crate::runbooks::engine::ansible_inventory_digest(package_root, inventory))
+        .transpose()?;
+    Ok(TargetBinding::AnsibleInventory {
+        source_id: source.id.clone(),
+        controller_path,
+        controller_version,
+        inventory_path,
+        inventory_digest,
+        project_digest,
+        limit,
+        observed_at: now(),
+    })
+}
+
+fn ansible_target_selection(
+    definition: &RunbookDefinition,
+) -> Result<(Option<String>, Option<String>), String> {
+    let mut selected: Option<(Option<String>, Option<String>)> = None;
+    let mut consider = |action: &AnsiblePlaybookAction| -> Result<(), String> {
+        let candidate = (action.inventory.clone(), action.limit.clone());
+        if selected.as_ref().is_some_and(|value| value != &candidate) {
+            return Err(
+                "all Ansible phases in a terminal-free Runbook must use one inventory and limit"
+                    .into(),
+            );
+        }
+        selected = Some(candidate);
+        Ok(())
+    };
+    for step in &definition.spec.steps {
+        if let Some(CheckAction::AnsiblePlaybook { action }) = &step.check {
+            consider(action)?;
+        }
+        if let Some(ApplyAction::AnsiblePlaybook { action }) = &step.apply {
+            consider(action)?;
+        }
+        if let Some(VerifyAction::AnsiblePlaybook { action }) = &step.verify {
+            consider(action)?;
+        }
+    }
+    selected.ok_or_else(|| "ansible-inventory Runbook has no Ansible action".into())
+}
+
 fn validate_target(
     session_id: &str,
     target: &TargetBinding,
     pty_manager: &PtyManager,
 ) -> Result<(), String> {
     validate_identifier(session_id, "terminal session id")?;
-    if target.kind != "active-terminal" {
-        return Err("native v1 runbooks require target kind active-terminal".into());
-    }
-    if target.session_id != session_id {
+    let TargetBinding::ActiveTerminal {
+        session_id: bound_session,
+        shell,
+        cwd,
+        remote_kind,
+        remote_target,
+        context_marker,
+        observed_at,
+    } = target
+    else {
+        return Err("the selected Runbook requires an Ansible inventory target".into());
+    };
+    if bound_session != session_id {
         return Err("target context does not match the selected terminal session".into());
     }
     for (label, value) in [
-        ("target shell", target.shell.as_deref()),
-        ("target cwd", target.cwd.as_deref()),
-        ("target remote kind", target.remote_kind.as_deref()),
-        ("target remote target", target.remote_target.as_deref()),
-        ("target context marker", target.context_marker.as_deref()),
+        ("target shell", shell.as_deref()),
+        ("target cwd", cwd.as_deref()),
+        ("target remote kind", remote_kind.as_deref()),
+        ("target remote target", remote_target.as_deref()),
+        ("target context marker", context_marker.as_deref()),
     ] {
         if let Some(value) = value {
             validate_small_text(value, label, MAX_TARGET_FIELD_BYTES, false)?;
             reject_sensitive_text(value, label)?;
         }
     }
-    validate_fresh_timestamp(&target.observed_at, "target observed_at")?;
+    validate_fresh_timestamp(observed_at, "target observed_at")?;
     if !pty_manager.list().iter().any(|id| id == session_id) {
         return Err("the selected terminal session is no longer available".into());
     }
@@ -2817,27 +3871,59 @@ fn validate_target(
 }
 
 fn validate_observed_target(target: &TargetBinding) -> Result<(), String> {
-    validate_identifier(&target.session_id, "observed target session id")?;
-    if target.kind != "active-terminal" {
-        return Err("observed target kind must be active-terminal".into());
-    }
-    validate_fresh_timestamp(&target.observed_at, "observed target timestamp")?;
-    for (label, value) in [
-        ("observed target shell", target.shell.as_deref()),
-        ("observed target cwd", target.cwd.as_deref()),
-        ("observed target remote kind", target.remote_kind.as_deref()),
-        (
-            "observed target remote target",
-            target.remote_target.as_deref(),
-        ),
-        (
-            "observed target context marker",
-            target.context_marker.as_deref(),
-        ),
-    ] {
-        if let Some(value) = value {
-            validate_small_text(value, label, MAX_TARGET_FIELD_BYTES, false)?;
-            reject_sensitive_text(value, label)?;
+    match target {
+        TargetBinding::ActiveTerminal {
+            session_id,
+            shell,
+            cwd,
+            remote_kind,
+            remote_target,
+            context_marker,
+            observed_at,
+        } => {
+            validate_identifier(session_id, "observed target session id")?;
+            validate_fresh_timestamp(observed_at, "observed target timestamp")?;
+            for (label, value) in [
+                ("observed target shell", shell.as_deref()),
+                ("observed target cwd", cwd.as_deref()),
+                ("observed target remote kind", remote_kind.as_deref()),
+                ("observed target remote target", remote_target.as_deref()),
+                ("observed target context marker", context_marker.as_deref()),
+            ] {
+                if let Some(value) = value {
+                    validate_small_text(value, label, MAX_TARGET_FIELD_BYTES, false)?;
+                    reject_sensitive_text(value, label)?;
+                }
+            }
+        }
+        TargetBinding::AnsibleInventory {
+            source_id,
+            controller_path,
+            controller_version,
+            inventory_path,
+            inventory_digest,
+            project_digest,
+            limit,
+            observed_at,
+        } => {
+            validate_identifier(source_id, "observed Ansible source id")?;
+            validate_fresh_timestamp(observed_at, "observed Ansible target timestamp")?;
+            for (label, value) in [
+                ("Ansible controller path", Some(controller_path.as_str())),
+                (
+                    "Ansible controller version",
+                    Some(controller_version.as_str()),
+                ),
+                ("Ansible inventory path", inventory_path.as_deref()),
+                ("Ansible inventory digest", inventory_digest.as_deref()),
+                ("Ansible project digest", Some(project_digest.as_str())),
+                ("Ansible limit", limit.as_deref()),
+            ] {
+                if let Some(value) = value {
+                    validate_small_text(value, label, MAX_TARGET_FIELD_BYTES, false)?;
+                    reject_sensitive_text(value, label)?;
+                }
+            }
         }
     }
     Ok(())
@@ -4692,6 +5778,8 @@ mod tests {
         db::migrate_v6(&connection).unwrap();
         db::migrate_v8(&connection).unwrap();
         db::migrate_v9(&connection).unwrap();
+        db::migrate_v10(&connection).unwrap();
+        db::migrate_v16(&connection).unwrap();
         connection
     }
 
@@ -4966,6 +6054,7 @@ spec:
                 "macos-security-posture",
                 "macos-developer-workstation-health",
                 "macos-backup-storage-readiness",
+                "ansible-localhost-example",
             ]
         );
         for (index, source) in first.iter().enumerate() {
@@ -5004,6 +6093,7 @@ spec:
                     "root-volume-uses-apfs",
                     "local-snapshot-present-when-required",
                 ],
+                "ansible-localhost-example" => &["manage-example-file"],
                 unexpected => panic!("unexpected built-in runbook {unexpected}"),
             };
             assert_eq!(
@@ -5018,29 +6108,47 @@ spec:
             );
             assert!(!package.definition.uses_unavailable_executor());
             assert!(!package.definition.spec.declared_capabilities.network);
-            assert!(package
-                .definition
-                .spec
-                .declared_capabilities
-                .writes
-                .is_empty());
             assert_eq!(
                 package.definition.spec.declared_capabilities.privilege,
                 crate::runbooks::definition::Privilege::None
             );
-            assert!(package.definition.spec.steps.iter().all(|step| matches!(
-                &step.check,
-                Some(CheckAction::Shell { .. })
-            ) && step.apply.is_none()
-                && step.verify.is_none()));
-            assert_eq!(
-                package.definition.spec.defaults.on_failure,
-                crate::runbooks::definition::FailurePolicy::Continue
-            );
-            assert_eq!(
-                package.definition.spec.steps[0].on_failure,
-                Some(crate::runbooks::definition::FailurePolicy::Stop)
-            );
+            if source.definition_id == "ansible-localhost-example" {
+                assert_eq!(
+                    package.definition.spec.target.kind,
+                    TargetKind::AnsibleInventory
+                );
+                assert!(matches!(
+                    package.definition.spec.steps[0].check,
+                    Some(CheckAction::AnsiblePlaybook { .. })
+                ));
+                assert_eq!(
+                    package.definition.spec.declared_capabilities.writes,
+                    vec!["/tmp/vterminal-ansible-example.txt"]
+                );
+                assert!(Path::new(&source.package_path)
+                    .join("ansible/site.yml")
+                    .is_file());
+            } else {
+                assert!(package
+                    .definition
+                    .spec
+                    .declared_capabilities
+                    .writes
+                    .is_empty());
+                assert!(package.definition.spec.steps.iter().all(|step| matches!(
+                    &step.check,
+                    Some(CheckAction::Shell { .. })
+                ) && step.apply.is_none()
+                    && step.verify.is_none()));
+                assert_eq!(
+                    package.definition.spec.defaults.on_failure,
+                    crate::runbooks::definition::FailurePolicy::Continue
+                );
+                assert_eq!(
+                    package.definition.spec.steps[0].on_failure,
+                    Some(crate::runbooks::definition::FailurePolicy::Stop)
+                );
+            }
         }
 
         let second = reconcile_builtin_sources(&app_data.0, &connection).unwrap();
@@ -5058,7 +6166,7 @@ spec:
         let hidden_id = first[1].id.clone();
         assert!(db::remove_source(&connection, &hidden_id).unwrap());
         let visible = reconcile_builtin_sources(&app_data.0, &connection).unwrap();
-        assert_eq!(visible.len(), 2);
+        assert_eq!(visible.len(), 3);
         let hidden = db::get_source(&connection, &hidden_id).unwrap().unwrap();
         assert!(hidden.hidden);
         assert_eq!(hidden.id, hidden_id);
@@ -5074,7 +6182,7 @@ spec:
         )
         .unwrap();
         let reconciled = reconcile_builtin_sources(&app_data.0, &connection).unwrap();
-        assert_eq!(reconciled.len(), 2);
+        assert_eq!(reconciled.len(), 3);
         let repaired = db::get_source(&connection, &hidden_id).unwrap().unwrap();
         assert_eq!(repaired.id, hidden_id);
         assert!(repaired.hidden);
@@ -5085,7 +6193,7 @@ spec:
         assert!(!hidden_package.join("ansible").exists());
 
         let restored = db::restore_builtin_sources(&connection).unwrap();
-        assert_eq!(restored.len(), 3);
+        assert_eq!(restored.len(), 4);
         assert_eq!(restored[0].definition_id, "macos-security-posture");
         assert_eq!(restored[1].id, hidden_id);
     }
@@ -5373,6 +6481,10 @@ spec:
             ("acknowledged", ApprovalAcknowledgement::Acknowledged),
             ("pre_authorized", ApprovalAcknowledgement::PreAuthorized),
             ("model_once", ApprovalAcknowledgement::ModelOnce),
+            (
+                "native_controller",
+                ApprovalAcknowledgement::NativeController,
+            ),
         ] {
             assert_eq!(
                 serde_json::from_value::<ApprovalAcknowledgement>(json!(wire)).unwrap(),
@@ -5615,16 +6727,15 @@ spec:
             canonical_json: canonical.clone(),
             source_sha256: sha256_hex(source.as_bytes()),
             canonical_sha256: sha256_hex(canonical.as_bytes()),
-            target: TargetBinding {
-                kind: "active-terminal".into(),
-                session_id: "session-1".into(),
-                shell: Some("zsh".into()),
-                cwd: Some("/srv".into()),
-                remote_kind: None,
-                remote_target: None,
-                context_marker: Some("ctx".into()),
-                observed_at: now(),
-            },
+            target: TargetBinding::active_terminal(
+                "session-1".into(),
+                Some("zsh".into()),
+                Some("/srv".into()),
+                None,
+                None,
+                Some("ctx".into()),
+                now(),
+            ),
             inputs: serde_json::json!({}),
             evidence_mode: EvidenceCaptureMode::Tail,
             status: RunStatus::WaitingOperator,
@@ -5786,5 +6897,211 @@ spec:
         assert!(error.contains("pinned export destination component"));
         assert!(!real.join("bundle").exists());
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    fn ansible_import_request(project_path: &Path) -> AnsibleImportRequest {
+        AnsibleImportRequest {
+            project_path: project_path.to_string_lossy().into_owned(),
+            definition_id: "ansible-test".into(),
+            title: "Ansible test".into(),
+            apply_playbook: "site.yml".into(),
+            check_playbook: None,
+            verify_playbook: None,
+            inventory: Some("inventory/hosts.ini".into()),
+            limit: Some("web".into()),
+            inputs: vec![AnsibleImportInput {
+                id: "port".into(),
+                variable: "http_port".into(),
+                input_type: InputType::Integer,
+                description: "Listener port".into(),
+                required: true,
+                default: None,
+                values: Vec::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn ansible_runner_status_reports_supported_installed_and_missing_states() {
+        let runner = PathBuf::from("/opt/tools/ansible-runner");
+        let installed = ansible_runner_status_with(
+            false,
+            || Ok(runner.clone()),
+            |path| {
+                assert_eq!(path, runner);
+                Ok("2.4.1".into())
+            },
+        );
+        assert!(installed.supported);
+        assert!(installed.installed);
+        assert_eq!(installed.path.as_deref(), Some("/opt/tools/ansible-runner"));
+        assert_eq!(installed.version.as_deref(), Some("2.4.1"));
+        assert!(installed.error.is_none());
+
+        let missing = ansible_runner_status_with(
+            false,
+            || Err("ansible-runner was not found".into()),
+            |_| panic!("a missing Runner must not be probed"),
+        );
+        assert!(missing.supported);
+        assert!(!missing.installed);
+        assert!(missing.path.is_none());
+        assert!(missing
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("not found")));
+    }
+
+    #[test]
+    fn ansible_runner_status_reports_invalid_and_windows_states() {
+        let invalid = ansible_runner_status_with(
+            false,
+            || Ok(PathBuf::from("/opt/tools/ansible-runner")),
+            |_| Err("ansible-runner --version exited with 17".into()),
+        );
+        assert!(invalid.supported);
+        assert!(!invalid.installed);
+        assert!(invalid.path.is_some());
+        assert!(invalid.version.is_none());
+        assert!(invalid
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("exited with 17")));
+
+        let windows = ansible_runner_status_with(
+            true,
+            || panic!("Windows must not search for a native Runner"),
+            |_| panic!("Windows must not probe a native Runner"),
+        );
+        assert!(!windows.supported);
+        assert!(!windows.installed);
+        assert!(windows
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("WSL")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ansible_runner_version_probe_handles_success_invalid_and_timeout() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = TempRoot::new("ansible-runner-probe");
+        let write_executable = |name: &str, body: &str| {
+            let path = root.0.join(name);
+            fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+            path
+        };
+
+        let valid = write_executable("valid", "printf '2.4.1\\n'");
+        assert_eq!(
+            bounded_program_version_with_timeout(&valid, Duration::from_secs(1)).unwrap(),
+            "2.4.1"
+        );
+
+        let invalid = write_executable("invalid", "exit 17");
+        assert!(
+            bounded_program_version_with_timeout(&invalid, Duration::from_secs(1))
+                .unwrap_err()
+                .contains("exited with 17")
+        );
+
+        let slow = write_executable("slow", "sleep 5");
+        assert!(
+            bounded_program_version_with_timeout(&slow, Duration::from_millis(40))
+                .unwrap_err()
+                .contains("timed out")
+        );
+    }
+
+    #[test]
+    fn ansible_inspection_excludes_generated_state_and_discovers_selections() {
+        let root = TempRoot::new("ansible-inspection");
+        fs::create_dir_all(root.0.join("inventory")).unwrap();
+        fs::create_dir_all(root.0.join(".git/objects")).unwrap();
+        fs::create_dir_all(root.0.join("roles/example/tasks")).unwrap();
+        fs::write(root.0.join("site.yml"), b"---\n- hosts: all\n").unwrap();
+        fs::write(root.0.join("inventory/hosts.ini"), b"[web]\nlocalhost\n").unwrap();
+        fs::write(root.0.join("roles/example/tasks/main.yaml"), b"---\n").unwrap();
+        fs::write(root.0.join("failed.retry"), b"localhost\n").unwrap();
+        fs::write(root.0.join(".git/objects/ignored"), b"ignored\n").unwrap();
+
+        let inspection = inspect_ansible_project(&root.0).unwrap();
+        assert_eq!(inspection.included_files, 3);
+        assert_eq!(
+            inspection.playbooks,
+            vec!["roles/example/tasks/main.yaml", "site.yml"]
+        );
+        assert_eq!(inspection.inventory_candidates, vec!["inventory/hosts.ini"]);
+        assert!(inspection.excluded.contains(&".git".into()));
+        assert!(inspection.excluded.contains(&"failed.retry".into()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ansible_inspection_rejects_symlinks_instead_of_following_them() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempRoot::new("ansible-symlink");
+        fs::write(root.0.join("site.yml"), b"---\n").unwrap();
+        symlink("site.yml", root.0.join("linked.yml")).unwrap();
+        assert!(inspect_ansible_project(&root.0)
+            .unwrap_err()
+            .contains("symlinks"));
+    }
+
+    #[test]
+    fn generated_ansible_definition_defaults_phases_and_maps_extra_vars() {
+        let root = TempRoot::new("ansible-definition");
+        let request = ansible_import_request(&root.0);
+        let available = HashSet::from(["site.yml".to_string(), "inventory/hosts.ini".to_string()]);
+        let definition = generated_ansible_definition(&request, "1.2.3", &available).unwrap();
+        assert_eq!(definition.spec.target.kind, TargetKind::AnsibleInventory);
+        assert_eq!(definition.metadata.version, "1.2.3");
+        assert_eq!(
+            definition.spec.inputs["port"].input_type,
+            InputType::Integer
+        );
+        let step = &definition.spec.steps[0];
+        let actions = [
+            match step.check.as_ref().unwrap() {
+                CheckAction::AnsiblePlaybook { action } => action,
+                _ => panic!("expected Ansible check"),
+            },
+            match step.apply.as_ref().unwrap() {
+                ApplyAction::AnsiblePlaybook { action } => action,
+                _ => panic!("expected Ansible apply"),
+            },
+            match step.verify.as_ref().unwrap() {
+                VerifyAction::AnsiblePlaybook { action } => action,
+                _ => panic!("expected Ansible verify"),
+            },
+        ];
+        assert!(actions
+            .iter()
+            .all(|action| action.playbook == "ansible/site.yml"));
+        assert!(actions
+            .iter()
+            .all(|action| action.inventory.as_deref() == Some("ansible/inventory/hosts.ini")));
+        assert!(actions
+            .iter()
+            .all(|action| action.limit.as_deref() == Some("web")));
+        assert!(actions.iter().all(|action| action
+            .input_vars
+            .get("http_port")
+            .map(String::as_str)
+            == Some("port")));
+    }
+
+    #[test]
+    fn generated_ansible_definition_rejects_external_or_unselected_files() {
+        let root = TempRoot::new("ansible-selection");
+        let mut request = ansible_import_request(&root.0);
+        request.apply_playbook = "../outside.yml".into();
+        let available = HashSet::from(["site.yml".to_string()]);
+        assert!(generated_ansible_definition(&request, "1.0.0", &available)
+            .unwrap_err()
+            .contains("unsafe relative path"));
     }
 }

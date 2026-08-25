@@ -509,7 +509,8 @@ impl<'a> EngineRunner<'a> {
         self.prepare_durable_run(mode)?;
         self.context.events.emit(RunbookEvent::RunStarted {
             run_id: self.spec.run_id.clone(),
-            session_id: self.spec.target.session_id.clone(),
+            session_id: self.spec.target.lock_key(),
+            target_label: self.spec.target.label(),
         });
 
         match self.run_discovery().await? {
@@ -1429,9 +1430,48 @@ impl<'a> EngineRunner<'a> {
             .as_ref()
             .ok_or("runbook execution is missing the package root; restart this run")?
             .to_path_buf();
-        let runner = find_ansible_runner()?;
         let project_root = fs::canonicalize(package_root.join("ansible"))
             .map_err(|error| format!("resolve runbook Ansible project: {error}"))?;
+        let runner = match &self.spec.target {
+            TargetBinding::AnsibleInventory {
+                controller_path,
+                inventory_path,
+                project_digest,
+                inventory_digest,
+                limit,
+                ..
+            } => {
+                if &action.inventory != inventory_path || &action.limit != limit {
+                    return Err(
+                        "Ansible action inventory or limit differs from the immutable run target"
+                            .into(),
+                    );
+                }
+                let current_project = ansible_project_digest(&project_root)?;
+                let current_inventory = action
+                    .inventory
+                    .as_deref()
+                    .map(|inventory| ansible_inventory_digest(&package_root, inventory))
+                    .transpose()?;
+                if &current_project != project_digest || &current_inventory != inventory_digest {
+                    return Err(
+                        "Ansible project or inventory changed after preflight; start a new run to review the updated digests"
+                            .into(),
+                    );
+                }
+                let path = PathBuf::from(controller_path);
+                let canonical = path.canonicalize().map_err(|error| {
+                    format!("revalidate the bound Ansible Runner controller: {error}")
+                })?;
+                if canonical != path || !canonical.is_file() {
+                    return Err(
+                        "the bound Ansible Runner controller path changed after preflight".into(),
+                    );
+                }
+                canonical
+            }
+            TargetBinding::ActiveTerminal { .. } => find_ansible_runner()?,
+        };
         let playbook_path =
             resolve_package_file(&package_root, &action.playbook).map_err(|error| {
                 format!(
@@ -1927,7 +1967,12 @@ impl<'a> EngineRunner<'a> {
             run_id: self.spec.run_id.clone(),
             attempt_id: attempt_id.clone(),
             approval_id,
-            session_id: self.spec.target.session_id.clone(),
+            session_id: self
+                .spec
+                .target
+                .session_id()
+                .ok_or("terminal dispatch requires an active-terminal target")?
+                .to_string(),
             command: executed_command,
             timeout_secs: self.context.config.command_timeout_secs,
             // Input mappings are part of the exact validated, classified and
@@ -2169,10 +2214,10 @@ impl<'a> EngineRunner<'a> {
     }
 
     fn ensure_target(&mut self, index: usize, step: &Step) -> Result<bool, String> {
-        let observed = self
-            .context
-            .target_observer
-            .observe(&self.spec.target.session_id)?;
+        let Some(session_id) = self.spec.target.session_id() else {
+            return Ok(true);
+        };
+        let observed = self.context.target_observer.observe(session_id)?;
         if self
             .context
             .coordinator
@@ -3682,15 +3727,7 @@ impl<'a> EngineRunner<'a> {
                 source_sha256: self.spec.definition_snapshot.source_sha256.clone(),
                 canonical_sha256: self.spec.definition_snapshot.canonical_sha256.clone(),
             },
-            target: ReportTarget {
-                kind: self.spec.target.kind.clone(),
-                session_id: self.spec.target.session_id.clone(),
-                shell: self.spec.target.shell.clone(),
-                cwd: self.spec.target.cwd.clone(),
-                remote_kind: self.spec.target.remote_kind.clone(),
-                remote_target: self.spec.target.remote_target.clone(),
-                context_marker: self.spec.target.context_marker.clone(),
-            },
+            target: ReportTarget::from(&self.spec.target),
             inputs: serde_json::to_value(&self.spec.inputs)
                 .map_err(|error| format!("serialize resolved inputs: {error}"))?,
             environment: ReportEnvironment {
@@ -4045,7 +4082,7 @@ fn ansible_preview_command(program: &str, args: &[String]) -> String {
     preview
 }
 
-fn ansible_project_digest(package_root: &Path) -> Result<String, String> {
+pub(crate) fn ansible_project_digest(package_root: &Path) -> Result<String, String> {
     let mut files = Vec::new();
     collect_ansible_project_files(package_root, package_root, &mut files)?;
     let mut hasher = Sha256::new();
@@ -4068,7 +4105,10 @@ fn ansible_project_digest(package_root: &Path) -> Result<String, String> {
     Ok(format!("sha256:{}", hex_digest(digest)))
 }
 
-fn ansible_inventory_digest(package_root: &Path, inventory: &str) -> Result<String, String> {
+pub(crate) fn ansible_inventory_digest(
+    package_root: &Path,
+    inventory: &str,
+) -> Result<String, String> {
     let inventory_path = resolve_package_file(package_root, inventory)
         .map_err(|error| format!("cannot resolve ansible inventory {inventory}: {error}"))?;
     let bytes = fs::read(&inventory_path)
@@ -4220,7 +4260,7 @@ fn set_ansible_recap_field(outcome: &mut AnsibleHostOutcome, field: AnsibleRecap
     }
 }
 
-fn find_ansible_runner() -> Result<PathBuf, String> {
+pub(crate) fn find_ansible_runner() -> Result<PathBuf, String> {
     let mut directories = std::env::var_os("PATH")
         .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
         .unwrap_or_default();
@@ -4995,15 +5035,7 @@ fn valid_path_component(value: &str) -> bool {
 }
 
 fn target_label(target: &TargetBinding) -> String {
-    match (&target.remote_kind, &target.remote_target) {
-        (Some(kind), Some(remote)) => {
-            format!(
-                "{} session {} ({kind}: {remote})",
-                target.kind, target.session_id
-            )
-        }
-        _ => format!("{} session {}", target.kind, target.session_id),
-    }
+    target.label()
 }
 
 fn timestamp() -> String {
@@ -5210,16 +5242,15 @@ spec:
     }
 
     fn target() -> TargetBinding {
-        TargetBinding {
-            kind: "active-terminal".into(),
-            session_id: "test-session".into(),
-            shell: Some("zsh".into()),
-            cwd: Some("/tmp".into()),
-            remote_kind: Some("ssh".into()),
-            remote_target: Some("test-host".into()),
-            context_marker: Some("ctx-test".into()),
-            observed_at: timestamp(),
-        }
+        TargetBinding::active_terminal(
+            "test-session".into(),
+            Some("zsh".into()),
+            Some("/tmp".into()),
+            Some("ssh".into()),
+            Some("test-host".into()),
+            Some("ctx-test".into()),
+            timestamp(),
+        )
     }
 
     async fn run(mode: TerminalMode, evidence_mode: EvidenceCaptureMode) -> RunbookReport {

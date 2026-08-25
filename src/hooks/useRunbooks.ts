@@ -22,6 +22,8 @@ import { useAppStore } from "../stores/appStore";
 import { useRunbookStore } from "../stores/runbookStore";
 import type {
   EvidenceMode,
+  AnsibleRunbookStartRequest,
+  ActiveTerminalTargetContext,
   RunbookEvent,
   RunbookOperatorDecision,
   RunbookRun,
@@ -32,7 +34,7 @@ import type {
 
 export function buildRunbookTargetContext(
   sessionId: string,
-): RunbookTargetContext {
+): ActiveTerminalTargetContext {
   const app = useAppStore.getState();
   const session = app.sessions.find((item) => item.id === sessionId);
   const ui = app.sessionUi[sessionId];
@@ -57,6 +59,12 @@ export function describeRunbookTarget(
   context: RunbookTargetContext | null,
 ): string {
   if (!context) return "No terminal bound";
+  if (context.kind === "ansible-inventory") {
+    const inventory = context.inventory_path ?? "implicit inventory";
+    return context.limit
+      ? `Ansible ${inventory}, limit ${context.limit}`
+      : `Ansible ${inventory}`;
+  }
   if (context.remote_kind) {
     return context.remote_target
       ? `${context.remote_kind} ${context.remote_target}`
@@ -69,6 +77,18 @@ function sameTarget(
   left: RunbookTargetContext,
   right: RunbookTargetContext,
 ): boolean {
+  if (left.kind !== right.kind) return false;
+  if (left.kind === "ansible-inventory" && right.kind === "ansible-inventory") {
+    return (
+      left.source_id === right.source_id &&
+      left.controller_path === right.controller_path &&
+      left.inventory_path === right.inventory_path &&
+      left.inventory_digest === right.inventory_digest &&
+      left.project_digest === right.project_digest &&
+      left.limit === right.limit
+    );
+  }
+  if (left.kind !== "active-terminal" || right.kind !== "active-terminal") return false;
   return (
     left.session_id === right.session_id &&
     (left.remote_kind !== null || left.cwd === right.cwd) &&
@@ -113,8 +133,8 @@ async function refreshRunById(runId: string): Promise<void> {
   }
 }
 
-/** How the operator arrived at an approval. The distinction is durable — it
- *  decides the wording of the reason recorded in the report. */
+/** How the operator arrived at an approval. The distinction is durable and
+ * decides the wording of the reason recorded in the report. */
 type ApprovalAcknowledgement = api.RunbookApprovalAcknowledgement;
 
 /** The one path to `runbooks_respond_approval`. The operator's click and an armed
@@ -162,8 +182,18 @@ async function submitApproval(args: {
   const modelInvocation = approval.command.startsWith(
     "model://configured-agent/",
   );
+  const nativeAnsible = run.target.kind === "ansible-inventory";
+  if (acknowledgement === "pre_authorized" && nativeAnsible) {
+    return fail("Auto-approve is unavailable for native Ansible controller actions.");
+  }
+  if (nativeAnsible && command !== null) {
+    return fail("Native Ansible controller commands cannot be edited.");
+  }
   let promptBinding: string | null = null;
-  if (approved && !modelInvocation) {
+  if (approved && !modelInvocation && !nativeAnsible) {
+    if (run.target.kind !== "active-terminal") {
+      return fail("The Runbook target is not available for terminal approval.");
+    }
     const sessionId = run.target.session_id;
     if (!sessionId || useAppStore.getState().activeSessionId !== sessionId) {
       return fail("Select the bound terminal before approving this action.");
@@ -248,6 +278,13 @@ async function autoApproveArmedApproval(
   const run = getRunById(runId);
   if (!run) {
     disarmAutoApprove(runId, "Auto-approve stopped: the run is unavailable.");
+    return;
+  }
+  if (run.target.kind === "ansible-inventory") {
+    disarmAutoApprove(
+      runId,
+      "Auto-approve is unavailable for native Ansible controller actions.",
+    );
     return;
   }
   if (useAppStore.getState().activeSessionId !== run.target.session_id) {
@@ -800,7 +837,11 @@ export function useRunbooks() {
     store.setError(null);
     store.setNotice(null);
     try {
-      await api.runbooksRemove(sourceId);
+      if (source?.managed_ansible) {
+        await api.runbooksRemove(sourceId, true);
+      } else {
+        await api.runbooksRemove(sourceId);
+      }
       await installLibrarySources(
         useRunbookStore
           .getState()
@@ -809,7 +850,9 @@ export function useRunbooks() {
       store.setNotice(
         source?.source_kind === "builtin"
           ? "Included runbook hidden. Restore examples can add it back; historical runs were retained."
-          : "Package registration removed. Historical runs were retained.",
+          : source?.managed_ansible
+            ? "Managed Ansible import and its application copy were removed. The original project and historical runs were retained."
+            : "Package registration removed. Historical runs were retained.",
       );
     } catch (error) {
       store.setError(String(error));
@@ -859,7 +902,7 @@ export function useRunbooks() {
   const start = useCallback(
     async (
       sourceId: string,
-      sessionId: string,
+      sessionId: string | null,
       inputs: Record<string, string | number | boolean>,
       evidenceMode: EvidenceMode,
     ) => {
@@ -868,18 +911,31 @@ export function useRunbooks() {
       store.setError(null);
       const eventBuffer = api.createRunbookEventBuffer(handleEvent);
       try {
-        if (useAppStore.getState().activeSessionId !== sessionId) {
+        const terminalTarget = store.definition?.spec.target.kind !== "ansible-inventory";
+        if (
+          terminalTarget &&
+          (!sessionId || useAppStore.getState().activeSessionId !== sessionId)
+        ) {
           throw new Error(
             "Select the target terminal before starting this runbook.",
           );
         }
-        const request: RunbookStartRequest = {
-          source_id: sourceId,
-          session_id: sessionId,
-          target_context: buildRunbookTargetContext(sessionId),
-          inputs,
-          evidence_mode: evidenceMode,
-        };
+        const request: RunbookStartRequest | AnsibleRunbookStartRequest =
+          terminalTarget
+            ? {
+                source_id: sourceId,
+                session_id: sessionId!,
+                target_context: buildRunbookTargetContext(sessionId!),
+                inputs,
+                evidence_mode: evidenceMode,
+              }
+            : {
+                source_id: sourceId,
+                session_id: null,
+                target_context: null,
+                inputs,
+                evidence_mode: evidenceMode,
+              };
         const run = await api.runbooksStart(request, eventBuffer.handle);
         const definition = store.definition;
         const installedRun: typeof run = {
@@ -920,24 +976,30 @@ export function useRunbooks() {
   );
 
   const resume = useCallback(
-    async (runId: string, sessionId: string) => {
+    async (runId: string, sessionId: string | null) => {
       const store = useRunbookStore.getState();
       store.setBusyAction("resume");
       store.setError(null);
       const eventBuffer = api.createRunbookEventBuffer(handleEvent);
       try {
-        if (useAppStore.getState().activeSessionId !== sessionId) {
+        const previous = getRunById(runId) ?? (await api.runbooksGet(runId));
+        const terminalTarget = previous.target.kind === "active-terminal";
+        if (
+          terminalTarget &&
+          (!sessionId || useAppStore.getState().activeSessionId !== sessionId)
+        ) {
           throw new Error(
             "Select the terminal you want to rebind before resuming.",
           );
         }
         const run = await api.runbooksResume(
           runId,
-          sessionId,
-          buildRunbookTargetContext(sessionId),
+          terminalTarget ? sessionId : null,
+          terminalTarget && sessionId
+            ? buildRunbookTargetContext(sessionId)
+            : null,
           eventBuffer.handle,
         );
-        const previous = getRunById(runId);
         store.setActiveRun({
           ...run,
           evidence_mode: run.evidence_mode ?? previous?.evidence_mode,
@@ -1001,8 +1063,9 @@ export function useRunbooks() {
       // is the operator taking the wheel back; approving one step by hand means
       // they were reading the cards again.
       disarmAutoApprove(runId, null);
-      const approval = getRunById(runId)?.pending_approval ?? null;
-      if (!approval) {
+      const run = getRunById(runId);
+      const approval = run?.pending_approval ?? null;
+      if (!run || !approval) {
         useRunbookStore
           .getState()
           .setError("No pending approval was found for this run.");
@@ -1017,12 +1080,17 @@ export function useRunbooks() {
       const modelInvocation = approval.command.startsWith(
         "model://configured-agent/",
       );
+      const nativeAnsible = run.target.kind === "ansible-inventory";
       await submitApproval({
         runId,
         approval,
         approved,
         command,
-        acknowledgement: modelInvocation ? "model_once" : "acknowledged",
+        acknowledgement: nativeAnsible
+          ? "native_controller"
+          : modelInvocation
+            ? "model_once"
+            : "acknowledged",
         busyAction: `approval:${approvalId}`,
       });
     },
@@ -1038,10 +1106,16 @@ export function useRunbooks() {
     async (runId: string, command: string | null) => {
       const run = getRunById(runId);
       const approval = run?.pending_approval ?? null;
-      if (!approval) {
+      if (!run || !approval) {
         useRunbookStore
           .getState()
           .setError("No pending approval was found for this run.");
+        return;
+      }
+      if (run.target.kind === "ansible-inventory") {
+        useRunbookStore
+          .getState()
+          .setError("Auto-approve is unavailable for native Ansible controller actions.");
         return;
       }
       const modelInvocation = approval.command.startsWith(
@@ -1098,7 +1172,10 @@ export function useRunbooks() {
       try {
         const run = getRunById(runId);
         if (!run) throw new Error("The durable run target is unavailable.");
-        const target = buildRunbookTargetContext(run.target.session_id);
+        const target =
+          run.target.kind === "ansible-inventory"
+            ? { ...run.target, observed_at: new Date().toISOString() }
+            : buildRunbookTargetContext(run.target.session_id);
         if (!sameTarget(run.target, target)) {
           throw new Error(
             "The terminal target changed; the manual outcome was not submitted.",

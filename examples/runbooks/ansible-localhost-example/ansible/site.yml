@@ -1,0 +1,11 @@
+---
+- name: Manage the VTerminal Ansible example
+  hosts: local
+  gather_facts: false
+  tasks:
+    - name: Write the idempotent example file
+      ansible.builtin.copy:
+        dest: /tmp/vterminal-ansible-example.txt
+        content: |
+          Managed by the VTerminal Ansible localhost example.
+        mode: "0644"

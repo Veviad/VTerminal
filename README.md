@@ -49,8 +49,8 @@ Modern AI terminals tend to be Electron apps that phone home for every completio
 - **Per-model reasoning effort** — `off → low → medium → high → max`, showing only the rungs each model actually accepts
 - **Image & file attachments** — drag, paste, or pick. An optional on-device vision sidecar transcribes screenshots so even a non-vision chat model can use them.
 - **Knowledge buckets** — attach local SQLite document buckets and compatible Qdrant collections to Ask, Agent, or durable Chat conversations, with UI-first ingestion and source-qualified citations.
-- **Reusable Runbooks** *(experimental and disabled by default)* — versioned YAML checklists with immutable run snapshots, per-action approvals, visible-terminal execution, evidence, and canonical JSON/Markdown reports. See [the authoring guide](docs/RUNBOOKS.md).
-- **Model Context Protocol** — select several remote Streamable HTTP or sandboxed local stdio servers per chat, use their tools in Ask and Agent, and keep every tool call behind an explicit approval. OAuth 2.1, bearer tokens, custom headers, per-chat tool switches, defaults, and Claude/VS Code JSON import are built in. See [MCP setup and security](docs/MCP.md).
+- **Reusable Runbooks** *(experimental and disabled by default)*: versioned YAML checklists with immutable run snapshots, per-action approvals, visible-terminal or native Ansible Runner execution, managed Ansible project imports, evidence, and canonical JSON/Markdown reports. See [the authoring guide](docs/RUNBOOKS.md).
+- **Model Context Protocol**: select several remote Streamable HTTP or sandboxed local stdio servers per chat, use their tools in Ask and Agent, and keep every tool call behind an explicit approval. OAuth 2.1, bearer tokens, custom headers, per-chat tool switches, defaults, and Claude/VS Code JSON import are built in. See [MCP setup and security](docs/MCP.md).
 
 **Interface**
 - Six themes — Veviad Developer UI (default), Veviad UI, Midnight, Nord, Solarized Dark, Light — each with a matched terminal ANSI palette

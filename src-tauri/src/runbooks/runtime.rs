@@ -21,6 +21,7 @@ pub enum RunbookEvent {
     RunStarted {
         run_id: String,
         session_id: String,
+        target_label: String,
     },
     StepChanged {
         run_id: String,
@@ -258,8 +259,9 @@ impl RunCoordinator {
         if run_id.trim().is_empty() {
             return Err("run id is required".into());
         }
-        if target.session_id.trim().is_empty() {
-            return Err("target session id is required".into());
+        let lock_key = target.lock_key();
+        if lock_key.trim().is_empty() {
+            return Err("target lock identity is required".into());
         }
         let mut unique = HashSet::new();
         if let Some(duplicate) = step_ids.iter().find(|step| !unique.insert(step.as_str())) {
@@ -270,15 +272,13 @@ impl RunCoordinator {
         if state.runs.contains_key(run_id) {
             return Err(format!("run already registered: {run_id}"));
         }
-        if let Some(owner) = state.session_locks.get(&target.session_id) {
+        if let Some(owner) = state.session_locks.get(&lock_key) {
             return Err(format!(
-                "terminal session {} is already owned by run {owner}",
-                target.session_id
+                "target {} is already owned by run {owner}",
+                target.label()
             ));
         }
-        state
-            .session_locks
-            .insert(target.session_id.clone(), run_id.to_string());
+        state.session_locks.insert(lock_key, run_id.to_string());
         state.runs.insert(
             run_id.to_string(),
             ManagedRun {
@@ -310,8 +310,9 @@ impl RunCoordinator {
         target: TargetBinding,
         steps: &[(String, StepStatus)],
     ) -> Result<RunSnapshot, String> {
-        if run_id.trim().is_empty() || target.session_id.trim().is_empty() {
-            return Err("run id and target session id are required".into());
+        let lock_key = target.lock_key();
+        if run_id.trim().is_empty() || lock_key.trim().is_empty() {
+            return Err("run id and target lock identity are required".into());
         }
         if steps.is_empty() {
             return Err("a restored run requires at least one step".into());
@@ -335,15 +336,13 @@ impl RunCoordinator {
         if state.runs.contains_key(run_id) {
             return Err(format!("run already registered: {run_id}"));
         }
-        if let Some(owner) = state.session_locks.get(&target.session_id) {
+        if let Some(owner) = state.session_locks.get(&lock_key) {
             return Err(format!(
-                "terminal session {} is already owned by run {owner}",
-                target.session_id
+                "target {} is already owned by run {owner}",
+                target.label()
             ));
         }
-        state
-            .session_locks
-            .insert(target.session_id.clone(), run_id.to_string());
+        state.session_locks.insert(lock_key, run_id.to_string());
         state.runs.insert(
             run_id.to_string(),
             ManagedRun {
@@ -376,12 +375,13 @@ impl RunCoordinator {
             .runs
             .remove(run_id)
             .ok_or_else(|| format!("unknown run: {run_id}"))?;
+        let lock_key = run.target.lock_key();
         if state
             .session_locks
-            .get(&run.target.session_id)
+            .get(&lock_key)
             .is_some_and(|owner| owner == run_id)
         {
-            state.session_locks.remove(&run.target.session_id);
+            state.session_locks.remove(&lock_key);
         }
         Ok(())
     }
@@ -405,7 +405,7 @@ impl RunCoordinator {
             }
             if next.is_terminal() || next == RunStatus::Interrupted {
                 run.pending_approval = None;
-                Some(run.target.session_id.clone())
+                Some(run.target.lock_key())
             } else {
                 None
             }
@@ -634,7 +634,7 @@ impl RunCoordinator {
                 }
                 PauseDecision::Stop => {
                     run.status = RunStatus::Failed;
-                    Some(run.target.session_id.clone())
+                    Some(run.target.lock_key())
                 }
             }
         };
@@ -733,7 +733,7 @@ impl RunCoordinator {
                     run.status = RunStatus::Failed;
                     run.active_phase = None;
                     run.pause_reason = Some("operator stopped the run".into());
-                    Some(run.target.session_id.clone())
+                    Some(run.target.lock_key())
                 }
             }
         };
@@ -821,8 +821,7 @@ impl RunCoordinator {
             .get_mut(run_id)
             .ok_or_else(|| format!("unknown run: {run_id}"))?;
         if run.target.same_execution_context(observed) {
-            run.target.cwd = observed.cwd.clone();
-            run.target.observed_at = observed.observed_at.clone();
+            run.target.refresh_observation(observed);
             return Ok(true);
         }
         if run.status.is_active() {
@@ -869,11 +868,12 @@ impl RunCoordinator {
             return Err("explicit operator confirmation is required to rebind a run".into());
         }
         let mut state = self.inner.lock().map_err(|_| "run coordinator poisoned")?;
-        if let Some(owner) = state.session_locks.get(&target.session_id) {
+        let lock_key = target.lock_key();
+        if let Some(owner) = state.session_locks.get(&lock_key) {
             if owner != run_id {
                 return Err(format!(
-                    "terminal session {} is already owned by run {owner}",
-                    target.session_id
+                    "target {} is already owned by run {owner}",
+                    target.label()
                 ));
             }
         }
@@ -887,9 +887,7 @@ impl RunCoordinator {
         run.target = target.clone();
         run.status = RunStatus::Ready;
         run.pause_reason = None;
-        state
-            .session_locks
-            .insert(target.session_id, run_id.to_string());
+        state.session_locks.insert(lock_key, run_id.to_string());
         snapshot(&state, run_id)
     }
 }
@@ -1242,16 +1240,43 @@ mod tests {
     use super::*;
 
     fn target(session: &str, remote: &str) -> TargetBinding {
-        TargetBinding {
-            kind: "active-terminal".into(),
-            session_id: session.into(),
-            shell: Some("zsh".into()),
-            cwd: Some("/srv".into()),
-            remote_kind: Some("ssh".into()),
-            remote_target: Some(remote.into()),
-            context_marker: Some(format!("ctx-{remote}")),
+        TargetBinding::active_terminal(
+            session.into(),
+            Some("zsh".into()),
+            Some("/srv".into()),
+            Some("ssh".into()),
+            Some(remote.into()),
+            Some(format!("ctx-{remote}")),
+            "now".into(),
+        )
+    }
+
+    fn ansible_target(source: &str) -> TargetBinding {
+        TargetBinding::AnsibleInventory {
+            source_id: source.into(),
+            controller_path: "/usr/local/bin/ansible-runner".into(),
+            controller_version: "2.4.0".into(),
+            inventory_path: Some("ansible/inventory.ini".into()),
+            inventory_digest: Some("sha256:inventory".into()),
+            project_digest: "sha256:project".into(),
+            limit: Some("web".into()),
             observed_at: "now".into(),
         }
+    }
+
+    #[test]
+    fn ansible_targets_lock_by_managed_source_without_a_terminal() {
+        let coordinator = RunCoordinator::default();
+        coordinator
+            .register_run("r1", ansible_target("source-1"), &["step".into()])
+            .unwrap();
+        let error = coordinator
+            .register_run("r2", ansible_target("source-1"), &["step".into()])
+            .unwrap_err();
+        assert!(error.contains("already owned"));
+        coordinator
+            .register_run("r3", ansible_target("source-2"), &["step".into()])
+            .unwrap();
     }
 
     fn running(coordinator: &RunCoordinator) {

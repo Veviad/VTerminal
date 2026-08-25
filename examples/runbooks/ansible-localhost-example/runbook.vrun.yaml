@@ -1,0 +1,43 @@
+apiVersion: runbooks.veviad.com/v1alpha1
+kind: Runbook
+metadata:
+  id: ansible-localhost-example
+  version: 1.0.0
+  title: Ansible localhost example
+  description: Demonstrates terminal-free check, apply, and verify phases through Ansible Runner.
+  tags:
+    - ansible
+    - example
+spec:
+  target:
+    kind: ansible-inventory
+  inputs: {}
+  declaredCapabilities:
+    network: false
+    privilege: none
+    writes:
+      - /tmp/vterminal-ansible-example.txt
+  defaults:
+    onFailure: pause
+  steps:
+    - id: manage-example-file
+      title: Manage the localhost example file
+      required: true
+      check:
+        uses: ansible.playbook
+        with:
+          playbook: ansible/site.yml
+          inventory: ansible/inventory.ini
+          limit: local
+      apply:
+        uses: ansible.playbook
+        with:
+          playbook: ansible/site.yml
+          inventory: ansible/inventory.ini
+          limit: local
+      verify:
+        uses: ansible.playbook
+        with:
+          playbook: ansible/site.yml
+          inventory: ansible/inventory.ini
+          limit: local

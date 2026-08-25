@@ -9,6 +9,7 @@ import {
   ShieldCheck,
   Target,
   TerminalSquare,
+  Workflow,
   Wrench,
 } from "lucide-react";
 
@@ -34,6 +35,16 @@ export function RunbookDefinitionPreview({
 }) {
   const capabilities = definitionCapabilities(definition);
   const inputs = Object.entries(definition.spec.inputs ?? {});
+  const ansibleTarget = definition.spec.target?.kind === "ansible-inventory";
+  const ansiblePhases = definition.spec.steps.flatMap((step) =>
+    ([
+      ["check", step.check],
+      ["apply", step.apply],
+      ["verify", step.verify],
+    ] as const)
+      .filter((entry) => entry[1]?.uses === "ansible.playbook")
+      .map(([phase, action]) => ({ phase, action: action as Extract<RunbookAction, { uses: "ansible.playbook" }> })),
+  );
 
   return (
     <div className="space-y-5">
@@ -70,6 +81,26 @@ export function RunbookDefinitionPreview({
           </div>
         )}
       </section>
+
+      {ansibleTarget && (
+        <section className="space-y-2 rounded-md border border-warning/30 bg-warning/5 p-3">
+          <h3 className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-widest text-warning">
+            <Workflow size={11} /> Native Ansible controller
+          </h3>
+          <p className="text-[10px] leading-relaxed text-text-muted">
+            Runs without an open terminal. Remote hosts use the inventory's Ansible SSH configuration.
+          </p>
+          <div className="space-y-1 font-mono text-[9px] text-text-secondary">
+            {ansiblePhases.map(({ phase, action }, index) => (
+              <p key={`${phase}-${index}`}>
+                <span className="inline-block w-12 text-text-muted">{phase}</span>
+                {action.with.playbook}
+                {phase !== "apply" && <span className="ms-2 text-warning">--check --diff</span>}
+              </p>
+            ))}
+          </div>
+        </section>
+      )}
 
       <section className="space-y-2 rounded-md border border-border-subtle bg-bg-card p-3">
         <h3 className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-widest text-text-muted">

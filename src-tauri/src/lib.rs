@@ -307,6 +307,10 @@ pub fn run() {
             commands::embedding_models::knowledge_embedding_model_status,
             // reusable runbooks (experimental; every command gated on runbooks_enabled)
             commands::runbooks::runbooks_import,
+            commands::runbooks::runbooks_ansible_inspect,
+            commands::runbooks::runbooks_ansible_import,
+            commands::runbooks::runbooks_ansible_reimport,
+            commands::runbooks::runbooks_ansible_status,
             commands::runbooks::runbooks_refresh,
             commands::runbooks::runbooks_list,
             commands::runbooks::runbooks_remove,

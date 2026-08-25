@@ -1,4 +1,4 @@
-import { ArrowLeft, Database, Eye, Play, ShieldAlert, TerminalSquare } from "lucide-react";
+import { ArrowLeft, Database, Eye, Play, ShieldAlert, TerminalSquare, Workflow } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import {
@@ -7,6 +7,9 @@ import {
   definitionRecordOutput,
   evidenceFloor,
   evidenceModesAtOrAbove,
+  runbooksAnsibleStatus,
+  type AnsibleRunnerStatus,
+  type AnsibleAction,
   type EvidenceMode,
   type RunbookDefinition,
   type RunbookInputDefinition,
@@ -18,12 +21,14 @@ import { primaryButton, runbookInputClass, secondaryButton } from "./runbookUi";
 export function RunbookPreflight({
   definition,
   sessionId,
+  packageDigest,
   busy,
   onBack,
   onStart,
 }: {
   definition: RunbookDefinition;
   sessionId: string | null;
+  packageDigest: string | null;
   busy: boolean;
   onBack(): void;
   onStart(inputs: Record<string, string | number | boolean>, evidence: EvidenceMode): void;
@@ -44,6 +49,22 @@ export function RunbookPreflight({
   const [requested, setRequested] = useState<EvidenceMode>(floor);
   const evidenceMode = atLeastEvidence(requested, floor);
   const [submitted, setSubmitted] = useState(false);
+  const ansibleTarget = definition.spec.target.kind === "ansible-inventory";
+  const [runner, setRunner] = useState<AnsibleRunnerStatus | null>(null);
+
+  useEffect(() => {
+    if (!ansibleTarget) return;
+    void runbooksAnsibleStatus().then(setRunner).catch((error) =>
+      setRunner({
+        supported: false,
+        installed: false,
+        path: null,
+        version: null,
+        error: String(error),
+        installUrl: "https://ansible.readthedocs.io/projects/runner/en/latest/install/",
+      }),
+    );
+  }, [ansibleTarget]);
 
   useEffect(() => {
     setValues(defaultRunbookInputs(definition));
@@ -70,6 +91,7 @@ export function RunbookPreflight({
           : null;
 
   const target = (() => {
+    if (ansibleTarget) return { context: null, error: null };
     if (!sessionId) return { context: null, error: "Open and select a terminal first." };
     try {
       return { context: buildRunbookTargetContext(sessionId), error: null };
@@ -83,6 +105,13 @@ export function RunbookPreflight({
   void targetUi;
 
   const inputs = Object.entries(definition.spec.inputs ?? {});
+  const ansibleActions = definition.spec.steps.flatMap((step) =>
+    [step.check, step.apply, step.verify].filter(
+      (action): action is AnsibleAction => action?.uses === "ansible.playbook",
+    ),
+  );
+  const ansibleSelection = ansibleActions[0]?.with;
+  const targetReady = ansibleTarget ? runner?.installed === true : target.context !== null;
   const missing = inputs.filter(([name, input]) => {
     if (!input.required) return false;
     const value = values[name];
@@ -103,9 +132,36 @@ export function RunbookPreflight({
 
       <section className="space-y-2 rounded-md border border-border-subtle bg-bg-card p-3">
         <h3 className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-widest text-text-muted">
-          <TerminalSquare size={11} /> Active terminal target
+          {ansibleTarget ? <Workflow size={11} /> : <TerminalSquare size={11} />}
+          {ansibleTarget ? "Ansible controller target" : "Active terminal target"}
         </h3>
-        {target.context ? (
+        {ansibleTarget ? (
+          <>
+            <p className={`text-[12px] ${runner?.installed ? "text-success" : "text-warning"}`}>
+              {runner?.installed
+                ? `Ready: Ansible Runner ${runner.version ?? "detected"}`
+                : "Execution blocked until Ansible Runner is installed"}
+            </p>
+            <dl className="grid grid-cols-[82px_1fr] gap-x-2 gap-y-1 font-mono text-[10px]">
+              <dt className="text-text-muted">Controller</dt>
+              <dd className="truncate text-text-secondary">{runner?.path ?? runner?.error ?? "Checking…"}</dd>
+              <dt className="text-text-muted">Inventory</dt>
+              <dd className="truncate text-text-secondary">{ansibleSelection?.inventory ?? "implicit localhost"}</dd>
+              <dt className="text-text-muted">Limit</dt>
+              <dd className="truncate text-text-secondary">{ansibleSelection?.limit ?? "none"}</dd>
+              <dt className="text-text-muted">Package</dt>
+              <dd className="truncate text-text-secondary" title={packageDigest ?? undefined}>sha256:{packageDigest ?? "unavailable"}</dd>
+            </dl>
+            <p className="text-[10px] leading-relaxed text-text-muted">
+              Project and inventory digests are recomputed from the managed snapshot and locked into the durable run before approval.
+            </p>
+            {!runner?.installed && runner?.installUrl && (
+              <a href={runner.installUrl} target="_blank" rel="noreferrer" className="text-[10px] text-accent hover:underline">
+                Official Ansible Runner installation guide
+              </a>
+            )}
+          </>
+        ) : target.context ? (
           <>
             <p className="text-[12px] text-text-primary">
               {describeRunbookTarget(target.context)}
@@ -212,9 +268,9 @@ export function RunbookPreflight({
       <button
         onClick={() => {
           setSubmitted(true);
-          if (target.context && missing.length === 0) onStart(values, evidenceMode);
+          if (targetReady && missing.length === 0) onStart(values, evidenceMode);
         }}
-        disabled={busy || !target.context}
+        disabled={busy || !targetReady}
         className={`${primaryButton} w-full`}
       >
         <Play size={12} /> {busy ? "Starting…" : "Start runbook"}

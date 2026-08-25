@@ -1,5 +1,10 @@
+import { useEffect, useState } from "react";
 import { useSettings } from "../../hooks/useSettings";
-import { type EvidenceRecordingPolicy } from "../../lib/runbooks";
+import {
+  runbooksAnsibleStatus,
+  type AnsibleRunnerStatus,
+  type EvidenceRecordingPolicy,
+} from "../../lib/runbooks";
 import { S } from "../../lib/strings";
 import { useAppStore } from "../../stores/appStore";
 import { Field, Toggle, inputClass } from "../ui/Row";
@@ -43,6 +48,21 @@ export function RunbooksSettings() {
   const enabled = useAppStore((s) => s.runbooksEnabled);
   const recording = useAppStore((s) => s.runbooksOutputRecording);
   const { save } = useSettings();
+  const [runner, setRunner] = useState<AnsibleRunnerStatus | null>(null);
+
+  useEffect(() => {
+    if (!enabled) return;
+    void runbooksAnsibleStatus().then(setRunner).catch((error) =>
+      setRunner({
+        supported: false,
+        installed: false,
+        path: null,
+        version: null,
+        error: String(error),
+        installUrl: "https://ansible.readthedocs.io/projects/runner/en/latest/install/",
+      }),
+    );
+  }, [enabled]);
 
   return (
     <div className="space-y-6">
@@ -87,6 +107,23 @@ export function RunbooksSettings() {
           <p className="text-[10px] leading-relaxed text-text-muted">
             {S.settings.runbooks.recordingRetention}
           </p>
+          <div className={`rounded-md border p-3 ${runner?.installed ? "border-success/30 bg-success/5" : "border-warning/30 bg-warning/5"}`}>
+            <p className="text-[11px] font-medium text-text-primary">
+              {runner?.installed
+                ? `Ansible Runner ${runner.version ?? "ready"}`
+                : runner?.supported === false
+                  ? "Native Ansible controller unsupported"
+                  : "Ansible Runner not installed"}
+            </p>
+            <p className="mt-1 break-all font-mono text-[9px] text-text-muted">
+              {runner?.path ?? runner?.error ?? "Checking local controller…"}
+            </p>
+            {!runner?.installed && runner?.installUrl && (
+              <a href={runner.installUrl} target="_blank" rel="noreferrer" className="mt-2 inline-block text-[10px] text-accent hover:underline">
+                Official installation guide
+              </a>
+            )}
+          </div>
         </section>
       )}
 

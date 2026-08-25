@@ -366,31 +366,191 @@ impl EvidenceRecordingPolicy {
     }
 }
 
-/// Terminal identity captured at preflight and checked again before dispatch.
-/// A local working directory is part of the approval boundary: changing it can
-/// change the meaning of relative paths. Remote integrations deliberately leave
-/// `cwd` unset when they cannot observe the remote directory authoritatively;
-/// `context_marker` then detects an SSH/container context change in-place.
+/// Execution identity captured at preflight and checked again before dispatch.
+/// Existing terminal targets retain their original wire representation. Managed
+/// Ansible targets are bound to a source and immutable package digests instead
+/// of a PTY session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TargetBinding {
-    pub kind: String,
-    pub session_id: String,
-    pub shell: Option<String>,
-    pub cwd: Option<String>,
-    pub remote_kind: Option<String>,
-    pub remote_target: Option<String>,
-    pub context_marker: Option<String>,
-    pub observed_at: String,
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum TargetBinding {
+    ActiveTerminal {
+        session_id: String,
+        shell: Option<String>,
+        cwd: Option<String>,
+        remote_kind: Option<String>,
+        remote_target: Option<String>,
+        context_marker: Option<String>,
+        observed_at: String,
+    },
+    AnsibleInventory {
+        source_id: String,
+        controller_path: String,
+        controller_version: String,
+        inventory_path: Option<String>,
+        inventory_digest: Option<String>,
+        project_digest: String,
+        limit: Option<String>,
+        observed_at: String,
+    },
 }
 
 impl TargetBinding {
+    pub fn active_terminal(
+        session_id: String,
+        shell: Option<String>,
+        cwd: Option<String>,
+        remote_kind: Option<String>,
+        remote_target: Option<String>,
+        context_marker: Option<String>,
+        observed_at: String,
+    ) -> Self {
+        Self::ActiveTerminal {
+            session_id,
+            shell,
+            cwd,
+            remote_kind,
+            remote_target,
+            context_marker,
+            observed_at,
+        }
+    }
+
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::ActiveTerminal { .. } => "active-terminal",
+            Self::AnsibleInventory { .. } => "ansible-inventory",
+        }
+    }
+
+    pub fn session_id(&self) -> Option<&str> {
+        match self {
+            Self::ActiveTerminal { session_id, .. } => Some(session_id),
+            Self::AnsibleInventory { .. } => None,
+        }
+    }
+
+    pub fn observed_at(&self) -> &str {
+        match self {
+            Self::ActiveTerminal { observed_at, .. }
+            | Self::AnsibleInventory { observed_at, .. } => observed_at,
+        }
+    }
+
+    pub fn lock_key(&self) -> String {
+        match self {
+            Self::ActiveTerminal { session_id, .. } => session_id.clone(),
+            Self::AnsibleInventory { source_id, .. } => format!("ansible:{source_id}"),
+        }
+    }
+
+    pub fn label(&self) -> String {
+        match self {
+            Self::ActiveTerminal {
+                session_id,
+                remote_kind: Some(kind),
+                remote_target: Some(target),
+                ..
+            } => format!("{kind} {target} ({session_id})"),
+            Self::ActiveTerminal { session_id, .. } => format!("terminal {session_id}"),
+            Self::AnsibleInventory {
+                inventory_path,
+                limit,
+                ..
+            } => match (inventory_path, limit) {
+                (Some(inventory), Some(limit)) => {
+                    format!("Ansible inventory {inventory}, limit {limit}")
+                }
+                (Some(inventory), None) => format!("Ansible inventory {inventory}"),
+                (None, Some(limit)) => format!("Ansible implicit inventory, limit {limit}"),
+                (None, None) => "Ansible implicit inventory".into(),
+            },
+        }
+    }
+
     pub fn same_execution_context(&self, observed: &Self) -> bool {
-        self.kind == observed.kind
-            && self.session_id == observed.session_id
-            && (self.remote_kind.is_some() || self.cwd == observed.cwd)
-            && self.remote_kind == observed.remote_kind
-            && self.remote_target == observed.remote_target
-            && self.context_marker == observed.context_marker
+        match (self, observed) {
+            (
+                Self::ActiveTerminal {
+                    session_id,
+                    cwd,
+                    remote_kind,
+                    remote_target,
+                    context_marker,
+                    ..
+                },
+                Self::ActiveTerminal {
+                    session_id: observed_session,
+                    cwd: observed_cwd,
+                    remote_kind: observed_kind,
+                    remote_target: observed_target,
+                    context_marker: observed_marker,
+                    ..
+                },
+            ) => {
+                session_id == observed_session
+                    && (remote_kind.is_some() || cwd == observed_cwd)
+                    && remote_kind == observed_kind
+                    && remote_target == observed_target
+                    && context_marker == observed_marker
+            }
+            (
+                Self::AnsibleInventory {
+                    source_id,
+                    controller_path,
+                    controller_version,
+                    inventory_path,
+                    inventory_digest,
+                    project_digest,
+                    limit,
+                    ..
+                },
+                Self::AnsibleInventory {
+                    source_id: observed_source,
+                    controller_path: observed_controller,
+                    controller_version: observed_version,
+                    inventory_path: observed_inventory,
+                    inventory_digest: observed_inventory_digest,
+                    project_digest: observed_project_digest,
+                    limit: observed_limit,
+                    ..
+                },
+            ) => {
+                source_id == observed_source
+                    && controller_path == observed_controller
+                    && controller_version == observed_version
+                    && inventory_path == observed_inventory
+                    && inventory_digest == observed_inventory_digest
+                    && project_digest == observed_project_digest
+                    && limit == observed_limit
+            }
+            _ => false,
+        }
+    }
+
+    pub fn refresh_observation(&mut self, observed: &Self) {
+        match (self, observed) {
+            (
+                Self::ActiveTerminal {
+                    cwd, observed_at, ..
+                },
+                Self::ActiveTerminal {
+                    cwd: next_cwd,
+                    observed_at: next_observed_at,
+                    ..
+                },
+            ) => {
+                *cwd = next_cwd.clone();
+                *observed_at = next_observed_at.clone();
+            }
+            (
+                Self::AnsibleInventory { observed_at, .. },
+                Self::AnsibleInventory {
+                    observed_at: next_observed_at,
+                    ..
+                },
+            ) => *observed_at = next_observed_at.clone(),
+            _ => {}
+        }
     }
 }
 
@@ -493,23 +653,62 @@ mod tests {
 
     #[test]
     fn local_cwd_and_remote_identity_changes_are_target_drift() {
-        let target = TargetBinding {
-            kind: "active-terminal".into(),
-            session_id: "s1".into(),
-            shell: Some("zsh".into()),
-            cwd: Some("/a".into()),
-            remote_kind: None,
-            remote_target: None,
-            context_marker: Some("ctx-1".into()),
-            observed_at: "now".into(),
-        };
+        let target = TargetBinding::active_terminal(
+            "s1".into(),
+            Some("zsh".into()),
+            Some("/a".into()),
+            None,
+            None,
+            Some("ctx-1".into()),
+            "now".into(),
+        );
         let mut observed = target.clone();
-        observed.cwd = Some("/b".into());
+        if let TargetBinding::ActiveTerminal { cwd, .. } = &mut observed {
+            *cwd = Some("/b".into());
+        }
         assert!(!target.same_execution_context(&observed));
         observed = target.clone();
-        observed.remote_kind = Some("ssh".into());
-        observed.remote_target = Some("staging".into());
+        if let TargetBinding::ActiveTerminal {
+            remote_kind,
+            remote_target,
+            ..
+        } = &mut observed
+        {
+            *remote_kind = Some("ssh".into());
+            *remote_target = Some("staging".into());
+        }
         assert!(!target.same_execution_context(&observed));
+    }
+
+    #[test]
+    fn runtime_targets_are_a_backward_compatible_tagged_union() {
+        let terminal: TargetBinding = serde_json::from_value(serde_json::json!({
+            "kind": "active-terminal",
+            "session_id": "s1",
+            "shell": "zsh",
+            "cwd": "/tmp",
+            "remote_kind": null,
+            "remote_target": null,
+            "context_marker": "local",
+            "observed_at": "now"
+        }))
+        .unwrap();
+        assert_eq!(terminal.session_id(), Some("s1"));
+
+        let ansible = TargetBinding::AnsibleInventory {
+            source_id: "source-1".into(),
+            controller_path: "/usr/bin/ansible-runner".into(),
+            controller_version: "2.4.0".into(),
+            inventory_path: None,
+            inventory_digest: None,
+            project_digest: "sha256:project".into(),
+            limit: None,
+            observed_at: "now".into(),
+        };
+        let serialized = serde_json::to_value(&ansible).unwrap();
+        assert_eq!(serialized["kind"], "ansible-inventory");
+        assert_eq!(ansible.lock_key(), "ansible:source-1");
+        assert_eq!(ansible.session_id(), None);
     }
 
     #[test]

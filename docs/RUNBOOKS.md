@@ -26,8 +26,8 @@ the switch is a capability gate and not a UI preference.
 Open **Runbooks** from the header. Three tabs: **Library** (what you can run),
 **Run** (what is running), **History** (what has run).
 
-VTerminal ships three macOS assessments that change nothing, so you can watch
-one work without risk:
+VTerminal ships three macOS assessments that change nothing, plus an Ansible
+localhost example:
 
 - **macOS Security Posture:** FileVault, SIP, Gatekeeper, the application
   firewall, automatic updates.
@@ -35,6 +35,8 @@ one work without risk:
   free space, optionally Homebrew.
 - **macOS Backup & Storage Readiness:** free space, the Time Machine
   destination and backup age, APFS, optional local snapshots.
+- **Ansible localhost example** manages `/tmp/vterminal-ansible-example.txt`
+  idempotently through a local `ansible-runner` controller.
 
 Pick one, press **Run**, and you get a preflight screen: which terminal it will
 bind to, any inputs, and how much output to keep. Press **Start runbook**.
@@ -70,9 +72,37 @@ rejected at publish time. Verify is seeded from the check, which is usually the
 right proof. Every path the runbook writes to belongs in the Basics list: it is
 shown in preflight before the first command runs.
 
-The wizard still cannot author `agent`, `goal` or Ansible actions. Those change
+The general wizard still cannot author `agent` or `goal` actions. Those change
 who decides whether a step succeeded, so they are read as YAML before they run.
-Publish what you have, export it, and edit the file. See below.
+Publish what you have, export it, and edit the file. Use
+**Library → Import Ansible** for Ansible projects.
+
+## Importing an Ansible project
+
+**Library → Import Ansible** opens a five-stage workflow. Select a project,
+choose the apply playbook and optional inventory and limit, choose whether check
+and verify use separate playbooks, map non-secret Runbook inputs to Ansible
+extra variables, then review the generated phases.
+
+VTerminal copies the selected project into application-managed storage. It
+rejects links, special files, path escapes, projects above 10,000 entries or
+250 MiB, and excludes version-control data, virtual environments, Python
+caches, Runner artifacts and retry files. The original project is never
+modified. **Re-import** atomically replaces the managed snapshot, preserves the
+source identity and increments the generated patch version.
+
+Pure Ansible Runbooks do not need an open terminal. They run on macOS and Linux
+through a user-installed `ansible-runner`. Settings, import and preflight show
+whether that controller is ready. Projects can still be imported while Runner
+is missing, but execution remains blocked with a link to the official install
+guide. Native Windows execution is deferred until a dedicated WSL controller is
+available.
+
+Ansible inventories may contain localhost or remote hosts. Remote connections
+use the inventory's Ansible SSH configuration, SSH agent or configured key
+paths. VTerminal SSH sessions and their credentials are not reused. Interactive
+password prompts, vault prompts and credential-shaped Runbook inputs are not
+supported.
 
 ---
 
@@ -425,6 +455,9 @@ cannot drive the same terminal at once.
   one command's timeout allows, the flow hands the remaining approvals back to
   you rather than holding the button indefinitely. The same approval is never
   approved twice. Runbooks do not mirror the agent panel's `Full` mode.
+- Native Ansible controller approvals are bound to the project and inventory
+  digests. The controller command cannot be edited, prompt binding is skipped,
+  and bulk auto-approval is unavailable.
 - **Abort run** stops an active run and returns you to the Library. It is two
   clicks, it sends SIGINT to an owned foreground command, and it cannot prove
   the process stopped or undo a mutation already made. The active step is

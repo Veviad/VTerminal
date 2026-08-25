@@ -139,6 +139,7 @@ export interface RunbookSource {
   validation_issues: RunbookValidationIssue[];
   imported_at: string;
   refreshed_at: string;
+  managed_ansible?: boolean;
 }
 
 export interface RunbookSourceWire {
@@ -154,6 +155,7 @@ export interface RunbookSourceWire {
   validation_error: string | null;
   created_at: string;
   updated_at: string;
+  managed_ansible?: boolean;
 }
 
 export interface RunbookMetadata {
@@ -271,7 +273,7 @@ export interface RunbookDefinition {
   kind: "Runbook";
   metadata: RunbookMetadata;
   spec: {
-    target: { kind: "active-terminal" | "ansible_inventory" };
+    target: { kind: "active-terminal" | "ansible-inventory" };
     inputs?: Record<string, RunbookInputDefinition>;
     declaredCapabilities?: RunbookCapabilities;
     declared_capabilities?: RunbookCapabilities;
@@ -407,7 +409,7 @@ export interface RunbookManualRequest {
   phase: RunbookPhase;
 }
 
-export interface RunbookTargetContext {
+export interface ActiveTerminalTargetContext {
   kind: "active-terminal";
   session_id: string;
   shell?: string | null;
@@ -417,6 +419,26 @@ export interface RunbookTargetContext {
   context_marker?: string | null;
   observed_at: string;
 }
+
+export interface AnsibleInventoryTargetContext {
+  kind: "ansible-inventory";
+  source_id: string;
+  controller_path: string;
+  controller_version: string;
+  inventory_path?: string | null;
+  inventory_digest?: string | null;
+  project_digest: string;
+  limit?: string | null;
+  observed_at: string;
+}
+
+export type RunbookTargetContext =
+  | ActiveTerminalTargetContext
+  | AnsibleInventoryTargetContext;
+
+export type RunbookReportTarget =
+  | Omit<ActiveTerminalTargetContext, "observed_at">
+  | Omit<AnsibleInventoryTargetContext, "observed_at">;
 
 export interface RunbookRun {
   run_id: string;
@@ -464,6 +486,7 @@ export interface RunbookHistoryWire {
   definition_version: string;
   definition_title: string;
   target_session_id: string;
+  target_label?: string;
   status: RunbookRunState;
   created_at: string;
   started_at: string | null;
@@ -519,8 +542,8 @@ export interface RunbookReportResumeEnvironment {
   resumed_at: string;
   app_version: string;
   model: string | null;
-  previous_target: Omit<RunbookTargetContext, "observed_at">;
-  target: Omit<RunbookTargetContext, "observed_at">;
+  previous_target: RunbookReportTarget;
+  target: RunbookReportTarget;
 }
 
 export interface RunbookReport {
@@ -536,7 +559,7 @@ export interface RunbookReport {
     yaml_sha256: string;
     canonical_json_sha256: string;
   };
-  target: Omit<RunbookTargetContext, "observed_at">;
+  target: RunbookReportTarget;
   inputs: unknown;
   app_version: string;
   model: string | null;
@@ -589,7 +612,7 @@ export interface RunbookReportWire {
     source_sha256: string;
     canonical_sha256: string;
   };
-  target: Omit<RunbookTargetContext, "observed_at">;
+  target: RunbookReportTarget;
   inputs: unknown;
   environment: {
     app_version: string;
@@ -663,9 +686,57 @@ export interface RunbookReportWire {
 export interface RunbookStartRequest {
   source_id: string;
   session_id: string;
-  target_context: RunbookTargetContext;
+  target_context: ActiveTerminalTargetContext;
   inputs: Record<string, string | number | boolean>;
   evidence_mode: EvidenceMode;
+}
+
+export interface AnsibleRunbookStartRequest {
+  source_id: string;
+  session_id: null;
+  target_context: null;
+  inputs: Record<string, string | number | boolean>;
+  evidence_mode: EvidenceMode;
+}
+
+export interface AnsibleRunnerStatus {
+  supported: boolean;
+  installed: boolean;
+  path: string | null;
+  version: string | null;
+  error: string | null;
+  installUrl: string;
+}
+
+export interface AnsibleProjectInspection {
+  projectPath: string;
+  playbooks: string[];
+  inventoryCandidates: string[];
+  includedFiles: number;
+  totalBytes: number;
+  excluded: string[];
+}
+
+export interface AnsibleImportInput {
+  id: string;
+  variable: string;
+  type: RunbookInputType;
+  description?: string | null;
+  required?: boolean;
+  default?: string | number | boolean | null;
+  values?: string[];
+}
+
+export interface AnsibleImportRequest {
+  projectPath: string;
+  definitionId: string;
+  title: string;
+  applyPlaybook: string;
+  checkPlaybook?: string | null;
+  verifyPlaybook?: string | null;
+  inventory?: string | null;
+  limit?: string | null;
+  inputs: AnsibleImportInput[];
 }
 
 export interface RunbookTerminalResult {
@@ -709,7 +780,7 @@ export interface RunbookDeleteResult {
 }
 
 export type RunbookEvent =
-  | { type: "RunStarted"; run_id: string; session_id: string }
+  | { type: "RunStarted"; run_id: string; session_id: string; target_label?: string }
   | { type: "StepChanged"; run_id: string; step_id: string; status: RunbookStepState; phase: RunbookPhase | null }
   | ({ type: "ApprovalRequested" } & RunbookApprovalRequest)
   | {
@@ -799,7 +870,7 @@ export function createRunbookEventBuffer(
 }
 
 type RunbookWireEvent =
-  | { type: "RunStarted"; run_id: string; session_id: string }
+  | { type: "RunStarted"; run_id: string; session_id: string; target_label?: string }
   | { type: "StepChanged"; run_id: string; step_id: string; status: RunbookStepState; phase: RunbookPhase | null }
   | {
       type: "ApprovalRequested";
@@ -902,14 +973,39 @@ function normalizeRunbookEvent(event: RunbookWireEvent): RunbookEvent {
 export const runbooksImport = (path: string) =>
   invoke<RunbookSourceWire>("runbooks_import", { path }).then(normalizeRunbookSource);
 
+export const selectAnsibleProjectDirectory = async (): Promise<string | null> => {
+  const selected = await openDialog({ directory: true, multiple: false });
+  return typeof selected === "string" ? selected : null;
+};
+
+export const runbooksAnsibleStatus = () =>
+  invoke<AnsibleRunnerStatus>("runbooks_ansible_status");
+
+export const runbooksAnsibleInspect = (projectPath: string) =>
+  invoke<AnsibleProjectInspection>("runbooks_ansible_inspect", {
+    project_path: projectPath,
+  });
+
+export const runbooksAnsibleImport = (request: AnsibleImportRequest) =>
+  invoke<RunbookSourceWire>("runbooks_ansible_import", { request }).then(normalizeRunbookSource);
+
+export const runbooksAnsibleReimport = (sourceId: string, replacementPath?: string | null) =>
+  invoke<RunbookSourceWire>("runbooks_ansible_reimport", {
+    source_id: sourceId,
+    replacement_path: replacementPath ?? null,
+  }).then(normalizeRunbookSource);
+
 export const runbooksRefresh = (sourceId: string) =>
   invoke<RunbookSourceWire>("runbooks_refresh", { source_id: sourceId }).then(normalizeRunbookSource);
 
 export const runbooksList = () =>
   invoke<RunbookSourceWire[]>("runbooks_list").then((sources) => sources.map(normalizeRunbookSource));
 
-export const runbooksRemove = (sourceId: string) =>
-  invoke<void>("runbooks_remove", { source_id: sourceId });
+export const runbooksRemove = (sourceId: string, confirmed = false) =>
+  invoke<void>("runbooks_remove", {
+    source_id: sourceId,
+    ...(confirmed ? { confirmed: true } : {}),
+  });
 
 export const runbooksRestoreBuiltins = () =>
   invoke<RunbookSourceWire[]>("runbooks_restore_builtins").then((sources) =>
@@ -971,10 +1067,10 @@ export const runbooksGetDefinition = (sourceId: string) =>
   invoke<RunbookDefinition>("runbooks_get_definition", { source_id: sourceId });
 
 export async function runbooksStart(
-  request: RunbookStartRequest,
+  request: RunbookStartRequest | AnsibleRunbookStartRequest,
   onEvent: (event: RunbookEvent) => void,
 ): Promise<RunbookRun> {
-  const key = `start:${request.source_id}:${request.session_id}:${Date.now()}`;
+  const key = `start:${request.source_id}:${request.session_id ?? "ansible"}:${Date.now()}`;
   const on_event = eventChannel(key, onEvent);
   try {
     const run = await invoke<RunbookRun>("runbooks_start", { request, on_event });
@@ -1000,8 +1096,8 @@ export const runbooksGet = (runId: string) =>
 
 export async function runbooksResume(
   runId: string,
-  sessionId: string,
-  targetContext: RunbookTargetContext,
+  sessionId: string | null,
+  targetContext: ActiveTerminalTargetContext | null,
   onEvent: (event: RunbookEvent) => void,
 ): Promise<RunbookRun> {
   const on_event = eventChannel(runId, onEvent);
@@ -1066,7 +1162,8 @@ export async function pollRunbookUntilTerminal(
 export type RunbookApprovalAcknowledgement =
   | "acknowledged"
   | "pre_authorized"
-  | "model_once";
+  | "model_once"
+  | "native_controller";
 
 export const runbooksRespondApproval = (
   runId: string,
@@ -1348,6 +1445,7 @@ export function normalizeRunbookSource(source: RunbookSourceWire): RunbookSource
       : [],
     imported_at: source.created_at,
     refreshed_at: source.updated_at,
+    managed_ansible: source.managed_ansible ?? false,
   };
 }
 
@@ -1363,7 +1461,7 @@ export function normalizeRunbookHistory(run: RunbookHistoryWire): RunbookHistory
     definition_version: run.definition_version,
     definition_title: run.definition_title,
     state: run.status,
-    target_label: run.target_session_id,
+    target_label: run.target_label ?? run.target_session_id,
     started_at: run.started_at,
     finished_at: run.finished_at,
     duration_ms: duration !== null && Number.isFinite(duration) ? duration : null,

@@ -718,7 +718,8 @@
     },
     "TargetKind": {
       "enum": [
-        "active-terminal"
+        "active-terminal",
+        "ansible-inventory"
       ],
       "type": "string"
     },

@@ -232,15 +232,22 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
               >
                 <Eye size={11} /> Review runbook
               </button>
-              {run.status === "interrupted" && sessionId && (
+              {run.status === "interrupted" &&
+                (run.target.kind === "ansible-inventory" || sessionId) && (
                 <button
                   onClick={() => {
-                    ignoreAsync(resume(run.run_id, sessionId));
+                    ignoreAsync(
+                      resume(
+                        run.run_id,
+                        run.target.kind === "ansible-inventory" ? null : sessionId,
+                      ),
+                    );
                   }}
                   disabled={busyAction === "resume"}
                   className={primaryButton}
                 >
-                  <RotateCcw size={11} /> Rebind and resume
+                  <RotateCcw size={11} />
+                  {run.target.kind === "ansible-inventory" ? "Resume" : "Rebind and resume"}
                 </button>
               )}
               {!terminal && run.status !== "interrupted" && (
@@ -299,6 +306,26 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
             </p>
           )}
         </section>
+
+        {run.target.kind === "ansible-inventory" && (
+          <section className="rounded-md border border-warning/30 bg-warning/5 p-3">
+            <p className="text-[10px] font-semibold uppercase tracking-widest text-warning">
+              Native Ansible controller
+            </p>
+            <dl className="mt-2 grid grid-cols-[82px_1fr] gap-x-2 gap-y-1 font-mono text-[9px]">
+              <dt className="text-text-muted">Runner</dt>
+              <dd className="break-all text-text-secondary">{run.target.controller_path} ({run.target.controller_version})</dd>
+              <dt className="text-text-muted">Inventory</dt>
+              <dd className="break-all text-text-secondary">{run.target.inventory_path ?? "implicit localhost"}</dd>
+              <dt className="text-text-muted">Limit</dt>
+              <dd className="text-text-secondary">{run.target.limit ?? "none"}</dd>
+              <dt className="text-text-muted">Project</dt>
+              <dd className="break-all text-text-secondary">{run.target.project_digest}</dd>
+              <dt className="text-text-muted">Inventory hash</dt>
+              <dd className="break-all text-text-secondary">{run.target.inventory_digest ?? "implicit"}</dd>
+            </dl>
+          </section>
+        )}
 
         {pendingApproval && (
           <section className="space-y-2">
