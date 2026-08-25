@@ -298,6 +298,7 @@ impl<'a> McpRunContext<'a> {
             server_id: tool.server_id.clone(),
             server_name: tool.server_name.clone(),
             tool_name: tool.name.clone(),
+            arguments: arguments.clone(),
         });
         let result = self
             .manager

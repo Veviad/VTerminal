@@ -30,12 +30,14 @@ const detail: ChatDetail = {
     prompt_tokens: null,
     completion_tokens: null,
     citations: [],
+    mcp_calls: [],
     attachments: [],
     created_at: "2026-08-23T10:00:00Z",
   }],
   model_transcript: [],
   model_transcript_version: 1,
   attached_bucket_refs: [],
+  mcp_selection: { server_ids: [], disabled_tools: {} },
 };
 
 describe("Chat workspace autoscroll", () => {
@@ -58,6 +60,8 @@ describe("Chat workspace autoscroll", () => {
         thinking: "",
         model: null,
         citations: [],
+        mcpCalls: [],
+        pendingMcpProposal: null,
         lastError: null,
       },
       pendingAttachments: [],
@@ -182,6 +186,49 @@ describe("Chat workspace autoscroll", () => {
     expect(screen.queryByRole("menu", { name: "Knowledge sources" })).toBeNull();
   });
 
+  it("shows the current Chat thread's MCP selection in the toolbar", async () => {
+    useAppStore.setState({
+      mcpServers: [{
+        version: 1,
+        id: "calendar",
+        name: "Calendar MCP",
+        enabled: true,
+        default_for_new_chats: true,
+        revision: 1,
+        transport: {
+          type: "streamable_http",
+          url: "https://example.com/mcp",
+          auth: { mode: "none", scopes: [] },
+          headers: [],
+        },
+        timeouts: { startup_ms: 10_000, list_ms: 30_000, call_ms: 60_000 },
+        disabled_tools: [],
+        trust_hash: null,
+        trusted: true,
+        missing_secret_slots: [],
+        runtime: { connected: false, log_bytes: 0, tool_count: null },
+        oauth: null,
+      }],
+    });
+    useChatStore.setState((state) => ({
+      current: state.current
+        ? {
+            ...state.current,
+            mcp_selection: { server_ids: ["calendar"], disabled_tools: {} },
+          }
+        : null,
+      stream: { ...state.stream, status: "idle", requestId: null },
+    }));
+    vi.spyOn(api, "mcpToolsList").mockResolvedValue([]);
+
+    render(<ChatWorkspace />);
+
+    const picker = screen.getByTitle("Select MCP servers and tools for this chat");
+    expect(picker).toHaveTextContent("MCP 1");
+    fireEvent.click(picker);
+    expect(await screen.findByText("Calendar MCP")).toBeInTheDocument();
+  });
+
   it("opens a working rename dialog from the sidebar chat action menu", async () => {
     useChatStore.setState((state) => ({
       stream: { ...state.stream, status: "idle", requestId: null },
@@ -223,6 +270,7 @@ describe("Chat workspace autoscroll", () => {
           prompt_tokens: 1,
           completion_tokens: 1,
           citations: [],
+          mcp_calls: [],
           attachments: [],
           created_at: "2026-08-23T10:01:00Z",
         },
@@ -238,6 +286,8 @@ describe("Chat workspace autoscroll", () => {
         thinking: "",
         model: null,
         citations: [],
+        mcpCalls: [],
+        pendingMcpProposal: null,
         lastError: null,
       },
     });

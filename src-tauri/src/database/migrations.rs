@@ -64,6 +64,9 @@ pub fn run(conn: &Connection) -> Result<(), String> {
     if version < 16 {
         crate::runbooks::db::migrate_v16(conn)?;
     }
+    if version < 17 {
+        migrate_v17(conn)?;
+    }
     crate::runbooks::db::ensure_v6_runtime_indexes(conn)?;
 
     Ok(())
@@ -525,6 +528,22 @@ fn migrate_v15(conn: &Connection) -> Result<(), String> {
     .map_err(|e| format!("migration v15 failed: {e}"))
 }
 
+fn migrate_v17(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        BEGIN;
+        -- Terminal-independent Chat threads snapshot their own MCP selection.
+        -- Tool-call display data is separate from the opaque provider transcript
+        -- so archived Chat timelines can restore approval and rich-result cards.
+        ALTER TABLE chat_threads ADD COLUMN mcp_selection_json TEXT;
+        ALTER TABLE chat_messages ADD COLUMN mcp_calls_json TEXT NOT NULL DEFAULT '[]';
+        INSERT INTO schema_version (version) VALUES (17);
+        COMMIT;
+        "#,
+    )
+    .map_err(|e| format!("migration v17 failed: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;
@@ -551,7 +570,7 @@ mod tests {
         let first = version(&conn);
         super::run(&conn).unwrap();
         assert_eq!(version(&conn), first);
-        assert_eq!(first, 16);
+        assert_eq!(first, 17);
     }
 
     #[test]
@@ -574,7 +593,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 16);
+        assert_eq!(version(&conn), 17);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'chat_%' ORDER BY name")
             .unwrap()
@@ -611,7 +630,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 16);
+        assert_eq!(version(&conn), 17);
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(archived_sessions)")
             .unwrap()
@@ -620,6 +639,50 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert!(columns.contains(&"mcp_selection_json".into()));
+    }
+
+    #[test]
+    fn v16_to_v17_adds_chat_mcp_persistence() {
+        let conn = mem();
+        conn.execute_batch("CREATE TABLE schema_version (version INTEGER PRIMARY KEY);")
+            .unwrap();
+        super::migrate_v1(&conn).unwrap();
+        super::migrate_v2(&conn).unwrap();
+        super::migrate_v3(&conn).unwrap();
+        super::migrate_v4(&conn).unwrap();
+        super::migrate_v5(&conn).unwrap();
+        crate::runbooks::db::migrate_v6(&conn).unwrap();
+        super::migrate_v7(&conn).unwrap();
+        crate::runbooks::db::migrate_v8(&conn).unwrap();
+        crate::runbooks::db::migrate_v9(&conn).unwrap();
+        crate::runbooks::db::migrate_v10(&conn).unwrap();
+        super::migrate_v11(&conn).unwrap();
+        super::migrate_v12(&conn).unwrap();
+        super::migrate_v13(&conn).unwrap();
+        super::migrate_v14(&conn).unwrap();
+        super::migrate_v15(&conn).unwrap();
+        crate::runbooks::db::migrate_v16(&conn).unwrap();
+        assert_eq!(version(&conn), 16);
+
+        super::run(&conn).unwrap();
+
+        assert_eq!(version(&conn), 17);
+        let thread_columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(chat_threads)")
+            .unwrap()
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(thread_columns.contains(&"mcp_selection_json".into()));
+        let message_columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(chat_messages)")
+            .unwrap()
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(message_columns.contains(&"mcp_calls_json".into()));
     }
 
     #[test]
@@ -658,7 +721,7 @@ mod tests {
         .unwrap();
 
         super::run(&conn).unwrap();
-        assert_eq!(version(&conn), 16);
+        assert_eq!(version(&conn), 17);
         let migrated: (String, Option<String>, Option<String>) = conn
             .query_row(
                 "SELECT cmd_command, cmd_target_role, cmd_target_label
@@ -771,7 +834,7 @@ mod tests {
         )
         .unwrap();
         super::run(&conn).unwrap();
-        assert_eq!(version(&conn), 16);
+        assert_eq!(version(&conn), 17);
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM command_history", [], |r| r.get(0))
             .unwrap();
@@ -804,7 +867,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 16);
+        assert_eq!(version(&conn), 17);
         let migrated: (String, i64, Option<i64>, String, String) = conn
             .query_row(
                 "SELECT source_kind, hidden, builtin_order, created_at, updated_at
@@ -845,7 +908,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 16);
+        assert_eq!(version(&conn), 17);
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(runbook_drafts)")
             .unwrap()
@@ -879,7 +942,7 @@ mod tests {
         super::run(&conn).unwrap();
 
         // Upgrades run the whole chain, so this lands on the current head.
-        assert_eq!(version(&conn), 16);
+        assert_eq!(version(&conn), 17);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()
@@ -925,7 +988,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 16);
+        assert_eq!(version(&conn), 17);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()
@@ -1041,7 +1104,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 16);
+        assert_eq!(version(&conn), 17);
         let has_password: bool = conn
             .query_row(
                 "SELECT has_password FROM ssh_hosts WHERE id = 'h1'",

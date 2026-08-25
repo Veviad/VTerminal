@@ -467,10 +467,12 @@ export const aiNameSession = (requestId: string, digest: string) =>
  * must be persisted exactly as received. */
 export async function chatStart(
   requestId: string,
+  conversationId: string,
   prompt: string,
   history: ChatMessage[],
   images: ImagePart[],
   docBuckets: KnowledgeBucketRef[],
+  mcpSelection: McpChatSelection,
   onEvent: (event: StreamEvent) => void,
 ): Promise<ChatMessage[]> {
   const channel = new Channel<StreamEvent>();
@@ -479,10 +481,12 @@ export async function chatStart(
   try {
     return await invoke<ChatMessage[]>("chat_start", {
       requestId,
+      conversationId,
       prompt,
       history,
       images,
       docBuckets,
+      mcpSelection,
       onEvent: channel,
     });
   } finally {

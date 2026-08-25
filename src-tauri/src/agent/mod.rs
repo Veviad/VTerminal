@@ -246,6 +246,7 @@ pub enum StreamEvent {
         server_id: String,
         server_name: String,
         tool_name: String,
+        arguments: serde_json::Value,
     },
     McpToolResult {
         approval_id: String,

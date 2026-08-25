@@ -33,6 +33,9 @@ import type {
 import { useDismissibleLayer } from "../../hooks/useDismissibleLayer";
 import { GenerationModeBadge } from "../layout/GenerationModeBadge";
 import { ChatActions } from "./ChatActions";
+import { McpApprovalCard } from "../ai/McpApprovalCard";
+import { McpPicker } from "../ai/McpPicker";
+import { McpToolCard } from "../ai/McpToolCard";
 
 const CHAT_BOTTOM_THRESHOLD_PX = 48;
 const GENERATION_STATUS_POLL_MS = 500;
@@ -147,8 +150,25 @@ export function ChatWorkspace() {
                   </details>
                 )}
                 {stream.content ? <AiMessageView content={stream.content} /> : <span className="text-xs text-text-muted">Thinking…</span>}
+                {stream.mcpCalls.length > 0 && (
+                  <div className="mt-3 space-y-2">
+                    {stream.mcpCalls.map((call) => (
+                      <McpToolCard key={call.approval_id} call={call} />
+                    ))}
+                  </div>
+                )}
                 <Sources citations={stream.citations} />
               </div>
+            )}
+            {stream.pendingMcpProposal && (
+              <McpApprovalCard
+                key={stream.pendingMcpProposal.approvalId}
+                server={stream.pendingMcpProposal.serverName}
+                tool={stream.pendingMcpProposal.title ?? stream.pendingMcpProposal.toolName}
+                description={stream.pendingMcpProposal.description}
+                args={stream.pendingMcpProposal.arguments}
+                onRespond={(decision) => void useChatStore.getState().respondToMcpProposal(decision)}
+              />
             )}
             {stream.lastError && <p className="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">{stream.lastError}</p>}
             {knowledgeWarning && <p className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">{knowledgeWarning}</p>}
@@ -307,6 +327,14 @@ function ChatToolbar() {
         </p>
       </div>
       <div className="flex items-center gap-2">
+        <McpPicker
+          conversationId={detail.summary.id}
+          selection={detail.mcp_selection}
+          disabled={busy || Boolean(detail.summary.archived_at)}
+          onSelectionChange={(selection) =>
+            void useChatStore.getState().setMcpSelection(selection)
+          }
+        />
         {model && <EffortPicker value={effort} available={model.efforts} layout="dropdown" size="sm" disabled={busy} onChange={(value) => {
           void api.setModelEffort(model.id, value).then(() => app.setModelEffortLocal(model.id, value));
         }} />}
@@ -360,6 +388,13 @@ function Message({ message }: { message: ChatDisplayMessage }) {
       {message.thinking && <details className="mb-3 text-xs text-text-muted"><summary className="cursor-pointer">Reasoning</summary><p className="mt-2 whitespace-pre-wrap">{message.thinking}</p></details>}
       <AiMessageView content={displayed.prompt} />
       {displayed.blocks.map((block, index) => <FoldedBlockSection key={`${block.kind}-${block.name}-${index}`} block={block} />)}
+      {message.mcp_calls.length > 0 && (
+        <div className="mt-3 space-y-2">
+          {message.mcp_calls.map((call) => (
+            <McpToolCard key={call.approval_id} call={call} />
+          ))}
+        </div>
+      )}
       <Sources citations={message.citations} />
       {!user && message.model && <p className="mt-2 text-[9px] text-text-muted">{message.model}{message.prompt_tokens !== null || message.completion_tokens !== null ? ` · ${(message.prompt_tokens ?? 0).toLocaleString()} in / ${(message.completion_tokens ?? 0).toLocaleString()} out` : ""}</p>}
     </article>

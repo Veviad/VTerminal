@@ -1037,7 +1037,7 @@ function dispatchPanelEvent(
         e.server_id,
         e.server_name,
         e.tool_name,
-        pending?.approvalId === e.approval_id ? pending.arguments : {},
+        e.arguments ?? (pending?.approvalId === e.approval_id ? pending.arguments : {}),
       );
       break;
     }

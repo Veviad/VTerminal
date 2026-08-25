@@ -1,12 +1,15 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   type Dispatch,
   type FormEvent,
+  type KeyboardEvent,
   type SetStateAction,
 } from "react";
 import {
+  Braces,
   Check,
   Copy,
   ExternalLink,
@@ -59,6 +62,102 @@ const inputClass =
   "w-full rounded-md border border-border-subtle bg-bg-secondary px-2.5 py-2 text-[12px] text-text-primary outline-none focus:border-accent";
 const buttonClass =
   "rounded-md border border-border-subtle px-2.5 py-1.5 text-[11px] text-text-secondary transition hover:bg-bg-hover hover:text-text-primary disabled:opacity-40";
+
+function jsonProblem(text: string): string | null {
+  if (!text.trim()) return "Enter a server object or an import configuration.";
+  try {
+    JSON.parse(text);
+    return null;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const offset = message.match(/position\s+(\d+)/i)?.[1];
+    if (!offset) return message;
+    const before = text.slice(0, Number(offset));
+    const line = before.split("\n").length;
+    const column = before.length - before.lastIndexOf("\n");
+    return `${message.replace(/\s+at position\s+\d+.*/i, "")} at line ${line}, column ${column}`;
+  }
+}
+
+export function JsonEditor({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const editor = useRef<HTMLTextAreaElement>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const problem = useMemo(() => jsonProblem(value), [value]);
+  const lines = Math.max(1, value.split("\n").length);
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key !== "Tab") return;
+    event.preventDefault();
+    const element = event.currentTarget;
+    const start = element.selectionStart;
+    const end = element.selectionEnd;
+    onChange(`${value.slice(0, start)}  ${value.slice(end)}`);
+    requestAnimationFrame(() => {
+      editor.current?.setSelectionRange(start + 2, start + 2);
+    });
+  };
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-border-subtle bg-bg-primary shadow-inner focus-within:border-accent">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border-subtle bg-bg-secondary px-3 py-2">
+        <span className="flex items-center gap-1.5 text-[11px] font-medium text-text-secondary">
+          <Braces size={13} /> JSON configuration
+        </span>
+        <div className="flex items-center gap-2">
+          <span
+            className={`text-[10px] ${problem ? "text-warning" : "text-success"}`}
+            role="status"
+          >
+            {problem ? "Check JSON" : "Valid JSON"}
+          </span>
+          <button
+            type="button"
+            className={`${buttonClass} whitespace-nowrap bg-bg-primary`}
+            disabled={Boolean(problem)}
+            onClick={() => onChange(JSON.stringify(JSON.parse(value), null, 2))}
+          >
+            Format JSON
+          </button>
+        </div>
+      </div>
+      <div className="relative min-h-[30rem] max-h-[62vh] overflow-hidden">
+        <pre
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-y-0 left-0 w-11 overflow-hidden border-r border-border-subtle bg-bg-secondary px-2 py-3 text-right font-mono text-[11px] leading-5 text-text-muted/60"
+        >
+          <span
+            className="block"
+            style={{ transform: `translateY(-${scrollTop}px)` }}
+          >
+            {Array.from({ length: lines }, (_, index) => index + 1).join("\n")}
+          </span>
+        </pre>
+        <textarea
+          ref={editor}
+          aria-label="MCP JSON configuration"
+          className="absolute inset-0 h-full w-full resize-none overflow-auto bg-transparent py-3 pl-14 pr-4 font-mono text-[12px] leading-5 text-text-primary outline-none selection:bg-accent/25"
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          onKeyDown={handleKeyDown}
+          onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+          spellCheck={false}
+          wrap="off"
+        />
+      </div>
+      <div
+        className={`border-t border-border-subtle px-3 py-2 text-[10px] ${problem ? "text-warning" : "text-text-muted"}`}
+      >
+        {problem ?? `${lines} line${lines === 1 ? "" : "s"}. Press Tab to indent.`}
+      </div>
+    </div>
+  );
+}
 
 interface KeyValueEntry {
   name: string;
@@ -583,13 +682,13 @@ Every individual tool call will still require approval.`,
 
         {advanced ? (
           <div className="space-y-2">
-            <textarea
-              className={`${inputClass} min-h-72 font-mono`}
-              value={jsonText}
-              onChange={(event) => setJsonText(event.target.value)}
-              spellCheck={false}
-            />
-            <button type="button" className={buttonClass} onClick={importJson}>
+            <JsonEditor value={jsonText} onChange={setJsonText} />
+            <button
+              type="button"
+              className={buttonClass}
+              disabled={Boolean(jsonProblem(jsonText))}
+              onClick={importJson}
+            >
               Import Claude / VS Code JSON
             </button>
           </div>
@@ -1016,7 +1115,10 @@ Every individual tool call will still require approval.`,
             servers. Every tool call still asks for approval.
           </p>
         </div>
-        <button className={buttonClass} onClick={() => setDraft(emptyHttp())}>
+        <button
+          className={`${buttonClass} inline-flex shrink-0 items-center whitespace-nowrap`}
+          onClick={() => setDraft(emptyHttp())}
+        >
           <Plus size={13} className="me-1 inline" />
           Add server
         </button>
