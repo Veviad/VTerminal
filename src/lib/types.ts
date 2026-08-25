@@ -338,6 +338,7 @@ export type StreamEvent =
       server_id: string;
       server_name: string;
       tool_name: string;
+      arguments: unknown;
     }
   | {
       type: "McpToolResult";
@@ -1094,8 +1095,20 @@ export interface ChatDisplayMessage {
   prompt_tokens: number | null;
   completion_tokens: number | null;
   citations: WebCitation[];
+  mcp_calls: ChatMcpCall[];
   attachments: ChatAttachment[];
   created_at: string;
+}
+
+export interface ChatMcpCall {
+  approval_id: string;
+  server_id: string;
+  server_name: string;
+  tool_name: string;
+  arguments: unknown;
+  status: "awaiting" | "running" | "done" | "denied" | "error";
+  result?: McpToolResultView | null;
+  error?: string | null;
 }
 
 export interface ChatDetail {
@@ -1104,6 +1117,7 @@ export interface ChatDetail {
   model_transcript: ChatMessage[];
   model_transcript_version: number;
   attached_bucket_refs: KnowledgeBucketRef[];
+  mcp_selection: McpChatSelection;
 }
 
 export interface ChatSaveInput {
@@ -1117,6 +1131,7 @@ export interface ChatSaveInput {
   model_transcript: ChatMessage[];
   model_transcript_version: number;
   attached_bucket_refs: KnowledgeBucketRef[];
+  mcp_selection: McpChatSelection;
 }
 
 export interface ChatStreamState {
@@ -1126,6 +1141,17 @@ export interface ChatStreamState {
   thinking: string;
   model: string | null;
   citations: WebCitation[];
+  mcpCalls: ChatMcpCall[];
+  pendingMcpProposal: {
+    approvalId: string;
+    serverId: string;
+    serverName: string;
+    toolName: string;
+    title?: string;
+    description?: string;
+    arguments: unknown;
+    schemaHash: string;
+  } | null;
   lastError: string | null;
 }
 

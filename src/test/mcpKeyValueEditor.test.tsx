@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { useState } from "react";
 import { describe, expect, it } from "vitest";
-import { KeyValueEditor } from "../components/settings/McpSettings";
+import { JsonEditor, KeyValueEditor } from "../components/settings/McpSettings";
 
 function EnvironmentHarness() {
   const [entries, setEntries] = useState([
@@ -77,5 +77,28 @@ describe("MCP key/value editor", () => {
     expect(screen.getByPlaceholderText("Value (stored in vault)")).toHaveValue(
       "vault-value",
     );
+  });
+});
+
+function JsonHarness() {
+  const [value, setValue] = useState('{"name":"Calendar","enabled":true}');
+  return <JsonEditor value={value} onChange={setValue} />;
+}
+
+describe("MCP JSON editor", () => {
+  it("formats valid JSON and reports invalid input", () => {
+    render(<JsonHarness />);
+
+    expect(screen.getByRole("status")).toHaveTextContent("Valid JSON");
+    fireEvent.click(screen.getByRole("button", { name: "Format JSON" }));
+    expect(screen.getByRole("textbox", { name: "MCP JSON configuration" })).toHaveValue(
+      '{\n  "name": "Calendar",\n  "enabled": true\n}',
+    );
+
+    fireEvent.change(screen.getByRole("textbox", { name: "MCP JSON configuration" }), {
+      target: { value: '{"name":}' },
+    });
+    expect(screen.getByRole("status")).toHaveTextContent("Check JSON");
+    expect(screen.getByRole("button", { name: "Format JSON" })).toBeDisabled();
   });
 });

@@ -2,27 +2,30 @@ import { useState } from "react";
 import { AlertTriangle, ChevronDown, Settings, Plug } from "lucide-react";
 import * as api from "../../lib/tauri";
 import { useAppStore } from "../../stores/appStore";
-import type { McpToolView } from "../../lib/types";
+import type { McpChatSelection, McpToolView } from "../../lib/types";
 
-export function McpPicker({
-  sessionId,
-  disabled,
-}: {
-  sessionId: string;
+export function McpPicker(props: {
+  sessionId?: string;
+  conversationId?: string;
+  selection?: McpChatSelection;
+  onSelectionChange?: (selection: McpChatSelection) => void;
   disabled: boolean;
 }) {
   const servers = useAppStore((state) => state.mcpServers);
-  const stream = useAppStore((state) => state.aiStreams[sessionId]);
+  const stream = useAppStore((state) =>
+    props.sessionId ? state.aiStreams[props.sessionId] : undefined,
+  );
   const setSelection = useAppStore((state) => state.setMcpSelection);
   const setSettingsOpen = useAppStore((state) => state.setSettingsOpen);
   const setSettingsTab = useAppStore((state) => state.setSettingsTab);
   const [open, setOpen] = useState(false);
   const [tools, setTools] = useState<McpToolView[]>([]);
   const [loading, setLoading] = useState(false);
-  const selection = stream?.mcpSelection ?? {
+  const selection = props.selection ?? stream?.mcpSelection ?? {
     server_ids: [],
     disabled_tools: {},
   };
+  const conversationId = props.conversationId ?? props.sessionId ?? "";
   const selected = new Set(selection.server_ids);
   const problemCount =
     servers.filter(
@@ -35,7 +38,7 @@ export function McpPicker({
     ).length;
 
   const updateServers = (serverId: string, on: boolean) => {
-    if (disabled) return;
+    if (props.disabled) return;
     const server_ids = on
       ? [...selection.server_ids, serverId].filter(
           (id, index, all) => all.indexOf(id) === index,
@@ -43,15 +46,18 @@ export function McpPicker({
       : selection.server_ids.filter((id) => id !== serverId);
     const disabled_tools = { ...selection.disabled_tools };
     if (!on) delete disabled_tools[serverId];
-    setSelection(sessionId, { server_ids, disabled_tools });
-    if (!on) void api.mcpDisconnect(sessionId, serverId).catch(() => {});
+    const next = { server_ids, disabled_tools };
+    if (props.onSelectionChange) props.onSelectionChange(next);
+    else if (props.sessionId) setSelection(props.sessionId, next);
+    if (!on && conversationId && !props.onSelectionChange)
+      void api.mcpDisconnect(conversationId, serverId).catch(() => {});
   };
 
   const loadTools = async () => {
     if (selection.server_ids.length === 0) return;
     setLoading(true);
     try {
-      setTools(await api.mcpToolsList(sessionId, selection.server_ids));
+      setTools(await api.mcpToolsList(conversationId, selection.server_ids));
     } catch {
       setTools([]);
     } finally {
@@ -63,7 +69,7 @@ export function McpPicker({
     <div className="relative">
       <button
         type="button"
-        disabled={disabled}
+        disabled={props.disabled}
         onClick={() => {
           const next = !open;
           setOpen(next);
@@ -125,7 +131,7 @@ export function McpPicker({
                     <input
                       type="checkbox"
                       className="mt-0.5"
-                      disabled={disabled}
+                      disabled={props.disabled}
                       checked={on}
                       onChange={(event) =>
                         updateServers(server.id, event.target.checked)
@@ -164,7 +170,7 @@ export function McpPicker({
                           >
                             <input
                               type="checkbox"
-                              disabled={disabled}
+                              disabled={props.disabled}
                               checked={!off}
                               onChange={(event) => {
                                 const current =
@@ -172,13 +178,17 @@ export function McpPicker({
                                 const next = event.target.checked
                                   ? current.filter((name) => name !== tool.name)
                                   : [...current, tool.name];
-                                setSelection(sessionId, {
+                                const nextSelection = {
                                   ...selection,
                                   disabled_tools: {
                                     ...selection.disabled_tools,
                                     [server.id]: next,
                                   },
-                                });
+                                };
+                                if (props.onSelectionChange)
+                                  props.onSelectionChange(nextSelection);
+                                else if (props.sessionId)
+                                  setSelection(props.sessionId, nextSelection);
                               }}
                             />
                             <span>
@@ -208,7 +218,7 @@ export function McpPicker({
                 >
                   <span>Unavailable server · {id.slice(0, 8)}</span>
                   <button
-                    disabled={disabled}
+                    disabled={props.disabled}
                     onClick={() => updateServers(id, false)}
                   >
                     Remove

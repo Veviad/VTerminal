@@ -5,6 +5,7 @@ import type {
   ChatMessage,
   ChatSaveInput,
   ChatSummary,
+  McpServerView,
   StreamEvent,
 } from "../lib/types";
 
@@ -18,6 +19,8 @@ const mocks = vi.hoisted(() => ({
   chatStart: vi.fn(),
   aiNameChat: vi.fn(),
   aiCancel: vi.fn(),
+  mcpDisconnect: vi.fn(),
+  respondToMcpApproval: vi.fn(),
   knowledgeSearchDetailed: vi.fn(),
   attachmentPut: vi.fn(),
   attachmentRead: vi.fn(),
@@ -54,6 +57,7 @@ function detail(value: ChatSummary): ChatDetail {
     model_transcript: [],
     model_transcript_version: 1,
     attached_bucket_refs: [],
+    mcp_selection: { server_ids: [], disabled_tools: {} },
   };
 }
 
@@ -82,6 +86,30 @@ function chatModel(): CatalogEntry {
   };
 }
 
+function mcpServer(id: string, isDefault = true): McpServerView {
+  return {
+    version: 1,
+    id,
+    name: id,
+    enabled: true,
+    default_for_new_chats: isDefault,
+    revision: 1,
+    transport: {
+      type: "streamable_http",
+      url: "https://example.com/mcp",
+      auth: { mode: "none", scopes: [] },
+      headers: [],
+    },
+    timeouts: { startup_ms: 10_000, list_ms: 30_000, call_ms: 60_000 },
+    disabled_tools: [],
+    trust_hash: null,
+    trusted: true,
+    missing_secret_slots: [],
+    runtime: { connected: false, log_bytes: 0, tool_count: null },
+    oauth: null,
+  };
+}
+
 describe("Chat workspace store", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -90,6 +118,8 @@ describe("Chat workspace store", () => {
     mocks.chatUpdateTitle.mockResolvedValue(false);
     mocks.chatDelete.mockResolvedValue(undefined);
     mocks.aiNameChat.mockResolvedValue("Generated title");
+    mocks.mcpDisconnect.mockResolvedValue(undefined);
+    mocks.respondToMcpApproval.mockResolvedValue(undefined);
     mocks.saveSettings.mockResolvedValue(undefined);
     mocks.modelStatus.mockResolvedValue({
       loaded: null,
@@ -109,7 +139,7 @@ describe("Chat workspace store", () => {
       current: null,
       search: "",
       archivedOpen: false,
-      stream: { status: "idle", requestId: null, content: "", thinking: "", model: null, citations: [], lastError: null },
+      stream: { status: "idle", requestId: null, content: "", thinking: "", model: null, citations: [], mcpCalls: [], pendingMcpProposal: null, lastError: null },
       pendingAttachments: [],
       attachError: null,
       attachStatus: null,
@@ -143,12 +173,51 @@ describe("Chat workspace store", () => {
     expect(mocks.chatSave).not.toHaveBeenCalled();
   });
 
+  it("snapshots current MCP defaults only when a new Chat thread is created", async () => {
+    useAppStore.setState({ mcpServers: [mcpServer("default"), mcpServer("optional", false)] });
+    mocks.chatList.mockResolvedValue([]);
+
+    await useChatStore.getState().initialize("chat", null);
+
+    expect(useChatStore.getState().current?.mcp_selection).toEqual({
+      server_ids: ["default"],
+      disabled_tools: {},
+    });
+    expect((mocks.chatSave.mock.calls[0]?.[0] as ChatSaveInput).mcp_selection.server_ids)
+      .toEqual(["default"]);
+
+    useAppStore.setState({ mcpServers: [mcpServer("new-default")] });
+    expect(useChatStore.getState().current?.mcp_selection.server_ids).toEqual(["default"]);
+  });
+
+  it("persists per-chat MCP changes and disconnects removed servers", async () => {
+    const active = detail(summary("active"));
+    active.mcp_selection = {
+      server_ids: ["one", "two"],
+      disabled_tools: { two: ["write"] },
+    };
+    useChatStore.setState({ current: active, summaries: [active.summary] });
+
+    await useChatStore.getState().setMcpSelection({
+      server_ids: ["two", "two"],
+      disabled_tools: { two: ["read", "read"], one: ["old"] },
+    });
+
+    expect(useChatStore.getState().current?.mcp_selection).toEqual({
+      server_ids: ["two"],
+      disabled_tools: { two: ["read"] },
+    });
+    expect(mocks.mcpDisconnect).toHaveBeenCalledWith("active", "one");
+    expect((mocks.chatSave.mock.calls[mocks.chatSave.mock.calls.length - 1]?.[0] as ChatSaveInput).mcp_selection)
+      .toEqual({ server_ids: ["two"], disabled_tools: { two: ["read"] } });
+  });
+
   it("does not archive while a response is running", async () => {
     const active = summary("active");
     useChatStore.setState({
       current: detail(active),
       summaries: [active],
-      stream: { status: "streaming", requestId: "request", content: "", thinking: "", model: null, citations: [], lastError: null },
+      stream: { status: "streaming", requestId: "request", content: "", thinking: "", model: null, citations: [], mcpCalls: [], pendingMcpProposal: null, lastError: null },
     });
 
     await useChatStore.getState().archive(true);
@@ -199,6 +268,7 @@ describe("Chat workspace store", () => {
         prompt_tokens: null,
         completion_tokens: null,
         citations: [],
+        mcp_calls: [],
         attachments: [],
         created_at: manual.created_at,
       },
@@ -212,6 +282,7 @@ describe("Chat workspace store", () => {
         prompt_tokens: 4,
         completion_tokens: 5,
         citations: [],
+        mcp_calls: [],
         attachments: [],
         created_at: manual.updated_at,
       },
@@ -254,6 +325,7 @@ describe("Chat workspace store", () => {
         prompt_tokens: null,
         completion_tokens: null,
         citations: [],
+        mcp_calls: [],
         attachments: [],
         created_at: generated.created_at,
       },
@@ -267,6 +339,7 @@ describe("Chat workspace store", () => {
         prompt_tokens: 4,
         completion_tokens: 5,
         citations: [],
+        mcp_calls: [],
         attachments: [],
         created_at: generated.created_at,
       },
@@ -280,6 +353,7 @@ describe("Chat workspace store", () => {
         prompt_tokens: null,
         completion_tokens: null,
         citations: [],
+        mcp_calls: [],
         attachments: [],
         created_at: generated.updated_at,
       },
@@ -293,6 +367,7 @@ describe("Chat workspace store", () => {
         prompt_tokens: 5,
         completion_tokens: 6,
         citations: [],
+        mcp_calls: [],
         attachments: [],
         created_at: generated.updated_at,
       },
@@ -334,14 +409,51 @@ describe("Chat workspace store", () => {
     ];
     mocks.chatStart.mockImplementation(async (
       _requestId: string,
+      conversationId: string,
       _prompt: string,
       _history: ChatMessage[],
       _images: unknown[],
       _buckets: unknown[],
+      mcpSelection: unknown,
       onEvent: (event: StreamEvent) => void,
     ) => {
+      expect(conversationId).toBe("active");
+      expect(mcpSelection).toEqual({ server_ids: [], disabled_tools: {} });
       expect(mocks.chatSave).toHaveBeenCalledTimes(1);
       onEvent({ type: "Started", request_id: "request", model: "Chat Test" });
+      onEvent({
+        type: "McpToolProposal",
+        approval_id: "mcp-approval",
+        server_id: "calendar",
+        server_name: "Calendar MCP",
+        tool_name: "list_events",
+        title: "List events",
+        description: "Lists upcoming events",
+        arguments: { limit: 5 },
+        schema_hash: "schema-a",
+      });
+      onEvent({
+        type: "McpToolStarted",
+        approval_id: "mcp-approval",
+        server_id: "calendar",
+        server_name: "Calendar MCP",
+        tool_name: "list_events",
+        arguments: { limit: 5 },
+      });
+      onEvent({
+        type: "McpToolResult",
+        approval_id: "mcp-approval",
+        server_id: "calendar",
+        server_name: "Calendar MCP",
+        tool_name: "list_events",
+        result: {
+          content: [{ type: "text", text: "No events" }],
+          structured_content: { events: [] },
+          is_error: false,
+          model_text: "No events",
+          truncated: false,
+        },
+      });
       onEvent({ type: "ThinkingDelta", content: "Checking sources" });
       onEvent({ type: "Delta", content: "A grounded answer" });
       onEvent({
@@ -369,6 +481,12 @@ describe("Chat workspace store", () => {
       prompt_tokens: 12,
       completion_tokens: 5,
       citations: [{ url: "https://example.com/source", title: "Source", cited_text: "Evidence" }],
+      mcp_calls: [{
+        approval_id: "mcp-approval",
+        server_id: "calendar",
+        tool_name: "list_events",
+        status: "done",
+      }],
     });
     expect(final.model_transcript).toBe(transcript);
     expect(useChatStore.getState().stream.status).toBe("idle");

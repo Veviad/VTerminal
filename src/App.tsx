@@ -74,6 +74,14 @@ export default function App() {
       try {
         const settings = await loadSettings();
         applyTheme(settings.theme);
+        // MCP defaults are conversation snapshots. Load the redacted server
+        // list before restoring or creating either Chat threads or terminal
+        // conversations so every genuinely new conversation sees today's defaults.
+        try {
+          useAppStore.getState().setMcpServers(await api.mcpServersList());
+        } catch (error) {
+          console.error("MCP configuration failed to load:", error);
+        }
         // Chat owns separate durable state and must never become a new failure
         // gate for terminal restoration. A damaged Chat row degrades to the
         // Terminal workspace while the user's existing shells still restore.
@@ -84,14 +92,6 @@ export default function App() {
         } catch (error) {
           console.error("Chat workspace restore failed:", error);
           useChatStore.setState({ initialized: true, workspaceMode: "terminal" });
-        }
-        // MCP defaults are conversation snapshots, so load the redacted server
-        // list before restore/new-tab creation. Reopened chats replace this with
-        // their archived selection; a genuinely fresh tab receives today's defaults.
-        try {
-          useAppStore.getState().setMcpServers(await api.mcpServersList());
-        } catch (error) {
-          console.error("MCP configuration failed to load:", error);
         }
         // The model catalog gates the whole AI surface (see aiReady), so it has
         // to be present from boot — not only once the user opens Settings.

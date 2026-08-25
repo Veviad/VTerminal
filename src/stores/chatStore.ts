@@ -15,11 +15,13 @@ import type {
   Attachment,
   ChatDetail,
   ChatDisplayMessage,
+  ChatMcpCall,
   ChatSaveInput,
   ChatStreamState,
   ChatSummary,
   ChatTitleSource,
   KnowledgeBucketRef,
+  McpChatSelection,
   StreamEvent,
   WebCitation,
   WorkspaceMode,
@@ -34,6 +36,8 @@ const idleStream = (): ChatStreamState => ({
   thinking: "",
   model: null,
   citations: [],
+  mcpCalls: [],
+  pendingMcpProposal: null,
   lastError: null,
 });
 
@@ -55,6 +59,15 @@ function ordered(summaries: ChatSummary[]): ChatSummary[] {
   });
 }
 
+function defaultMcpSelection(): McpChatSelection {
+  return {
+    server_ids: useAppStore.getState().mcpServers
+      .filter((server) => server.enabled && server.default_for_new_chats)
+      .map((server) => server.id),
+    disabled_tools: {},
+  };
+}
+
 function blankChat(): ChatDetail {
   const now = new Date().toISOString();
   const summary: ChatSummary = {
@@ -73,6 +86,7 @@ function blankChat(): ChatDetail {
     model_transcript: [],
     model_transcript_version: 1,
     attached_bucket_refs: [],
+    mcp_selection: defaultMcpSelection(),
   };
 }
 
@@ -88,6 +102,7 @@ function saveInput(detail: ChatDetail): ChatSaveInput {
     model_transcript: detail.model_transcript,
     model_transcript_version: detail.model_transcript_version,
     attached_bucket_refs: detail.attached_bucket_refs,
+    mcp_selection: detail.mcp_selection,
   };
 }
 
@@ -159,6 +174,8 @@ interface ChatState {
   deleteChat(chatId?: string): Promise<void>;
   attachBuckets(ref: KnowledgeBucketRef): Promise<void>;
   detachBucket(ref: KnowledgeBucketRef): Promise<void>;
+  setMcpSelection(selection: McpChatSelection): Promise<void>;
+  respondToMcpProposal(decision: "allow_once" | "always_allow" | "deny"): Promise<void>;
   addAttachments(attachments: Attachment[]): Attachment[];
   removeAttachment(attachmentId: string): void;
   setAttachError(message: string | null): void;
@@ -274,6 +291,7 @@ function appendUserTurn(
     prompt_tokens: null,
     completion_tokens: null,
     citations: [],
+    mcp_calls: [],
     attachments: prepared.staged.map(attachmentToDisplay),
     created_at: now,
   };
@@ -298,6 +316,111 @@ type ChatSet = (
   update: Partial<ChatState> | ((state: ChatState) => Partial<ChatState>),
 ) => void;
 
+/** Apply MCP lifecycle events without coupling them to the provider stream loop. */
+function handleMcpStreamEvent(event: StreamEvent, set: ChatSet): boolean {
+  if (event.type === "McpToolProposal") {
+    const call: ChatMcpCall = {
+      approval_id: event.approval_id,
+      server_id: event.server_id,
+      server_name: event.server_name,
+      tool_name: event.tool_name,
+      arguments: event.arguments,
+      status: "awaiting",
+      result: null,
+      error: null,
+    };
+    set((state) => ({
+      stream: {
+        ...state.stream,
+        mcpCalls: [
+          ...state.stream.mcpCalls.filter(
+            (candidate) => candidate.approval_id !== event.approval_id,
+          ),
+          call,
+        ],
+        pendingMcpProposal: {
+          approvalId: event.approval_id,
+          serverId: event.server_id,
+          serverName: event.server_name,
+          toolName: event.tool_name,
+          title: event.title,
+          description: event.description,
+          arguments: event.arguments,
+          schemaHash: event.schema_hash,
+        },
+      },
+    }));
+    return true;
+  }
+
+  if (event.type === "McpToolStarted") {
+    set((state) => ({
+      stream: {
+        ...state.stream,
+        pendingMcpProposal:
+          state.stream.pendingMcpProposal?.approvalId === event.approval_id
+            ? null
+            : state.stream.pendingMcpProposal,
+        mcpCalls: state.stream.mcpCalls.some(
+          (call) => call.approval_id === event.approval_id,
+        )
+          ? state.stream.mcpCalls.map((call) =>
+              call.approval_id === event.approval_id
+                ? { ...call, status: "running" as const }
+                : call,
+            )
+          : [
+              ...state.stream.mcpCalls,
+              {
+                approval_id: event.approval_id,
+                server_id: event.server_id,
+                server_name: event.server_name,
+                tool_name: event.tool_name,
+                arguments: event.arguments,
+                status: "running" as const,
+                result: null,
+                error: null,
+              },
+            ],
+      },
+    }));
+    return true;
+  }
+
+  if (event.type === "McpToolResult") {
+    set((state) => ({
+      stream: {
+        ...state.stream,
+        pendingMcpProposal:
+          state.stream.pendingMcpProposal?.approvalId === event.approval_id
+            ? null
+            : state.stream.pendingMcpProposal,
+        mcpCalls: state.stream.mcpCalls.map((call) =>
+          call.approval_id === event.approval_id
+            ? {
+                ...call,
+                status:
+                  event.error || event.result.is_error
+                    ? ("error" as const)
+                    : ("done" as const),
+                result: event.result,
+                error: event.error ?? null,
+              }
+            : call,
+        ),
+      },
+    }));
+    return true;
+  }
+
+  if (event.type === "McpServerProblem") {
+    set({ knowledgeWarning: `MCP: ${event.message}` });
+    return true;
+  }
+
+  return false;
+}
+
 async function streamTurn(
   requestId: string,
   outgoing: Outgoing,
@@ -311,12 +434,15 @@ async function streamTurn(
   try {
     transcript = await api.chatStart(
       requestId,
+      detail.summary.id,
       outgoing.prompt,
       transcript,
       outgoing.images,
       detail.attached_bucket_refs,
+      detail.mcp_selection,
       (event: StreamEvent) => {
         if (get().stream.requestId !== requestId) return;
+        if (handleMcpStreamEvent(event, set)) return;
         if (event.type === "Started") {
           set((state) => ({ stream: { ...state.stream, model: event.model } }));
         }
@@ -351,7 +477,30 @@ async function streamTurn(
         }
         if (event.type === "Error") {
           set((state) => ({
-            stream: { ...state.stream, status: "error", lastError: event.message },
+            stream: {
+              ...state.stream,
+              status: "error",
+              pendingMcpProposal: null,
+              mcpCalls: state.stream.mcpCalls.map((call) =>
+                call.status === "awaiting" || call.status === "running"
+                  ? { ...call, status: "error" as const, error: event.message }
+                  : call,
+              ),
+              lastError: event.message,
+            },
+          }));
+        }
+        if (event.type === "Cancelled") {
+          set((state) => ({
+            stream: {
+              ...state.stream,
+              pendingMcpProposal: null,
+              mcpCalls: state.stream.mcpCalls.map((call) =>
+                call.status === "awaiting" || call.status === "running"
+                  ? { ...call, status: "error" as const, error: "Cancelled" }
+                  : call,
+              ),
+            },
           }));
         }
       },
@@ -370,7 +519,7 @@ function completeTurn(
   transcript: ChatDetail["model_transcript"],
   usage: { prompt: number; completion: number },
 ): ChatDetail {
-  if (!stream.content && !stream.thinking) {
+  if (!stream.content && !stream.thinking && stream.mcpCalls.length === 0) {
     return { ...detail, model_transcript: transcript };
   }
   const finished = new Date().toISOString();
@@ -384,6 +533,7 @@ function completeTurn(
     prompt_tokens: usage.prompt,
     completion_tokens: usage.completion,
     citations: stream.citations,
+    mcp_calls: stream.mcpCalls,
     attachments: [],
     created_at: finished,
   };
@@ -537,6 +687,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!targetId || !existing || (state.current?.summary.id === targetId && state.stream.status === "streaming")) return;
     const archivedAt = archived ? new Date().toISOString() : null;
     await api.chatSetArchived(targetId, archivedAt);
+    if (archived) void api.mcpDisconnect(targetId).catch(() => {});
     const summary = { ...existing, archived_at: archivedAt, updated_at: new Date().toISOString() };
     set((state) => updateCurrentSummary(state, summary));
   },
@@ -546,6 +697,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const targetId = chatId ?? state.current?.summary.id;
     if (!targetId || (state.current?.summary.id === targetId && state.stream.status === "streaming")) return;
     await api.chatDelete(targetId);
+    void api.mcpDisconnect(targetId).catch(() => {});
     const remaining = get().summaries.filter((chat) => chat.id !== targetId);
     if (state.current?.summary.id !== targetId) {
       set({ summaries: remaining });
@@ -574,6 +726,63 @@ export const useChatStore = create<ChatState>((set, get) => ({
     };
     set({ current: next });
     await persist(next);
+  },
+
+  setMcpSelection: async (selection) => {
+    const state = get();
+    const detail = state.current;
+    if (!detail || detail.summary.archived_at || state.stream.status === "streaming") return;
+    const server_ids = selection.server_ids.filter(
+      (serverId, index, all) => all.indexOf(serverId) === index,
+    );
+    const disabled_tools = Object.fromEntries(
+      Object.entries(selection.disabled_tools)
+        .filter(([serverId]) => server_ids.includes(serverId))
+        .map(([serverId, names]) => [
+          serverId,
+          names.filter((name, index, all) => all.indexOf(name) === index),
+        ]),
+    );
+    const nextSelection = { server_ids, disabled_tools };
+    const removed = detail.mcp_selection.server_ids.filter(
+      (serverId) => !server_ids.includes(serverId),
+    );
+    const next = { ...detail, mcp_selection: nextSelection };
+    set({ current: next });
+    await persist(next);
+    for (const serverId of removed) {
+      void api.mcpDisconnect(detail.summary.id, serverId).catch(() => {});
+    }
+  },
+
+  respondToMcpProposal: async (decision) => {
+    const proposal = get().stream.pendingMcpProposal;
+    if (!proposal) return;
+    set((state) => ({
+      stream: {
+        ...state.stream,
+        pendingMcpProposal: null,
+        mcpCalls: state.stream.mcpCalls.map((call) =>
+          call.approval_id === proposal.approvalId && decision === "deny"
+            ? { ...call, status: "denied" as const, error: "Denied by user" }
+            : call,
+        ),
+      },
+    }));
+    await api.respondToMcpApproval(proposal.approvalId, decision).catch((error) => {
+      set((state) => ({
+        stream: {
+          ...state.stream,
+          pendingMcpProposal: proposal,
+          mcpCalls: state.stream.mcpCalls.map((call) =>
+            call.approval_id === proposal.approvalId
+              ? { ...call, status: "awaiting" as const, error: null }
+              : call,
+          ),
+          lastError: String(error),
+        },
+      }));
+    });
   },
 
   addAttachments: (attachments) => {

@@ -12,6 +12,43 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+/// Build the immutable MCP view shared by Chat, Ask, and Agent after they have
+/// resolved the active provider. Models without client-tool support continue
+/// without MCP and surface one actionable server problem to the UI.
+pub async fn prepare_mcp_context<'a>(
+    app: &'a tauri::AppHandle<tauri::Wry>,
+    manager: &'a crate::mcp::client::McpManager,
+    approvals: &'a crate::mcp::approval::McpApprovalState,
+    request_id: &str,
+    conversation_id: &str,
+    selection: &crate::mcp::config::McpChatSelection,
+    model: &crate::models::catalog::CatalogModel,
+    on_event: &tauri::ipc::Channel<StreamEvent>,
+) -> Result<Option<crate::mcp::chat::McpRunContext<'a>>, String> {
+    if selection.server_ids.is_empty() {
+        return Ok(None);
+    }
+    if !model.supports_tools {
+        let _ = on_event.send(StreamEvent::McpServerProblem {
+            server_id: selection.server_ids[0].clone(),
+            message: format!("{} does not support MCP tool calls", model.label),
+        });
+        return Ok(None);
+    }
+    crate::mcp::chat::McpRunContext::prepare(
+        app,
+        manager,
+        approvals,
+        request_id,
+        conversation_id,
+        selection,
+        model.context_tokens,
+        on_event,
+    )
+    .await
+    .map(Some)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionMode {
@@ -246,6 +283,7 @@ pub enum StreamEvent {
         server_id: String,
         server_name: String,
         tool_name: String,
+        arguments: serde_json::Value,
     },
     McpToolResult {
         approval_id: String,

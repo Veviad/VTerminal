@@ -8,6 +8,8 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 
 use crate::knowledge::KnowledgeBucketRef;
+use crate::mcp::client::McpToolResultView;
+use crate::mcp::config::McpChatSelection;
 use crate::provider::{ChatMessage, WebCitation};
 
 #[derive(Debug, Clone, Serialize)]
@@ -45,8 +47,21 @@ pub struct ChatDisplayMessage {
     pub prompt_tokens: Option<i64>,
     pub completion_tokens: Option<i64>,
     pub citations: Vec<WebCitation>,
+    pub mcp_calls: Vec<ChatMcpCall>,
     pub attachments: Vec<ChatAttachment>,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMcpCall {
+    pub approval_id: String,
+    pub server_id: String,
+    pub server_name: String,
+    pub tool_name: String,
+    pub arguments: serde_json::Value,
+    pub status: String,
+    pub result: Option<McpToolResultView>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -56,6 +71,7 @@ pub struct ChatDetail {
     pub model_transcript: Vec<ChatMessage>,
     pub model_transcript_version: i64,
     pub attached_bucket_refs: Vec<KnowledgeBucketRef>,
+    pub mcp_selection: McpChatSelection,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -69,6 +85,8 @@ pub struct ChatMessageInput {
     pub completion_tokens: Option<i64>,
     #[serde(default)]
     pub citations: Vec<WebCitation>,
+    #[serde(default)]
+    pub mcp_calls: Vec<ChatMcpCall>,
     #[serde(default)]
     pub attachments: Vec<ChatAttachment>,
     pub created_at: String,
@@ -90,6 +108,8 @@ pub struct ChatSaveInput {
     pub model_transcript_version: i64,
     #[serde(default)]
     pub attached_bucket_refs: Vec<KnowledgeBucketRef>,
+    #[serde(default)]
+    pub mcp_selection: McpChatSelection,
 }
 
 fn transcript_v1() -> i64 {
@@ -147,19 +167,24 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<ChatDetail>, String> {
         .map_err(|e| e.to_string())?;
     let Some(found) = found else { return Ok(None) };
 
-    let (transcript, transcript_version, buckets): (Option<String>, i64, String) = conn
+    let (transcript, transcript_version, buckets, mcp_selection): (
+        Option<String>,
+        i64,
+        String,
+        Option<String>,
+    ) = conn
         .query_row(
-            "SELECT model_transcript, transcript_version, attached_bucket_refs \
+            "SELECT model_transcript, transcript_version, attached_bucket_refs, mcp_selection_json \
              FROM chat_threads WHERE id = ?1",
             params![id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .map_err(|e| e.to_string())?;
 
     let mut message_stmt = conn
         .prepare(
             "SELECT id, sort_order, role, content, thinking, model, prompt_tokens, \
-                    completion_tokens, citations, created_at \
+                    completion_tokens, citations, mcp_calls_json, created_at \
                FROM chat_messages WHERE chat_id = ?1 ORDER BY sort_order",
         )
         .map_err(|e| e.to_string())?;
@@ -176,6 +201,7 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<ChatDetail>, String> {
                 row.get::<_, Option<i64>>(7)?,
                 row.get::<_, String>(8)?,
                 row.get::<_, String>(9)?,
+                row.get::<_, String>(10)?,
             ))
         })
         .map_err(|e| e.to_string())?
@@ -216,8 +242,9 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<ChatDetail>, String> {
             prompt_tokens: row.6,
             completion_tokens: row.7,
             citations: serde_json::from_str(&row.8).unwrap_or_default(),
+            mcp_calls: serde_json::from_str(&row.9).unwrap_or_default(),
             attachments,
-            created_at: row.9,
+            created_at: row.10,
         });
     }
 
@@ -227,6 +254,7 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<ChatDetail>, String> {
         model_transcript: json_or_default(transcript),
         model_transcript_version: transcript_version,
         attached_bucket_refs: serde_json::from_str(&buckets).unwrap_or_default(),
+        mcp_selection: json_or_default(mcp_selection),
     }))
 }
 
@@ -255,6 +283,11 @@ fn validate(input: &ChatSaveInput) -> Result<(), String> {
                 return Err("invalid chat attachment kind".into());
             }
         }
+        if message.mcp_calls.iter().any(|call| {
+            !["awaiting", "running", "done", "denied", "error"].contains(&call.status.as_str())
+        }) {
+            return Err("invalid chat MCP call status".into());
+        }
     }
     Ok(())
 }
@@ -267,11 +300,12 @@ fn replace_messages(tx: &Transaction<'_>, input: &ChatSaveInput) -> Result<(), S
     .map_err(|e| format!("clear chat messages: {e}"))?;
     for (index, message) in input.messages.iter().enumerate() {
         let citations = serde_json::to_string(&message.citations).map_err(|e| e.to_string())?;
+        let mcp_calls = serde_json::to_string(&message.mcp_calls).map_err(|e| e.to_string())?;
         tx.execute(
             "INSERT INTO chat_messages \
                (id, chat_id, sort_order, role, content, thinking, model, prompt_tokens, \
-                completion_tokens, citations, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                completion_tokens, citations, mcp_calls_json, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 message.id,
                 input.id,
@@ -283,6 +317,7 @@ fn replace_messages(tx: &Transaction<'_>, input: &ChatSaveInput) -> Result<(), S
                 message.prompt_tokens,
                 message.completion_tokens,
                 citations,
+                mcp_calls,
                 message.created_at,
             ],
         )
@@ -315,12 +350,13 @@ pub fn save(conn: &mut Connection, input: &ChatSaveInput) -> Result<(), String> 
     validate(input)?;
     let transcript = serde_json::to_string(&input.model_transcript).map_err(|e| e.to_string())?;
     let buckets = serde_json::to_string(&input.attached_bucket_refs).map_err(|e| e.to_string())?;
+    let mcp_selection = serde_json::to_string(&input.mcp_selection).map_err(|e| e.to_string())?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     tx.execute(
         "INSERT INTO chat_threads \
            (id, title, title_source, created_at, updated_at, archived_at, \
-            attached_bucket_refs, model_transcript, transcript_version) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+            attached_bucket_refs, model_transcript, transcript_version, mcp_selection_json) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
          ON CONFLICT(id) DO UPDATE SET \
            title=CASE WHEN chat_threads.title_source='manual' AND excluded.title_source<>'manual' \
                       THEN chat_threads.title ELSE excluded.title END, \
@@ -330,7 +366,8 @@ pub fn save(conn: &mut Connection, input: &ChatSaveInput) -> Result<(), String> 
            archived_at=excluded.archived_at, \
            attached_bucket_refs=excluded.attached_bucket_refs, \
            model_transcript=excluded.model_transcript, \
-           transcript_version=excluded.transcript_version",
+           transcript_version=excluded.transcript_version, \
+           mcp_selection_json=excluded.mcp_selection_json",
         params![
             input.id,
             input.title,
@@ -341,6 +378,7 @@ pub fn save(conn: &mut Connection, input: &ChatSaveInput) -> Result<(), String> 
             buckets,
             transcript,
             input.model_transcript_version,
+            mcp_selection,
         ],
     )
     .map_err(|e| format!("save chat thread: {e}"))?;
@@ -465,12 +503,14 @@ mod tests {
                 prompt_tokens: None,
                 completion_tokens: None,
                 citations: vec![],
+                mcp_calls: vec![],
                 attachments: vec![],
                 created_at: "2026-08-23T10:00:00Z".into(),
             }],
             model_transcript: vec![],
             model_transcript_version: 1,
             attached_bucket_refs: vec![],
+            mcp_selection: McpChatSelection::default(),
         }
     }
 
@@ -492,6 +532,46 @@ mod tests {
         )
         .unwrap();
         assert!(get(&conn, "chat-a").unwrap().is_some());
+    }
+
+    #[test]
+    fn round_trips_chat_mcp_selection_and_result_cards() {
+        let mut conn = db();
+        let mut value = input("chat-mcp", "use the selected service");
+        value.mcp_selection.server_ids = vec!["server-a".into()];
+        value
+            .mcp_selection
+            .disabled_tools
+            .insert("server-a".into(), vec!["dangerous".into()]);
+        value.messages[0].mcp_calls.push(ChatMcpCall {
+            approval_id: "approval-a".into(),
+            server_id: "server-a".into(),
+            server_name: "Calendar".into(),
+            tool_name: "list_events".into(),
+            arguments: serde_json::json!({"limit": 5}),
+            status: "done".into(),
+            result: Some(McpToolResultView {
+                content: vec![serde_json::json!({"type": "text", "text": "No events"})],
+                structured_content: Some(serde_json::json!({"events": []})),
+                is_error: false,
+                model_text: "No events".into(),
+                truncated: false,
+            }),
+            error: None,
+        });
+
+        save(&mut conn, &value).unwrap();
+        let restored = get(&conn, "chat-mcp").unwrap().unwrap();
+
+        assert_eq!(restored.mcp_selection.server_ids, vec!["server-a"]);
+        assert_eq!(restored.messages[0].mcp_calls[0].status, "done");
+        assert_eq!(
+            restored.messages[0].mcp_calls[0]
+                .result
+                .as_ref()
+                .and_then(|result| result.structured_content.as_ref()),
+            Some(&serde_json::json!({"events": []}))
+        );
     }
 
     #[test]

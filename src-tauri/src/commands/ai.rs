@@ -445,17 +445,30 @@ pub async fn ai_ask(
         .await;
     }
     let resolved = resolve_provider(&app).await?;
-    let context = crate::mcp::chat::McpRunContext::prepare(
+    let context = crate::agent::prepare_mcp_context(
         &app,
         &mcp_manager,
         &mcp_approvals,
         &request_id,
         &context.session_id,
         &mcp_selection,
-        resolved.model.context_tokens,
+        resolved.model,
         &on_event,
     )
     .await?;
+    let Some(context) = context else {
+        return run_chat(
+            &app,
+            &ai_state,
+            request_id,
+            messages,
+            on_event,
+            Some(2048),
+            None,
+            true,
+        )
+        .await;
+    };
     run_chat_with_mcp(
         &app,
         &ai_state,
@@ -776,23 +789,17 @@ pub async fn agent_start(
     let (goal_images, gate_note) = gate_images(resolved.model, images.unwrap_or_default());
     let conversation_id = context.session_id.clone();
     let mcp_selection = mcp_selection.unwrap_or_default();
-    let mcp_context = if mcp_selection.server_ids.is_empty() {
-        None
-    } else {
-        Some(
-            crate::mcp::chat::McpRunContext::prepare(
-                &app,
-                &mcp_manager,
-                &mcp_approvals,
-                &request_id,
-                &conversation_id,
-                &mcp_selection,
-                resolved.model.context_tokens,
-                &on_event,
-            )
-            .await?,
-        )
-    };
+    let mcp_context = crate::agent::prepare_mcp_context(
+        &app,
+        &mcp_manager,
+        &mcp_approvals,
+        &request_id,
+        &conversation_id,
+        &mcp_selection,
+        resolved.model,
+        &on_event,
+    )
+    .await?;
     let provider = resolved.provider;
 
     let shell = crate::commands::settings::read_string(&app, "shell_path")

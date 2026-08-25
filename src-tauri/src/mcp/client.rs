@@ -96,7 +96,7 @@ pub struct McpToolView {
     pub schema_hash: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct McpToolResultView {
     pub content: Vec<Value>,
     pub structured_content: Option<Value>,
