@@ -4,7 +4,8 @@
     "resources": {
       "binaries/llama-runtime/*.dll": "",
       "binaries/llama-backends/*.dll": "llama-backends/",
-      "../scripts/windows-cli-path.ps1": "windows-cli-path.ps1"
+      "../scripts/windows-cli-path.ps1": "windows-cli-path.ps1",
+      "binaries/vterminal-mcp-relay": "vterminal-mcp-relay"
     }
   }
 }

@@ -108,7 +108,10 @@ function cancelLinkedSessionWork(
   // Inline command-composer requests are per terminal rather than per shared
   // conversation. A target disappearing invalidates either member's proposal.
   for (const targetSessionId of new Set(targetSessionIds)) {
-    const composerRequestId = ownRecordValue(store.sessionUi, targetSessionId)?.composerRequestId;
+    const composerRequestId = ownRecordValue(
+      store.sessionUi,
+      targetSessionId,
+    )?.composerRequestId;
     if (composerRequestId) {
       // Composer callbacks already compare this id before committing. Clear it
       // synchronously so a late proposal cannot reopen on the surviving pane.
@@ -128,7 +131,10 @@ function cancelLinkedSessionWork(
 
 /** Resolve once the shell reaches its input phase (OSC 133;B), or on timeout /
  *  teardown. Never rejects — a missed prompt must not sink the tab. */
-function waitForFirstPrompt(sessionId: string, timeoutMs: number): Promise<void> {
+function waitForFirstPrompt(
+  sessionId: string,
+  timeoutMs: number,
+): Promise<void> {
   return new Promise((resolve) => {
     let done = false;
     const finish = () => {
@@ -140,7 +146,8 @@ function waitForFirstPrompt(sessionId: string, timeoutMs: number): Promise<void>
     };
     const timer = setTimeout(finish, timeoutMs);
     const unsubscribe = subscribeTerm(sessionId, (e) => {
-      if (e.type === "disposed" || (e.type === "phase" && e.phase === "input")) finish();
+      if (e.type === "disposed" || (e.type === "phase" && e.phase === "input"))
+        finish();
     });
   });
 }
@@ -149,297 +156,340 @@ function waitForFirstPrompt(sessionId: string, timeoutMs: number): Promise<void>
 // mount): xterm instance, BlockTracker callbacks → store, PTY spawn, raw data
 // channel with ack-based flow control, keystroke forwarding.
 export function useSessions() {
-  const createSession = useCallback(async (spec: LaunchSpec = {}): Promise<string> => {
-    if (isUpdateExitBarrier(useUpdateStore.getState().status)) {
-      throw new Error("A new terminal cannot be opened while VTerminal is applying an update.");
-    }
-    const store = useAppStore.getState();
-    const sessionId = `sess-${Date.now()}-${sessionCounter++}`;
-    const shell = isWindows()
-      ? "/bin/bash"
-      : spec.shell?.trim() || store.shellPath || defaultShell();
-
-    const session: Session = {
-      id: sessionId,
-      shell,
-      cwd: spec.cwd ?? null,
-      createdAt: new Date().toISOString(),
-      exited: false,
-      exitCode: null,
-      hostId: spec.hostId ?? null,
-      hostLabel: spec.title ?? null,
-      userTitle: spec.userTitle ?? null,
-      aiTitle: null,
-      ordinal: nextOrdinal(store.sessions),
-      archivedFrom: spec.archivedFrom ?? null,
-    };
-    // addSession and getOrCreateTerm must stay in the SAME tick: React cannot
-    // render between them, so TerminalView's effect always finds the entry.
-    store.addSession(session, spec.activate ?? true);
-
-    const entry = getOrCreateTerm(
-      sessionId,
-      {
-        fontSize: store.fontSize,
-        scrollback: store.scrollbackLines,
-        cursorStyle: store.cursorStyle,
-        cursorBlink: store.cursorBlink,
-        themeId: store.theme,
-      },
-      {
-        onBlockStart: (blockId, command, startMarker) => {
-          // Keep the LIVE marker — marker.line shifts with scrollback trimming
-          // and reflow; static snapshots would drift (gutter/off-buffer reads).
-          getTerm(sessionId)?.blockMarkers.set(blockId, { start: startMarker, end: null });
-          const block: Block = {
-            id: blockId,
-            sessionId,
-            command,
-            state: "running",
-            exitCode: null,
-            startLine: startMarker.line,
-            endLine: null,
-            startedAt: new Date().toISOString(),
-            endedAt: null,
-            origin: "user",
-          };
-          useAppStore.getState().startBlock(sessionId, block);
-          // `ssh host` opening means every OSC after this describes a DIFFERENT
-          // machine — until this block ends, the local cwd is not the truth.
-          const nested = detectNesting(command);
-          if (nested) {
-            // Entering a nested environment invalidates a Sidecar local role.
-            // Fence the provider even when this workspace is not mounted.
-            if (useAppStore.getState().sidecarForSession(sessionId)) {
-              void cancelLinkedSessionWork(sessionId, "cancelled");
-            }
-            // Claimed only on an exact command match, so a connect the user
-            // typed by hand still gets `remote` but no saved-host identity.
-            const connect = takePendingConnect(sessionId, command);
-            useAppStore.getState().updateSessionUi(sessionId, {
-              remote: nested,
-              nestedBlockId: blockId,
-              remoteHost: connect
-                ? { id: connect.hostId, label: connect.label, color: connect.color }
-                : null,
-            });
-            // Frecency counts commands that actually reached a shell, not
-            // palette clicks that were never typed.
-            if (connect) void api.sshHostsTouch(connect.hostId).catch(() => {});
-          }
-          // Name the tab after this command, but only once it has proven itself
-          // slow. A nested session gets its label from `remote` instead.
-          clearLongRunningTimer(sessionId);
-          if (!nested) {
-            const label = shortenCommand(command);
-            if (label) {
-              longRunningTimers.set(
-                sessionId,
-                setTimeout(() => {
-                  longRunningTimers.delete(sessionId);
-                  const live = useAppStore.getState();
-                  // Still the same command? A fast block that finished and was
-                  // replaced must not hand its label to its successor.
-                  if (live.sessionUi[sessionId]?.runningBlockId !== blockId) return;
-                  live.updateSessionUi(sessionId, { longRunningCommand: label });
-                }, LONG_RUNNING_MS),
-              );
-            }
-          }
-          emitTerm(sessionId, { type: "blockStart", blockId, command });
-        },
-        onBlockEnd: (blockId, exitCode, endMarker) => {
-          const s = useAppStore.getState();
-          const markers = getTerm(sessionId)?.blockMarkers.get(blockId);
-          if (markers && endMarker) markers.end = endMarker;
-          const block = s.sessionUi[sessionId]?.blocks.find((b) => b.id === blockId);
-          s.finishBlock(sessionId, blockId, exitCode, endMarker?.line ?? null);
-          clearLongRunningTimer(sessionId);
-          if (s.sessionUi[sessionId]?.longRunningCommand) {
-            s.updateSessionUi(sessionId, { longRunningCommand: null });
-          }
-          // `ssh` returned — we are back on the local shell, so local cwd is
-          // trustworthy again and any remote exec mode must be forgotten.
-          if (s.sessionUi[sessionId]?.nestedBlockId === blockId) {
-            // The SSH role stopped being SSH. Cancel before publishing the
-            // identity transition so no hidden Sidecar continues generating.
-            if (s.sidecarForSession(sessionId)) {
-              void cancelLinkedSessionWork(sessionId, "cancelled");
-            }
-            s.updateSessionUi(sessionId, { remote: null, nestedBlockId: null, remoteHost: null });
-            resetSessionMode(sessionId);
-          }
-          emitTerm(sessionId, {
-            type: "blockEnd",
-            blockId,
-            exitCode,
-            endLine: endMarker?.line ?? null,
-          });
-          // Persist to history (fire-and-forget; backend checks the setting too)
-          if (block && s.historyEnabled && block.command.trim()) {
-            const startedAt = new Date(block.startedAt);
-            void api
-              .historyRecord({
-                session_id: sessionId,
-                cwd: s.sessionUi[sessionId]?.cwd ?? "",
-                command: block.command,
-                exit_code: exitCode,
-                duration_ms: Date.now() - startedAt.getTime(),
-                output_tail: null,
-                git_branch: s.sessionUi[sessionId]?.gitBranch ?? null,
-                started_at: block.startedAt,
-              })
-              .catch(() => {});
-          }
-        },
-        onBlockTrimmed: (blockId) => {
-          getTerm(sessionId)?.blockMarkers.delete(blockId);
-          useAppStore.getState().trimBlock(sessionId, blockId);
-          emitTerm(sessionId, { type: "blockTrimmed", blockId });
-        },
-        onCwdChange: (cwd, host) => {
-          const s = useAppStore.getState();
-          // While nested, OSC 7 describes a DIFFERENT machine. Our own remote
-          // hook deliberately emits only OSC 6973;RD, but plenty of distros
-          // ship their own (VTE's __vte_osc7 in /etc/bash.bashrc, iTerm2's
-          // remote integration). Recording that path would rename the tab
-          // after a remote directory and — once sessions are persisted — hand
-          // a remote path to the next spawn as a local cwd.
-          if (s.sessionUi[sessionId]?.remote) {
-            s.updateSessionUi(sessionId, { host, integrationActive: true });
-            return;
-          }
-          s.updateSessionUi(sessionId, { cwd, host, integrationActive: true });
-          // Only the cwd is recorded — the label is derived from it by
-          // `resolveSessionTitle`. Writing a title here is what named every
-          // fresh tab `maholick`: basename($HOME) is the username.
-          s.updateSession(sessionId, { cwd });
-        },
-        onPhaseChange: (phase) => {
-          useAppStore.getState().updateSessionUi(sessionId, { phase, integrationActive: true });
-          emitTerm(sessionId, { type: "phase", phase });
-        },
-        onOscPrivate: (payload) => emitTerm(sessionId, { type: "osc", payload }),
-      },
-      // "#" at an empty prompt opens the AI composer
-      () => useAppStore.getState().updateSessionUi(sessionId, { composerOpen: true }),
-    );
-
-    // Seed the status bar before the first OSC 7 arrives. Legal only here:
-    // withSessionUi no-ops for ids not in `sessions`, and addSession ran above.
-    if (spec.cwd) store.updateSessionUi(sessionId, { cwd: spec.cwd });
-
-    // A restored tab's container is not laid out yet (inactive panes render
-    // `hidden`, so fit() bails on offsetParent). Seed the caller's dims so the
-    // shell spawns at the right size instead of 80x24 and reflowing on first view.
-    if (spec.dims) entry.term.resize(spec.dims.cols, spec.dims.rows);
-
-    // Replay BEFORE the spawn and await the parse: the shell's first bytes then
-    // cannot interleave with the payload, and the new prompt lands cleanly
-    // below the separator. This ordering is the real replay guard — the
-    // tracker suspension inside replayScrollback is defence in depth.
-    if (spec.replay) await replayScrollback(sessionId, spec.replay);
-
-    // Keystrokes → PTY
-    entry.term.onData((d) => void api.ptyWrite(sessionId, d));
-
-    // Copy-on-select (checked live so the setting applies without recreating)
-    entry.term.onSelectionChange(() => {
-      const s = useAppStore.getState();
-      if (s.copyOnSelect && entry.term.hasSelection()) {
-        void navigator.clipboard.writeText(entry.term.getSelection());
+  const createSession = useCallback(
+    async (spec: LaunchSpec = {}): Promise<string> => {
+      if (isUpdateExitBarrier(useUpdateStore.getState().status)) {
+        throw new Error(
+          "A new terminal cannot be opened while VTerminal is applying an update.",
+        );
       }
-    });
+      const store = useAppStore.getState();
+      const sessionId = `sess-${Date.now()}-${sessionCounter++}`;
+      const shell = isWindows()
+        ? "/bin/bash"
+        : spec.shell?.trim() || store.shellPath || defaultShell();
 
-    // PTY output → xterm, with write-callback ack flow control (~256 KB)
-    try {
-      await api.ptySpawn(
-      sessionId,
-      {
-        cols: entry.term.cols,
-        rows: entry.term.rows,
-        cwd: spec.cwd ?? null,
+      const session: Session = {
+        id: sessionId,
         shell,
-      },
-      (buf) => {
-        const bytes = new Uint8Array(buf);
-        observeSshPasswordPrompt(sessionId, bytes);
-        entry.term.write(bytes, () => {
-          entry.unackedBytes += bytes.byteLength;
-          if (entry.unackedBytes >= 262_144) {
-            const n = entry.unackedBytes;
-            entry.unackedBytes = 0;
-            void api.ptyAck(sessionId, n);
-          }
-        });
-      },
-      (event) => {
-        if (event.type === "Exit") {
-          // Cancel the SHARED owner before marking either target unavailable.
-          // updateSession below then degrades (or removes) the binding.
-          void cancelLinkedSessionWork(sessionId, "closed");
-          api.releasePtyChannels(sessionId);
-          useAppStore.getState().updateSession(sessionId, {
-            exited: true,
-            exitCode: event.exit_code,
-          });
-        } else if (event.type === "Error") {
-          console.error(`PTY error (${sessionId}):`, event.message);
-        } else if (event.type === "Warning") {
-          entry.term.write(`\x1b[33m${event.message}\x1b[0m\r\n`);
-        }
-      },
+        cwd: spec.cwd ?? null,
+        createdAt: new Date().toISOString(),
+        exited: false,
+        exitCode: null,
+        hostId: spec.hostId ?? null,
+        hostLabel: spec.title ?? null,
+        userTitle: spec.userTitle ?? null,
+        aiTitle: null,
+        ordinal: nextOrdinal(store.sessions),
+        archivedFrom: spec.archivedFrom ?? null,
+      };
+      // addSession and getOrCreateTerm must stay in the SAME tick: React cannot
+      // render between them, so TerminalView's effect always finds the entry.
+      store.addSession(session, spec.activate ?? true);
+
+      const entry = getOrCreateTerm(
+        sessionId,
+        {
+          fontSize: store.fontSize,
+          scrollback: store.scrollbackLines,
+          cursorStyle: store.cursorStyle,
+          cursorBlink: store.cursorBlink,
+          themeId: store.theme,
+        },
+        {
+          onBlockStart: (blockId, command, startMarker) => {
+            // Keep the LIVE marker — marker.line shifts with scrollback trimming
+            // and reflow; static snapshots would drift (gutter/off-buffer reads).
+            getTerm(sessionId)?.blockMarkers.set(blockId, {
+              start: startMarker,
+              end: null,
+            });
+            const block: Block = {
+              id: blockId,
+              sessionId,
+              command,
+              state: "running",
+              exitCode: null,
+              startLine: startMarker.line,
+              endLine: null,
+              startedAt: new Date().toISOString(),
+              endedAt: null,
+              origin: "user",
+            };
+            useAppStore.getState().startBlock(sessionId, block);
+            // `ssh host` opening means every OSC after this describes a DIFFERENT
+            // machine — until this block ends, the local cwd is not the truth.
+            const nested = detectNesting(command);
+            if (nested) {
+              // Entering a nested environment invalidates a Sidecar local role.
+              // Fence the provider even when this workspace is not mounted.
+              if (useAppStore.getState().sidecarForSession(sessionId)) {
+                void cancelLinkedSessionWork(sessionId, "cancelled");
+              }
+              // Claimed only on an exact command match, so a connect the user
+              // typed by hand still gets `remote` but no saved-host identity.
+              const connect = takePendingConnect(sessionId, command);
+              useAppStore.getState().updateSessionUi(sessionId, {
+                remote: nested,
+                nestedBlockId: blockId,
+                remoteHost: connect
+                  ? {
+                      id: connect.hostId,
+                      label: connect.label,
+                      color: connect.color,
+                    }
+                  : null,
+              });
+              // Frecency counts commands that actually reached a shell, not
+              // palette clicks that were never typed.
+              if (connect)
+                void api.sshHostsTouch(connect.hostId).catch(() => {});
+            }
+            // Name the tab after this command, but only once it has proven itself
+            // slow. A nested session gets its label from `remote` instead.
+            clearLongRunningTimer(sessionId);
+            if (!nested) {
+              const label = shortenCommand(command);
+              if (label) {
+                longRunningTimers.set(
+                  sessionId,
+                  setTimeout(() => {
+                    longRunningTimers.delete(sessionId);
+                    const live = useAppStore.getState();
+                    // Still the same command? A fast block that finished and was
+                    // replaced must not hand its label to its successor.
+                    if (live.sessionUi[sessionId]?.runningBlockId !== blockId)
+                      return;
+                    live.updateSessionUi(sessionId, {
+                      longRunningCommand: label,
+                    });
+                  }, LONG_RUNNING_MS),
+                );
+              }
+            }
+            emitTerm(sessionId, { type: "blockStart", blockId, command });
+          },
+          onBlockEnd: (blockId, exitCode, endMarker) => {
+            const s = useAppStore.getState();
+            const markers = getTerm(sessionId)?.blockMarkers.get(blockId);
+            if (markers && endMarker) markers.end = endMarker;
+            const block = s.sessionUi[sessionId]?.blocks.find(
+              (b) => b.id === blockId,
+            );
+            s.finishBlock(
+              sessionId,
+              blockId,
+              exitCode,
+              endMarker?.line ?? null,
+            );
+            clearLongRunningTimer(sessionId);
+            if (s.sessionUi[sessionId]?.longRunningCommand) {
+              s.updateSessionUi(sessionId, { longRunningCommand: null });
+            }
+            // `ssh` returned — we are back on the local shell, so local cwd is
+            // trustworthy again and any remote exec mode must be forgotten.
+            if (s.sessionUi[sessionId]?.nestedBlockId === blockId) {
+              // The SSH role stopped being SSH. Cancel before publishing the
+              // identity transition so no hidden Sidecar continues generating.
+              if (s.sidecarForSession(sessionId)) {
+                void cancelLinkedSessionWork(sessionId, "cancelled");
+              }
+              s.updateSessionUi(sessionId, {
+                remote: null,
+                nestedBlockId: null,
+                remoteHost: null,
+              });
+              resetSessionMode(sessionId);
+            }
+            emitTerm(sessionId, {
+              type: "blockEnd",
+              blockId,
+              exitCode,
+              endLine: endMarker?.line ?? null,
+            });
+            // Persist to history (fire-and-forget; backend checks the setting too)
+            if (block && s.historyEnabled && block.command.trim()) {
+              const startedAt = new Date(block.startedAt);
+              void api
+                .historyRecord({
+                  session_id: sessionId,
+                  cwd: s.sessionUi[sessionId]?.cwd ?? "",
+                  command: block.command,
+                  exit_code: exitCode,
+                  duration_ms: Date.now() - startedAt.getTime(),
+                  output_tail: null,
+                  git_branch: s.sessionUi[sessionId]?.gitBranch ?? null,
+                  started_at: block.startedAt,
+                })
+                .catch(() => {});
+            }
+          },
+          onBlockTrimmed: (blockId) => {
+            getTerm(sessionId)?.blockMarkers.delete(blockId);
+            useAppStore.getState().trimBlock(sessionId, blockId);
+            emitTerm(sessionId, { type: "blockTrimmed", blockId });
+          },
+          onCwdChange: (cwd, host) => {
+            const s = useAppStore.getState();
+            // While nested, OSC 7 describes a DIFFERENT machine. Our own remote
+            // hook deliberately emits only OSC 6973;RD, but plenty of distros
+            // ship their own (VTE's __vte_osc7 in /etc/bash.bashrc, iTerm2's
+            // remote integration). Recording that path would rename the tab
+            // after a remote directory and — once sessions are persisted — hand
+            // a remote path to the next spawn as a local cwd.
+            if (s.sessionUi[sessionId]?.remote) {
+              s.updateSessionUi(sessionId, { host, integrationActive: true });
+              return;
+            }
+            s.updateSessionUi(sessionId, {
+              cwd,
+              host,
+              integrationActive: true,
+            });
+            // Only the cwd is recorded — the label is derived from it by
+            // `resolveSessionTitle`. Writing a title here is what named every
+            // fresh tab `maholick`: basename($HOME) is the username.
+            s.updateSession(sessionId, { cwd });
+          },
+          onPhaseChange: (phase) => {
+            useAppStore
+              .getState()
+              .updateSessionUi(sessionId, { phase, integrationActive: true });
+            emitTerm(sessionId, { type: "phase", phase });
+          },
+          onOscPrivate: (payload) =>
+            emitTerm(sessionId, { type: "osc", payload }),
+        },
+        // "#" at an empty prompt opens the AI composer
+        () =>
+          useAppStore
+            .getState()
+            .updateSessionUi(sessionId, { composerOpen: true }),
       );
-    } catch (err) {
-      // Spawn failed (bad shell path etc.) — keep the tab visible but mark it
-      // exited with the error written into the terminal, instead of leaving a
-      // silent zombie.
-      console.error(`pty_spawn failed (${sessionId}):`, err);
-      entry.term.write(`\x1b[31mFailed to start shell: ${String(err)}\x1b[0m\r\n`);
-      useAppStore.getState().updateSession(sessionId, { exited: true, exitCode: null });
+
+      // Seed the status bar before the first OSC 7 arrives. Legal only here:
+      // withSessionUi no-ops for ids not in `sessions`, and addSession ran above.
+      if (spec.cwd) store.updateSessionUi(sessionId, { cwd: spec.cwd });
+
+      // A restored tab's container is not laid out yet (inactive panes render
+      // `hidden`, so fit() bails on offsetParent). Seed the caller's dims so the
+      // shell spawns at the right size instead of 80x24 and reflowing on first view.
+      if (spec.dims) entry.term.resize(spec.dims.cols, spec.dims.rows);
+
+      // Replay BEFORE the spawn and await the parse: the shell's first bytes then
+      // cannot interleave with the payload, and the new prompt lands cleanly
+      // below the separator. This ordering is the real replay guard — the
+      // tracker suspension inside replayScrollback is defence in depth.
+      if (spec.replay) await replayScrollback(sessionId, spec.replay);
+
+      // Keystrokes → PTY
+      entry.term.onData((d) => void api.ptyWrite(sessionId, d));
+
+      // Copy-on-select (checked live so the setting applies without recreating)
+      entry.term.onSelectionChange(() => {
+        const s = useAppStore.getState();
+        if (s.copyOnSelect && entry.term.hasSelection()) {
+          void navigator.clipboard.writeText(entry.term.getSelection());
+        }
+      });
+
+      // PTY output → xterm, with write-callback ack flow control (~256 KB)
+      try {
+        await api.ptySpawn(
+          sessionId,
+          {
+            cols: entry.term.cols,
+            rows: entry.term.rows,
+            cwd: spec.cwd ?? null,
+            shell,
+          },
+          (buf) => {
+            const bytes = new Uint8Array(buf);
+            observeSshPasswordPrompt(sessionId, bytes);
+            entry.term.write(bytes, () => {
+              entry.unackedBytes += bytes.byteLength;
+              if (entry.unackedBytes >= 262_144) {
+                const n = entry.unackedBytes;
+                entry.unackedBytes = 0;
+                void api.ptyAck(sessionId, n);
+              }
+            });
+          },
+          (event) => {
+            if (event.type === "Exit") {
+              // Cancel the SHARED owner before marking either target unavailable.
+              // updateSession below then degrades (or removes) the binding.
+              void cancelLinkedSessionWork(sessionId, "closed");
+              api.releasePtyChannels(sessionId);
+              useAppStore.getState().updateSession(sessionId, {
+                exited: true,
+                exitCode: event.exit_code,
+              });
+            } else if (event.type === "Error") {
+              console.error(`PTY error (${sessionId}):`, event.message);
+            } else if (event.type === "Warning") {
+              entry.term.write(`\x1b[33m${event.message}\x1b[0m\r\n`);
+            }
+          },
+        );
+      } catch (err) {
+        // Spawn failed (bad shell path etc.) — keep the tab visible but mark it
+        // exited with the error written into the terminal, instead of leaving a
+        // silent zombie.
+        console.error(`pty_spawn failed (${sessionId}):`, err);
+        entry.term.write(
+          `\x1b[31mFailed to start shell: ${String(err)}\x1b[0m\r\n`,
+        );
+        useAppStore
+          .getState()
+          .updateSession(sessionId, { exited: true, exitCode: null });
+        return sessionId;
+      }
+
+      // Resize forwarding is wired only AFTER the spawn — the seed resize above
+      // would otherwise fire pty_resize at a session Rust has never heard of.
+      entry.term.onResize(({ cols, rows }) => {
+        void api.ptyResize(sessionId, cols, rows).catch(() => {});
+        if (useAppStore.getState().activeSessionId === sessionId) {
+          useAppStore.getState().setTermDims(cols, rows);
+        }
+      });
+
+      // An initial command is user-authored (a saved host, a Reconnect click) and
+      // still goes through the same gate the agent's commands use — one chokepoint
+      // for turning a string into an executed command line.
+      if (spec.initialCommand) {
+        const gated = sanitizeCommand(spec.initialCommand);
+        if (gated.ok) {
+          void waitForFirstPrompt(sessionId, FIRST_PROMPT_WAIT_MS).then(() => {
+            void api.ptyWrite(sessionId, `${gated.command}\r`).catch(() => {});
+          });
+        } else {
+          console.error(
+            `initial command rejected (${sessionId}): ${gated.reason}`,
+          );
+        }
+      }
+
+      // Flush any bytes below the ack threshold on a timer so long-idle sessions
+      // don't hold back the backend's outstanding counter.
+      const ackFlush = setInterval(() => {
+        if (entry.disposed) {
+          clearInterval(ackFlush);
+          return;
+        }
+        if (entry.unackedBytes > 0) {
+          const n = entry.unackedBytes;
+          entry.unackedBytes = 0;
+          void api.ptyAck(sessionId, n);
+        }
+      }, 1000);
+
+      trackSession(sessionId);
       return sessionId;
-    }
-
-    // Resize forwarding is wired only AFTER the spawn — the seed resize above
-    // would otherwise fire pty_resize at a session Rust has never heard of.
-    entry.term.onResize(({ cols, rows }) => {
-      void api.ptyResize(sessionId, cols, rows).catch(() => {});
-      if (useAppStore.getState().activeSessionId === sessionId) {
-        useAppStore.getState().setTermDims(cols, rows);
-      }
-    });
-
-    // An initial command is user-authored (a saved host, a Reconnect click) and
-    // still goes through the same gate the agent's commands use — one chokepoint
-    // for turning a string into an executed command line.
-    if (spec.initialCommand) {
-      const gated = sanitizeCommand(spec.initialCommand);
-      if (gated.ok) {
-        void waitForFirstPrompt(sessionId, FIRST_PROMPT_WAIT_MS).then(() => {
-          void api.ptyWrite(sessionId, `${gated.command}\r`).catch(() => {});
-        });
-      } else {
-        console.error(`initial command rejected (${sessionId}): ${gated.reason}`);
-      }
-    }
-
-    // Flush any bytes below the ack threshold on a timer so long-idle sessions
-    // don't hold back the backend's outstanding counter.
-    const ackFlush = setInterval(() => {
-      if (entry.disposed) {
-        clearInterval(ackFlush);
-        return;
-      }
-      if (entry.unackedBytes > 0) {
-        const n = entry.unackedBytes;
-        entry.unackedBytes = 0;
-        void api.ptyAck(sessionId, n);
-      }
-    }, 1000);
-
-    trackSession(sessionId);
-    return sessionId;
-  }, []);
+    },
+    [],
+  );
 
   /**
    * Rebuild last run's tabs. Never throws and never rejects — a failed restore
@@ -477,7 +527,8 @@ export function useSessions() {
           // times shows those dozen separators one final time.
           if (stored)
             replay =
-              stripReplayBanners(stored) + restoreBanner(snap, extra.dims?.cols ?? 80, ws.crashed);
+              stripReplayBanners(stored) +
+              restoreBanner(snap, extra.dims?.cols ?? 80, ws.crashed);
         } catch (err) {
           console.warn(`scrollback fetch failed (${snap.session_id}):`, err);
         }
@@ -552,7 +603,9 @@ export function useSessions() {
   const closeSession = useCallback(
     (sessionId: string) =>
       trackArchiveMutation(async () => {
-        const bindingAtClose = useAppStore.getState().sidecarForSession(sessionId);
+        const bindingAtClose = useAppStore
+          .getState()
+          .sidecarForSession(sessionId);
         // Sidecar work belongs to the owner conversation, not necessarily the
         // tab being closed. Fence it and release BOTH PTY waiters before the
         // selected target can disappear.
@@ -578,7 +631,9 @@ export function useSessions() {
         if (bindingAtClose) {
           forgetRunbookTerminal(sessionId);
           const store = useAppStore.getState();
-          const live = store.sessions.find((session) => session.id === sessionId);
+          const live = store.sessions.find(
+            (session) => session.id === sessionId,
+          );
           if (live) {
             store.updateSession(sessionId, {
               exited: true,
@@ -593,6 +648,7 @@ export function useSessions() {
         //   before removeSession — which drops aiStreams[id] UNREAD, and the AI
         //                          transcript exists nowhere else in the app
         await archiveOnClose(sessionId);
+        await api.mcpDisconnect(sessionId).catch(() => {});
         forgetRunbookTerminal(sessionId);
         disposeTerm(sessionId);
         useAppStore.getState().removeSession(sessionId);
@@ -634,7 +690,11 @@ function nextFrame(timeoutMs = 250): Promise<void> {
 }
 
 /** Restore's wording of the replay separator — see lib/replayBanner.ts. */
-function restoreBanner(snap: SessionSnapshotMeta, cols: number, crashed: boolean): string {
+function restoreBanner(
+  snap: SessionSnapshotMeta,
+  cols: number,
+  crashed: boolean,
+): string {
   return replayBanner(
     {
       kind: "restored",

@@ -8,6 +8,7 @@ import { DocsSettings } from "./DocsSettings";
 import { RunbooksSettings } from "./RunbooksSettings";
 import { SshHostsSection } from "./SshHostsSection";
 import { UpdatesSection } from "./UpdatesSection";
+import { McpSettings } from "./McpSettings";
 import { Row } from "../ui/Row";
 import { S } from "../../lib/strings";
 
@@ -17,6 +18,7 @@ import { S } from "../../lib/strings";
 const TABS: { id: SettingsTab; label: string }[] = [
   { id: "models", label: S.settings.tabs.models },
   { id: "agent", label: S.settings.tabs.agent },
+  { id: "mcp", label: S.settings.tabs.mcp },
   { id: "docs", label: S.settings.tabs.docs },
   { id: "runbooks", label: S.settings.tabs.runbooks },
   { id: "appearance", label: S.settings.tabs.appearance },
@@ -62,6 +64,7 @@ export function SettingsPage() {
           <div className="mx-auto max-w-lg px-6 py-6">
             {tab === "models" && <ModelsSettings />}
             {tab === "agent" && <AgentSection />}
+            {tab === "mcp" && <McpSettings />}
             {tab === "docs" && <DocsSettings />}
             {tab === "runbooks" && <RunbooksSettings />}
             {tab === "appearance" && <AppearanceSection />}

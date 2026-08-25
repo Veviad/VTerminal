@@ -134,6 +134,7 @@ pub async fn execute_agent_phase(
             content: text,
             tool_calls: Some(calls.clone()),
             tool_call_id: None,
+            structured_tool_result: None,
             images: None,
         });
 
@@ -492,6 +493,7 @@ fn tool_result(id: &str, content: &str) -> ChatMessage {
         content: content.into(),
         tool_calls: None,
         tool_call_id: Some(id.into()),
+        structured_tool_result: None,
         images: None,
     }
 }

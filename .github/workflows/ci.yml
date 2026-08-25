@@ -46,6 +46,10 @@ jobs:
       - name: Site release renderer fixtures
         run: npm run test:site-release
 
+      - name: Bundled WSL MCP relay
+        run: go test ./...
+        working-directory: src-tauri/mcp-relay
+
       # `tsc && vite build`. Deliberately the full build rather than a bare
       # `tsc --noEmit`: bundling catches what typechecking cannot, and
       # tsconfig.json already sets strict + noUnusedLocals + noUnusedParameters.

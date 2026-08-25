@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { emptySessionUi, useAppStore } from "../stores/appStore";
-import type { Block, Session } from "../lib/types";
+import type { Block, McpServerView, Session } from "../lib/types";
 
 function makeSession(id: string): Session {
   return {
@@ -33,12 +33,37 @@ function makeBlock(id: string, sessionId: string): Block {
   };
 }
 
+function makeMcpServer(id: string, isDefault: boolean): McpServerView {
+  return {
+    version: 1,
+    id,
+    name: id,
+    enabled: true,
+    default_for_new_chats: isDefault,
+    revision: 1,
+    transport: {
+      type: "streamable_http",
+      url: "https://mcp.example.test",
+      auth: { mode: "none", scopes: [] },
+      headers: [],
+    },
+    timeouts: { startup_ms: 10_000, list_ms: 30_000, call_ms: 60_000 },
+    disabled_tools: [],
+    trust_hash: null,
+    trusted: true,
+    missing_secret_slots: [],
+    runtime: { connected: false, log_bytes: 0, tool_count: null },
+    oauth: null,
+  };
+}
+
 beforeEach(() => {
   useAppStore.setState({
     sessions: [],
     activeSessionId: null,
     sessionUi: {},
     aiStreams: {},
+    mcpServers: [],
   });
 });
 
@@ -209,6 +234,61 @@ describe("ai stream lifecycle", () => {
   it("newAiConversation cannot resurrect a closed tab", () => {
     useAppStore.getState().newAiConversation("gone");
     expect(useAppStore.getState().aiStreams["gone"]).toBeUndefined();
+  });
+
+  it("snapshots MCP defaults for each new conversation without mutating existing chats", () => {
+    const first = makeMcpServer("11111111-1111-4111-8111-111111111111", true);
+    const second = makeMcpServer("22222222-2222-4222-8222-222222222222", false);
+    useAppStore.getState().setMcpServers([first, second]);
+    useAppStore.getState().addSession(makeSession("a"));
+    expect(useAppStore.getState().aiStreams.a.mcpSelection.server_ids).toEqual([first.id]);
+
+    useAppStore.getState().setMcpServers([
+      { ...first, default_for_new_chats: false },
+      { ...second, default_for_new_chats: true },
+    ]);
+    expect(useAppStore.getState().aiStreams.a.mcpSelection.server_ids).toEqual([first.id]);
+
+    useAppStore.getState().setMcpSelection("a", {
+      server_ids: [],
+      disabled_tools: {},
+    });
+    useAppStore.getState().setMcpServers([
+      { ...first, default_for_new_chats: false },
+      { ...second, default_for_new_chats: true },
+    ]);
+    expect(useAppStore.getState().aiStreams.a.mcpSelection.server_ids).toEqual([]);
+
+    useAppStore.getState().addSession(makeSession("b"));
+    expect(useAppStore.getState().aiStreams.b.mcpSelection.server_ids).toEqual([second.id]);
+    useAppStore.getState().newAiConversation("a");
+    expect(useAppStore.getState().aiStreams.a.mcpSelection.server_ids).toEqual([second.id]);
+  });
+
+  it("restores an archived MCP selection while old archives restore with none", () => {
+    const selection = {
+      server_ids: ["11111111-1111-4111-8111-111111111111"],
+      disabled_tools: {
+        "11111111-1111-4111-8111-111111111111": ["dangerous_tool"],
+      },
+    };
+    useAppStore.getState().addSession(makeSession("a"));
+    useAppStore
+      .getState()
+      .restoreAiTranscript("a", [], [], "2026-08-01T00:00:00.000Z", selection);
+    expect(useAppStore.getState().aiStreams.a.mcpSelection).toEqual(selection);
+
+    useAppStore.getState().restoreAiTranscript(
+      "a",
+      [],
+      [],
+      "2026-08-01T00:00:00.000Z",
+      null,
+    );
+    expect(useAppStore.getState().aiStreams.a.mcpSelection).toEqual({
+      server_ids: [],
+      disabled_tools: {},
+    });
   });
 
   it("attach/detach block context ids", () => {

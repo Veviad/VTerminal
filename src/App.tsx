@@ -58,7 +58,7 @@ export default function App() {
                     ? "missing_bash"
                     : info.wsl_status === "missing_tools"
                       ? "missing_tools"
-                    : "error",
+                      : "error",
             );
             return;
           }
@@ -78,10 +78,20 @@ export default function App() {
         // gate for terminal restoration. A damaged Chat row degrades to the
         // Terminal workspace while the user's existing shells still restore.
         try {
-          await useChatStore.getState().initialize(settings.workspace_mode, settings.active_chat_id);
+          await useChatStore
+            .getState()
+            .initialize(settings.workspace_mode, settings.active_chat_id);
         } catch (error) {
           console.error("Chat workspace restore failed:", error);
           useChatStore.setState({ initialized: true, workspaceMode: "terminal" });
+        }
+        // MCP defaults are conversation snapshots, so load the redacted server
+        // list before restore/new-tab creation. Reopened chats replace this with
+        // their archived selection; a genuinely fresh tab receives today's defaults.
+        try {
+          useAppStore.getState().setMcpServers(await api.mcpServersList());
+        } catch (error) {
+          console.error("MCP configuration failed to load:", error);
         }
         // The model catalog gates the whole AI surface (see aiReady), so it has
         // to be present from boot — not only once the user opens Settings.
@@ -109,7 +119,10 @@ export default function App() {
         setWorkspaceReady(true);
         // Only declare the run healthy once it has actually survived a while;
         // doing it at boot would defeat the crash-loop guard entirely.
-        setTimeout(() => void api.workspaceMarkHealthy().catch(() => {}), HEALTHY_AFTER_MS);
+        setTimeout(
+          () => void api.workspaceMarkHealthy().catch(() => {}),
+          HEALTHY_AFTER_MS,
+        );
       }
 
       // Phase 2 — model status, in its OWN try. Sharing the one above would let
@@ -118,13 +131,20 @@ export default function App() {
         const status = await api.modelStatus();
         useAppStore
           .getState()
-          .setModelStatus(status.loaded, status.state, status.available, status.acceleration);
+          .setModelStatus(
+            status.loaded,
+            status.state,
+            status.available,
+            status.acceleration,
+          );
         // Chat model first, vision sidecar second, never both at once —
         // `warmStart` owns that order and the reason for it. Detached, because a
         // multi-gigabyte load must not hold the rest of boot; `loadModel` and
         // `loadVisionModel` route their own failures into the store, so this
         // catch is for the unexpected rather than for "not downloaded yet".
-        void warmStart(status).catch((err) => console.error("Model warm-up failed:", err));
+        void warmStart(status).catch((err) =>
+          console.error("Model warm-up failed:", err),
+        );
       } catch (err) {
         console.error("Model status failed:", err);
       }
@@ -171,7 +191,10 @@ function PrerequisiteQuitFallback() {
     let unlisten: (() => void) | null = null;
     void listen<{ token: number }>(APP_QUIT_EVENT, (event) => {
       void api
-        .appQuitForce(event.payload.token, "Windows prerequisites are unavailable")
+        .appQuitForce(
+          event.payload.token,
+          "Windows prerequisites are unavailable",
+        )
         .catch((error) => {
           console.warn("could not finish prerequisite-screen quit:", error);
         });
@@ -214,20 +237,23 @@ function WslRequired({ issue }: { issue: WslIssue }) {
           ? "Your default WSL2 distribution does not provide /bin/bash."
           : issue === "missing_tools"
             ? "Your default WSL2 distribution is missing the standard POSIX tools VTerminal uses for terminal lifecycle and command reporting."
-        : "VTerminal could not verify the default WSL distribution.";
+            : "VTerminal could not verify the default WSL distribution.";
   return (
     <main className="flex h-full items-center justify-center bg-bg-primary p-8 text-text-primary">
       <section className="max-w-lg rounded-lg border border-border-subtle bg-bg-card p-6 shadow-lg">
         <h1 className="text-lg font-semibold">WSL 2 and Bash are required</h1>
         <p className="mt-2 text-sm text-text-secondary">{detail}</p>
         <p className="mt-2 text-sm text-text-muted">
-          Install or upgrade WSL, choose a default distribution, then reopen VTerminal. The app will
-          never make this administrator-level change automatically.
+          Install or upgrade WSL, choose a default distribution, then reopen
+          VTerminal. The app will never make this administrator-level change
+          automatically.
         </p>
         <button
           type="button"
           className="mt-4 rounded-md bg-accent px-3 py-2 text-sm font-medium text-bg-primary"
-          onClick={() => void openUrl("https://learn.microsoft.com/windows/wsl/install")}
+          onClick={() =>
+            void openUrl("https://learn.microsoft.com/windows/wsl/install")
+          }
         >
           Open Microsoft WSL setup
         </button>

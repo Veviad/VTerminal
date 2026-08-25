@@ -6,10 +6,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // one call, or a crash between them duplicates or loses the chat.
 const archivePutManyMock = vi.fn(async (_rows: ArchiveSessionInput[]) => {});
 const aiCancelMock = vi.fn(async (_requestId: string) => {});
+const mcpDisconnectMock = vi.fn(async (_conversationId: string) => {});
 
 vi.mock("../lib/tauri", () => ({
   archivePutMany: (rows: unknown) => archivePutManyMock(rows as ArchiveSessionInput[]),
   aiCancel: (id: string) => aiCancelMock(id),
+  mcpDisconnect: (id: string) => mcpDisconnectMock(id),
 }));
 
 vi.mock("../lib/termRegistry", () => ({
@@ -120,6 +122,7 @@ beforeEach(() => {
   archivePutManyMock.mockClear();
   archivePutManyMock.mockResolvedValue(undefined);
   aiCancelMock.mockClear();
+  mcpDisconnectMock.mockClear();
   abortSessionMock.mockClear();
   seed(makeSession("sess-1-0"));
 });
@@ -158,6 +161,7 @@ describe("hasConversation", () => {
 describe("startNewChat", () => {
   it("writes the split-off chat and the blanked live row in one transaction", async () => {
     await expect(startNewChat("sess-1-0")).resolves.toBe(true);
+    expect(mcpDisconnectMock).toHaveBeenCalledWith("sess-1-0");
 
     expect(archivePutManyMock).toHaveBeenCalledTimes(1);
     expect(rowsOf(0)).toHaveLength(2);

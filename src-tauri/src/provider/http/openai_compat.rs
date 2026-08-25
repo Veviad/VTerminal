@@ -599,6 +599,7 @@ mod tests {
                     arguments: "{}".into(),
                 }]),
                 tool_call_id: None,
+                structured_tool_result: None,
                 images: None,
             },
             ChatMessage {
@@ -606,6 +607,7 @@ mod tests {
                 content: "exit code: 0".into(),
                 tool_calls: None,
                 tool_call_id: Some("t1".into()),
+                structured_tool_result: None,
                 images: None,
             },
             ChatMessage::user("actually, check the logs first"),
@@ -1033,6 +1035,7 @@ mod tests {
             role: Role::Tool,
             content: "ok".into(),
             tool_call_id: Some("call_1".into()),
+            structured_tool_result: None,
             images: None,
             tool_calls: None,
         }]);

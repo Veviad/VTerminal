@@ -128,6 +128,9 @@ pub struct AgentConfig {
     /// when this is empty, rather than offered and then answered with "nothing is
     /// attached" — a tool the model can see is a tool it will spend a round calling.
     pub doc_buckets: Vec<crate::knowledge::KnowledgeBucketRef>,
+    /// Captured once with the server tool list. May contain direct MCP tools or
+    /// the two progressive-discovery broker tools.
+    pub mcp_tools: Vec<ToolDef>,
     pub exec_target: ExecTarget,
 }
 
@@ -311,6 +314,7 @@ fn tools(config: &AgentConfig) -> Vec<ToolDef> {
     if !config.doc_buckets.is_empty() {
         tools.push(search_docs_tool());
     }
+    tools.extend(config.mcp_tools.clone());
     tools
 }
 
@@ -479,6 +483,7 @@ struct ToolCallContext<'a> {
     steers: &'a SteerState,
     app: Option<&'a tauri::AppHandle<tauri::Wry>>,
     docs: Option<&'a crate::docs::db::DocsDb>,
+    mcp: Option<&'a crate::mcp::chat::McpRunContext<'a>>,
     cancel: &'a tokio::sync::watch::Receiver<bool>,
     on_event: &'a Channel<StreamEvent>,
 }
@@ -698,6 +703,7 @@ async fn process_tool_calls(
         steers,
         app,
         docs,
+        mcp,
         cancel,
         on_event,
     } = context;
@@ -1117,6 +1123,23 @@ async fn process_tool_calls(
                 };
                 messages.push(tool_result(&call.id, &rendered));
             }
+            other if mcp.is_some_and(|context| context.owns_call(other)) => {
+                let context = mcp.expect("guarded above");
+                let dispatched = match context.dispatch(&call, cancel, on_event).await {
+                    Ok(result) => result,
+                    Err(error) => crate::mcp::chat::McpDispatchResult::text(format!(
+                        "MCP tool error: {error}"
+                    )),
+                };
+                messages.push(ChatMessage {
+                    role: Role::Tool,
+                    content: dispatched.model_text,
+                    tool_calls: None,
+                    tool_call_id: Some(call.id),
+                    structured_tool_result: dispatched.structured_tool_result,
+                    images: None,
+                });
+            }
             other => {
                 messages.push(tool_result(
                     &call.id,
@@ -1168,6 +1191,8 @@ pub async fn run_agent(
     // `None` here means `search_docs` answers with an error rather than panicking,
     // though `commands::ai` never offers the tool without it.
     docs: Option<&crate::docs::db::DocsDb>,
+    // Shared MCP dispatcher used by Ask and Agent. None for headless callers.
+    mcp: Option<&crate::mcp::chat::McpRunContext<'_>>,
     cancel: tokio::sync::watch::Receiver<bool>,
     on_event: &Channel<StreamEvent>,
 ) -> AgentRunOutcome {
@@ -1391,6 +1416,7 @@ pub async fn run_agent(
             content: text,
             tool_calls: Some(calls.clone()),
             tool_call_id: None,
+            structured_tool_result: None,
             images: None,
         });
         checkpoints.mark_changed();
@@ -1407,6 +1433,7 @@ pub async fn run_agent(
                 steers,
                 app,
                 docs,
+                mcp,
                 cancel: &cancel,
                 on_event,
             },
@@ -1572,6 +1599,7 @@ fn tool_result(tool_call_id: &str, content: &str) -> ChatMessage {
         content: content.to_string(),
         tool_calls: None,
         tool_call_id: Some(tool_call_id.to_string()),
+        structured_tool_result: None,
         images: None,
     }
 }
@@ -1663,6 +1691,7 @@ mod tests {
             policy_scope_single: "local".into(),
             policy_scope_remote: "remote:test".into(),
             doc_buckets: buckets,
+            mcp_tools: vec![],
             exec_target: ExecTarget::Subprocess,
         }
     }
@@ -2018,6 +2047,7 @@ mod tests {
                 arguments: "{}".to_string(),
             }]),
             tool_call_id: None,
+            structured_tool_result: None,
             images: None,
         }
     }

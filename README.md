@@ -50,6 +50,7 @@ Modern AI terminals tend to be Electron apps that phone home for every completio
 - **Image & file attachments** — drag, paste, or pick. An optional on-device vision sidecar transcribes screenshots so even a non-vision chat model can use them.
 - **Knowledge buckets** — attach local SQLite document buckets and compatible Qdrant collections to Ask, Agent, or durable Chat conversations, with UI-first ingestion and source-qualified citations.
 - **Reusable Runbooks** *(experimental and disabled by default)* — versioned YAML checklists with immutable run snapshots, per-action approvals, visible-terminal execution, evidence, and canonical JSON/Markdown reports. See [the authoring guide](docs/RUNBOOKS.md).
+- **Model Context Protocol** — select several remote Streamable HTTP or sandboxed local stdio servers per chat, use their tools in Ask and Agent, and keep every tool call behind an explicit approval. OAuth 2.1, bearer tokens, custom headers, per-chat tool switches, defaults, and Claude/VS Code JSON import are built in. See [MCP setup and security](docs/MCP.md).
 
 **Interface**
 - Six themes — Veviad Developer UI (default), Veviad UI, Midnight, Nord, Solarized Dark, Light — each with a matched terminal ANSI palette
@@ -65,6 +66,7 @@ Modern AI terminals tend to be Electron apps that phone home for every completio
 | **OS** | macOS on Apple Silicon, or Windows 11 x64 with WSL2, a default distribution, and Bash |
 | **Node** | 20 or newer |
 | **Rust** | pinned by `rust-toolchain.toml` |
+| **Go** | 1.24 or newer for Windows source builds (bundled WSL MCP relay) |
 | **Native tools** | macOS: Xcode CLT; Windows: Visual Studio Build Tools with MSVC and Windows SDK |
 | **cmake / Vulkan SDK** | Local inference only; Vulkan SDK is required for a Windows source build |
 
@@ -225,6 +227,7 @@ Terminal copy and paste on Windows are `Ctrl+Shift+C` / `Ctrl+Shift+V`; plain
 - Backend-only credentials in macOS Keychain or Windows Credential Manager; settings store contains presence flags, not secret values
 - SQLite (WAL, versioned migrations) for history, transcripts, local knowledge metadata, canonical vectors and rebuildable sqlite-vec indexes
 - One asynchronous Knowledge service for hybrid local retrieval, profile-aware Qdrant search, persistent ingestion jobs and deterministic rank fusion
+- An official-SDK MCP client for protocol 2026-07-28 with legacy lifecycle fallback, isolated conversation sessions, Streamable HTTP/SSE, OAuth-backed credentials, cached tool discovery, and mandatory fail-closed stdio isolation
 
 **React** (`src/`)
 - xterm instances live in a registry *outside* React state, which keeps them StrictMode-safe; only the active tab holds a WebGL context

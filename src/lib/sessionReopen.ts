@@ -89,9 +89,12 @@ export async function reopenSession(
   if (!detail) return null;
   const { summary, messages } = detail;
 
-  const wantsOutput = opts.replayOutput !== false && summary.scrollback_lines > 0;
+  const wantsOutput =
+    opts.replayOutput !== false && summary.scrollback_lines > 0;
   const [scrollback, transcript] = await Promise.all([
-    wantsOutput ? api.archiveScrollback(archiveId).catch(() => null) : Promise.resolve(null),
+    wantsOutput
+      ? api.archiveScrollback(archiveId).catch(() => null)
+      : Promise.resolve(null),
     summary.has_model_transcript
       ? api.archiveTranscript(archiveId).catch(() => [])
       : Promise.resolve([]),
@@ -140,7 +143,13 @@ export async function reopenSession(
   if (messages.length > 0) {
     useAppStore
       .getState()
-      .restoreAiTranscript(sessionId, toAiMessages(messages), transcript, summary.closed_at);
+      .restoreAiTranscript(
+        sessionId,
+        toAiMessages(messages),
+        transcript,
+        summary.closed_at,
+        detail.mcp_selection,
+      );
     // Register the live replacement before handing it back to the browser. Its
     // attachment paths are shared with the source archive, and archive cleanup
     // decides whether those bytes are still owned from the surviving DB rows.

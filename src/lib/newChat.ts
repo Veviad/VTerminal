@@ -24,7 +24,11 @@
 
 import * as api from "./tauri";
 import { trackArchiveMutation } from "./archiveWriteTracker";
-import { useAppStore, type AiStreamState, type AppState } from "../stores/appStore";
+import {
+  useAppStore,
+  type AiStreamState,
+  type AppState,
+} from "../stores/appStore";
 import { buildArchiveRow } from "./sessionArchive";
 import { abortSession } from "./ptyExec";
 import { S } from "./strings";
@@ -62,7 +66,9 @@ export function archiveWillKeepChats(): boolean {
 /** Is there anything in this panel worth preserving? One definition, used both
  *  reactively (the button's disabled state) and imperatively (the action itself),
  *  so the two cannot disagree about whether there is a chat. */
-export function streamHasConversation(stream: AiStreamState | undefined): boolean {
+export function streamHasConversation(
+  stream: AiStreamState | undefined,
+): boolean {
   if (!stream) return false;
   return (
     stream.messages.length > 0 ||
@@ -75,7 +81,9 @@ export function streamHasConversation(stream: AiStreamState | undefined): boolea
 
 export function hasConversation(sessionId: string): boolean {
   const store = useAppStore.getState();
-  return streamHasConversation(store.aiStreams[store.resolveAiOwner(sessionId)]);
+  return streamHasConversation(
+    store.aiStreams[store.resolveAiOwner(sessionId)],
+  );
 }
 
 /**
@@ -166,10 +174,18 @@ export function startNewChat(sessionId: string): Promise<boolean> {
         // Keep the conversation. Losing it to a database error would be strictly
         // worse than a click that reports why it did nothing.
         console.warn(`archiving the chat of ${ownerSessionId} failed:`, err);
-        useAppStore.getState().finishAiStream(ownerSessionId, S.aiPanel.newChatFailed);
+        useAppStore
+          .getState()
+          .finishAiStream(ownerSessionId, S.aiPanel.newChatFailed);
         return false;
       }
     }
+
+    // MCP stdio processes and logical HTTP sessions are conversation-scoped.
+    // Close the old set only after its transcript has been durably archived.
+    await api.mcpDisconnect(ownerSessionId).catch((error) => {
+      console.warn(`closing MCP sessions for ${ownerSessionId} failed:`, error);
+    });
 
     // newAiConversation also removes the transient binding. Neither target PTY
     // is closed or re-spawned; ending Sidecar is purely a conversation boundary.
@@ -177,7 +193,9 @@ export function startNewChat(sessionId: string): Promise<boolean> {
     // The split row inherited the supersede, so the tab must stop claiming it:
     // its next close is the end of a NEW thread of work.
     if (session.archivedFrom) {
-      useAppStore.getState().updateSession(ownerSessionId, { archivedFrom: null });
+      useAppStore
+        .getState()
+        .updateSession(ownerSessionId, { archivedFrom: null });
     }
     return true;
   }, false);

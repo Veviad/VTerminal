@@ -8,6 +8,7 @@ pub mod embedding_models;
 pub mod history;
 pub mod knowledge;
 pub mod knowledge_cli;
+pub mod mcp;
 pub mod models;
 pub mod pty;
 pub mod remote_servers;

@@ -64,6 +64,7 @@ fn tool_result(id: &str, content: impl Into<String>) -> ChatMessage {
         tool_calls: None,
         tool_call_id: Some(id.to_string()),
         images: None,
+        structured_tool_result: None,
     }
 }
 
