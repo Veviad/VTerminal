@@ -144,29 +144,17 @@ pub async fn chat_start(
         Vec::new()
     };
     let mcp_selection = mcp_selection.unwrap_or_default();
-    let mcp_context = if supports_tools && !mcp_selection.server_ids.is_empty() {
-        Some(
-            crate::mcp::chat::McpRunContext::prepare(
-                &app,
-                &mcp_manager,
-                &mcp_approvals,
-                &request_id,
-                &conversation_id,
-                &mcp_selection,
-                resolved.model.context_tokens,
-                &on_event,
-            )
-            .await?,
-        )
-    } else {
-        if !supports_tools && !mcp_selection.server_ids.is_empty() {
-            let _ = on_event.send(StreamEvent::McpServerProblem {
-                server_id: mcp_selection.server_ids[0].clone(),
-                message: format!("{} does not support MCP tool calls", resolved.model.label),
-            });
-        }
-        None
-    };
+    let mcp_context = crate::agent::prepare_mcp_context(
+        &app,
+        &mcp_manager,
+        &mcp_approvals,
+        &request_id,
+        &conversation_id,
+        &mcp_selection,
+        resolved.model,
+        &on_event,
+    )
+    .await?;
     let available_tools = chat_tools(
         supports_tools,
         &buckets,

@@ -316,6 +316,111 @@ type ChatSet = (
   update: Partial<ChatState> | ((state: ChatState) => Partial<ChatState>),
 ) => void;
 
+/** Apply MCP lifecycle events without coupling them to the provider stream loop. */
+function handleMcpStreamEvent(event: StreamEvent, set: ChatSet): boolean {
+  if (event.type === "McpToolProposal") {
+    const call: ChatMcpCall = {
+      approval_id: event.approval_id,
+      server_id: event.server_id,
+      server_name: event.server_name,
+      tool_name: event.tool_name,
+      arguments: event.arguments,
+      status: "awaiting",
+      result: null,
+      error: null,
+    };
+    set((state) => ({
+      stream: {
+        ...state.stream,
+        mcpCalls: [
+          ...state.stream.mcpCalls.filter(
+            (candidate) => candidate.approval_id !== event.approval_id,
+          ),
+          call,
+        ],
+        pendingMcpProposal: {
+          approvalId: event.approval_id,
+          serverId: event.server_id,
+          serverName: event.server_name,
+          toolName: event.tool_name,
+          title: event.title,
+          description: event.description,
+          arguments: event.arguments,
+          schemaHash: event.schema_hash,
+        },
+      },
+    }));
+    return true;
+  }
+
+  if (event.type === "McpToolStarted") {
+    set((state) => ({
+      stream: {
+        ...state.stream,
+        pendingMcpProposal:
+          state.stream.pendingMcpProposal?.approvalId === event.approval_id
+            ? null
+            : state.stream.pendingMcpProposal,
+        mcpCalls: state.stream.mcpCalls.some(
+          (call) => call.approval_id === event.approval_id,
+        )
+          ? state.stream.mcpCalls.map((call) =>
+              call.approval_id === event.approval_id
+                ? { ...call, status: "running" as const }
+                : call,
+            )
+          : [
+              ...state.stream.mcpCalls,
+              {
+                approval_id: event.approval_id,
+                server_id: event.server_id,
+                server_name: event.server_name,
+                tool_name: event.tool_name,
+                arguments: event.arguments,
+                status: "running" as const,
+                result: null,
+                error: null,
+              },
+            ],
+      },
+    }));
+    return true;
+  }
+
+  if (event.type === "McpToolResult") {
+    set((state) => ({
+      stream: {
+        ...state.stream,
+        pendingMcpProposal:
+          state.stream.pendingMcpProposal?.approvalId === event.approval_id
+            ? null
+            : state.stream.pendingMcpProposal,
+        mcpCalls: state.stream.mcpCalls.map((call) =>
+          call.approval_id === event.approval_id
+            ? {
+                ...call,
+                status:
+                  event.error || event.result.is_error
+                    ? ("error" as const)
+                    : ("done" as const),
+                result: event.result,
+                error: event.error ?? null,
+              }
+            : call,
+        ),
+      },
+    }));
+    return true;
+  }
+
+  if (event.type === "McpServerProblem") {
+    set({ knowledgeWarning: `MCP: ${event.message}` });
+    return true;
+  }
+
+  return false;
+}
+
 async function streamTurn(
   requestId: string,
   outgoing: Outgoing,
@@ -337,6 +442,7 @@ async function streamTurn(
       detail.mcp_selection,
       (event: StreamEvent) => {
         if (get().stream.requestId !== requestId) return;
+        if (handleMcpStreamEvent(event, set)) return;
         if (event.type === "Started") {
           set((state) => ({ stream: { ...state.stream, model: event.model } }));
         }
@@ -361,95 +467,6 @@ async function streamTurn(
               ],
             },
           }));
-        }
-        if (event.type === "McpToolProposal") {
-          const call: ChatMcpCall = {
-            approval_id: event.approval_id,
-            server_id: event.server_id,
-            server_name: event.server_name,
-            tool_name: event.tool_name,
-            arguments: event.arguments,
-            status: "awaiting",
-            result: null,
-            error: null,
-          };
-          set((state) => ({
-            stream: {
-              ...state.stream,
-              mcpCalls: [
-                ...state.stream.mcpCalls.filter(
-                  (candidate) => candidate.approval_id !== event.approval_id,
-                ),
-                call,
-              ],
-              pendingMcpProposal: {
-                approvalId: event.approval_id,
-                serverId: event.server_id,
-                serverName: event.server_name,
-                toolName: event.tool_name,
-                title: event.title,
-                description: event.description,
-                arguments: event.arguments,
-                schemaHash: event.schema_hash,
-              },
-            },
-          }));
-        }
-        if (event.type === "McpToolStarted") {
-          set((state) => ({
-            stream: {
-              ...state.stream,
-              pendingMcpProposal:
-                state.stream.pendingMcpProposal?.approvalId === event.approval_id
-                  ? null
-                  : state.stream.pendingMcpProposal,
-              mcpCalls: state.stream.mcpCalls.some(
-                (call) => call.approval_id === event.approval_id,
-              )
-                ? state.stream.mcpCalls.map((call) =>
-                    call.approval_id === event.approval_id
-                      ? { ...call, status: "running" as const }
-                      : call,
-                  )
-                : [
-                    ...state.stream.mcpCalls,
-                    {
-                      approval_id: event.approval_id,
-                      server_id: event.server_id,
-                      server_name: event.server_name,
-                      tool_name: event.tool_name,
-                      arguments: event.arguments,
-                      status: "running" as const,
-                      result: null,
-                      error: null,
-                    },
-                  ],
-            },
-          }));
-        }
-        if (event.type === "McpToolResult") {
-          set((state) => ({
-            stream: {
-              ...state.stream,
-              pendingMcpProposal:
-                state.stream.pendingMcpProposal?.approvalId === event.approval_id
-                  ? null
-                  : state.stream.pendingMcpProposal,
-              mcpCalls: state.stream.mcpCalls.map((call) =>
-                call.approval_id === event.approval_id
-                  ? {
-                      ...call,
-                      status: event.error || event.result.is_error ? "error" as const : "done" as const,
-                      result: event.result,
-                      error: event.error ?? null,
-                    }
-                  : call,
-              ),
-            },
-          }));
-        }
-        if (event.type === "McpServerProblem") {
-          set({ knowledgeWarning: `MCP: ${event.message}` });
         }
         if (event.type === "Checkpoint") {
           detail = { ...detail, model_transcript: event.transcript };
