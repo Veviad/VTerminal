@@ -32,7 +32,6 @@ export function RunbookApprovalCard({
   onRespond(
     approved: boolean,
     command: string | null,
-    shellAttested: boolean,
   ): void;
   onApproveAll?: (command: string | null) => void;
   onCancelApproveAll?: () => void;
@@ -180,7 +179,7 @@ export function RunbookApprovalCard({
       <div className="space-y-2">
         <div className="flex gap-2">
           <button
-            onClick={() => onRespond(false, null, false)}
+            onClick={() => onRespond(false, null)}
             disabled={busy}
             className={`${dangerButton} flex-1`}
           >
@@ -198,11 +197,7 @@ export function RunbookApprovalCard({
           ) : (
             <button
               onClick={() => {
-                onRespond(
-                  true,
-                  modelInvocation ? null : command,
-                  !modelInvocation,
-                );
+                onRespond(true, modelInvocation ? null : command);
               }}
               disabled={approveDisabled}
               className={`${primaryButton} flex-1`}
