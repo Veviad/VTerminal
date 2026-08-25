@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -75,6 +75,20 @@ beforeEach(() => {
 });
 
 describe("RunbookLibrary", () => {
+  it("groups creation and maintenance actions into aligned rows", () => {
+    render(<RunbookLibrary sessionId={null} />);
+
+    const creationActions = screen.getByRole("group", { name: "Runbook creation actions" });
+    expect(within(creationActions).getByRole("button", { name: "New" })).toBeInTheDocument();
+    expect(within(creationActions).getByRole("button", { name: "Import" })).toBeInTheDocument();
+    const importAnsible = within(creationActions).getByRole("button", { name: "Import Ansible" });
+    expect(importAnsible.parentElement).toHaveClass("col-span-2");
+
+    const maintenanceActions = screen.getByRole("group", { name: "Runbook library maintenance" });
+    expect(within(maintenanceActions).getByRole("button", { name: "Restore examples" })).toHaveClass("flex-1");
+    expect(within(maintenanceActions).getByRole("button", { name: "Refresh library" })).toHaveClass("w-8");
+  });
+
   it("labels included examples, omits disk refresh, and exports the selected package", async () => {
     const builtin = source("builtin");
     useRunbookStore.getState().setSources([builtin]);
