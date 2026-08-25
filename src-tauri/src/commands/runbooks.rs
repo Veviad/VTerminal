@@ -1623,11 +1623,11 @@ pub fn runbooks_respond_approval(
         return Err("a pre-authorized approval cannot carry an edited command".into());
     }
     if approved
-        && match (model_invocation, acknowledgement) {
-            (true, ApprovalAcknowledgement::Acknowledged) => true,
-            (false, ApprovalAcknowledgement::ModelOnce) => true,
-            _ => false,
-        }
+        && matches!(
+            (model_invocation, acknowledgement),
+            (true, ApprovalAcknowledgement::Acknowledged)
+                | (false, ApprovalAcknowledgement::ModelOnce)
+        )
     {
         return Err(
             "a displayed model invocation must be acknowledged as model_once, and only a model invocation may be"
