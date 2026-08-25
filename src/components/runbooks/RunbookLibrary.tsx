@@ -89,50 +89,56 @@ export function RunbookLibrary({ sessionId }: { sessionId: string | null }) {
     <div className="flex min-h-0 flex-1">
       <aside className="flex w-48 shrink-0 flex-col border-e border-border-subtle bg-bg-primary">
         <div className="space-y-1 border-b border-border-subtle p-2">
-          <div className="grid grid-cols-2 gap-1">
-            <NewRunbookWizard
-              onPublished={async (source) => {
-                await loadLibrary();
-                await selectSource(source.source_id);
-                useRunbookStore.getState().setNotice("Runbook published to the Library.");
-              }}
-            />
+          <div role="group" aria-label="Runbook creation actions" className="grid grid-cols-2 gap-1">
+            <div className="flex min-w-0">
+              <NewRunbookWizard
+                onPublished={async (source) => {
+                  await loadLibrary();
+                  await selectSource(source.source_id);
+                  useRunbookStore.getState().setNotice("Runbook published to the Library.");
+                }}
+              />
+            </div>
             <button
               onClick={() => void pickAndImport()}
               disabled={busyAction !== null}
-              className={`${secondaryButton} min-w-0 flex-1`}
+              className={`${secondaryButton} min-w-0 w-full`}
             >
               <FolderOpen size={12} /> Import
             </button>
-            <AnsibleImportWizard
-              onImported={async (source) => {
-                await loadLibrary();
-                await selectSource(source.source_id);
-                useRunbookStore.getState().setNotice("Ansible project imported into the Runbook Library.");
-              }}
-            />
+            <div className="col-span-2 flex min-w-0">
+              <AnsibleImportWizard
+                onImported={async (source) => {
+                  await loadLibrary();
+                  await selectSource(source.source_id);
+                  useRunbookStore.getState().setNotice("Ansible project imported into the Runbook Library.");
+                }}
+              />
+            </div>
+          </div>
+          <div role="group" aria-label="Runbook library maintenance" className="flex gap-1">
+            <button
+              onClick={() => void restoreBuiltins()}
+              disabled={busyAction !== null}
+              className={`${secondaryButton} min-w-0 flex-1`}
+            >
+              {busyAction === "restore-builtins" ? (
+                <Loader2 size={12} className="animate-spin" />
+              ) : (
+                <RotateCcw size={12} />
+              )}
+              {busyAction === "restore-builtins" ? "Restoring…" : "Restore examples"}
+            </button>
             <button
               onClick={() => void loadLibrary()}
               disabled={loadingLibrary || busyAction !== null}
               title="Refresh library"
               aria-label="Refresh library"
-              className="rounded-md border border-border-subtle p-1.5 text-text-muted hover:bg-bg-hover hover:text-text-secondary disabled:opacity-40"
+              className={`${secondaryButton} w-8 shrink-0 px-0`}
             >
               <RefreshCw size={12} className={loadingLibrary ? "animate-spin" : ""} />
             </button>
           </div>
-          <button
-            onClick={() => void restoreBuiltins()}
-            disabled={busyAction !== null}
-            className={`${secondaryButton} w-full justify-center`}
-          >
-            {busyAction === "restore-builtins" ? (
-              <Loader2 size={12} className="animate-spin" />
-            ) : (
-              <RotateCcw size={12} />
-            )}
-            {busyAction === "restore-builtins" ? "Restoring…" : "Restore examples"}
-          </button>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto py-1">
           {loadingLibrary && sources.length === 0 && (
