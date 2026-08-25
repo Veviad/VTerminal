@@ -197,7 +197,10 @@ export function RunbookApprovalCard({
           ) : (
             <button
               onClick={() => {
-                onRespond(true, modelInvocation ? null : command);
+                onRespond(
+                  true,
+                  modelInvocation || ansibleController ? null : command,
+                );
               }}
               disabled={approveDisabled}
               className={`${primaryButton} flex-1`}

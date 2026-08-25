@@ -186,6 +186,9 @@ async function submitApproval(args: {
   if (acknowledgement === "pre_authorized" && nativeAnsible) {
     return fail("Auto-approve is unavailable for native Ansible controller actions.");
   }
+  if (nativeAnsible && command !== null) {
+    return fail("Native Ansible controller commands cannot be edited.");
+  }
   let promptBinding: string | null = null;
   if (approved && !modelInvocation && !nativeAnsible) {
     if (run.target.kind !== "active-terminal") {
@@ -231,7 +234,7 @@ async function submitApproval(args: {
       runId,
       approvalId,
       approved,
-      nativeAnsible ? null : command,
+      command,
       acknowledgement,
     );
     await refreshRunById(runId);

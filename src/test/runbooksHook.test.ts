@@ -712,6 +712,87 @@ describe("useRunbooks channel activation", () => {
 });
 
 describe("useRunbooks recovery and deletion", () => {
+  it("uses native-controller attestation without an editable command", async () => {
+    const native = waitingApprovalRun(
+      "run-ansible",
+      "approval-ansible",
+      "ansible-runner run /managed/project",
+      {
+        target: {
+          kind: "ansible-inventory",
+          source_id: "source-ansible",
+          controller_path: "/usr/local/bin/ansible-runner",
+          controller_version: "2.4.1",
+          inventory_path: "/managed/project/inventory.ini",
+          inventory_digest: "b".repeat(64),
+          project_digest: "a".repeat(64),
+          limit: "webservers",
+          observed_at: "2026-08-13T12:00:00Z",
+        },
+      },
+    );
+    useRunbookStore.getState().setActiveRun(native);
+    mocks.get.mockResolvedValue({
+      ...native,
+      status: "running" as const,
+      pending_approval_id: null,
+      pending_approval: null,
+    });
+
+    const { result } = renderHook(() => useRunbooks());
+    await act(async () => {
+      await result.current.respondApproval(
+        "run-ansible",
+        "approval-ansible",
+        true,
+        null,
+      );
+    });
+
+    expect(mocks.respondApproval).toHaveBeenCalledWith(
+      "run-ansible",
+      "approval-ansible",
+      true,
+      null,
+      "native_controller",
+    );
+  });
+
+  it("rejects a supplied edit for a native Ansible approval", async () => {
+    const native = waitingApprovalRun(
+      "run-ansible",
+      "approval-ansible",
+      "ansible-runner run /managed/project",
+      {
+        target: {
+          kind: "ansible-inventory",
+          source_id: "source-ansible",
+          controller_path: "/usr/local/bin/ansible-runner",
+          controller_version: "2.4.1",
+          inventory_path: null,
+          inventory_digest: null,
+          project_digest: "a".repeat(64),
+          limit: null,
+          observed_at: "2026-08-13T12:00:00Z",
+        },
+      },
+    );
+    useRunbookStore.getState().setActiveRun(native);
+
+    const { result } = renderHook(() => useRunbooks());
+    await act(async () => {
+      await result.current.respondApproval(
+        "run-ansible",
+        "approval-ansible",
+        true,
+        "ansible-runner run /edited/project",
+      );
+    });
+
+    expect(mocks.respondApproval).not.toHaveBeenCalled();
+    expect(useRunbookStore.getState().error).toContain("cannot be edited");
+  });
+
   it("performs one history request during empty initialization", async () => {
     const { result } = renderHook(() => useRunbooks());
     await act(async () => {

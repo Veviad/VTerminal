@@ -67,6 +67,34 @@ describe("RunbookApprovalCard", () => {
     expect(onRespond).toHaveBeenCalledWith(false, null);
   });
 
+  it("renders native Ansible commands as immutable and submits no edit", () => {
+    const onRespond = vi.fn();
+    render(
+      <RunbookApprovalCard
+        approval={{
+          ...shellApproval("ansible-runner run /managed/project"),
+          project_digest: "a".repeat(64),
+          inventory_digest: "b".repeat(64),
+        }}
+        busy={false}
+        targetLabel="Ansible project"
+        onRespond={onRespond}
+        onApproveAll={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(screen.getByText(/cannot be edited/i)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /every later step unseen/i }),
+    ).toBeNull();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /approve this step/i }),
+    );
+    expect(onRespond).toHaveBeenCalledWith(true, null);
+  });
+
   it("carries the operator's edit into the bulk approval", () => {
     // The bulk button used to take no arguments, so the hook fell back to the
     // model's original proposal and the report recorded it as un-edited.
