@@ -1,5 +1,5 @@
 import { Loader2, Sparkles } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { aiCancel } from "../../lib/tauri";
 import {
@@ -45,8 +45,11 @@ export function RunbookAiGenerator({
   const [requirements, setRequirements] = useState("");
   const [attach, setAttach] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  const [requestId, setRequestId] = useState<string | null>(null);
+  const activeRequestRef = useRef<string | null>(null);
+  const cancelledRequestRef = useRef<string | null>(null);
 
   const sessions = useAppStore((state) => state.sessions);
   const activeSessionId = useAppStore((state) => state.activeSessionId);
@@ -92,6 +95,32 @@ export function RunbookAiGenerator({
   const [edited, setEdited] = useState<string | null>(null);
   const payload = edited ?? renderContext(included);
 
+  useEffect(() => {
+    if (!busy) {
+      setElapsedSeconds(0);
+      return;
+    }
+    const started = Date.now();
+    const update = () => {
+      setElapsedSeconds(Math.floor((Date.now() - started) / 1_000));
+    };
+    update();
+    const timer = window.setInterval(update, 1_000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [busy]);
+
+  // Closing the parent wizard must not leave an invisible generation consuming
+  // the model and later creating a draft the operator explicitly abandoned.
+  useEffect(
+    () => () => {
+      const id = activeRequestRef.current;
+      if (id) void aiCancel(id).catch(() => undefined);
+    },
+    [],
+  );
+
   const reset = () => {
     setRequirements("");
     setAttach(false);
@@ -102,33 +131,50 @@ export function RunbookAiGenerator({
 
   const generate = async () => {
     const id = `runbook-gen-${Date.now()}-${requestCounter++}`;
-    setRequestId(id);
+    activeRequestRef.current = id;
+    cancelledRequestRef.current = null;
     setBusy(true);
+    setStopping(false);
     setError(null);
     try {
       const context = attach && availability.available && payload.trim() ? payload : null;
       const document = await runbooksAiGenerate(id, requirements, context);
+      if (cancelledRequestRef.current === id) return;
       const draft = await runbooksDraftCreate(document);
       await onGenerated(draft);
       setOpen(false);
       reset();
     } catch (reason) {
-      setError(String(reason));
+      if (cancelledRequestRef.current !== id) setError(String(reason));
     } finally {
-      setBusy(false);
-      setRequestId(null);
+      if (activeRequestRef.current === id) {
+        activeRequestRef.current = null;
+        cancelledRequestRef.current = null;
+        setBusy(false);
+        setStopping(false);
+      }
     }
   };
 
   const cancel = () => {
-    if (requestId) void aiCancel(requestId);
+    const id = activeRequestRef.current;
+    if (!id || stopping) return;
+    cancelledRequestRef.current = id;
+    setStopping(true);
+    setError(null);
+    void aiCancel(id).catch((reason) => {
+      if (activeRequestRef.current !== id) return;
+      cancelledRequestRef.current = null;
+      setStopping(false);
+      setError(`Could not stop generation: ${String(reason)}`);
+    });
   };
 
   if (!open) {
     return (
       <button
         type="button"
-        disabled={disabled}
+        disabled={disabled || busy}
         onClick={() => {
           setOpen(true);
         }}
@@ -148,6 +194,10 @@ export function RunbookAiGenerator({
         <button
           type="button"
           onClick={() => {
+            if (busy) {
+              cancel();
+              return;
+            }
             setOpen(false);
             reset();
           }}
@@ -261,10 +311,20 @@ export function RunbookAiGenerator({
 
       {error && <p className="mt-2 text-[9px] text-error">{error}</p>}
 
+      {busy && (
+        <p role="status" aria-live="polite" className="mt-2 text-[9px] text-text-muted">
+          {stopping
+            ? "Stopping generation…"
+            : elapsedSeconds < 10
+              ? "Drafting the runbook, then checking it before opening Review…"
+              : `Still working (${formatElapsed(elapsedSeconds)}). Complex runbooks can take a few minutes.`}
+        </p>
+      )}
+
       <div className="mt-3 flex items-center justify-end gap-2">
         {busy && (
-          <button type="button" onClick={cancel} className={secondaryButton}>
-            Stop
+          <button type="button" disabled={stopping} onClick={cancel} className={secondaryButton}>
+            {stopping ? "Stopping…" : "Stop"}
           </button>
         )}
         <button
@@ -283,6 +343,12 @@ export function RunbookAiGenerator({
       </p>
     </section>
   );
+}
+
+function formatElapsed(totalSeconds: number) {
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 }
 
 function BlockRow({

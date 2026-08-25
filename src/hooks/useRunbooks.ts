@@ -272,9 +272,10 @@ async function autoApproveArmedApproval(
     runId,
     approval: event,
     approved: true,
-    // Nobody typed an edit for a step that was never displayed.
-    command: modelInvocation ? null : event.command,
-    acknowledgement: modelInvocation ? "model_once" : "pre_authorized",
+    // Nobody typed an edit for a step that was never displayed. A null command
+    // preserves the proposed command while keeping that audit fact explicit.
+    command: null,
+    acknowledgement: "pre_authorized",
     busyAction: `approval:${event.approval_id}`,
   });
   if (!result.ok) {
@@ -1029,9 +1030,10 @@ export function useRunbooks() {
   );
 
   /** Approves the approval on screen and arms the run so later approvals are
-   *  answered by `autoApproveArmedApproval` as their events arrive. Arming
-   *  happens only after the visible step is accepted, so a rejected preflight
-   *  never leaves a run silently armed. */
+   *  answered by `autoApproveArmedApproval` as their events arrive. The mode is
+   *  armed before releasing the visible approval to Rust, otherwise the engine
+   *  can request its next approval before the response and refresh round trip
+   *  completes. A refused visible approval rolls the mode back. */
   const approveAllPendingSteps = useCallback(
     async (runId: string, command: string | null) => {
       const run = getRunById(runId);
@@ -1045,6 +1047,11 @@ export function useRunbooks() {
       const modelInvocation = approval.command.startsWith(
         "model://configured-agent/",
       );
+      const store = useRunbookStore.getState();
+      store.setAutoApprove(runId, true);
+      // A replay of the currently displayed request must not race the explicit
+      // response below and submit the same approval a second time.
+      store.noteAutoApproved(runId, approval.approval_id);
       const result = await submitApproval({
         runId,
         approval,
@@ -1053,7 +1060,7 @@ export function useRunbooks() {
         acknowledgement: modelInvocation ? "model_once" : "acknowledged",
         busyAction: `approval:${approval.approval_id}`,
       });
-      if (result.ok) useRunbookStore.getState().setAutoApprove(runId, true);
+      if (!result.ok) disarmAutoApprove(runId, result.error);
     },
     [],
   );

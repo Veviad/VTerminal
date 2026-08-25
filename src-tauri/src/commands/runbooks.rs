@@ -1067,11 +1067,18 @@ pub async fn runbooks_ai_generate(
     let model = crate::commands::ai::active_model(&app);
     let resolved = crate::commands::ai::resolve_provider_for_model(&app, model).await?;
     let cancel = ai_state.register(&request_id);
+    let effort = authoring::authoring_effort(resolved.effort);
+    let started = std::time::Instant::now();
+    log::info!(
+        "generating runbook with {} at {} effort",
+        resolved.model.label,
+        effort.as_str()
+    );
     let authored = authoring::author_draft(
         resolved.provider.as_ref(),
         &requirements,
         terminal_context.as_deref(),
-        resolved.effort,
+        effort,
         cancel,
         &|document| validate_draft_preview(document).issues,
     )
@@ -1079,6 +1086,11 @@ pub async fn runbooks_ai_generate(
     ai_state.finish(&request_id);
 
     let authored = authored?;
+    log::info!(
+        "generated runbook with {} in {}ms",
+        resolved.model.label,
+        started.elapsed().as_millis()
+    );
     if !authored.issues.is_empty() {
         log::info!(
             "generated runbook has {} unresolved issue(s) after one repair round",
@@ -1531,6 +1543,55 @@ pub fn runbooks_cancel(
     Ok(())
 }
 
+/// How the operator arrived at an approval. This is a durable audit fact: it
+/// decides the wording recorded against the approval and distinguishes steps
+/// shown to the operator from later steps accepted by run-level auto-approve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+pub enum ApprovalAcknowledgement {
+    /// The operator clicked approve on a command displayed on screen.
+    #[serde(rename = "acknowledged")]
+    Acknowledged,
+    /// Granted by run-level auto-approve; the command was not individually
+    /// displayed to the operator.
+    #[serde(rename = "pre_authorized")]
+    PreAuthorized,
+    /// A displayed configured-model invocation allowed once. No terminal
+    /// command runs.
+    #[serde(rename = "model_once")]
+    ModelOnce,
+}
+
+fn approval_reason(
+    approved: bool,
+    model_invocation: bool,
+    edited: bool,
+    acknowledgement: ApprovalAcknowledgement,
+    target_basis: &str,
+) -> String {
+    if !approved {
+        return "operator declined the proposed command".to_string();
+    }
+    match (model_invocation, acknowledgement) {
+        (true, ApprovalAcknowledgement::PreAuthorized) => {
+            "operator pre-authorized this step via run-level auto-approve; the configured-model invocation was not individually displayed"
+                .to_string()
+        }
+        (true, _) => {
+            "operator acknowledged the displayed configured-model invocation and allowed it once"
+                .to_string()
+        }
+        (false, ApprovalAcknowledgement::PreAuthorized) => format!(
+            "operator pre-authorized this step via run-level auto-approve for bound target {target_basis}; the proposed command was not individually displayed"
+        ),
+        (false, _) if edited => format!(
+            "operator acknowledged the command displayed for bound target {target_basis} and approved an edited command"
+        ),
+        (false, _) => format!(
+            "operator acknowledged the proposed command displayed for bound target {target_basis} and approved it"
+        ),
+    }
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub fn runbooks_respond_approval(
     app: tauri::AppHandle<Wry>,
@@ -1540,7 +1601,7 @@ pub fn runbooks_respond_approval(
     approval_id: String,
     approved: bool,
     command: Option<String>,
-    shell_attested: bool,
+    acknowledgement: ApprovalAcknowledgement,
 ) -> Result<(), String> {
     gate(&app)?;
     validate_identifier(&run_id, "run id")?;
@@ -1570,14 +1631,20 @@ pub fn runbooks_respond_approval(
         .proposed_command
         .as_deref()
         .is_some_and(|value| value.starts_with("model://configured-agent/"));
-    if approved && !model_invocation && !shell_attested {
+    if approved && acknowledgement == ApprovalAcknowledgement::PreAuthorized && command.is_some() {
+        return Err("a pre-authorized approval cannot carry an edited command".into());
+    }
+    if approved
+        && matches!(
+            (model_invocation, acknowledgement),
+            (true, ApprovalAcknowledgement::Acknowledged)
+                | (false, ApprovalAcknowledgement::ModelOnce)
+        )
+    {
         return Err(
-            "shell approval requires operator attestation of the visible POSIX prompt and session shell state"
+            "a displayed model invocation must be acknowledged as model_once, and only a model invocation may be"
                 .into(),
         );
-    }
-    if model_invocation && shell_attested {
-        return Err("model approval cannot carry a shell-prompt attestation".into());
     }
     let edited_command = if approved {
         normalize_edited_command(command, approval.proposed_command.as_deref())?
@@ -1590,21 +1657,13 @@ pub fn runbooks_respond_approval(
         (_, _, Some(cwd)) => format!("local session {} at {cwd}", target.session_id),
         _ => format!("session {}", target.session_id),
     };
-    let reason = if approved {
-        if model_invocation {
-            "operator allowed the configured model once".to_string()
-        } else if edited_command.is_some() {
-            format!(
-                "operator attested that the visible POSIX shell prompt is on bound target {target_basis}, trusted the session shell, functions, aliases, and PATH, and approved an edited command"
-            )
-        } else {
-            format!(
-                "operator attested that the visible POSIX shell prompt is on bound target {target_basis}, trusted the session shell, functions, aliases, and PATH, and approved the proposed command"
-            )
-        }
-    } else {
-        "operator declined the proposed command".to_string()
-    };
+    let reason = approval_reason(
+        approved,
+        model_invocation,
+        edited_command.is_some(),
+        acknowledgement,
+        &target_basis,
+    );
     command_state.approvals.respond(
         &approval_id,
         ApprovalResponse {
@@ -5304,6 +5363,82 @@ spec:
             package.snapshot
         );
         assert!(fs::read_dir(&decoy).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn acknowledgement_wire_literals_are_pinned() {
+        use serde_json::json;
+
+        for (wire, expected) in [
+            ("acknowledged", ApprovalAcknowledgement::Acknowledged),
+            ("pre_authorized", ApprovalAcknowledgement::PreAuthorized),
+            ("model_once", ApprovalAcknowledgement::ModelOnce),
+        ] {
+            assert_eq!(
+                serde_json::from_value::<ApprovalAcknowledgement>(json!(wire)).unwrap(),
+                expected,
+                "{wire} must stay the wire literal the frontend sends"
+            );
+        }
+        for wrong in ["PreAuthorized", "preAuthorized", "pre-authorized", "auto"] {
+            assert!(
+                serde_json::from_value::<ApprovalAcknowledgement>(json!(wrong)).is_err(),
+                "{wrong} must not deserialize"
+            );
+        }
+    }
+
+    #[test]
+    fn approval_reason_distinguishes_displayed_and_automatic_approvals() {
+        let basis = "local session s1 at /srv/app";
+        let displayed = approval_reason(
+            true,
+            false,
+            false,
+            ApprovalAcknowledgement::Acknowledged,
+            basis,
+        );
+        assert!(displayed.contains("operator acknowledged"));
+        assert!(displayed.contains(basis));
+
+        let automatic = approval_reason(
+            true,
+            false,
+            false,
+            ApprovalAcknowledgement::PreAuthorized,
+            basis,
+        );
+        assert!(automatic.contains("pre-authorized"));
+        assert!(automatic.contains("not individually displayed"));
+
+        let automatic_model = approval_reason(
+            true,
+            true,
+            false,
+            ApprovalAcknowledgement::PreAuthorized,
+            basis,
+        );
+        assert!(automatic_model.contains("configured-model invocation"));
+        assert!(automatic_model.contains("not individually displayed"));
+
+        assert_eq!(
+            approval_reason(
+                false,
+                false,
+                false,
+                ApprovalAcknowledgement::Acknowledged,
+                basis,
+            ),
+            "operator declined the proposed command"
+        );
+        for reason in [displayed, automatic, automatic_model] {
+            for forbidden in ["aliases", "PATH", "trusted", "attested"] {
+                assert!(
+                    !reason.contains(forbidden),
+                    "{reason:?} must not claim {forbidden}"
+                );
+            }
+        }
     }
 
     #[test]

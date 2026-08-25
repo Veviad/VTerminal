@@ -983,11 +983,64 @@ describe("useRunbooks recovery and deletion", () => {
       "run-auto",
       "approval-2",
       true,
-      "printf two",
+      null,
       "pre_authorized",
     );
     expect(useRunbookStore.getState().error).toBeNull();
     expect(useRunbookStore.getState().busyAction).toBeNull();
+  });
+
+  it("arms before releasing the visible approval so the next request cannot race it", async () => {
+    const armed = waitingApprovalRun("run-race", "approval-1", "printf one");
+    useRunbookStore.getState().setActiveRun(armed);
+    useAppStore.setState({ activeSessionId: "session-1" });
+    mocks.get.mockResolvedValue(armed);
+
+    let releaseVisibleApproval!: () => void;
+    mocks.respondApproval.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseVisibleApproval = resolve;
+        }),
+    );
+
+    const { result } = renderHook(() => useRunbooks());
+    let approveAll!: Promise<void>;
+    act(() => {
+      approveAll = result.current.approveAllPendingSteps(
+        "run-race",
+        "printf one",
+      );
+    });
+
+    await waitFor(() => expect(mocks.respondApproval).toHaveBeenCalledTimes(1));
+    expect(useRunbookStore.getState().hasAutoApproveRun("run-race")).toBe(true);
+    expect(
+      useRunbookStore
+        .getState()
+        .getAutoApproveRunState("run-race")
+        ?.grantedApprovalIds,
+    ).toContain("approval-1");
+
+    await act(async () => {
+      await result.current.handleRunbookEvent(
+        approvalEvent("run-race", "approval-2", "printf two"),
+      );
+    });
+    expect(mocks.respondApproval).toHaveBeenNthCalledWith(
+      2,
+      "run-race",
+      "approval-2",
+      true,
+      null,
+      "pre_authorized",
+    );
+
+    releaseVisibleApproval();
+    await act(async () => {
+      await approveAll;
+    });
+    expect(useRunbookStore.getState().hasAutoApproveRun("run-race")).toBe(true);
   });
 
   it("never approves the same approval twice when an event is replayed", async () => {
@@ -1006,6 +1059,32 @@ describe("useRunbooks recovery and deletion", () => {
 
     expect(mocks.respondApproval).toHaveBeenCalledTimes(1);
     expect(useRunbookStore.getState().error).toBeNull();
+  });
+
+  it("records an unseen model approval as pre-authorized", async () => {
+    const armed = waitingApprovalRun("run-model-auto", "approval-1", "printf one");
+    useRunbookStore.getState().setActiveRun(armed);
+    useAppStore.setState({ activeSessionId: "session-1" });
+    useRunbookStore.getState().setAutoApprove("run-model-auto", true);
+
+    const { result } = renderHook(() => useRunbooks());
+    await act(async () => {
+      await result.current.handleRunbookEvent(
+        approvalEvent(
+          "run-model-auto",
+          "approval-model",
+          "model://configured-agent/check",
+        ),
+      );
+    });
+
+    expect(mocks.respondApproval).toHaveBeenCalledWith(
+      "run-model-auto",
+      "approval-model",
+      true,
+      null,
+      "pre_authorized",
+    );
   });
 
   it("stops auto-approve and says why when the bound terminal is not visible", async () => {

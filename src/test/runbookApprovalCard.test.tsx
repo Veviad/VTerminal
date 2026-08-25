@@ -49,7 +49,22 @@ describe("RunbookApprovalCard", () => {
     const approve = screen.getByRole("button", { name: /approve this step/i });
     expect(approve).toBeEnabled();
     fireEvent.click(approve);
-    expect(onRespond).toHaveBeenCalledWith(true, command, true);
+    expect(onRespond).toHaveBeenCalledWith(true, command);
+  });
+
+  it("declines without attaching a command", () => {
+    const onRespond = vi.fn();
+    render(
+      <RunbookApprovalCard
+        approval={shellApproval("printf hi")}
+        busy={false}
+        targetLabel="Local /srv/app"
+        onRespond={onRespond}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /decline and pause/i }));
+    expect(onRespond).toHaveBeenCalledWith(false, null);
   });
 
   it("carries the operator's edit into the bulk approval", () => {

@@ -18,6 +18,7 @@ import {
   runbooksDraftPublish,
   runbooksDraftSave,
   runbooksExportPackage,
+  runbooksRespondApproval,
   runbooksRestoreBuiltins,
   type RunbookDeleteResult,
   type RunbookExportResult,
@@ -27,6 +28,25 @@ import {
 beforeEach(() => invokeMock.mockReset());
 
 describe("runbooks API", () => {
+  it("sends the approval acknowledgement expected by the backend", async () => {
+    invokeMock.mockResolvedValue(undefined);
+
+    await runbooksRespondApproval(
+      "run-1",
+      "approval-1",
+      true,
+      "printf ok",
+      "acknowledged",
+    );
+    expect(invokeMock).toHaveBeenCalledWith("runbooks_respond_approval", {
+      run_id: "run-1",
+      approval_id: "approval-1",
+      approved: true,
+      command: "printf ok",
+      acknowledgement: "acknowledged",
+    });
+  });
+
   it("sends the backend's explicit confirmation flag when deleting history", async () => {
     const result: RunbookDeleteResult = {
       run_id: "run-1",
