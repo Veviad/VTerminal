@@ -2,6 +2,7 @@ pub mod archive;
 pub mod chat;
 pub mod migrations;
 pub mod queries;
+pub mod statistics;
 pub mod workspace;
 
 use rusqlite::Connection;

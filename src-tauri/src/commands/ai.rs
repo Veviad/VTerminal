@@ -93,49 +93,61 @@ pub async fn resolve_provider_for_model(
 ) -> Result<Resolved, String> {
     let effort = crate::commands::settings::read_effort(app, model);
 
-    if model.provider == ProviderId::Local {
-        return resolve_local(app, model, effort).await;
-    }
+    let resolved = if model.provider == ProviderId::Local {
+        resolve_local(app, model, effort).await?
     // Before the API-key gate below: a self-hosted server usually has no key at
     // all, and its token is per-server rather than per-provider.
-    if model.provider == ProviderId::Remote {
-        return resolve_remote(app, model, effort);
-    }
+    } else if model.provider == ProviderId::Remote {
+        resolve_remote(app, model, effort)?
+    } else {
+        let key_setting = model
+            .provider
+            .api_key_setting()
+            .ok_or("this model has no API key setting")?;
+        let credential_id = crate::credentials::CredentialId::from_setting(key_setting)
+            .ok_or("this model has no credential mapping")?;
+        let api_key = crate::commands::settings::read_credential(app, credential_id)?
+            .filter(|k| !k.expose().trim().is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "no {} API key — add one in Settings → Models",
+                    model.provider.label()
+                )
+            })?;
 
-    let key_setting = model
-        .provider
-        .api_key_setting()
-        .ok_or("this model has no API key setting")?;
-    let credential_id = crate::credentials::CredentialId::from_setting(key_setting)
-        .ok_or("this model has no credential mapping")?;
-    let api_key = crate::commands::settings::read_credential(app, credential_id)?
-        .filter(|k| !k.expose().trim().is_empty())
-        .ok_or_else(|| {
-            format!(
-                "no {} API key — add one in Settings → Models",
-                model.provider.label()
-            )
-        })?;
-
-    let provider: Box<dyn Provider> = match model.provider {
-        ProviderId::Anthropic => {
-            Box::new(crate::provider::http::anthropic::AnthropicProvider { model, api_key })
-        }
-        _ => Box::new(crate::provider::http::openai_compat::OpenAiCompatProvider {
+        let provider: Box<dyn Provider> = match model.provider {
+            ProviderId::Anthropic => {
+                Box::new(crate::provider::http::anthropic::AnthropicProvider { model, api_key })
+            }
+            _ => Box::new(crate::provider::http::openai_compat::OpenAiCompatProvider {
+                model,
+                endpoint: crate::provider::http::openai_compat::vendor_endpoint(model.provider)
+                    .ok_or_else(|| format!("{} has no endpoint", model.provider.label()))?
+                    .to_string(),
+                api_key: Some(api_key),
+                // The vendors never emit raw `<think>` tags, and splitting them
+                // would eat a literal one out of a legitimate answer.
+                split_think_tags: false,
+            }),
+        };
+        Resolved {
+            provider,
             model,
-            endpoint: crate::provider::http::openai_compat::vendor_endpoint(model.provider)
-                .ok_or_else(|| format!("{} has no endpoint", model.provider.label()))?
-                .to_string(),
-            api_key: Some(api_key),
-            // The vendors never emit raw `<think>` tags, and splitting them
-            // would eat a literal one out of a legitimate answer.
-            split_think_tags: false,
-        }),
+            effort,
+        }
     };
+
+    // Every provider is instrumented at the shared seam. This is what makes
+    // hidden calls such as automatic naming and Runbook summaries count too,
+    // without each feature having to remember its own bookkeeping call.
     Ok(Resolved {
-        provider,
-        model,
-        effort,
+        provider: Box::new(crate::provider::usage::UsageTrackingProvider::new(
+            resolved.provider,
+            app.clone(),
+            resolved.model,
+        )),
+        model: resolved.model,
+        effort: resolved.effort,
     })
 }
 

@@ -9,6 +9,7 @@ import { RunbooksSettings } from "./RunbooksSettings";
 import { SshHostsSection } from "./SshHostsSection";
 import { UpdatesSection } from "./UpdatesSection";
 import { McpSettings } from "./McpSettings";
+import { StatisticsSection } from "./StatisticsSection";
 import { Row } from "../ui/Row";
 import { S } from "../../lib/strings";
 
@@ -17,6 +18,7 @@ import { S } from "../../lib/strings";
 // switch nowhere to be found.
 const TABS: { id: SettingsTab; label: string }[] = [
   { id: "models", label: S.settings.tabs.models },
+  { id: "statistics", label: S.settings.tabs.statistics },
   { id: "agent", label: S.settings.tabs.agent },
   { id: "mcp", label: S.settings.tabs.mcp },
   { id: "docs", label: S.settings.tabs.docs },
@@ -63,6 +65,7 @@ export function SettingsPage() {
         <div className="min-w-0 flex-1 overflow-y-auto">
           <div className="mx-auto max-w-lg px-6 py-6">
             {tab === "models" && <ModelsSettings />}
+            {tab === "statistics" && <StatisticsSection />}
             {tab === "agent" && <AgentSection />}
             {tab === "mcp" && <McpSettings />}
             {tab === "docs" && <DocsSettings />}

@@ -100,6 +100,7 @@ export type AiMode = "ask" | "explain" | "agent";
 
 export type SettingsTab =
   | "models"
+  | "statistics"
   | "mcp"
   | "agent"
   | "docs"

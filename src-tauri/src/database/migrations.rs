@@ -67,6 +67,9 @@ pub fn run(conn: &Connection) -> Result<(), String> {
     if version < 17 {
         migrate_v17(conn)?;
     }
+    if version < 18 {
+        migrate_v18(conn)?;
+    }
     crate::runbooks::db::ensure_v6_runtime_indexes(conn)?;
 
     Ok(())
@@ -544,6 +547,48 @@ fn migrate_v17(conn: &Connection) -> Result<(), String> {
     .map_err(|e| format!("migration v17 failed: {e}"))
 }
 
+fn migrate_v18(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        BEGIN;
+        -- Lifetime token accounting is deliberately independent from chat and
+        -- archive retention. Removing conversation content must not silently
+        -- rewrite a cumulative usage counter.
+        CREATE TABLE token_usage_events (
+            id            TEXT PRIMARY KEY,
+            model_id      TEXT NOT NULL,
+            model_label   TEXT NOT NULL,
+            -- Provider IDs are application-controlled, but intentionally not
+            -- constrained here. A newly added provider must remain observable
+            -- before a later schema migration can know its identifier.
+            provider      TEXT NOT NULL,
+            input_tokens  INTEGER NOT NULL CHECK(input_tokens >= 0),
+            output_tokens INTEGER NOT NULL CHECK(output_tokens >= 0),
+            created_at    TEXT NOT NULL
+        );
+        CREATE INDEX idx_token_usage_model
+            ON token_usage_events(provider, model_id, model_label);
+        CREATE INDEX idx_token_usage_created
+            ON token_usage_events(created_at);
+
+        -- Standalone chats already persisted per-response usage before the
+        -- lifetime ledger existed. Import it once. Older terminal archives did
+        -- not retain token counts, so there is nothing honest to reconstruct.
+        INSERT INTO token_usage_events
+            (id, model_id, model_label, provider, input_tokens, output_tokens, created_at)
+        SELECT 'legacy-chat:' || id, '', COALESCE(NULLIF(model, ''), 'Unknown model'),
+               'unknown', MAX(COALESCE(prompt_tokens, 0), 0),
+               MAX(COALESCE(completion_tokens, 0), 0), created_at
+          FROM chat_messages
+         WHERE role = 'assistant'
+           AND (prompt_tokens IS NOT NULL OR completion_tokens IS NOT NULL);
+        INSERT INTO schema_version (version) VALUES (18);
+        COMMIT;
+        "#,
+    )
+    .map_err(|error| format!("migration v18 failed: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;
@@ -570,7 +615,7 @@ mod tests {
         let first = version(&conn);
         super::run(&conn).unwrap();
         assert_eq!(version(&conn), first);
-        assert_eq!(first, 17);
+        assert_eq!(first, 18);
     }
 
     #[test]
@@ -593,7 +638,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 17);
+        assert_eq!(version(&conn), 18);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'chat_%' ORDER BY name")
             .unwrap()
@@ -630,7 +675,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 17);
+        assert_eq!(version(&conn), 18);
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(archived_sessions)")
             .unwrap()
@@ -664,7 +709,7 @@ mod tests {
         crate::runbooks::db::migrate_v16(&conn).unwrap();
         assert_eq!(version(&conn), 16);
 
-        super::run(&conn).unwrap();
+        super::migrate_v17(&conn).unwrap();
 
         assert_eq!(version(&conn), 17);
         let thread_columns: Vec<String> = conn
@@ -683,6 +728,48 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert!(message_columns.contains(&"mcp_calls_json".into()));
+    }
+
+    #[test]
+    fn v17_to_v18_imports_existing_standalone_chat_usage_once() {
+        let conn = mem();
+        super::run(&conn).unwrap();
+        conn.execute("DELETE FROM schema_version WHERE version = 18", [])
+            .unwrap();
+        conn.execute_batch(
+            "DROP TABLE token_usage_events;
+             INSERT INTO chat_threads
+                (id, title, created_at, updated_at)
+             VALUES ('chat-1', 'Chat', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z');
+             INSERT INTO chat_messages
+                (id, chat_id, sort_order, role, content, model, prompt_tokens,
+                 completion_tokens, created_at)
+             VALUES ('message-1', 'chat-1', 0, 'assistant', 'hello', 'Qwen3.5 9B',
+                     123, 45, '2026-01-01T00:01:00Z');",
+        )
+        .unwrap();
+        assert_eq!(version(&conn), 17);
+
+        super::run(&conn).unwrap();
+
+        assert_eq!(version(&conn), 18);
+        let imported: (String, String, i64, i64) = conn
+            .query_row(
+                "SELECT model_label, provider, input_tokens, output_tokens
+                   FROM token_usage_events WHERE id = 'legacy-chat:message-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(imported, ("Qwen3.5 9B".into(), "unknown".into(), 123, 45));
+
+        super::run(&conn).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM token_usage_events", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]
@@ -721,7 +808,7 @@ mod tests {
         .unwrap();
 
         super::run(&conn).unwrap();
-        assert_eq!(version(&conn), 17);
+        assert_eq!(version(&conn), 18);
         let migrated: (String, Option<String>, Option<String>) = conn
             .query_row(
                 "SELECT cmd_command, cmd_target_role, cmd_target_label
@@ -834,7 +921,7 @@ mod tests {
         )
         .unwrap();
         super::run(&conn).unwrap();
-        assert_eq!(version(&conn), 17);
+        assert_eq!(version(&conn), 18);
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM command_history", [], |r| r.get(0))
             .unwrap();
@@ -867,7 +954,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 17);
+        assert_eq!(version(&conn), 18);
         let migrated: (String, i64, Option<i64>, String, String) = conn
             .query_row(
                 "SELECT source_kind, hidden, builtin_order, created_at, updated_at
@@ -908,7 +995,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 17);
+        assert_eq!(version(&conn), 18);
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(runbook_drafts)")
             .unwrap()
@@ -942,7 +1029,7 @@ mod tests {
         super::run(&conn).unwrap();
 
         // Upgrades run the whole chain, so this lands on the current head.
-        assert_eq!(version(&conn), 17);
+        assert_eq!(version(&conn), 18);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()
@@ -988,7 +1075,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 17);
+        assert_eq!(version(&conn), 18);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()
@@ -1104,7 +1191,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 17);
+        assert_eq!(version(&conn), 18);
         let has_password: bool = conn
             .query_row(
                 "SELECT has_password FROM ssh_hosts WHERE id = 'h1'",

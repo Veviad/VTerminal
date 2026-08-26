@@ -8,6 +8,7 @@ pub mod http;
 #[cfg(feature = "local-llm")]
 pub mod local;
 pub mod round;
+pub mod usage;
 #[cfg(feature = "local-llm")]
 pub mod vision;
 
