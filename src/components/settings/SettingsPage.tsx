@@ -63,7 +63,11 @@ export function SettingsPage() {
           ))}
         </nav>
         <div className="min-w-0 flex-1 overflow-y-auto">
-          <div className="mx-auto max-w-lg px-6 py-6">
+          <div
+            className={`mx-auto w-full px-6 py-6 ${
+              tab === "statistics" ? "max-w-4xl" : "max-w-lg"
+            }`}
+          >
             {tab === "models" && <ModelsSettings />}
             {tab === "statistics" && <StatisticsSection />}
             {tab === "agent" && <AgentSection />}

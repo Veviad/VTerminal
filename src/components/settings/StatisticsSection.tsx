@@ -75,7 +75,7 @@ function LocationCard({
   const tokens = tokenCount(totals);
   const percent = overall > 0 ? (tokens / overall) * 100 : 0;
   return (
-    <div className="rounded-lg border border-border-subtle bg-bg-card p-3">
+    <div className="rounded-lg border border-border-subtle bg-bg-card p-4">
       <div className="flex items-start justify-between gap-2">
         <div>
           <p className="text-[12px] font-medium text-text-primary">{label}</p>
@@ -133,7 +133,7 @@ function Breakdown({ title, groups }: { title: string; groups: TokenGroup[] }) {
       <h3 className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">
         {title}
       </h3>
-      <div className="divide-y divide-border-subtle rounded-lg border border-border-subtle bg-bg-card p-3">
+      <div className="divide-y divide-border-subtle rounded-lg border border-border-subtle bg-bg-card p-4">
         {groups.map((group) => (
           <BreakdownRow key={`${group.provider}:${group.id}`} group={group} maxTokens={maxTokens} />
         ))}
@@ -206,16 +206,20 @@ export function StatisticsSection() {
 
         {statistics && (
           <>
-            <div className="rounded-lg border border-accent/25 bg-accent/5 p-4">
-              <p className="text-[10px] font-medium uppercase tracking-widest text-text-muted">
-                {S.settings.statistics.allTime}
-              </p>
-              <p className="mt-1 font-mono text-[26px] font-medium tracking-tight text-text-primary">
-                {formatTokenCount(total)}
-              </p>
-              <p className="text-[10px] text-text-muted">{S.settings.statistics.tokens}</p>
-              <div className="mt-4 border-t border-accent/15 pt-3">
-                <UsageNumbers totals={statistics.total} />
+            <div className="rounded-lg border border-accent/25 bg-accent/5 p-4 sm:p-5">
+              <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.75fr)] sm:items-end">
+                <div>
+                  <p className="text-[10px] font-medium uppercase tracking-widest text-text-muted">
+                    {S.settings.statistics.allTime}
+                  </p>
+                  <p className="mt-1 font-mono text-[26px] font-medium tracking-tight text-text-primary">
+                    {formatTokenCount(total)}
+                  </p>
+                  <p className="text-[10px] text-text-muted">{S.settings.statistics.tokens}</p>
+                </div>
+                <div className="border-t border-accent/15 pt-3 sm:border-s sm:border-t-0 sm:ps-5 sm:pt-0">
+                  <UsageNumbers totals={statistics.total} />
+                </div>
               </div>
             </div>
 
@@ -224,7 +228,7 @@ export function StatisticsSection() {
                 {S.settings.statistics.empty}
               </p>
             ) : (
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <LocationCard
                   label={S.settings.statistics.local}
                   hint={S.settings.statistics.localHint}
