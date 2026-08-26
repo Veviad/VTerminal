@@ -236,7 +236,6 @@ fn signal_runtime_cleanup(app: &AppHandle<Wry>) {
     let approvals = app.state::<ApprovalState>();
     let mcp_approvals = app.state::<crate::mcp::approval::McpApprovalState>();
     let mcp_oauth = app.state::<crate::mcp::oauth::McpOAuthState>();
-    let mcp_manager = app.state::<crate::mcp::McpManager>();
     let pty_exec = app.state::<PtyExecState>();
     let steers = app.state::<SteerState>();
     let runbooks = app.state::<std::sync::Arc<RunbookCommandState>>();
@@ -246,7 +245,16 @@ fn signal_runtime_cleanup(app: &AppHandle<Wry>) {
     approvals.drain_all();
     mcp_approvals.drain_all();
     mcp_oauth.cancel_all();
-    tauri::async_runtime::block_on(mcp_manager.shutdown());
+    // Both clean-exit IPC commands use Tauri's async execution context. Calling
+    // `async_runtime::block_on` from that context panics inside Tokio before the
+    // command can request an exit, leaving the frontend promise and its
+    // "Restarting VTerminal" state pending forever. Start bounded MCP cleanup
+    // on the existing runtime instead. Process cleanup below remains the hard
+    // boundary if an MCP peer does not close promptly.
+    let mcp_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        mcp_app.state::<crate::mcp::McpManager>().shutdown().await;
+    });
     pty_exec.drain_all();
     steers.drain_all();
     runbooks.cancellations.cancel_all();

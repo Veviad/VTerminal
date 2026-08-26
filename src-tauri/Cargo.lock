@@ -5956,7 +5956,7 @@ dependencies = [
 
 [[package]]
 name = "vterminal"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
