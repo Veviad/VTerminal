@@ -35,7 +35,7 @@ import { GenerationModeBadge } from "../layout/GenerationModeBadge";
 import { ChatActions } from "./ChatActions";
 import { McpApprovalCard } from "../ai/McpApprovalCard";
 import { McpPicker } from "../ai/McpPicker";
-import { McpToolCard } from "../ai/McpToolCard";
+import { McpToolGroup } from "../ai/McpToolCard";
 
 const CHAT_BOTTOM_THRESHOLD_PX = 48;
 const GENERATION_STATUS_POLL_MS = 500;
@@ -151,10 +151,8 @@ export function ChatWorkspace() {
                 )}
                 {stream.content ? <AiMessageView content={stream.content} /> : <span className="text-xs text-text-muted">Thinking…</span>}
                 {stream.mcpCalls.length > 0 && (
-                  <div className="mt-3 space-y-2">
-                    {stream.mcpCalls.map((call) => (
-                      <McpToolCard key={call.approval_id} call={call} />
-                    ))}
+                  <div className="mt-3">
+                    <McpToolGroup calls={stream.mcpCalls} />
                   </div>
                 )}
                 <Sources citations={stream.citations} />
@@ -389,10 +387,8 @@ function Message({ message }: { message: ChatDisplayMessage }) {
       <AiMessageView content={displayed.prompt} />
       {displayed.blocks.map((block, index) => <FoldedBlockSection key={`${block.kind}-${block.name}-${index}`} block={block} />)}
       {message.mcp_calls.length > 0 && (
-        <div className="mt-3 space-y-2">
-          {message.mcp_calls.map((call) => (
-            <McpToolCard key={call.approval_id} call={call} />
-          ))}
+        <div className="mt-3">
+          <McpToolGroup calls={message.mcp_calls} />
         </div>
       )}
       <Sources citations={message.citations} />

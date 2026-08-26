@@ -372,6 +372,40 @@ describe("AiPanel renders", () => {
     ).toBeInTheDocument();
   });
 
+  it("collapses consecutive MCP calls into one transcript group", () => {
+    seedReadyPanel({
+      mode: "agent",
+      messages: ["list_services", "get_service", "get_service"].map(
+        (toolName, index) => ({
+          id: `mcp-${index}`,
+          role: "assistant" as const,
+          kind: "mcp_tool" as const,
+          content: "",
+          createdAt: `2026-08-22T00:0${index}:00.000Z`,
+          mcp: {
+            approvalId: `approval-${index}`,
+            serverId: "coolify",
+            serverName: "Coolify",
+            toolName,
+            arguments: {},
+            status: "done" as const,
+          },
+        }),
+      ),
+    });
+
+    render(<AiPanel sessionId="s1" />);
+
+    const group = screen.getByRole("button", {
+      name: "Coolify · 3 tool calls · Done",
+    });
+    expect(group).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("Coolify · get_service")).toBeNull();
+
+    fireEvent.click(group);
+    expect(screen.getAllByText("Coolify · get_service")).toHaveLength(2);
+  });
+
   it("renders the key hint instead of the load hint for an API model", () => {
     useAppStore.setState({
       catalog: [cloudEntry()],
