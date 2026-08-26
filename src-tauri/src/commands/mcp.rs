@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use futures::{stream, StreamExt};
 use serde::Serialize;
 use serde_json::Value;
 use tauri::{Manager, State, Wry};
@@ -16,6 +17,7 @@ use crate::mcp::config::{
 };
 
 const SETTINGS_CONNECTION_PREFIX: &str = "settings-live";
+const AUTO_START_CONCURRENCY: usize = 4;
 
 fn settings_connection_id(server_id: &str) -> String {
     format!("{SETTINGS_CONNECTION_PREFIX}-{server_id}")
@@ -32,24 +34,30 @@ fn auto_start_servers(servers: Vec<McpServerConfig>) -> Vec<McpServerConfig> {
 /// setup. The normal connection path still enforces trust, credentials, remote
 /// target validation, and the local stdio sandbox before a session is retained.
 pub fn auto_start_configured_servers(app: &tauri::AppHandle<Wry>) {
-    for server in auto_start_servers(config::read_servers(app)) {
-        let app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            let manager = app.state::<McpManager>();
-            let connection_id = settings_connection_id(&server.id);
-            if let Err(error) = manager.list_tools(&app, &connection_id, &server).await {
-                let error = crate::credentials::redact_provider_text(&error, None);
-                manager
-                    .append_log(&server.id, format!("auto-start failed: {error}"))
-                    .await;
-                log::warn!(
-                    "MCP auto-start failed for {} ({}): {error}",
-                    server.name,
-                    server.id
-                );
-            }
-        });
-    }
+    let app = app.clone();
+    let servers = auto_start_servers(config::read_servers(&app));
+    tauri::async_runtime::spawn(async move {
+        stream::iter(servers)
+            .for_each_concurrent(AUTO_START_CONCURRENCY, |server| {
+                let app = app.clone();
+                async move {
+                    let manager = app.state::<McpManager>();
+                    let connection_id = settings_connection_id(&server.id);
+                    if let Err(error) = manager.list_tools(&app, &connection_id, &server).await {
+                        let error = crate::credentials::redact_provider_text(&error, None);
+                        manager
+                            .append_log(&server.id, format!("auto-start failed: {error}"))
+                            .await;
+                        log::warn!(
+                            "MCP auto-start failed for {} ({}): {error}",
+                            server.name,
+                            server.id
+                        );
+                    }
+                }
+            })
+            .await;
+    });
 }
 
 #[derive(Debug, Serialize)]
