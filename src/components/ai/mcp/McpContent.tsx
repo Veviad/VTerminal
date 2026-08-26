@@ -19,20 +19,41 @@ const AUDIO_TYPES = [
   "audio/webm",
 ];
 
+function jsonText(text: string): unknown | undefined {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return undefined;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return undefined;
+  }
+}
+
 /** Render one MCP content block consistently in Chat, Ask, and Agent. */
 export function McpContent({ block }: { block: unknown }) {
   if (!block || typeof block !== "object") {
     return (
-      <pre className="text-[10px] text-text-muted">{JSON.stringify(block)}</pre>
+      <pre className="max-w-full overflow-auto whitespace-pre-wrap break-all text-[10px] text-text-muted">
+        {JSON.stringify(block)}
+      </pre>
     );
   }
 
   const value = block as Record<string, unknown>;
   const type = String(value.type ?? "");
   if (type === "text") {
+    const text = String(value.text ?? "");
+    const structured = jsonText(text);
+    if (structured !== undefined) {
+      return (
+        <pre className="max-h-64 max-w-full overflow-auto whitespace-pre-wrap break-all rounded bg-bg-primary p-2 text-[10px] text-text-secondary">
+          {JSON.stringify(structured, null, 2)}
+        </pre>
+      );
+    }
     return (
-      <div className="text-[11px] text-text-secondary">
-        <AiMessageView content={String(value.text ?? "")} />
+      <div className="min-w-0 max-w-full overflow-hidden break-words text-[11px] text-text-secondary [overflow-wrap:anywhere]">
+        <AiMessageView content={text} />
       </div>
     );
   }
@@ -48,7 +69,7 @@ export function McpContent({ block }: { block: unknown }) {
     }
     return (
       <img
-        className="max-h-64 rounded border border-border-subtle"
+        className="max-h-64 max-w-full rounded border border-border-subtle"
         src={`data:${mime};base64,${value.data}`}
         alt="MCP tool result"
       />
@@ -78,7 +99,7 @@ export function McpContent({ block }: { block: unknown }) {
     return safe ? (
       <button
         type="button"
-        className="break-all text-left text-[10px] text-accent underline"
+        className="max-w-full break-all text-left text-[10px] text-accent underline"
         onClick={() => void openUrl(safe)}
       >
         {String(value.name ?? value.title ?? value.uri)}
@@ -93,12 +114,12 @@ export function McpContent({ block }: { block: unknown }) {
   const resource = value.resource as Record<string, unknown> | undefined;
   if (type === "resource" && resource) {
     return (
-      <div className="rounded bg-bg-primary p-2">
+      <div className="min-w-0 max-w-full overflow-hidden rounded bg-bg-primary p-2">
         <p className="mb-1 break-all text-[9px] text-text-muted">
           {String(resource.uri ?? "Embedded resource")}
         </p>
         {typeof resource.text === "string" ? (
-          <pre className="max-h-48 overflow-auto whitespace-pre-wrap text-[10px] text-text-secondary">
+          <pre className="max-h-48 max-w-full overflow-auto whitespace-pre-wrap break-all text-[10px] text-text-secondary">
             {resource.text}
           </pre>
         ) : (
@@ -111,7 +132,7 @@ export function McpContent({ block }: { block: unknown }) {
   }
 
   return (
-    <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded bg-bg-primary p-2 text-[10px] text-text-muted">
+    <pre className="max-h-40 max-w-full overflow-auto whitespace-pre-wrap break-all rounded bg-bg-primary p-2 text-[10px] text-text-muted">
       {JSON.stringify(value, null, 2)}
     </pre>
   );
