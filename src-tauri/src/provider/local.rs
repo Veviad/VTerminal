@@ -939,7 +939,20 @@ impl OutputSplitter {
                     self.mode = next;
                 }
                 Mode::Think => {
-                    let Some(at) = self.buf.find(m.think_close) else {
+                    // A small local model can emit a well-formed tool call
+                    // without first closing the reasoning span opened by its
+                    // prompt. The tool marker is unambiguous, so treat it as an
+                    // implicit reasoning close instead of streaming the call as
+                    // reasoning and falsely ending the Agent run with no call.
+                    let found = [
+                        (self.buf.find(m.think_close), m.think_close, Mode::Text),
+                        (self.buf.find(m.tool_open), m.tool_open, Mode::Tool),
+                    ];
+                    let earliest = found
+                        .into_iter()
+                        .filter_map(|(at, tag, next)| at.map(|at| (at, tag, next)))
+                        .min_by_key(|(at, _, _)| *at);
+                    let Some((at, tag, next)) = earliest else {
                         let cut = hold_back(&self.buf, hold);
                         if cut > 0 {
                             out.push(ProviderEvent::ReasoningDelta(self.buf[..cut].to_string()));
@@ -950,8 +963,8 @@ impl OutputSplitter {
                     if at > 0 {
                         out.push(ProviderEvent::ReasoningDelta(self.buf[..at].to_string()));
                     }
-                    self.buf.drain(..at + m.think_close.len());
-                    self.mode = Mode::Text;
+                    self.buf.drain(..at + tag.len());
+                    self.mode = next;
                 }
                 Mode::Tool => {
                     // Withhold everything until the call is whole — a half
@@ -2099,6 +2112,54 @@ mod tests {
         let args: serde_json::Value = serde_json::from_str(&s.calls[0].arguments).unwrap();
         assert_eq!(args["command"], "ls -la /tmp");
         assert_eq!(args["explanation"], "list files");
+    }
+
+    #[test]
+    fn qwen35_tool_call_implicitly_closes_prefilled_thinking() {
+        // Qwen3.5 occasionally omits `</think>` after the prompt pre-opens the
+        // reasoning span. The explicit tool marker must still enter Tool mode;
+        // otherwise the XML leaks into Thinking and the Agent falsely completes.
+        let mut s = OutputSplitter::new(LocalFamily::Qwen, true);
+        let (text, think) = drain(
+            &mut s,
+            &[
+                "I should inspect Docker first. <tool_",
+                "call>\n<function=run_command>\n",
+                "<parameter=command>\nsystemctl status docker --no-pager\n</parameter>\n",
+                "<parameter=explanation>\nCheck Docker status\n</parameter>\n",
+                "</function>\n</tool_call>",
+            ],
+        );
+        assert!(text.is_empty());
+        assert_eq!(think, "I should inspect Docker first. ");
+        assert_eq!(s.calls.len(), 1);
+        assert_eq!(s.calls[0].name, "run_command");
+        let args: serde_json::Value = serde_json::from_str(&s.calls[0].arguments).unwrap();
+        assert_eq!(args["command"], "systemctl status docker --no-pager");
+        assert_eq!(args["explanation"], "Check Docker status");
+    }
+
+    #[test]
+    fn gemma_tool_call_implicitly_closes_prefilled_thinking() {
+        // The recovery transition is family-neutral. Keep Gemma's channel and
+        // brace DSL covered so hardening Qwen cannot turn Gemma calls into text.
+        let mut s = OutputSplitter::new(LocalFamily::Gemma, true);
+        let (text, think) = drain(
+            &mut s,
+            &[
+                "I should inspect Docker first. <|tool_",
+                "call>call:run_command{command:<|\"|>systemctl status docker<|\"|>",
+                ",explanation:<|\"|>Check Docker status<|\"|>}",
+                "<tool_call|>",
+            ],
+        );
+        assert!(text.is_empty());
+        assert_eq!(think, "I should inspect Docker first. ");
+        assert_eq!(s.calls.len(), 1);
+        assert_eq!(s.calls[0].name, "run_command");
+        let args: serde_json::Value = serde_json::from_str(&s.calls[0].arguments).unwrap();
+        assert_eq!(args["command"], "systemctl status docker");
+        assert_eq!(args["explanation"], "Check Docker status");
     }
 
     #[test]
