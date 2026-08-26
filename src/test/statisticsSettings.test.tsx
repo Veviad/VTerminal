@@ -88,4 +88,35 @@ describe("Statistics settings", () => {
     fireEvent.click(screen.getByRole("button", { name: S.settings.statistics.refresh }));
     await waitFor(() => expect(statistics).toHaveBeenCalledTimes(2));
   });
+
+  it("uses the wider responsive layout only for statistics", async () => {
+    render(<SettingsPage />);
+    await waitFor(() => expect(statistics).toHaveBeenCalledTimes(1));
+
+    const settingsContent = screen
+      .getByRole("heading", { name: S.settings.statistics.title })
+      .closest(".max-w-4xl");
+    expect(settingsContent).toHaveClass("w-full", "max-w-4xl");
+    expect(settingsContent).not.toHaveClass("max-w-lg");
+
+    const summaryLayout = screen.getByText(S.settings.statistics.allTime).parentElement
+      ?.parentElement;
+    expect(summaryLayout).toHaveClass(
+      "grid",
+      "sm:grid-cols-[minmax(0,1fr)_minmax(0,1.75fr)]",
+    );
+
+    const localCard = screen.getByText(S.settings.statistics.local).closest(".rounded-lg");
+    expect(localCard).toHaveClass("p-4");
+    expect(localCard?.parentElement).toHaveClass("grid-cols-1", "gap-3", "sm:grid-cols-2");
+
+    const providerBreakdown = screen.getByRole("heading", {
+      name: S.settings.statistics.byProvider,
+    }).nextElementSibling;
+    expect(providerBreakdown).toHaveClass("p-4");
+
+    fireEvent.click(screen.getByRole("button", { name: S.settings.tabs.appearance }));
+    expect(settingsContent).toHaveClass("max-w-lg");
+    expect(settingsContent).not.toHaveClass("max-w-4xl");
+  });
 });
