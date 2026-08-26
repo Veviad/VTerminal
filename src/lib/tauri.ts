@@ -58,6 +58,7 @@ import type {
   SshHostInput,
   StreamEvent,
   TerminalContext,
+  TokenStatistics,
   TurboQuantConfig,
   UpdateDownloadEvent,
   UpdateMetadata,
@@ -527,6 +528,10 @@ export const chatUpdateTitle = (
 }));
 export const chatDelete = (chatId: string) =>
   trackArchiveWrite(() => invoke<void>("chat_delete", { chatId }));
+
+// ---------- Token statistics ----------
+
+export const tokenStatistics = () => invoke<TokenStatistics>("token_statistics");
 
 // ---------- Models ----------
 

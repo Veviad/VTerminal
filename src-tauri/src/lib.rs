@@ -192,6 +192,7 @@ pub fn run() {
             commands::settings::get_model_effort,
             commands::settings::set_model_effort,
             commands::settings::get_system_info,
+            commands::statistics::token_statistics,
             // application updates
             commands::updates::update_check,
             commands::updates::update_download,

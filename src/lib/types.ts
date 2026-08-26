@@ -1134,6 +1134,33 @@ export interface ChatSaveInput {
   mcp_selection: McpChatSelection;
 }
 
+// ---------- Token statistics ----------
+
+export interface TokenTotals {
+  input_tokens: number;
+  output_tokens: number;
+  /** One provider call with reported usage. Tool-using turns may make several. */
+  model_calls: number;
+}
+
+export interface TokenGroup extends TokenTotals {
+  id: string;
+  label: string;
+  provider: string;
+  last_used_at: string | null;
+}
+
+export interface TokenStatistics {
+  total: TokenTotals;
+  /** In-process llama.cpp generations only. */
+  local: TokenTotals;
+  /** Every provider path other than in-process llama.cpp. */
+  cloud: TokenTotals;
+  by_provider: TokenGroup[];
+  by_model: TokenGroup[];
+  tracking_since: string | null;
+}
+
 export interface ChatStreamState {
   status: "idle" | "streaming" | "error";
   requestId: string | null;
