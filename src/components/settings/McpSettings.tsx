@@ -1183,6 +1183,16 @@ Every individual tool call will still require approval.`,
               />
               Default for new chats
             </label>
+            <label className="flex items-center gap-1.5 text-[11px] text-text-secondary">
+              <input
+                type="checkbox"
+                checked={server.auto_start}
+                onChange={(event) =>
+                  void mutate(server, { auto_start: event.target.checked })
+                }
+              />
+              Connect on app start
+            </label>
           </div>
           <div className="flex flex-wrap gap-2">
             {!server.trusted && (

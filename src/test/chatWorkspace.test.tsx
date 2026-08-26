@@ -193,6 +193,7 @@ describe("Chat workspace autoscroll", () => {
         id: "calendar",
         name: "Calendar MCP",
         enabled: true,
+        auto_start: false,
         default_for_new_chats: true,
         revision: 1,
         transport: {

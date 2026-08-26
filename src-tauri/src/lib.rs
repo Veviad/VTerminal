@@ -153,6 +153,7 @@ pub fn run() {
             if let Err(e) = commands::shell_integration::ensure_platform_integration(app.handle()) {
                 log::warn!("shell integration setup failed: {e}");
             }
+            commands::mcp::auto_start_configured_servers(app.handle());
             Ok(())
         })
         .on_menu_event(|app, event| {

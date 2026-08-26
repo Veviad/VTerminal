@@ -39,6 +39,7 @@ function makeMcpServer(id: string, isDefault: boolean): McpServerView {
     id,
     name: id,
     enabled: true,
+    auto_start: false,
     default_for_new_chats: isDefault,
     revision: 1,
     transport: {

@@ -263,7 +263,7 @@ fn append_bounded_log(log: &mut String, message: &str) {
 }
 
 impl McpManager {
-    async fn append_log(&self, server_id: &str, message: impl AsRef<str>) {
+    pub(crate) async fn append_log(&self, server_id: &str, message: impl AsRef<str>) {
         let clean = crate::credentials::redact_provider_text(message.as_ref(), None);
         let mut logs = self.logs.lock().await;
         append_bounded_log(logs.entry(server_id.to_owned()).or_default(), &clean);
