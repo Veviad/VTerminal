@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { emptySessionUi, useAppStore } from "../stores/appStore";
-import type { Block, McpServerView, Session } from "../lib/types";
+import type { Block, Session } from "../lib/types";
+import { createMockMcpServer } from "./mcpTestUtils";
 
 function makeSession(id: string): Session {
   return {
@@ -30,30 +31,6 @@ function makeBlock(id: string, sessionId: string): Block {
     startedAt: new Date().toISOString(),
     endedAt: null,
     origin: "user",
-  };
-}
-
-function makeMcpServer(id: string, isDefault: boolean): McpServerView {
-  return {
-    version: 1,
-    id,
-    name: id,
-    enabled: true,
-    default_for_new_chats: isDefault,
-    revision: 1,
-    transport: {
-      type: "streamable_http",
-      url: "https://mcp.example.test",
-      auth: { mode: "none", scopes: [] },
-      headers: [],
-    },
-    timeouts: { startup_ms: 10_000, list_ms: 30_000, call_ms: 60_000 },
-    disabled_tools: [],
-    trust_hash: null,
-    trusted: true,
-    missing_secret_slots: [],
-    runtime: { connected: false, log_bytes: 0, tool_count: null },
-    oauth: null,
   };
 }
 
@@ -237,8 +214,10 @@ describe("ai stream lifecycle", () => {
   });
 
   it("snapshots MCP defaults for each new conversation without mutating existing chats", () => {
-    const first = makeMcpServer("11111111-1111-4111-8111-111111111111", true);
-    const second = makeMcpServer("22222222-2222-4222-8222-222222222222", false);
+    const first = createMockMcpServer("11111111-1111-4111-8111-111111111111");
+    const second = createMockMcpServer("22222222-2222-4222-8222-222222222222", {
+      defaultForNewChats: false,
+    });
     useAppStore.getState().setMcpServers([first, second]);
     useAppStore.getState().addSession(makeSession("a"));
     expect(useAppStore.getState().aiStreams.a.mcpSelection.server_ids).toEqual([first.id]);

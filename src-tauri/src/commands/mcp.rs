@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use futures::{stream, StreamExt};
 use serde::Serialize;
 use serde_json::Value;
 use tauri::{Manager, State, Wry};
@@ -14,6 +15,50 @@ use crate::mcp::client::{McpManager, McpServerRuntimeView, McpToolResultView, Mc
 use crate::mcp::config::{
     self, McpAuthMode, McpSecretInput, McpServerConfig, McpToolGrant, McpTransportConfig,
 };
+
+const SETTINGS_CONNECTION_PREFIX: &str = "settings-live";
+const AUTO_START_CONCURRENCY: usize = 4;
+
+fn settings_connection_id(server_id: &str) -> String {
+    format!("{SETTINGS_CONNECTION_PREFIX}-{server_id}")
+}
+
+fn auto_start_servers(servers: Vec<McpServerConfig>) -> Vec<McpServerConfig> {
+    servers
+        .into_iter()
+        .filter(|server| server.enabled && server.auto_start)
+        .collect()
+}
+
+/// Starts every selected MCP server without delaying the rest of application
+/// setup. The normal connection path still enforces trust, credentials, remote
+/// target validation, and the local stdio sandbox before a session is retained.
+pub fn auto_start_configured_servers(app: &tauri::AppHandle<Wry>) {
+    let app = app.clone();
+    let servers = auto_start_servers(config::read_servers(&app));
+    tauri::async_runtime::spawn(async move {
+        stream::iter(servers)
+            .for_each_concurrent(AUTO_START_CONCURRENCY, |server| {
+                let app = app.clone();
+                async move {
+                    let manager = app.state::<McpManager>();
+                    let connection_id = settings_connection_id(&server.id);
+                    if let Err(error) = manager.list_tools(&app, &connection_id, &server).await {
+                        let error = crate::credentials::redact_provider_text(&error, None);
+                        manager
+                            .append_log(&server.id, format!("auto-start failed: {error}"))
+                            .await;
+                        log::warn!(
+                            "MCP auto-start failed for {} ({}): {error}",
+                            server.name,
+                            server.id
+                        );
+                    }
+                }
+            })
+            .await;
+    });
+}
 
 #[derive(Debug, Serialize)]
 pub struct McpServerView {
@@ -364,7 +409,7 @@ pub async fn mcp_server_connect(
     let servers = config::read_servers(&app);
     let server = config::find(&servers, &id)?.clone();
     manager
-        .list_tools(&app, &format!("settings-live-{id}"), &server)
+        .list_tools(&app, &settings_connection_id(&id), &server)
         .await
 }
 
@@ -522,6 +567,7 @@ mod tests {
             id: uuid::Uuid::new_v4().to_string(),
             name: "oauth".into(),
             enabled: true,
+            auto_start: false,
             default_for_new_chats: false,
             revision: 1,
             transport: McpTransportConfig::StreamableHttp {
@@ -538,5 +584,48 @@ mod tests {
         };
         config::validate(&mut server, false).unwrap();
         assert_eq!(required_secret_slots(&server), vec!["oauth_credentials"]);
+    }
+
+    #[test]
+    fn auto_start_only_selects_enabled_opted_in_servers() {
+        let selected = McpServerConfig {
+            version: 1,
+            id: "selected".into(),
+            name: "selected".into(),
+            enabled: true,
+            auto_start: true,
+            default_for_new_chats: false,
+            revision: 1,
+            transport: McpTransportConfig::StreamableHttp {
+                url: "https://example.test/mcp".into(),
+                auth: Default::default(),
+                headers: vec![],
+            },
+            timeouts: Default::default(),
+            disabled_tools: vec![],
+            trust_hash: None,
+        };
+        let mut disabled = selected.clone();
+        disabled.id = "disabled".into();
+        disabled.enabled = false;
+        let mut manual = selected.clone();
+        manual.id = "manual".into();
+        manual.auto_start = false;
+        let mut local = selected.clone();
+        local.id = "local".into();
+        local.transport = McpTransportConfig::Stdio {
+            command: "mcp-server".into(),
+            args: vec![],
+            cwd: None,
+            env: vec![],
+            sandbox: Default::default(),
+        };
+
+        let ids = auto_start_servers(vec![manual, disabled, selected, local])
+            .into_iter()
+            .map(|server| server.id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec!["selected", "local"]);
     }
 }

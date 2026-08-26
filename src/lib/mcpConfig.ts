@@ -17,6 +17,7 @@ export function createEmptyMcpHttpServer(): McpHttpServerConfig {
     id: "",
     name: "",
     enabled: true,
+    auto_start: false,
     default_for_new_chats: false,
     revision: 1,
     transport: {

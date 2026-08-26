@@ -1,11 +1,16 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createEmptyMcpHttpServer } from "../lib/mcpConfig";
-import type { McpServerView, McpToolView } from "../lib/types";
+import type {
+  McpServerConfig,
+  McpServerView,
+  McpToolView,
+} from "../lib/types";
 import { useAppStore } from "../stores/appStore";
 
 const listed = vi.fn<() => Promise<McpServerView[]>>();
 const tested = vi.fn<(id: string) => Promise<McpToolView[]>>();
+const upserted = vi.fn<(server: McpServerConfig) => Promise<string>>();
 
 vi.mock("../lib/tauri", () => ({
   mcpServersList: () => listed(),
@@ -19,6 +24,7 @@ vi.mock("../lib/tauri", () => ({
     }),
   ),
   mcpServerTest: (id: string) => tested(id),
+  mcpServerUpsert: (value: McpServerConfig) => upserted(value),
   mcpForgetApprovals: vi.fn(() => Promise.resolve()),
 }));
 
@@ -55,6 +61,7 @@ describe("MCP settings server test", () => {
     vi.clearAllMocks();
     useAppStore.setState({ mcpServers: [] });
     listed.mockResolvedValue([server]);
+    upserted.mockResolvedValue(server.id);
   });
 
   it("shows progress and the successful result inside the server card", async () => {
@@ -115,5 +122,17 @@ describe("MCP settings server test", () => {
     expect(
       await screen.findByText("Test passed. 1 valid tool discovered."),
     ).toBeVisible();
+  });
+
+  it("lets the user select a server for connection on app start", async () => {
+    render(<McpSettings />);
+
+    fireEvent.click(await screen.findByLabelText("Connect on app start"));
+
+    await waitFor(() =>
+      expect(upserted).toHaveBeenCalledWith(
+        expect.objectContaining({ id: server.id, auto_start: true }),
+      ),
+    );
   });
 });

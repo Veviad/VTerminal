@@ -145,6 +145,8 @@ pub struct McpServerConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default)]
+    pub auto_start: bool,
+    #[serde(default)]
     pub default_for_new_chats: bool,
     #[serde(default = "default_version")]
     pub revision: u32,
@@ -502,6 +504,7 @@ mod tests {
             id: String::new(),
             name: "Test".into(),
             enabled: true,
+            auto_start: false,
             default_for_new_chats: false,
             revision: 0,
             transport: McpTransportConfig::StreamableHttp {
@@ -527,5 +530,17 @@ mod tests {
     fn docker_host_escape_flags_are_rejected() {
         assert!(validate_docker(&["run".into(), "--privileged".into(), "image".into()]).is_err());
         assert!(validate_docker(&["run".into(), "--network=none".into(), "image".into()]).is_ok());
+    }
+
+    #[test]
+    fn legacy_servers_default_auto_start_to_false() {
+        let value = serde_json::to_value(http("https://mcp.example.test/api")).unwrap();
+        let mut object = value.as_object().unwrap().clone();
+        object.remove("auto_start");
+
+        let server: McpServerConfig =
+            serde_json::from_value(serde_json::Value::Object(object)).unwrap();
+
+        assert!(!server.auto_start);
     }
 }

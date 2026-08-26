@@ -155,6 +155,7 @@ export interface McpServerConfig {
   id: string;
   name: string;
   enabled: boolean;
+  auto_start: boolean;
   default_for_new_chats: boolean;
   revision: number;
   transport: McpTransportConfig;

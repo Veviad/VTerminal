@@ -41,7 +41,9 @@ Use the **MCP** chip beside the model and Knowledge controls. Multiple servers c
 
 Servers marked **Default for new chats** are snapshotted when a new chat is created. Changing defaults does not alter an existing chat. Selection survives archive/reopen; a deleted server remains visibly unavailable until removed from that chat.
 
-Connections are lazy. Each conversation/server pair has an isolated logical session. Removing a server, starting a new chat, closing the tab, editing security-relevant configuration, stopping the server, or exiting VTerminal closes the affected connection and local process tree.
+Conversation connections are lazy. Each conversation/server pair has an isolated logical session. In Settings, **Connect on app start** can also create an app-lifetime connection for any enabled remote HTTP or local stdio server as soon as VTerminal launches. Existing configurations remain manual unless this is selected. Trust, credentials, endpoint validation, and the local sandbox are still required.
+
+Removing a server, starting a new chat, closing the tab, editing security-relevant configuration, stopping the server, or exiting VTerminal closes the affected connection and local process tree.
 
 ## Approval model
 
