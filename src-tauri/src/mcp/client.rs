@@ -28,6 +28,7 @@ const MAX_SSE_EVENT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TOOL_ALIAS_BYTES: usize = 64;
 const MAX_ALIAS_TOOL_NAME_BYTES: usize = 39;
 const TOOL_CACHE_TTL: Duration = Duration::from_secs(30);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(4);
 
 #[derive(Debug, Clone, Default)]
 struct VTerminalClient {
@@ -604,19 +605,19 @@ impl McpManager {
         }
     }
 
-    pub async fn shutdown(&self) {
-        let sessions = self
-            .sessions
-            .lock()
-            .await
-            .drain()
-            .map(|(_, session)| session)
-            .collect::<Vec<_>>();
-        for session in &sessions {
-            let session = session.lock().await;
-            session.service.cancellation_token().cancel();
-        }
-        let closing = async {
+    async fn shutdown_with_timeout(&self, timeout: Duration) -> bool {
+        let shutdown = async {
+            let sessions = self
+                .sessions
+                .lock()
+                .await
+                .drain()
+                .map(|(_, session)| session)
+                .collect::<Vec<_>>();
+            for session in &sessions {
+                let session = session.lock().await;
+                session.service.cancellation_token().cancel();
+            }
             for session in sessions {
                 let mut session = session.lock().await;
                 let _ = session
@@ -625,7 +626,20 @@ impl McpManager {
                     .await;
             }
         };
-        let _ = tokio::time::timeout(Duration::from_secs(4), closing).await;
+        tokio::time::timeout(timeout, shutdown).await.is_ok()
+    }
+
+    pub async fn shutdown(&self) {
+        // The deadline includes registry and per-session lock acquisition. An
+        // in-flight tool call owns a session lock, so timing only the final
+        // close calls can otherwise strand application exit behind that call's
+        // user-configurable timeout (up to ten minutes).
+        if !self.shutdown_with_timeout(SHUTDOWN_TIMEOUT).await {
+            log::warn!(
+                "MCP shutdown did not finish within {:?}; process exit will complete cleanup",
+                SHUTDOWN_TIMEOUT
+            );
+        }
     }
 
     pub async fn runtime(&self, server_id: &str) -> McpServerRuntimeView {
@@ -850,6 +864,25 @@ pub fn grant_matches(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn shutdown_deadline_includes_the_session_registry_lock() {
+        let manager = McpManager::default();
+        let registry = manager.sessions.lock().await;
+
+        assert!(
+            !manager
+                .shutdown_with_timeout(Duration::from_millis(1))
+                .await
+        );
+
+        drop(registry);
+        assert!(
+            manager
+                .shutdown_with_timeout(Duration::from_millis(50))
+                .await
+        );
+    }
 
     #[test]
     fn aliases_are_server_scoped_and_provider_safe() {
