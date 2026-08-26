@@ -8,6 +8,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { McpPicker } from "../components/ai/McpPicker";
+import { createEmptyMcpHttpServer } from "../lib/mcpConfig";
 import * as api from "../lib/tauri";
 import type {
   McpChatSelection,
@@ -17,21 +18,15 @@ import type {
 import { useAppStore } from "../stores/appStore";
 
 function server(id: string, name: string): McpServerView {
+  const emptyServer = createEmptyMcpHttpServer();
   return {
-    version: 1,
+    ...emptyServer,
     id,
     name,
-    enabled: true,
-    default_for_new_chats: false,
-    revision: 1,
     transport: {
-      type: "streamable_http",
+      ...emptyServer.transport,
       url: `https://${id}.example.test/mcp`,
-      auth: { mode: "none", scopes: [] },
-      headers: [],
     },
-    timeouts: { startup_ms: 10_000, list_ms: 30_000, call_ms: 60_000 },
-    disabled_tools: [],
     trust_hash: "trusted",
     trusted: true,
     missing_secret_slots: [],
