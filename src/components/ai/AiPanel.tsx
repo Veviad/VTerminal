@@ -44,7 +44,7 @@ import { BucketChip, BucketPicker } from "./BucketPicker";
 import { CommandApprovalCard } from "./CommandApprovalCard";
 import { McpApprovalCard } from "./McpApprovalCard";
 import { McpPicker } from "./McpPicker";
-import { McpContent } from "./mcp/McpContent";
+import { McpToolGroup } from "./McpToolCard";
 import { describeRemote } from "../../lib/nesting";
 import {
   selectArchiveWillKeepChats,
@@ -75,6 +75,7 @@ import type {
   AiMessage,
   Attachment,
   Block,
+  ChatMcpCall,
   CommandStall,
   Session,
 } from "../../lib/types";
@@ -856,9 +857,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             {S.aiPanel.restoredTranscript} {relativeTime(stream.restoredAt)}
           </p>
         )}
-        {messages.map((m) => (
-          <MessageRow key={m.id} message={m} sessionId={sessionId} />
-        ))}
+        <MessageTimeline messages={messages} sessionId={sessionId} />
         {/* Live thinking stream */}
         {thinkingContent && (
           <ThinkingSection
@@ -1440,9 +1439,6 @@ function MessageRow({
   if (message.kind === "command" && message.command) {
     return <CommandMessage message={message} sessionId={sessionId} />;
   }
-  if (message.kind === "mcp_tool" && message.mcp) {
-    return <McpToolMessage message={message} />;
-  }
   if (message.role === "user") {
     return (
       <div
@@ -1484,70 +1480,80 @@ function MessageRow({
   );
 }
 
-function McpToolMessage({ message }: { message: AiMessage }) {
-  const call = message.mcp!;
-  const [open, setOpen] = useState(false);
-  const statusLabel =
-    call.status === "awaiting"
-      ? "Awaiting approval"
-      : call.status === "running"
-        ? "Running"
-        : call.status === "denied"
-          ? "Denied"
-          : call.status === "error"
-            ? "Error"
-            : "Done";
-  return (
-    <div className="min-w-0 max-w-full overflow-hidden rounded-lg border border-border-subtle bg-bg-card">
-      <button
-        type="button"
-        className="flex min-w-0 w-full items-center gap-2 px-3 py-2 text-left"
-        onClick={() => setOpen(!open)}
-        aria-expanded={open}
-      >
-        <Server
-          size={13}
-          className={call.status === "error" ? "text-error" : "text-accent"}
-        />
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-[11px] font-medium text-text-primary">
-            {call.serverName} · {call.toolName}
-          </span>
-          <span className="text-[9px] text-text-muted">{statusLabel}</span>
-        </span>
-        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-      </button>
-      {open && (
-        <div className="min-w-0 max-w-full space-y-2 overflow-hidden border-t border-border-subtle p-2">
-          <p className="text-[9px] font-medium uppercase tracking-wide text-text-muted">
-            Arguments
-          </p>
-          <pre className="max-h-40 max-w-full overflow-auto whitespace-pre-wrap break-all rounded bg-bg-primary p-2 text-[10px] text-text-secondary">
-            {JSON.stringify(call.arguments, null, 2)}
-          </pre>
-          {call.error && (
-            <p className="break-words text-[10px] text-error [overflow-wrap:anywhere]">
-              {call.error}
-            </p>
-          )}
-          {call.result?.content.map((block, index) => (
-            <McpContent key={index} block={block} />
-          ))}
-          {call.result?.structured_content != null && (
-            <pre className="max-h-48 max-w-full overflow-auto whitespace-pre-wrap break-all rounded bg-bg-primary p-2 text-[10px] text-text-secondary">
-              {JSON.stringify(call.result.structured_content, null, 2)}
-            </pre>
-          )}
-          {call.result?.truncated && (
-            <p className="text-[9px] text-warning">
-              The model-visible result was truncated at 64 KiB. Rich content
-              above is retained.
-            </p>
-          )}
-        </div>
-      )}
-    </div>
-  );
+type AiMcpToolMessage = AiMessage & {
+  kind: "mcp_tool";
+  mcp: NonNullable<AiMessage["mcp"]>;
+};
+
+function chatMcpCall(message: AiMcpToolMessage): ChatMcpCall {
+  const call = message.mcp;
+  return {
+    approval_id: call.approvalId,
+    server_id: call.serverId,
+    server_name: call.serverName,
+    tool_name: call.toolName,
+    arguments: call.arguments,
+    status: call.status,
+    result: call.result ?? null,
+    error: call.error ?? null,
+  };
+}
+
+function isMcpToolMessage(
+  message: AiMessage | undefined,
+): message is AiMcpToolMessage {
+  return message?.kind === "mcp_tool" && message.mcp != null;
+}
+
+/** MCP calls are separate timeline messages in the terminal side panel. Fold
+ *  each consecutive run into the same turn-level group used by Chat. */
+type MessageTimelineRow =
+  | { kind: "message"; key: string; message: AiMessage }
+  | { kind: "mcp"; key: string; calls: ChatMcpCall[] };
+
+function messageTimelineRows(messages: AiMessage[]): MessageTimelineRow[] {
+  const rows: MessageTimelineRow[] = [];
+  let pendingKey: string | null = null;
+  let pendingCalls: ChatMcpCall[] = [];
+  const flushMcpCalls = () => {
+    if (pendingKey == null || pendingCalls.length === 0) return;
+    rows.push({ kind: "mcp", key: pendingKey, calls: pendingCalls });
+    pendingKey = null;
+    pendingCalls = [];
+  };
+
+  for (const message of messages) {
+    if (isMcpToolMessage(message)) {
+      pendingKey ??= message.id;
+      pendingCalls.push(chatMcpCall(message));
+      continue;
+    }
+    flushMcpCalls();
+    rows.push({ kind: "message", key: message.id, message });
+  }
+  flushMcpCalls();
+  return rows;
+}
+
+function MessageTimeline({
+  messages,
+  sessionId,
+}: {
+  messages: AiMessage[];
+  sessionId: string | null;
+}) {
+  return messageTimelineRows(messages).map((row) => {
+    if (row.kind === "mcp") {
+      return <McpToolGroup key={row.key} calls={row.calls} />;
+    }
+    return (
+      <MessageRow
+        key={row.key}
+        message={row.message}
+        sessionId={sessionId}
+      />
+    );
+  });
 }
 
 /** Delivery state of a message typed mid-run.
