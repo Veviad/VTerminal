@@ -277,6 +277,9 @@ test("renders the checked-in Pages source and writes sanitized release.json", as
   assert.match(html, /vterminal-terminal-ai\.webp/);
   assert.match(html, /vterminal-knowledge\.webp/);
   assert.match(html, /Pick Your Platform\. Start in Minutes\./);
+  assert.match(html, /id="mcp"/);
+  assert.match(html, /Model Context Protocol/);
+  assert.match(html, /MCP setup and security guide/);
   assert.match(html, /Verify and prepare Windows/);
   assert.match(html, /"softwareVersion": "0\.3\.0-beta\.2"/);
   assert.match(

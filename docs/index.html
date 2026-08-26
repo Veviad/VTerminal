@@ -10,7 +10,7 @@
     <title>VTerminal | The Lean AI Terminal for macOS and Windows 11</title>
     <meta
       name="description"
-      content="A lean, AI-powered terminal for macOS and Windows 11 with WSL2 Bash, command blocks, a multi-step agent, and in-process local models. Open source, GPL-3.0."
+      content="A lean, AI-powered terminal for macOS and Windows 11 with command blocks, a multi-step agent, Model Context Protocol tools, and in-process local models. Open source, GPL-3.0."
     />
     <link rel="canonical" href="https://vterminal.veviad.com/" />
 
@@ -23,7 +23,7 @@
     />
     <meta
       property="og:description"
-      content="Command blocks, a multi-step AI agent, and local or Qdrant knowledge buckets. Local models run in-process via llama.cpp; nothing runs without you."
+      content="Command blocks, a multi-step AI agent, MCP tools, and local or Qdrant knowledge buckets. Local models run in-process via llama.cpp; nothing runs without you."
     />
     <meta property="og:url" content="https://vterminal.veviad.com/" />
     <meta
@@ -41,7 +41,7 @@
     />
     <meta
       name="twitter:description"
-      content="Command blocks, a multi-step AI agent, and local or Qdrant knowledge buckets. Local models run in-process via llama.cpp; nothing runs without you."
+      content="Command blocks, a multi-step AI agent, MCP tools, and local or Qdrant knowledge buckets. Local models run in-process via llama.cpp; nothing runs without you."
     />
 
     <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
@@ -76,7 +76,7 @@
         "url": "https://vterminal.veviad.com/",
         "codeRepository": "https://github.com/Veviad/VTerminal",
         "license": "https://www.gnu.org/licenses/gpl-3.0.html",
-        "description": "A lean, AI-powered terminal for macOS and Windows 11 with WSL2 Bash, command blocks, a multi-step agent, and in-process Metal or Vulkan local models.",
+        "description": "A lean, AI-powered terminal for macOS and Windows 11 with command blocks, a multi-step agent, Model Context Protocol tools, and in-process Metal or Vulkan local models.",
         "author": {
           "@type": "Organization",
           "name": "Veviad",
@@ -226,6 +226,7 @@
         <nav class="desktop-nav" aria-label="Main navigation">
           <a href="#why">Product</a>
           <a href="#ai">AI</a>
+          <a href="#mcp">MCP</a>
           <a href="#knowledge">Knowledge</a>
           <a href="#safety">Safety</a>
           <a href="#download">Install</a>
@@ -254,6 +255,7 @@
         <nav aria-label="Main navigation">
           <a href="#why">Product</a>
           <a href="#ai">AI</a>
+          <a href="#mcp">MCP</a>
           <a href="#knowledge">Knowledge</a>
           <a href="#safety">Safety</a>
           <a href="#download">Install</a>
@@ -699,6 +701,96 @@
                 Drag, paste or pick. An optional on-device vision sidecar
                 transcribes screenshots, so even a non-vision chat model can work
                 with them.
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section
+        class="section section-soft mcp-section"
+        id="mcp"
+        aria-labelledby="mcp-title"
+      >
+        <div class="shell">
+          <p class="eyebrow">Model Context Protocol</p>
+          <h2 class="section-heading section-heading-wide" id="mcp-title">
+            Bring Your Own Tools. Keep Every Call Visible.
+          </h2>
+          <p class="section-lead">
+            Connect several remote or local MCP servers, choose them per chat,
+            and expose only the tools that conversation needs. MCP tools work in
+            Ask and Agent, while terminal commands remain Agent-only. See the
+            <a href="https://github.com/Veviad/VTerminal/blob/main/docs/MCP.md"
+              >MCP setup and security guide</a
+            >.
+          </p>
+
+          <div class="feature-grid mcp-grid">
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-chat" /></svg>
+              </span>
+              <h3>Several Servers per Chat</h3>
+              <p>
+                Select multiple servers for a conversation. Defaults apply to
+                new chats, while every chat can keep its own server and tool
+                choices.
+              </p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-cloud" /></svg>
+              </span>
+              <h3>Remote Streamable HTTP</h3>
+              <p>
+                Connect HTTPS endpoints using JSON or request-scoped SSE.
+                VTerminal negotiates protocol versions and supports compatible
+                legacy initialization lifecycles.
+              </p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-terminal" /></svg>
+              </span>
+              <h3>Sandboxed Local stdio</h3>
+              <p>
+                Run <code>npx</code>, <code>uvx</code>, Docker, or an exact
+                command on macOS and Windows through WSL2. Local MCP stays off
+                unless the mandatory sandbox self-test passes.
+              </p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-lock" /></svg>
+              </span>
+              <h3>OAuth and Header Authentication</h3>
+              <p>
+                OAuth 2.1 with PKCE, bearer tokens, and custom secret headers
+                are built in. Credentials remain in the operating-system vault,
+                and exported configuration is redacted.
+              </p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-blocks" /></svg>
+              </span>
+              <h3>Tool-Level Control</h3>
+              <p>
+                Tool discovery is paginated and cached. Each server is a compact
+                group in the chat picker, where individual tools can be enabled
+                or disabled for that conversation.
+              </p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-shield" /></svg>
+              </span>
+              <h3>Approval by Default</h3>
+              <p>
+                Calls show the server, exact tool, and complete arguments. Allow
+                once, deny, or remember that exact tool until its server
+                configuration or schema changes.
               </p>
             </article>
           </div>
@@ -1587,6 +1679,7 @@
             <a href="#why">Why VTerminal</a>
             <a href="#terminal">Terminal</a>
             <a href="#ai">AI</a>
+            <a href="#mcp">MCP</a>
             <a href="#knowledge">Knowledge</a>
             <a href="#runbooks">Runbooks</a>
             <a href="#safety">Safety</a>
