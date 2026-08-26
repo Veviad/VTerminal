@@ -1147,6 +1147,10 @@ a:hover {
   gap: 1.2rem;
 }
 
+.mcp-grid {
+  margin-top: clamp(2.5rem, 5vw, 3.5rem);
+}
+
 .feature-card {
   min-width: 0;
   border: 1px solid var(--line);

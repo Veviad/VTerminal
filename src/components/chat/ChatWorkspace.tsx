@@ -383,7 +383,7 @@ function Message({ message }: { message: ChatDisplayMessage }) {
   const displayed = user ? splitFoldedBlocks(message.content) : { prompt: message.content, blocks: [] };
   const attachments = message.attachments.map(attachmentForChatDisplay);
   return (
-    <article className={user ? "ml-auto max-w-[86%] rounded-2xl bg-bg-hover px-4 py-3 text-text-primary" : "rounded-xl border border-border-subtle bg-bg-card p-4 text-text-primary"}>
+    <article className={user ? "ml-auto min-w-0 max-w-[86%] overflow-hidden rounded-2xl bg-bg-hover px-4 py-3 text-text-primary" : "min-w-0 max-w-full overflow-hidden rounded-xl border border-border-subtle bg-bg-card p-4 text-text-primary"}>
       <AttachmentStrip attachments={attachments} />
       {message.thinking && <details className="mb-3 text-xs text-text-muted"><summary className="cursor-pointer">Reasoning</summary><p className="mt-2 whitespace-pre-wrap">{message.thinking}</p></details>}
       <AiMessageView content={displayed.prompt} />

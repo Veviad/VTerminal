@@ -14,12 +14,17 @@ import {
   Copy,
   ExternalLink,
   FileJson,
+  Loader2,
   Play,
   Plus,
   RefreshCw,
   ShieldCheck,
   Trash2,
 } from "lucide-react";
+import {
+  createEmptyMcpHttpServer,
+  createEmptyMcpStdioServer,
+} from "../../lib/mcpConfig";
 import * as api from "../../lib/tauri";
 import type {
   McpAuthMode,
@@ -28,40 +33,15 @@ import type {
 } from "../../lib/types";
 import { useAppStore } from "../../stores/appStore";
 
-const emptyHttp = (): McpServerConfig => ({
-  version: 1,
-  id: "",
-  name: "",
-  enabled: true,
-  default_for_new_chats: false,
-  revision: 1,
-  transport: {
-    type: "streamable_http",
-    url: "https://",
-    auth: { mode: "none", scopes: [] },
-    headers: [],
-  },
-  timeouts: { startup_ms: 10_000, list_ms: 30_000, call_ms: 60_000 },
-  disabled_tools: [],
-  trust_hash: null,
-});
-
-const emptyStdio = (): McpServerConfig => ({
-  ...emptyHttp(),
-  transport: {
-    type: "stdio",
-    command: "npx",
-    args: ["-y", ""],
-    cwd: null,
-    env: [],
-    sandbox: { allow_read: [], allow_write: [], allowed_domains: [] },
-  },
-});
-
 const inputClass =
   "w-full rounded-md border border-border-subtle bg-bg-secondary px-2.5 py-2 text-[12px] text-text-primary outline-none focus:border-accent";
 const buttonClass =
   "rounded-md border border-border-subtle px-2.5 py-1.5 text-[11px] text-text-secondary transition hover:bg-bg-hover hover:text-text-primary disabled:opacity-40";
+
+type McpTestFeedback = {
+  status: "running" | "success" | "error";
+  message: string;
+};
 
 function jsonProblem(text: string): string | null {
   if (!text.trim()) return "Enter a server object or an import configuration.";
@@ -328,7 +308,9 @@ function asConfig(
     const server = raw as Record<string, any>;
     if (server.transport?.type) {
       const base =
-        server.transport.type === "stdio" ? emptyStdio() : emptyHttp();
+        server.transport.type === "stdio"
+          ? createEmptyMcpStdioServer()
+          : createEmptyMcpHttpServer();
       const transport = structuredClone(server.transport) as Record<
         string,
         any
@@ -391,7 +373,7 @@ function asConfig(
         values[`env:${key}`] = String(item ?? "");
         return { name: key, value: "", secret: true };
       });
-      const config = emptyStdio();
+      const config = createEmptyMcpStdioServer();
       config.name = name;
       config.transport = {
         type: "stdio",
@@ -426,7 +408,7 @@ function asConfig(
         values[`header:${header}`] = String(item ?? "");
       }
     }
-    const config = emptyHttp();
+    const config = createEmptyMcpHttpServer();
     config.name = name;
     config.transport = {
       type: "streamable_http",
@@ -447,6 +429,9 @@ export function McpSettings() {
   const [jsonText, setJsonText] = useState("");
   const [sandbox, setSandbox] = useState<string>("Checking local sandbox…");
   const [busy, setBusy] = useState<string | null>(null);
+  const [testFeedback, setTestFeedback] = useState<
+    Record<string, McpTestFeedback>
+  >({});
   const [notice, setNotice] = useState<string | null>(null);
   const [logs, setLogs] = useState<string | null>(null);
 
@@ -643,7 +628,7 @@ Every individual tool call will still require approval.`,
             onClick={() => {
               setAdvanced(false);
               setDraft({
-                ...emptyHttp(),
+                ...createEmptyMcpHttpServer(),
                 name: draft.name,
                 id: draft.id,
                 revision: draft.revision,
@@ -658,7 +643,7 @@ Every individual tool call will still require approval.`,
             onClick={() => {
               setAdvanced(false);
               setDraft({
-                ...emptyStdio(),
+                ...createEmptyMcpStdioServer(),
                 name: draft.name,
                 id: draft.id,
                 revision: draft.revision,
@@ -1117,7 +1102,7 @@ Every individual tool call will still require approval.`,
         </div>
         <button
           className={`${buttonClass} inline-flex shrink-0 items-center whitespace-nowrap`}
-          onClick={() => setDraft(emptyHttp())}
+          onClick={() => setDraft(createEmptyMcpHttpServer())}
         >
           <Plus size={13} className="me-1 inline" />
           Add server
@@ -1301,25 +1286,55 @@ Every individual tool call will still require approval.`,
               </button>
             )}
             <button
-              disabled={!server.trusted || busy === server.id}
-              className={buttonClass}
+              disabled={
+                !server.trusted ||
+                busy === server.id ||
+                testFeedback[server.id]?.status === "running"
+              }
+              aria-busy={testFeedback[server.id]?.status === "running"}
+              className={`${buttonClass} inline-flex items-center gap-1 whitespace-nowrap`}
               onClick={async () => {
                 setBusy(server.id);
+                setTestFeedback((current) => ({
+                  ...current,
+                  [server.id]: {
+                    status: "running",
+                    message: "Testing connection and discovering tools…",
+                  },
+                }));
                 try {
                   const tools = await api.mcpServerTest(server.id);
-                  setNotice(
-                    `${server.name}: ${tools.length} valid tool${tools.length === 1 ? "" : "s"}.`,
-                  );
+                  setTestFeedback((current) => ({
+                    ...current,
+                    [server.id]: {
+                      status: "success",
+                      message: `Test passed. ${tools.length} valid tool${tools.length === 1 ? "" : "s"} discovered.`,
+                    },
+                  }));
                 } catch (error) {
-                  setNotice(String(error));
+                  const message =
+                    error instanceof Error ? error.message : String(error);
+                  setTestFeedback((current) => ({
+                    ...current,
+                    [server.id]: {
+                      status: "error",
+                      message: `Test failed. ${message}`,
+                    },
+                  }));
                 } finally {
                   setBusy(null);
                   await refresh();
                 }
               }}
             >
-              <Play size={12} className="me-1 inline" />
-              Test
+              {testFeedback[server.id]?.status === "running" ? (
+                <Loader2 size={12} className="animate-spin" aria-hidden="true" />
+              ) : (
+                <Play size={12} aria-hidden="true" />
+              )}
+              {testFeedback[server.id]?.status === "running"
+                ? "Testing…"
+                : "Test"}
             </button>
             <button className={buttonClass} onClick={() => edit(server)}>
               Edit
@@ -1356,6 +1371,23 @@ Every individual tool call will still require approval.`,
               Delete
             </button>
           </div>
+          {testFeedback[server.id] && (
+            <div
+              role={
+                testFeedback[server.id].status === "error" ? "alert" : "status"
+              }
+              aria-live="polite"
+              className={`rounded-md border px-2.5 py-2 text-[11px] ${
+                testFeedback[server.id].status === "success"
+                  ? "border-success/20 bg-success/10 text-success"
+                  : testFeedback[server.id].status === "error"
+                    ? "border-danger/20 bg-danger/10 text-danger"
+                    : "border-accent/20 bg-accent/10 text-text-secondary"
+              }`}
+            >
+              {testFeedback[server.id].message}
+            </div>
+          )}
         </div>
       ))}
       <div className="flex gap-2">
@@ -1374,7 +1406,7 @@ Every individual tool call will still require approval.`,
         <button
           className={buttonClass}
           onClick={() => {
-            setDraft(emptyHttp());
+            setDraft(createEmptyMcpHttpServer());
             setAdvanced(true);
             setJsonText("");
           }}
