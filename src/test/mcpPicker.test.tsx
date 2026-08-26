@@ -1,4 +1,11 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { McpPicker } from "../components/ai/McpPicker";
 import * as api from "../lib/tauri";
@@ -68,6 +75,14 @@ const selection: McpChatSelection = {
   server_ids: [coolify.id, github.id],
   disabled_tools: { [coolify.id]: ["list_servers"] },
 };
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
 
 describe("MCP picker", () => {
   beforeEach(() => {
@@ -154,10 +169,14 @@ describe("MCP picker", () => {
   it("loads tools immediately when another server is selected", async () => {
     const onSelectionChange = vi.fn();
     const listTools = vi.mocked(api.mcpToolsList);
-    render(
+    const initialSelection = {
+      server_ids: [coolify.id],
+      disabled_tools: {},
+    };
+    const { rerender } = render(
       <McpPicker
         conversationId="chat-1"
-        selection={{ server_ids: [coolify.id], disabled_tools: {} }}
+        selection={initialSelection}
         onSelectionChange={onSelectionChange}
         disabled={false}
       />,
@@ -176,15 +195,95 @@ describe("MCP picker", () => {
     });
     fireEvent.click(within(githubGroup).getByRole("checkbox"));
 
-    expect(onSelectionChange).toHaveBeenCalledWith({
+    const nextSelection = {
       server_ids: [coolify.id, github.id],
       disabled_tools: {},
-    });
+    };
+    expect(onSelectionChange).toHaveBeenCalledWith(nextSelection);
+    rerender(
+      <McpPicker
+        conversationId="chat-1"
+        selection={nextSelection}
+        onSelectionChange={onSelectionChange}
+        disabled={false}
+      />,
+    );
     await waitFor(() =>
       expect(listTools).toHaveBeenCalledWith("chat-1", [
         coolify.id,
         github.id,
       ]),
     );
+  });
+
+  it("ignores stale tool discovery after the selected servers change", async () => {
+    const listTools = vi.mocked(api.mcpToolsList);
+    const firstRequest = deferred<McpToolView[]>();
+    const secondRequest = deferred<McpToolView[]>();
+    listTools.mockReset();
+    listTools
+      .mockReturnValueOnce(firstRequest.promise)
+      .mockReturnValueOnce(secondRequest.promise);
+    const onSelectionChange = vi.fn();
+    const { rerender } = render(
+      <McpPicker
+        conversationId="chat-1"
+        selection={{ server_ids: [coolify.id], disabled_tools: {} }}
+        onSelectionChange={onSelectionChange}
+        disabled={false}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByTitle("Select MCP servers and tools for this chat"),
+    );
+    await waitFor(() =>
+      expect(listTools).toHaveBeenCalledWith("chat-1", [coolify.id]),
+    );
+
+    rerender(
+      <McpPicker
+        conversationId="chat-1"
+        selection={{
+          server_ids: [coolify.id, github.id],
+          disabled_tools: {},
+        }}
+        onSelectionChange={onSelectionChange}
+        disabled={false}
+      />,
+    );
+    await waitFor(() =>
+      expect(listTools).toHaveBeenCalledWith("chat-1", [
+        coolify.id,
+        github.id,
+      ]),
+    );
+
+    await act(async () => {
+      secondRequest.resolve([
+        tool(github.id, github.name, "new_tool", "New GitHub Tool"),
+      ]);
+      await secondRequest.promise;
+    });
+    const githubGroup = screen.getByRole("group", {
+      name: "GitHub MCP server",
+    });
+    expect(
+      await within(githubGroup).findByRole("button", {
+        name: "Show tools for GitHub",
+      }),
+    ).toHaveTextContent("1 tool");
+
+    await act(async () => {
+      firstRequest.resolve([
+        tool(coolify.id, coolify.name, "stale_tool", "Stale Coolify Tool"),
+      ]);
+      await firstRequest.promise;
+    });
+    expect(
+      within(githubGroup).getByRole("button", {
+        name: "Show tools for GitHub",
+      }),
+    ).toHaveTextContent("1 tool");
   });
 });
