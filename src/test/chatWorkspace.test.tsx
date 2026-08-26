@@ -6,6 +6,7 @@ import type { ChatDetail } from "../lib/types";
 import * as api from "../lib/tauri";
 import { useAppStore } from "../stores/appStore";
 import { useChatStore } from "../stores/chatStore";
+import { createMockMcpServer } from "./mcpTestUtils";
 
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 
@@ -188,28 +189,7 @@ describe("Chat workspace autoscroll", () => {
 
   it("shows the current Chat thread's MCP selection in the toolbar", async () => {
     useAppStore.setState({
-      mcpServers: [{
-        version: 1,
-        id: "calendar",
-        name: "Calendar MCP",
-        enabled: true,
-        auto_start: false,
-        default_for_new_chats: true,
-        revision: 1,
-        transport: {
-          type: "streamable_http",
-          url: "https://example.com/mcp",
-          auth: { mode: "none", scopes: [] },
-          headers: [],
-        },
-        timeouts: { startup_ms: 10_000, list_ms: 30_000, call_ms: 60_000 },
-        disabled_tools: [],
-        trust_hash: null,
-        trusted: true,
-        missing_secret_slots: [],
-        runtime: { connected: false, log_bytes: 0, tool_count: null },
-        oauth: null,
-      }],
+      mcpServers: [createMockMcpServer("calendar", { name: "Calendar MCP" })],
     });
     useChatStore.setState((state) => ({
       current: state.current

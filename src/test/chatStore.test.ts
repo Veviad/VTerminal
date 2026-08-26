@@ -5,9 +5,9 @@ import type {
   ChatMessage,
   ChatSaveInput,
   ChatSummary,
-  McpServerView,
   StreamEvent,
 } from "../lib/types";
+import { createMockMcpServer } from "./mcpTestUtils";
 
 const mocks = vi.hoisted(() => ({
   chatList: vi.fn(),
@@ -86,31 +86,6 @@ function chatModel(): CatalogEntry {
   };
 }
 
-function mcpServer(id: string, isDefault = true): McpServerView {
-  return {
-    version: 1,
-    id,
-    name: id,
-    enabled: true,
-    auto_start: false,
-    default_for_new_chats: isDefault,
-    revision: 1,
-    transport: {
-      type: "streamable_http",
-      url: "https://example.com/mcp",
-      auth: { mode: "none", scopes: [] },
-      headers: [],
-    },
-    timeouts: { startup_ms: 10_000, list_ms: 30_000, call_ms: 60_000 },
-    disabled_tools: [],
-    trust_hash: null,
-    trusted: true,
-    missing_secret_slots: [],
-    runtime: { connected: false, log_bytes: 0, tool_count: null },
-    oauth: null,
-  };
-}
-
 describe("Chat workspace store", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -175,7 +150,12 @@ describe("Chat workspace store", () => {
   });
 
   it("snapshots current MCP defaults only when a new Chat thread is created", async () => {
-    useAppStore.setState({ mcpServers: [mcpServer("default"), mcpServer("optional", false)] });
+    useAppStore.setState({
+      mcpServers: [
+        createMockMcpServer("default"),
+        createMockMcpServer("optional", { defaultForNewChats: false }),
+      ],
+    });
     mocks.chatList.mockResolvedValue([]);
 
     await useChatStore.getState().initialize("chat", null);
@@ -187,7 +167,7 @@ describe("Chat workspace store", () => {
     expect((mocks.chatSave.mock.calls[0]?.[0] as ChatSaveInput).mcp_selection.server_ids)
       .toEqual(["default"]);
 
-    useAppStore.setState({ mcpServers: [mcpServer("new-default")] });
+    useAppStore.setState({ mcpServers: [createMockMcpServer("new-default")] });
     expect(useChatStore.getState().current?.mcp_selection.server_ids).toEqual(["default"]);
   });
 
