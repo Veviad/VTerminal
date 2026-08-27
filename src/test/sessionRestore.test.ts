@@ -3,6 +3,7 @@ import { renderHook } from "@testing-library/react";
 
 const restoreMock = vi.fn();
 const scrollbackMock = vi.fn(async (_id: string) => null as string | null);
+const archiveListMock = vi.fn();
 const archiveGetMock = vi.fn();
 const archiveTranscriptMock = vi.fn();
 const archiveTranscriptOnlyMock = vi.fn(async (_sessionId: string) => true);
@@ -30,6 +31,8 @@ const releaseWebglMock = vi.fn();
 vi.mock("../lib/tauri", () => ({
   workspaceRestore: () => restoreMock(),
   workspaceScrollback: (id: string) => scrollbackMock(id),
+  archiveList: (limit?: number, offset?: number) =>
+    archiveListMock(limit, offset),
   archiveGet: (id: string) => archiveGetMock(id),
   archiveTranscript: (id: string) => archiveTranscriptMock(id),
   ptySpawn: (
@@ -190,10 +193,33 @@ function archivedDetail(id: string): ArchiveDetail {
   };
 }
 
+function restoreWorkspace(
+  sessions: SessionSnapshotMeta[],
+  activeSessionId: string | null = sessions[0]?.session_id ?? null,
+): void {
+  restoreMock.mockResolvedValue({
+    sessions,
+    active_session_id: activeSessionId,
+    crashed: false,
+    skipped: false,
+  });
+}
+
+function mockArchivedChat(
+  detail: ArchiveDetail,
+  modelTranscript: ChatMessage[],
+): void {
+  archiveListMock.mockResolvedValueOnce([detail.summary]);
+  archiveGetMock.mockResolvedValueOnce(detail);
+  archiveTranscriptMock.mockResolvedValueOnce(modelTranscript);
+}
+
 beforeEach(() => {
   restoreMock.mockReset();
   scrollbackMock.mockReset();
   scrollbackMock.mockResolvedValue(null);
+  archiveListMock.mockReset();
+  archiveListMock.mockResolvedValue([]);
   archiveGetMock.mockReset();
   archiveGetMock.mockResolvedValue(null);
   archiveTranscriptMock.mockReset();
@@ -250,12 +276,7 @@ describe("session creation update barrier", () => {
 
 describe("restoreSessions", () => {
   it("returns 0 when there is nothing saved, so App opens a fresh tab", async () => {
-    restoreMock.mockResolvedValue({
-      sessions: [],
-      active_session_id: null,
-      crashed: false,
-      skipped: false,
-    });
+    restoreWorkspace([]);
     const { result } = renderHook(() => useSessions());
     await expect(result.current.restoreSessions()).resolves.toBe(0);
   });
@@ -267,12 +288,7 @@ describe("restoreSessions", () => {
   });
 
   it("rebuilds tabs in saved order with fresh ids and the saved cwd", async () => {
-    restoreMock.mockResolvedValue({
-      sessions: [meta("old-b", 1), meta("old-a", 0)],
-      active_session_id: "old-a",
-      crashed: false,
-      skipped: false,
-    });
+    restoreWorkspace([meta("old-b", 1), meta("old-a", 0)], "old-a");
     const { result } = renderHook(() => useSessions());
     const n = await result.current.restoreSessions();
 
@@ -290,14 +306,8 @@ describe("restoreSessions", () => {
       { role: "user", content: "diagnose this" },
       { role: "assistant", content: "The service is healthy." },
     ];
-    archiveGetMock.mockResolvedValueOnce(archived);
-    archiveTranscriptMock.mockResolvedValueOnce(modelTranscript);
-    restoreMock.mockResolvedValue({
-      sessions: [meta("old", 0, { scrollback_lines: 20 })],
-      active_session_id: "old",
-      crashed: false,
-      skipped: false,
-    });
+    mockArchivedChat(archived, modelTranscript);
+    restoreWorkspace([meta("old", 0, { scrollback_lines: 20 })]);
 
     const { result } = renderHook(() => useSessions());
     await expect(result.current.restoreSessions()).resolves.toBe(1);
@@ -321,13 +331,9 @@ describe("restoreSessions", () => {
   });
 
   it("still restores the terminal when its archived chat cannot be read", async () => {
+    archiveListMock.mockRejectedValueOnce(new Error("archive index unavailable"));
     archiveGetMock.mockRejectedValueOnce(new Error("archive unavailable"));
-    restoreMock.mockResolvedValue({
-      sessions: [meta("old", 0)],
-      active_session_id: "old",
-      crashed: false,
-      skipped: false,
-    });
+    restoreWorkspace([meta("old", 0)]);
     const { result } = renderHook(() => useSessions());
 
     await expect(result.current.restoreSessions()).resolves.toBe(1);
@@ -336,13 +342,48 @@ describe("restoreSessions", () => {
     expect(state.aiStreams[state.sessions[0].id].messages).toEqual([]);
   });
 
+  it("does not fetch archive details for terminal-only tabs", async () => {
+    restoreWorkspace([meta("old", 0)]);
+    const { result } = renderHook(() => useSessions());
+
+    await expect(result.current.restoreSessions()).resolves.toBe(1);
+    expect(archiveListMock).toHaveBeenCalledOnce();
+    expect(archiveGetMock).not.toHaveBeenCalled();
+    expect(archiveTranscriptMock).not.toHaveBeenCalled();
+  });
+
+  it("finds saved chat beyond the first archive metadata page", async () => {
+    const archived = archivedDetail("old");
+    const firstPage = Array.from({ length: 200 }, (_, index) => ({
+      ...archived.summary,
+      session_id: `unrelated-${index}`,
+      message_count: 0,
+    }));
+    archiveListMock
+      .mockResolvedValueOnce(firstPage)
+      .mockResolvedValueOnce([archived.summary]);
+    archiveGetMock.mockResolvedValueOnce(archived);
+    restoreWorkspace([meta("old", 0)]);
+
+    const { result } = renderHook(() => useSessions());
+    await expect(result.current.restoreSessions()).resolves.toBe(1);
+
+    expect(archiveListMock.mock.calls).toEqual([
+      [200, 0],
+      [200, 200],
+    ]);
+    expect(archiveGetMock).toHaveBeenCalledWith("old");
+    expect(useAppStore.getState().sessions[0].archivedFrom).toBe("old");
+  });
+
   it("carries the saved host through so the tab can offer Reconnect", async () => {
-    restoreMock.mockResolvedValue({
-      sessions: [meta("old", 0, { host_id: "h1", title: "prod-01", remote_kind: "ssh" })],
-      active_session_id: "old",
-      crashed: false,
-      skipped: false,
-    });
+    restoreWorkspace([
+      meta("old", 0, {
+        host_id: "h1",
+        title: "prod-01",
+        remote_kind: "ssh",
+      }),
+    ]);
     const { result } = renderHook(() => useSessions());
     await result.current.restoreSessions();
 
@@ -356,12 +397,7 @@ describe("restoreSessions", () => {
   });
 
   it("restores a hand-renamed tab as a rename, not as a host label", async () => {
-    restoreMock.mockResolvedValue({
-      sessions: [meta("old", 0, { host_id: null, title: "my tab" })],
-      active_session_id: "old",
-      crashed: false,
-      skipped: false,
-    });
+    restoreWorkspace([meta("old", 0, { host_id: null, title: "my tab" })]);
     const { result } = renderHook(() => useSessions());
     await result.current.restoreSessions();
 
@@ -371,12 +407,7 @@ describe("restoreSessions", () => {
   });
 
   it("does not pin a label for a tab that was never named", async () => {
-    restoreMock.mockResolvedValue({
-      sessions: [meta("old", 0, { host_id: null, title: "" })],
-      active_session_id: "old",
-      crashed: false,
-      skipped: false,
-    });
+    restoreWorkspace([meta("old", 0, { host_id: null, title: "" })]);
     const { result } = renderHook(() => useSessions());
     await result.current.restoreSessions();
 
@@ -386,12 +417,7 @@ describe("restoreSessions", () => {
   });
 
   it("skips the scrollback fetch when nothing was stored", async () => {
-    restoreMock.mockResolvedValue({
-      sessions: [meta("old", 0, { scrollback_lines: 0 })],
-      active_session_id: "old",
-      crashed: false,
-      skipped: false,
-    });
+    restoreWorkspace([meta("old", 0, { scrollback_lines: 0 })]);
     const { result } = renderHook(() => useSessions());
     await result.current.restoreSessions();
     expect(scrollbackMock).not.toHaveBeenCalled();
@@ -399,12 +425,7 @@ describe("restoreSessions", () => {
 
   it("fetches scrollback when a blob was stored", async () => {
     scrollbackMock.mockResolvedValue("PAYLOAD");
-    restoreMock.mockResolvedValue({
-      sessions: [meta("old", 0, { scrollback_lines: 500 })],
-      active_session_id: "old",
-      crashed: false,
-      skipped: false,
-    });
+    restoreWorkspace([meta("old", 0, { scrollback_lines: 500 })]);
     const { result } = renderHook(() => useSessions());
     await result.current.restoreSessions();
     expect(scrollbackMock).toHaveBeenCalledWith("old");
@@ -417,12 +438,7 @@ describe("restoreSessions", () => {
       if (call === 2) throw new Error("spawn failed");
       return 1234;
     });
-    restoreMock.mockResolvedValue({
-      sessions: [meta("a", 0), meta("b", 1), meta("c", 2)],
-      active_session_id: "a",
-      crashed: false,
-      skipped: false,
-    });
+    restoreWorkspace([meta("a", 0), meta("b", 1), meta("c", 2)], "a");
     const { result } = renderHook(() => useSessions());
     const n = await result.current.restoreSessions();
     // The failed spawn still leaves a visible (exited) tab rather than vanishing.
@@ -437,12 +453,7 @@ describe("restoreSessions", () => {
     const original = globalThis.requestAnimationFrame;
     globalThis.requestAnimationFrame = (() => 0) as never;
     try {
-      restoreMock.mockResolvedValue({
-        sessions: [meta("a", 0), meta("b", 1)],
-        active_session_id: "a",
-        crashed: false,
-        skipped: false,
-      });
+      restoreWorkspace([meta("a", 0), meta("b", 1)], "a");
       const { result } = renderHook(() => useSessions());
       await expect(result.current.restoreSessions()).resolves.toBe(2);
     } finally {

@@ -96,9 +96,10 @@ describe("SessionBrowser", () => {
     rows = [row(), row({ session_id: "s2", message_count: 0, model: "" })];
     render(<SessionBrowser />);
 
-    await waitFor(() => expect(screen.getByText(/no AI chat saved/)).toBeTruthy());
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Reopen terminal" })).toBeTruthy(),
+    );
     expect(screen.getByRole("button", { name: "Reopen with chat" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Reopen terminal" })).toBeTruthy();
   });
 
   it("shows a loading state, then the list — not an empty state", async () => {

@@ -97,6 +97,59 @@ export async function restoreArchivedAiTranscript(
   return true;
 }
 
+export interface ArchivedAiTranscript {
+  detail: ArchiveDetail;
+  modelTranscript: ChatMessage[];
+}
+
+const ARCHIVE_PAGE_SIZE = 200;
+
+/** Find startup tabs with saved chat using metadata pages, not detail queries. */
+export async function findArchivedChatSessionIds(
+  sessionIds: readonly string[],
+): Promise<Set<string> | null> {
+  const pending = new Set(sessionIds);
+  const withChat = new Set<string>();
+
+  try {
+    for (let offset = 0; pending.size > 0; offset += ARCHIVE_PAGE_SIZE) {
+      const rows = await api.archiveList(ARCHIVE_PAGE_SIZE, offset);
+      for (const row of rows) {
+        if (!pending.delete(row.session_id)) continue;
+        if (row.message_count > 0) withChat.add(row.session_id);
+      }
+      if (rows.length < ARCHIVE_PAGE_SIZE) break;
+    }
+  } catch (err) {
+    console.warn("archived transcript index fetch failed:", err);
+    return null;
+  }
+
+  return withChat;
+}
+
+/** Load the AI portion of an archive without making terminal restore depend on it. */
+export async function loadArchivedAiTranscript(
+  archiveId: string,
+): Promise<ArchivedAiTranscript | null> {
+  let detail: ArchiveDetail | null;
+  try {
+    detail = await api.archiveGet(archiveId);
+  } catch (err) {
+    console.warn(`archived transcript fetch failed (${archiveId}):`, err);
+    return null;
+  }
+  if (!detail || detail.messages.length === 0) return null;
+
+  const modelTranscript = detail.summary.has_model_transcript
+    ? await api.archiveTranscript(archiveId).catch((err) => {
+        console.warn(`model transcript fetch failed (${archiveId}):`, err);
+        return [];
+      })
+    : [];
+  return { detail, modelTranscript };
+}
+
 export interface ReopenOptions {
   /** false replays nothing — reopen the DIRECTORY only, with a clean screen. */
   replayOutput?: boolean;

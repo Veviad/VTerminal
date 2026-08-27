@@ -80,10 +80,8 @@ describe("metaLine", () => {
     expect(line).not.toContain("~/Code/proj");
   });
 
-  it("makes the absence of a saved AI chat explicit", () => {
-    expect(metaLine(row(), null)).toBe(
-      "~/Code/proj · no AI chat saved · 1420 lines",
-    );
+  it("omits zero counters", () => {
+    expect(metaLine(row(), null)).toBe("~/Code/proj · 1420 lines");
   });
 
   it("always says when no output was saved", () => {

@@ -332,7 +332,6 @@ export const S = {
     confirmRemove: "Click again to remove",
     commands: "cmds",
     aiMessages: "AI",
-    noAiChat: "no AI chat saved",
     lines: "lines",
     noOutput: "no output saved",
     crashed: "after an unexpected quit",
