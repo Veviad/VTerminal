@@ -71,7 +71,7 @@ export function Header() {
     >
       {/* Left: traffic-light inset + logo. Standard OS decorations like Cowork,
           so no extra inset is needed — the native title bar sits above us. */}
-      <div className="flex items-center gap-2" data-tauri-drag-region>
+      <div className="flex shrink-0 items-center gap-2" data-tauri-drag-region>
         <img src="/vterminal-mark.svg" alt="" className="h-5 w-[14px]" />
         <span className="text-[13px] font-medium text-text-secondary">{S.app.name}</span>
         <span className="mx-0.5 h-4 border-l border-border-subtle" />
@@ -89,14 +89,14 @@ export function Header() {
       </div>
 
       {/* Center: the active workspace's navigation. */}
-      <div className="flex min-w-0 items-center gap-2 px-2">
+      <div className="flex min-w-0 flex-1 items-center gap-2 px-2">
         {workspaceMode === "terminal" && <TabStrip />}
       </div>
 
       {/* Right: model chip + past sessions + settings. The AI panel toggle lives
           on the panel itself (rail to expand, chevron to collapse) — a third
           control here sat inches from the rail's and did the same thing. */}
-      <div className="relative flex items-center gap-1">
+      <div className="relative flex shrink-0 items-center gap-1">
         {/* Only when a SECOND model is doing the reading. A chat model with native
             vision reads images itself, so there is nothing else to name and a
             second chip would be noise; the `none` case is deliberately silent here

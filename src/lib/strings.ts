@@ -341,6 +341,8 @@ export const S = {
     manage: "Retention…",
   },
   tabs: {
+    allOpen: "All open terminals",
+    allOpenHint: (count: number) => `All open terminals (${count})`,
     connected: "Connected to a remote host",
     disconnected: "Not connected — use Reconnect",
     rename: "Rename",

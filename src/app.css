@@ -82,6 +82,16 @@ body,
   letter-spacing: -0.011em;
 }
 
+/* Terminal tabs keep their native wheel and trackpad behaviour without adding
+   a second visual line to the compact application header. */
+.tab-strip-scroll {
+  scrollbar-width: none;
+}
+
+.tab-strip-scroll::-webkit-scrollbar {
+  display: none;
+}
+
 /* Selection */
 ::selection {
   background: var(--color-selection);
