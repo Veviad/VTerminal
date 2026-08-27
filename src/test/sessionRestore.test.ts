@@ -3,6 +3,11 @@ import { renderHook } from "@testing-library/react";
 
 const restoreMock = vi.fn();
 const scrollbackMock = vi.fn(async (_id: string) => null as string | null);
+const archiveGetMock = vi.fn();
+const archiveTranscriptMock = vi.fn();
+const archiveTranscriptOnlyMock = vi.fn(async (_sessionId: string) => true);
+const hydrateAttachmentsMock = vi.fn(async (_sessionId: string) => {});
+const setAiPanelOpenMock = vi.fn();
 const ptyEventHandlers = new Map<string, (event: { type: string; exit_code?: number | null }) => void>();
 const spawnMock = vi.fn(
   async (
@@ -25,6 +30,8 @@ const releaseWebglMock = vi.fn();
 vi.mock("../lib/tauri", () => ({
   workspaceRestore: () => restoreMock(),
   workspaceScrollback: (id: string) => scrollbackMock(id),
+  archiveGet: (id: string) => archiveGetMock(id),
+  archiveTranscript: (id: string) => archiveTranscriptMock(id),
   ptySpawn: (
     sessionId: string,
     params: unknown,
@@ -49,6 +56,16 @@ vi.mock("../lib/ptyExec", () => ({
 
 vi.mock("../lib/sessionArchive", () => ({
   archiveOnClose: (sessionId: string) => archiveOnCloseMock(sessionId),
+  archiveTranscriptOnly: (sessionId: string) =>
+    archiveTranscriptOnlyMock(sessionId),
+}));
+
+vi.mock("../lib/attachInput", () => ({
+  hydrateAttachments: (sessionId: string) => hydrateAttachmentsMock(sessionId),
+}));
+
+vi.mock("../lib/aiPanel", () => ({
+  setAiPanelOpen: (open: boolean) => setAiPanelOpenMock(open),
 }));
 
 const fakeTerm = {
@@ -99,7 +116,11 @@ import { useSessions } from "../hooks/useSessions";
 import { useAppStore } from "../stores/appStore";
 import { captureSidecarRemoteIdentity } from "../lib/sidecar";
 import { initialUpdateState, useUpdateStore } from "../stores/updateStore";
-import type { SessionSnapshotMeta } from "../lib/types";
+import type {
+  ArchiveDetail,
+  ChatMessage,
+  SessionSnapshotMeta,
+} from "../lib/types";
 
 function meta(id: string, index: number, over: Partial<SessionSnapshotMeta> = {}): SessionSnapshotMeta {
   return {
@@ -120,10 +141,67 @@ function meta(id: string, index: number, over: Partial<SessionSnapshotMeta> = {}
   };
 }
 
+function archivedDetail(id: string): ArchiveDetail {
+  return {
+    summary: {
+      session_id: id,
+      title: "saved chat",
+      shell: "/bin/zsh",
+      cwd: "/dir/0",
+      host_id: null,
+      remote_kind: null,
+      remote_target: null,
+      opened_at: "2026-08-01T00:00:00.000Z",
+      closed_at: "2026-08-01T01:00:00.000Z",
+      close_reason: "quit",
+      scrollback_lines: 20,
+      message_count: 2,
+      agent_command_count: 0,
+      history_command_count: 0,
+      model: "local-balanced",
+      has_model_transcript: true,
+      first_prompt: "diagnose this",
+    },
+    messages: [
+      {
+        id: `${id}:0`,
+        sort_order: 0,
+        role: "user",
+        kind: "text",
+        content: "diagnose this",
+        thinking: null,
+        command: null,
+        attachments: [],
+        created_at: "2026-08-01T00:00:01.000Z",
+      },
+      {
+        id: `${id}:1`,
+        sort_order: 1,
+        role: "assistant",
+        kind: "text",
+        content: "The service is healthy.",
+        thinking: null,
+        command: null,
+        attachments: [],
+        created_at: "2026-08-01T00:00:02.000Z",
+      },
+    ],
+    mcp_selection: { server_ids: ["docs"], disabled_tools: {} },
+  };
+}
+
 beforeEach(() => {
   restoreMock.mockReset();
   scrollbackMock.mockReset();
   scrollbackMock.mockResolvedValue(null);
+  archiveGetMock.mockReset();
+  archiveGetMock.mockResolvedValue(null);
+  archiveTranscriptMock.mockReset();
+  archiveTranscriptMock.mockResolvedValue([]);
+  archiveTranscriptOnlyMock.mockClear();
+  archiveTranscriptOnlyMock.mockResolvedValue(true);
+  hydrateAttachmentsMock.mockClear();
+  setAiPanelOpenMock.mockClear();
   ptyEventHandlers.clear();
   spawnMock.mockReset();
   spawnMock.mockImplementation(
@@ -204,6 +282,58 @@ describe("restoreSessions", () => {
     // Fresh ids: reusing them would merge two runs in command_history.
     expect(state.sessions.map((s) => s.id)).not.toContain("old-a");
     expect(state.activeSessionId).toBe(state.sessions[0].id);
+  });
+
+  it("restores the saved Ask/Agent conversation with its terminal", async () => {
+    const archived = archivedDetail("old");
+    const modelTranscript: ChatMessage[] = [
+      { role: "user", content: "diagnose this" },
+      { role: "assistant", content: "The service is healthy." },
+    ];
+    archiveGetMock.mockResolvedValueOnce(archived);
+    archiveTranscriptMock.mockResolvedValueOnce(modelTranscript);
+    restoreMock.mockResolvedValue({
+      sessions: [meta("old", 0, { scrollback_lines: 20 })],
+      active_session_id: "old",
+      crashed: false,
+      skipped: false,
+    });
+
+    const { result } = renderHook(() => useSessions());
+    await expect(result.current.restoreSessions()).resolves.toBe(1);
+
+    const state = useAppStore.getState();
+    const restored = state.sessions[0];
+    const stream = state.aiStreams[restored.id];
+    expect(restored.archivedFrom).toBe("old");
+    expect(stream.messages.map((message) => message.content)).toEqual([
+      "diagnose this",
+      "The service is healthy.",
+    ]);
+    expect(stream.modelTranscript).toEqual(modelTranscript);
+    expect(stream.mode).toBe("ask");
+    expect(stream.permissionMode).toBe("ask");
+    expect(stream.restoredAt).toBe(archived.summary.closed_at);
+    expect(stream.mcpSelection).toEqual(archived.mcp_selection);
+    expect(archiveTranscriptOnlyMock).toHaveBeenCalledWith(restored.id);
+    expect(hydrateAttachmentsMock).toHaveBeenCalledWith(restored.id);
+    expect(setAiPanelOpenMock).not.toHaveBeenCalled();
+  });
+
+  it("still restores the terminal when its archived chat cannot be read", async () => {
+    archiveGetMock.mockRejectedValueOnce(new Error("archive unavailable"));
+    restoreMock.mockResolvedValue({
+      sessions: [meta("old", 0)],
+      active_session_id: "old",
+      crashed: false,
+      skipped: false,
+    });
+    const { result } = renderHook(() => useSessions());
+
+    await expect(result.current.restoreSessions()).resolves.toBe(1);
+    const state = useAppStore.getState();
+    expect(state.sessions).toHaveLength(1);
+    expect(state.aiStreams[state.sessions[0].id].messages).toEqual([]);
   });
 
   it("carries the saved host through so the tab can offer Reconnect", async () => {

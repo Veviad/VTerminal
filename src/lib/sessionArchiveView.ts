@@ -54,6 +54,7 @@ export function metaLine(r: ArchiveSummary, modelLabel: string | null): string {
 
   if (r.history_command_count > 0) parts.push(`${r.history_command_count} ${S.sessions.commands}`);
   if (r.message_count > 0) parts.push(`${r.message_count} ${S.sessions.aiMessages}`);
+  else parts.push(S.sessions.noAiChat);
 
   // Never conditional: the ABSENCE of output is what the user needs to know
   // BEFORE clicking Reopen, not after the screen comes back empty. Plain text
