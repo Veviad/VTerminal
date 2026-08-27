@@ -18,7 +18,13 @@ import { setAiPanelOpen } from "./aiPanel";
 import { hydrateAttachments } from "./attachInput";
 import { replayBanner, stripReplayBanners } from "./replayBanner";
 import { archiveTranscriptOnly } from "./sessionArchive";
-import type { AiMessage, ArchivedMessage, LaunchSpec } from "./types";
+import type {
+  AiMessage,
+  ArchiveDetail,
+  ArchivedMessage,
+  ChatMessage,
+  LaunchSpec,
+} from "./types";
 
 /** Archive rows -> the panel's shape. */
 function toAiMessages(rows: ArchivedMessage[]): AiMessage[] {
@@ -61,6 +67,87 @@ function toAiMessages(rows: ArchivedMessage[]): AiMessage[] {
         }))
       : undefined,
   }));
+}
+
+/** Restore a saved Ask/Agent conversation into a newly created live session. */
+export async function restoreArchivedAiTranscript(
+  sessionId: string,
+  detail: ArchiveDetail,
+  modelTranscript: ChatMessage[],
+  opts: { openPanel?: boolean } = {},
+): Promise<boolean> {
+  if (detail.messages.length === 0) return false;
+
+  useAppStore
+    .getState()
+    .restoreAiTranscript(
+      sessionId,
+      toAiMessages(detail.messages),
+      modelTranscript,
+      detail.summary.closed_at,
+      detail.mcp_selection,
+    );
+
+  // Persist the live replacement immediately. This keeps restored attachment
+  // ownership valid and prevents a crash from losing the recovered chat again.
+  await archiveTranscriptOnly(sessionId);
+  void hydrateAttachments(sessionId);
+
+  if (opts.openPanel !== false) setAiPanelOpen(true);
+  return true;
+}
+
+export interface ArchivedAiTranscript {
+  detail: ArchiveDetail;
+  modelTranscript: ChatMessage[];
+}
+
+const ARCHIVE_PAGE_SIZE = 200;
+
+/** Find startup tabs with saved chat using metadata pages, not detail queries. */
+export async function findArchivedChatSessionIds(
+  sessionIds: readonly string[],
+): Promise<Set<string> | null> {
+  const pending = new Set(sessionIds);
+  const withChat = new Set<string>();
+
+  try {
+    for (let offset = 0; pending.size > 0; offset += ARCHIVE_PAGE_SIZE) {
+      const rows = await api.archiveList(ARCHIVE_PAGE_SIZE, offset);
+      for (const row of rows) {
+        if (!pending.delete(row.session_id)) continue;
+        if (row.message_count > 0) withChat.add(row.session_id);
+      }
+      if (rows.length < ARCHIVE_PAGE_SIZE) break;
+    }
+  } catch (err) {
+    console.warn("archived transcript index fetch failed:", err);
+    return null;
+  }
+
+  return withChat;
+}
+
+/** Load the AI portion of an archive without making terminal restore depend on it. */
+export async function loadArchivedAiTranscript(
+  archiveId: string,
+): Promise<ArchivedAiTranscript | null> {
+  let detail: ArchiveDetail | null;
+  try {
+    detail = await api.archiveGet(archiveId);
+  } catch (err) {
+    console.warn(`archived transcript fetch failed (${archiveId}):`, err);
+    return null;
+  }
+  if (!detail || detail.messages.length === 0) return null;
+
+  const modelTranscript = detail.summary.has_model_transcript
+    ? await api.archiveTranscript(archiveId).catch((err) => {
+        console.warn(`model transcript fetch failed (${archiveId}):`, err);
+        return [];
+      })
+    : [];
+  return { detail, modelTranscript };
 }
 
 export interface ReopenOptions {
@@ -140,30 +227,7 @@ export async function reopenSession(
     // offers Reconnect, it never reconnects itself.
   });
 
-  if (messages.length > 0) {
-    useAppStore
-      .getState()
-      .restoreAiTranscript(
-        sessionId,
-        toAiMessages(messages),
-        transcript,
-        summary.closed_at,
-        detail.mcp_selection,
-      );
-    // Register the live replacement before handing it back to the browser. Its
-    // attachment paths are shared with the source archive, and archive cleanup
-    // decides whether those bytes are still owned from the surviving DB rows.
-    // Without this open row, closing/pruning one of two reopens can delete the
-    // source directory while the other live tab still references it.
-    await archiveTranscriptOnly(sessionId);
-    // Not awaited: the panel is usable with named chips straight away, and
-    // blocking the reopen on N file reads would make a long conversation feel
-    // broken. Thumbnails fill in as the reads land.
-    void hydrateAttachments(sessionId);
-    // A transcript restored into a collapsed panel is a transcript the user
-    // cannot see. Through lib/aiPanel so the change survives quit.
-    setAiPanelOpen(true);
-  }
+  await restoreArchivedAiTranscript(sessionId, detail, transcript);
   getTerm(sessionId)?.term.focus();
   return sessionId;
 }

@@ -23,6 +23,11 @@ import { archiveOnClose } from "../lib/sessionArchive";
 import { trackArchiveMutation } from "../lib/archiveWriteTracker";
 import { forgetRunbookTerminal } from "../lib/runbookTerminalPrivacy";
 import { replayBanner, stripReplayBanners } from "../lib/replayBanner";
+import {
+  findArchivedChatSessionIds,
+  loadArchivedAiTranscript,
+  restoreArchivedAiTranscript,
+} from "../lib/sessionReopen";
 import { ownRecordValue } from "../lib/records";
 import { nextOrdinal, shortenCommand } from "../lib/sessionTitle";
 import { defaultShell, isWindows } from "../lib/platform";
@@ -513,10 +518,24 @@ export function useSessions() {
     );
     const ids: (string | undefined)[] = new Array(ordered.length);
 
+    // One metadata query tells us which tabs can have an AI transcript. Avoid
+    // an archive detail query for every terminal-only tab. If the index read
+    // fails, fall back to probing each tab so a transient error cannot lose chat.
+    const archivedChatIds = await findArchivedChatSessionIds(
+      ordered.map((row) => row.session_id),
+    );
+
     const createOne = async (
       snap: SessionSnapshotMeta,
       extra: Pick<LaunchSpec, "activate" | "dims">,
     ): Promise<string> => {
+      // Final archive rows and workspace snapshots share the old session id.
+      // Start chat loading beside scrollback, but only when the metadata index
+      // says there is chat. A failed index read deliberately falls back here.
+      const archivedPromise =
+        archivedChatIds === null || archivedChatIds.has(snap.session_id)
+          ? loadArchivedAiTranscript(snap.session_id)
+          : Promise.resolve(null);
       let replay: string | null = null;
       if (snap.scrollback_lines > 0) {
         try {
@@ -541,15 +560,29 @@ export function useSessions() {
       // Derived labels are persisted as "" precisely so they do NOT come back
       // pinned — that is what used to make `maholick` survive a restart.
       const sticky = snap.title || null;
-      return createSession({
+      const archived = await archivedPromise;
+      const sessionId = await createSession({
         cwd: snap.cwd,
         shell: snap.shell,
         hostId: snap.host_id,
         title: snap.host_id ? sticky : null,
         userTitle: snap.host_id ? null : sticky,
         replay,
+        archivedFrom: archived ? snap.session_id : null,
         ...extra,
       });
+
+      if (archived) {
+        // Startup respects the persisted panel visibility. Explicit History
+        // reopen still opens the panel so the recovered chat is visible.
+        await restoreArchivedAiTranscript(
+          sessionId,
+          archived.detail,
+          archived.modelTranscript,
+          { openPanel: false },
+        );
+      }
+      return sessionId;
     };
 
     // 1. The active tab first, alone and awaited: it is the only pane React
