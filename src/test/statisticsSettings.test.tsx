@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import { S } from "../lib/strings";
 import type { TokenStatistics } from "../lib/types";
@@ -79,6 +79,28 @@ describe("Statistics settings", () => {
     expect(screen.getByText("44.0%")).toBeInTheDocument();
     expect(screen.getByText("Qwen3.5 9B")).toBeInTheDocument();
     expect(screen.getByText("GPT-5.6 Terra")).toBeInTheDocument();
+  });
+
+  it("appears between SSH hosts and Updates in the settings navigation", () => {
+    render(<SettingsPage />);
+
+    const labels = within(screen.getByRole("navigation"))
+      .getAllByRole("button")
+      .map((button) => button.textContent);
+
+    expect(labels).toEqual([
+      S.settings.tabs.models,
+      S.settings.tabs.agent,
+      S.settings.tabs.mcp,
+      S.settings.tabs.docs,
+      S.settings.tabs.runbooks,
+      S.settings.tabs.appearance,
+      S.settings.tabs.terminal,
+      S.settings.tabs.hosts,
+      S.settings.tabs.statistics,
+      S.settings.tabs.updates,
+      S.settings.tabs.about,
+    ]);
   });
 
   it("refreshes the lifetime totals on demand", async () => {
