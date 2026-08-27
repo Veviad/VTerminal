@@ -88,6 +88,17 @@ describe("Header workspace and generation controls", () => {
     expect(switchWorkspace).toHaveBeenCalledWith("terminal");
   });
 
+  it("keeps the header edges fixed while the terminal navigation takes remaining space", () => {
+    useChatStore.setState({ workspaceMode: "terminal" });
+    render(<Header />);
+
+    const [left, center, right] = Array.from(screen.getByRole("banner").children);
+    expect(left).toHaveClass("shrink-0");
+    expect(center).toHaveClass("min-w-0", "flex-1");
+    expect(right).toHaveClass("shrink-0");
+    expect(center).toContainElement(screen.getByTestId("tabs"));
+  });
+
   it("shows when MTP decoding is active", () => {
     render(<Header />);
     expect(screen.getByText("MTP")).toHaveAttribute(
