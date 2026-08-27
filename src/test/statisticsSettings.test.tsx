@@ -81,6 +81,19 @@ describe("Statistics settings", () => {
     expect(screen.getByText("GPT-5.6 Terra")).toBeInTheDocument();
   });
 
+  it("appears between SSH hosts and Updates in the settings navigation", () => {
+    render(<SettingsPage />);
+
+    const hosts = screen.getByRole("button", { name: S.settings.tabs.hosts });
+    const statisticsTab = screen.getByRole("button", {
+      name: S.settings.tabs.statistics,
+    });
+    const updates = screen.getByRole("button", { name: S.settings.tabs.updates });
+
+    expect(hosts.nextElementSibling).toBe(statisticsTab);
+    expect(statisticsTab.nextElementSibling).toBe(updates);
+  });
+
   it("refreshes the lifetime totals on demand", async () => {
     render(<SettingsPage />);
     await waitFor(() => expect(statistics).toHaveBeenCalledTimes(1));

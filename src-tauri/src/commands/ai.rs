@@ -1104,7 +1104,6 @@ async fn run_chat(
         model: label,
     });
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<ProviderEvent>(64);
     let params = ChatParams {
         temperature,
         max_tokens,
@@ -1120,55 +1119,50 @@ async fn run_chat(
         },
     };
 
-    let stream_task = tokio::spawn(async move {
-        provider
-            .chat_stream(messages, Vec::new(), params, cancel_rx, tx)
-            .await
-    });
-
     let mut filter = ThinkFilter::new();
-    let mut usage = (0u32, 0u32);
-    while let Some(event) = rx.recv().await {
-        match event {
+    let result = crate::provider::round::run_round(
+        provider.as_ref(),
+        messages,
+        Vec::new(),
+        params,
+        cancel_rx,
+        |event| match event {
             ProviderEvent::TextDelta(delta) => {
-                let cleaned = filter.push(&delta);
+                let cleaned = filter.push(delta);
                 if !cleaned.is_empty() {
                     let _ = on_event.send(StreamEvent::Delta { content: cleaned });
                 }
             }
             ProviderEvent::ReasoningDelta(delta) => {
-                let _ = on_event.send(StreamEvent::ThinkingDelta { content: delta });
+                let _ = on_event.send(StreamEvent::ThinkingDelta {
+                    content: delta.clone(),
+                });
             }
             ProviderEvent::WebCitation(citation) => {
                 let _ = on_event.send(StreamEvent::WebCitation {
-                    url: citation.url,
-                    title: citation.title,
-                    cited_text: citation.cited_text,
+                    url: citation.url.clone(),
+                    title: citation.title.clone(),
+                    cited_text: citation.cited_text.clone(),
                 });
             }
-            ProviderEvent::Usage {
-                prompt_tokens,
-                completion_tokens,
-            } => usage = (prompt_tokens, completion_tokens),
-            ProviderEvent::Done { .. } => break,
-            ProviderEvent::ToolCalls(_) => {} // ask/explain/suggest expose no client tools
-        }
-    }
+            ProviderEvent::Usage { .. }
+            | ProviderEvent::Done { .. }
+            | ProviderEvent::ToolCalls(_) => {}
+        },
+    )
+    .await;
     let tail = filter.flush();
     if !tail.is_empty() {
         let _ = on_event.send(StreamEvent::Delta { content: tail });
     }
 
-    let result = stream_task
-        .await
-        .map_err(|e| format!("stream task panicked: {e}"))?;
     ai_state.finish(&request_id);
 
     match result {
-        Ok(()) => {
+        Ok(output) => {
             let _ = on_event.send(StreamEvent::Done {
-                prompt_tokens: usage.0,
-                completion_tokens: usage.1,
+                prompt_tokens: output.usage.0,
+                completion_tokens: output.usage.1,
             });
             Ok(())
         }
@@ -1222,7 +1216,6 @@ async fn run_chat_with_mcp(
             let _ = on_event.send(StreamEvent::Cancelled);
             return Ok(());
         }
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<ProviderEvent>(64);
         let params = ChatParams {
             temperature,
             max_tokens,
@@ -1241,55 +1234,47 @@ async fn run_chat_with_mcp(
                 crate::provider::WebToolPolicy::Disabled
             },
         };
-        let future =
-            provider.chat_stream(messages.clone(), tools.clone(), params, cancel.clone(), tx);
-        tokio::pin!(future);
-        let mut calls = Vec::new();
         let mut text = String::new();
         let mut filter = ThinkFilter::new();
-        let mut result = None;
-        let mut finish = FinishReason::Stop;
-        loop {
-            tokio::select! {
-                completed = &mut future, if result.is_none() => result = Some(completed),
-                event = rx.recv() => match event {
-                    Some(ProviderEvent::TextDelta(delta)) => {
-                        let clean = filter.push(&delta);
-                        if !clean.is_empty() {
-                            text.push_str(&clean);
-                            let _ = on_event.send(StreamEvent::Delta { content: clean });
-                        }
+        let result = crate::provider::round::run_round(
+            provider.as_ref(),
+            messages.clone(),
+            tools.clone(),
+            params,
+            cancel.clone(),
+            |event| match event {
+                ProviderEvent::TextDelta(delta) => {
+                    let clean = filter.push(delta);
+                    if !clean.is_empty() {
+                        text.push_str(&clean);
+                        let _ = on_event.send(StreamEvent::Delta { content: clean });
                     }
-                    Some(ProviderEvent::ReasoningDelta(delta)) => {
-                        let _ = on_event.send(StreamEvent::ThinkingDelta { content: delta });
-                    }
-                    Some(ProviderEvent::WebCitation(citation)) => {
-                        let _ = on_event.send(StreamEvent::WebCitation {
-                            url: citation.url,
-                            title: citation.title,
-                            cited_text: citation.cited_text,
-                        });
-                    }
-                    Some(ProviderEvent::ToolCalls(found)) => calls.extend(found),
-                    Some(ProviderEvent::Usage { prompt_tokens, completion_tokens }) => {
-                        usage.0 = usage.0.saturating_add(prompt_tokens);
-                        usage.1 = usage.1.saturating_add(completion_tokens);
-                    }
-                    Some(ProviderEvent::Done { finish_reason }) => finish = finish_reason,
-                    None => break,
                 }
-            }
-            if rx.is_closed() && result.is_some() {
-                break;
-            }
-        }
+                ProviderEvent::ReasoningDelta(delta) => {
+                    let _ = on_event.send(StreamEvent::ThinkingDelta {
+                        content: delta.clone(),
+                    });
+                }
+                ProviderEvent::WebCitation(citation) => {
+                    let _ = on_event.send(StreamEvent::WebCitation {
+                        url: citation.url.clone(),
+                        title: citation.title.clone(),
+                        cited_text: citation.cited_text.clone(),
+                    });
+                }
+                ProviderEvent::ToolCalls(_)
+                | ProviderEvent::Usage { .. }
+                | ProviderEvent::Done { .. } => {}
+            },
+        )
+        .await;
         let tail = filter.flush();
         if !tail.is_empty() {
             text.push_str(&tail);
             let _ = on_event.send(StreamEvent::Delta { content: tail });
         }
-        match result.unwrap_or(Ok(())) {
-            Ok(()) => {}
+        let output = match result {
+            Ok(output) => output,
             Err(ProviderError::Cancelled) => {
                 ai_state.finish(&request_id);
                 mcp_approvals.drain_for_request(&request_id);
@@ -1305,7 +1290,15 @@ async fn run_chat_with_mcp(
                 });
                 return Err(message);
             }
-        }
+        };
+        let crate::provider::round::RoundOutput {
+            calls,
+            usage: round_usage,
+            finish,
+            ..
+        } = output;
+        usage.0 = usage.0.saturating_add(round_usage.0);
+        usage.1 = usage.1.saturating_add(round_usage.1);
         if calls.is_empty() {
             ai_state.finish(&request_id);
             mcp_approvals.drain_for_request(&request_id);

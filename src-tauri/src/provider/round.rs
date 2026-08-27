@@ -72,3 +72,74 @@ pub async fn run_round(
         _ => Ok(output),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::{Effort, WebToolPolicy};
+
+    struct ImmediateProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for ImmediateProvider {
+        fn id(&self) -> &'static str {
+            "immediate"
+        }
+
+        fn model_name(&self) -> String {
+            "Immediate".into()
+        }
+
+        async fn chat_stream(
+            &self,
+            _messages: Vec<ChatMessage>,
+            _tools: Vec<ToolDef>,
+            _params: ChatParams,
+            _cancel: tokio::sync::watch::Receiver<bool>,
+            tx: tokio::sync::mpsc::Sender<ProviderEvent>,
+        ) -> Result<(), ProviderError> {
+            tx.send(ProviderEvent::TextDelta("answer".into()))
+                .await
+                .unwrap();
+            tx.send(ProviderEvent::Usage {
+                prompt_tokens: 9_697,
+                completion_tokens: 165,
+            })
+            .await
+            .unwrap();
+            tx.send(ProviderEvent::Done {
+                finish_reason: FinishReason::Stop,
+            })
+            .await
+            .unwrap();
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn drains_usage_when_a_provider_finishes_immediately() {
+        let (_, cancel) = tokio::sync::watch::channel(false);
+        let mut observed = Vec::new();
+        let output = run_round(
+            &ImmediateProvider,
+            vec![ChatMessage::user("hello")],
+            Vec::new(),
+            ChatParams {
+                temperature: None,
+                max_tokens: None,
+                tool_choice: super::super::ToolChoiceMode::None,
+                web: WebToolPolicy::Disabled,
+                effort: Effort::Off,
+            },
+            cancel,
+            |event| observed.push(std::mem::discriminant(event)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(output.text, "answer");
+        assert_eq!(output.usage, (9_697, 165));
+        assert_eq!(output.finish, FinishReason::Stop);
+        assert_eq!(observed.len(), 3);
+    }
+}

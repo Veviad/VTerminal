@@ -18,7 +18,6 @@ import { S } from "../../lib/strings";
 // switch nowhere to be found.
 const TABS: { id: SettingsTab; label: string }[] = [
   { id: "models", label: S.settings.tabs.models },
-  { id: "statistics", label: S.settings.tabs.statistics },
   { id: "agent", label: S.settings.tabs.agent },
   { id: "mcp", label: S.settings.tabs.mcp },
   { id: "docs", label: S.settings.tabs.docs },
@@ -26,6 +25,7 @@ const TABS: { id: SettingsTab; label: string }[] = [
   { id: "appearance", label: S.settings.tabs.appearance },
   { id: "terminal", label: S.settings.tabs.terminal },
   { id: "hosts", label: S.settings.tabs.hosts },
+  { id: "statistics", label: S.settings.tabs.statistics },
   { id: "updates", label: S.settings.tabs.updates },
   { id: "about", label: S.settings.tabs.about },
 ];
