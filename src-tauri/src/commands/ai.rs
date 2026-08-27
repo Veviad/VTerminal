@@ -1064,6 +1064,40 @@ impl ThinkFilter {
     }
 }
 
+fn forward_chat_provider_event(
+    event: &crate::provider::ProviderEvent,
+    filter: &mut ThinkFilter,
+    on_event: &Channel<StreamEvent>,
+    mut text: Option<&mut String>,
+) {
+    use crate::provider::ProviderEvent;
+
+    match event {
+        ProviderEvent::TextDelta(delta) => {
+            let cleaned = filter.push(delta);
+            if !cleaned.is_empty() {
+                if let Some(text) = text.as_mut() {
+                    text.push_str(&cleaned);
+                }
+                let _ = on_event.send(StreamEvent::Delta { content: cleaned });
+            }
+        }
+        ProviderEvent::ReasoningDelta(delta) => {
+            let _ = on_event.send(StreamEvent::ThinkingDelta {
+                content: delta.clone(),
+            });
+        }
+        ProviderEvent::WebCitation(citation) => {
+            let _ = on_event.send(StreamEvent::WebCitation {
+                url: citation.url.clone(),
+                title: citation.title.clone(),
+                cited_text: citation.cited_text.clone(),
+            });
+        }
+        ProviderEvent::Usage { .. } | ProviderEvent::Done { .. } | ProviderEvent::ToolCalls(_) => {}
+    }
+}
+
 /// `effort_override` is for internal fast paths (NL→command suggestions) that
 /// must stay instant no matter what the user configured. `None` means "use the
 /// model's configured effort".
@@ -1080,7 +1114,7 @@ async fn run_chat(
     // ceiling rather than a demand.
     allow_web: bool,
 ) -> Result<(), String> {
-    use crate::provider::{ProviderError, ProviderEvent};
+    use crate::provider::ProviderError;
 
     let resolved = match resolve_provider(app).await {
         Ok(r) => r,
@@ -1126,29 +1160,7 @@ async fn run_chat(
         Vec::new(),
         params,
         cancel_rx,
-        |event| match event {
-            ProviderEvent::TextDelta(delta) => {
-                let cleaned = filter.push(delta);
-                if !cleaned.is_empty() {
-                    let _ = on_event.send(StreamEvent::Delta { content: cleaned });
-                }
-            }
-            ProviderEvent::ReasoningDelta(delta) => {
-                let _ = on_event.send(StreamEvent::ThinkingDelta {
-                    content: delta.clone(),
-                });
-            }
-            ProviderEvent::WebCitation(citation) => {
-                let _ = on_event.send(StreamEvent::WebCitation {
-                    url: citation.url.clone(),
-                    title: citation.title.clone(),
-                    cited_text: citation.cited_text.clone(),
-                });
-            }
-            ProviderEvent::Usage { .. }
-            | ProviderEvent::Done { .. }
-            | ProviderEvent::ToolCalls(_) => {}
-        },
+        |event| forward_chat_provider_event(event, &mut filter, &on_event, None),
     )
     .await;
     let tail = filter.flush();
@@ -1195,7 +1207,7 @@ async fn run_chat_with_mcp(
     resolved: Resolved,
     mcp: &crate::mcp::chat::McpRunContext<'_>,
 ) -> Result<(), String> {
-    use crate::provider::{FinishReason, ProviderError, ProviderEvent, Role, ToolChoiceMode};
+    use crate::provider::{FinishReason, ProviderError, Role, ToolChoiceMode};
 
     const MAX_ASK_MCP_ROUNDS: u32 = 12;
     let model = resolved.model;
@@ -1242,30 +1254,7 @@ async fn run_chat_with_mcp(
             tools.clone(),
             params,
             cancel.clone(),
-            |event| match event {
-                ProviderEvent::TextDelta(delta) => {
-                    let clean = filter.push(delta);
-                    if !clean.is_empty() {
-                        text.push_str(&clean);
-                        let _ = on_event.send(StreamEvent::Delta { content: clean });
-                    }
-                }
-                ProviderEvent::ReasoningDelta(delta) => {
-                    let _ = on_event.send(StreamEvent::ThinkingDelta {
-                        content: delta.clone(),
-                    });
-                }
-                ProviderEvent::WebCitation(citation) => {
-                    let _ = on_event.send(StreamEvent::WebCitation {
-                        url: citation.url.clone(),
-                        title: citation.title.clone(),
-                        cited_text: citation.cited_text.clone(),
-                    });
-                }
-                ProviderEvent::ToolCalls(_)
-                | ProviderEvent::Usage { .. }
-                | ProviderEvent::Done { .. } => {}
-            },
+            |event| forward_chat_provider_event(event, &mut filter, &on_event, Some(&mut text)),
         )
         .await;
         let tail = filter.flush();

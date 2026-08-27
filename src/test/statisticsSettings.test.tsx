@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import { S } from "../lib/strings";
 import type { TokenStatistics } from "../lib/types";
@@ -84,14 +84,23 @@ describe("Statistics settings", () => {
   it("appears between SSH hosts and Updates in the settings navigation", () => {
     render(<SettingsPage />);
 
-    const hosts = screen.getByRole("button", { name: S.settings.tabs.hosts });
-    const statisticsTab = screen.getByRole("button", {
-      name: S.settings.tabs.statistics,
-    });
-    const updates = screen.getByRole("button", { name: S.settings.tabs.updates });
+    const labels = within(screen.getByRole("navigation"))
+      .getAllByRole("button")
+      .map((button) => button.textContent);
 
-    expect(hosts.nextElementSibling).toBe(statisticsTab);
-    expect(statisticsTab.nextElementSibling).toBe(updates);
+    expect(labels).toEqual([
+      S.settings.tabs.models,
+      S.settings.tabs.agent,
+      S.settings.tabs.mcp,
+      S.settings.tabs.docs,
+      S.settings.tabs.runbooks,
+      S.settings.tabs.appearance,
+      S.settings.tabs.terminal,
+      S.settings.tabs.hosts,
+      S.settings.tabs.statistics,
+      S.settings.tabs.updates,
+      S.settings.tabs.about,
+    ]);
   });
 
   it("refreshes the lifetime totals on demand", async () => {
