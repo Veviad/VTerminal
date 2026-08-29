@@ -317,6 +317,39 @@ pub const CATALOG: &[CatalogModel] = &[
     // Sizes are the real Q4_K_M byte counts from the HF tree API; min_ram_gb
     // is derived from them via the recommend() fit rule, not guessed.
     CatalogModel {
+        id: "local/qwen3.5-2b",
+        provider: ProviderId::Local,
+        tier: Tier::Fast,
+        label: "Qwen3.5 2B",
+        description: "Ultrafast on-device agent. Native tool calling with minimal memory use on 8GB systems.",
+        wire_model: "Qwen3.5-2B-Q4_K_M.gguf",
+        context_tokens: 262_144,
+        efforts: TOGGLE_PLUS,
+        default_effort: Effort::Off,
+        supports_temperature: true,
+        supports_tools: true,
+        native_web_search: false,
+        native_web_fetch: false,
+        supports_vision: false,
+        local: Some(LocalSpec {
+            artifact: ArtifactSpec {
+                repo_id: "unsloth/Qwen3.5-2B-MTP-GGUF",
+                filename: "Qwen3.5-2B-Q4_K_M.gguf",
+                size_bytes: 1_329_851_808,
+            },
+            mtp: MtpSpec::Embedded {
+                legacy: ArtifactSpec {
+                    repo_id: "unsloth/Qwen3.5-2B-GGUF",
+                    filename: "Qwen3.5-2B-Q4_K_M.gguf",
+                    size_bytes: 1_280_835_840,
+                },
+                draft_tokens: 6,
+            },
+            min_ram_gb: 8,
+            family: LocalFamily::Qwen,
+        }),
+    },
+    CatalogModel {
         id: "local/qwen3.5-4b",
         provider: ProviderId::Local,
         tier: Tier::Fast,
@@ -784,8 +817,8 @@ mod tests {
 
     #[test]
     fn every_provider_offers_each_tier_once() {
-        // Deliberately explicit, not `all providers`: Local is exempt (six
-        // entries, two families) and Remote is not in the table at all.
+        // Deliberately explicit, not `all providers`: Local is exempt because
+        // it offers several models per tier, and Remote is not in the table.
         for provider in [
             ProviderId::Anthropic,
             ProviderId::OpenAi,
@@ -932,11 +965,46 @@ mod tests {
     #[test]
     fn legacy_local_ids_resolve() {
         assert_eq!(
+            find_by_legacy_local_id("unsloth/Qwen3.5-2B-GGUF::Qwen3.5-2B-Q4_K_M.gguf")
+                .map(|m| m.id),
+            Some("local/qwen3.5-2b")
+        );
+        assert_eq!(
             find_by_legacy_local_id("unsloth/Qwen3.5-9B-GGUF::Qwen3.5-9B-Q4_K_M.gguf")
                 .map(|m| m.id),
             Some("local/qwen3.5-9b")
         );
         assert!(find_by_legacy_local_id("unsloth/Nope-GGUF::nope.gguf").is_none());
         assert!(find_by_legacy_local_id("not-a-legacy-id").is_none());
+    }
+
+    #[test]
+    fn qwen35_2b_is_an_embedded_mtp_model_for_8gb_systems() {
+        let model = find("local/qwen3.5-2b").expect("Qwen3.5 2B must be in the catalog");
+        assert_eq!(model.label, "Qwen3.5 2B");
+        assert_eq!(model.wire_model, "Qwen3.5-2B-Q4_K_M.gguf");
+        assert_eq!(model.context_tokens, 262_144);
+        assert_eq!(model.default_effort, Effort::Off);
+        assert!(model.supports_tools);
+
+        let local = model.local.expect("Qwen3.5 2B must be a local model");
+        assert_eq!(local.family, LocalFamily::Qwen);
+        assert_eq!(local.min_ram_gb, 8);
+        assert_eq!(local.artifact.repo_id, "unsloth/Qwen3.5-2B-MTP-GGUF");
+        assert_eq!(local.artifact.filename, "Qwen3.5-2B-Q4_K_M.gguf");
+        assert_eq!(local.artifact.size_bytes, 1_329_851_808);
+
+        match local.mtp {
+            MtpSpec::Embedded {
+                legacy,
+                draft_tokens,
+            } => {
+                assert_eq!(legacy.repo_id, "unsloth/Qwen3.5-2B-GGUF");
+                assert_eq!(legacy.filename, "Qwen3.5-2B-Q4_K_M.gguf");
+                assert_eq!(legacy.size_bytes, 1_280_835_840);
+                assert_eq!(draft_tokens, 6);
+            }
+            MtpSpec::Sidecar { .. } => panic!("Qwen3.5 2B MTP must be embedded"),
+        }
     }
 }

@@ -1,8 +1,9 @@
 {
   "name": "vterminal",
   "private": true,
-  "version": "0.5.5",
+  "version": "0.5.6",
   "author": "Shawn Maholick",
+  "license": "GPL-3.0-only",
   "type": "module",
   "scripts": {
     "dev": "vite",
