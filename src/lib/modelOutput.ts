@@ -41,10 +41,10 @@ function unprotectedLineControlToken(
   line: MarkdownLine,
   protection: MarkdownProtection,
 ): string | null {
-  const token = lineControlToken(line);
-  if (token === null) return null;
+  const lineValue = lineControlToken(line);
+  if (lineValue === null) return null;
   const indentation = line.text.match(/^ {0,3}/)?.[0].length ?? 0;
-  return protection.isProtected(line.start + indentation) ? null : token;
+  return protection.isProtected(line.start + indentation) ? null : lineValue;
 }
 
 function previousNonBlankLine(lines: readonly MarkdownLine[], from: number): number {
@@ -62,9 +62,12 @@ function visiblePrefix(content: string, lineStart: number): string {
   return prefix.trim().length === 0 ? "" : prefix;
 }
 
-function isSummaryFinishPair(token: string, allowPartial: boolean): boolean {
-  if (!token.startsWith(SUMMARY_CLOSE)) return false;
-  const afterSummary = token.slice(SUMMARY_CLOSE.length);
+function isSummaryFinishPair(
+  controlText: string,
+  allowPartial: boolean,
+): boolean {
+  if (!controlText.startsWith(SUMMARY_CLOSE)) return false;
+  const afterSummary = controlText.slice(SUMMARY_CLOSE.length);
   if (!/^\s/u.test(afterSummary)) return false;
   const finish = afterSummary.trimStart();
   return finish === FINISH_CLOSE || (allowPartial && isProperPrefix(finish, FINISH_CLOSE));
@@ -139,19 +142,24 @@ function stripTrailingControlLines(content: string, openedEnvelope: boolean): st
   let index = previousNonBlankLine(lines, lines.length - 1);
   let cutoff = content.length;
   let removed = false;
-  let token =
+  let controlText =
     index >= 0 ? unprotectedLineControlToken(lines[index], protection) : null;
 
-  if (token !== null && isSummaryFinishPair(token, openedEnvelope)) {
+  if (
+    controlText !== null &&
+    isSummaryFinishPair(controlText, openedEnvelope)
+  ) {
     cutoff = lines[index].start;
     removed = true;
-    token = null;
+    controlText = null;
   }
 
   if (!removed) {
     const finishLike =
-      token === FINISH_CLOSE ||
-      (openedEnvelope && token !== null && isProperPrefix(token, FINISH_CLOSE));
+      controlText === FINISH_CLOSE ||
+      (openedEnvelope &&
+        controlText !== null &&
+        isProperPrefix(controlText, FINISH_CLOSE));
     if (finishLike) {
       const finishStart = lines[index].start;
       const summaryIndex = previousNonBlankLine(lines, index - 1);
@@ -174,8 +182,8 @@ function stripTrailingControlLines(content: string, openedEnvelope: boolean): st
       }
     } else if (
       openedEnvelope &&
-      (token === SUMMARY_CLOSE ||
-        (token !== null && isProperPrefix(token, SUMMARY_CLOSE)))
+      (controlText === SUMMARY_CLOSE ||
+        (controlText !== null && isProperPrefix(controlText, SUMMARY_CLOSE)))
     ) {
       cutoff = lines[index].start;
       removed = true;

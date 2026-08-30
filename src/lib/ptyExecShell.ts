@@ -513,8 +513,8 @@ type ControlFrame =
 
 /** Reject incomplete multiline-style control grammar before it reaches a PTY. */
 function hasCompleteControlGrammar(command: string): boolean {
-  const tokens = command.match(/&&|\|\||[;|(){}<>]|[^\s;&|(){}<>]+/g) ?? [];
-  if (tokens.some((token, index) => token === "(" && tokens[index + 1] === ")")) {
+  const words = command.match(/&&|\|\||[;|(){}<>]|[^\s;&|(){}<>]+/g) ?? [];
+  if (words.some((word, index) => word === "(" && words[index + 1] === ")")) {
     // Empty parentheses are either an incomplete function declaration or an
     // invalid empty subshell. Both can keep an interactive parser at PS2.
     return false;
@@ -523,27 +523,27 @@ function hasCompleteControlGrammar(command: string): boolean {
   let commandPosition = true;
   let conditionalTestOpen = false;
 
-  for (const token of tokens) {
+  for (const word of words) {
     if (conditionalTestOpen) {
-      if (token === "]]") {
+      if (word === "]]") {
         conditionalTestOpen = false;
         commandPosition = false;
       }
       continue;
     }
-    if ([";", "&&", "||", "|", "(", "{"].includes(token)) {
+    if ([";", "&&", "||", "|", "(", "{"].includes(word)) {
       commandPosition = true;
       continue;
     }
-    if (token === ")" || token === "}") {
+    if (word === ")" || word === "}") {
       commandPosition = false;
       continue;
     }
-    if (token === "<" || token === ">") continue;
+    if (word === "<" || word === ">") continue;
     if (!commandPosition) continue;
 
     const top = frames[frames.length - 1];
-    switch (token) {
+    switch (word) {
       case "[[":
         conditionalTestOpen = true;
         commandPosition = false;
