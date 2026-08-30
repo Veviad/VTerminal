@@ -766,11 +766,14 @@ export const S = {
       build: "Build",
       description:
         `A lean AI-powered terminal. Local models run in-process (no external daemon) with ${isWindows() ? "Vulkan acceleration and CPU fallback" : "Metal acceleration"}; models are pulled directly from Hugging Face.`,
-      // Labels only. The names behind them (author, publisher, copyright) are
-      // build-time constants read from package.json / tauri.conf.json — see
-      // vite.config.ts. Attribution is metadata, not UI copy to translate.
+      // Attribution values and the SPDX identifier are build-time constants read
+      // from package.json / tauri.conf.json. Labels and explanatory copy stay here.
       author: "Author",
       publisher: "Publisher",
+      license: "License",
+      licenseName: "GNU General Public License version 3",
+      licenseNotice:
+        "VTerminal is free software. You may redistribute and modify it under GPLv3. There is no warranty, to the extent permitted by law.",
     },
   },
   statusBar: {

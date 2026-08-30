@@ -1,4 +1,5 @@
 import { ArrowLeft } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useAppStore, type SettingsTab } from "../../stores/appStore";
 import { ModelsSettings } from "./ModelsSettings";
 import { AppearanceSection } from "./AppearanceSection";
@@ -12,6 +13,8 @@ import { McpSettings } from "./McpSettings";
 import { StatisticsSection } from "./StatisticsSection";
 import { Row } from "../ui/Row";
 import { S } from "../../lib/strings";
+
+const GPL_V3_URL = "https://www.gnu.org/licenses/gpl-3.0.html";
 
 // The Docs tab is listed even while the feature is off: its own toggle is the first
 // thing inside it, and a tab that only appears once the feature is enabled leaves the
@@ -109,7 +112,19 @@ function AboutSection() {
         <Row label={S.settings.about.publisher}>
           <span className="text-[12px] text-text-primary">{__APP_PUBLISHER__}</span>
         </Row>
+        <Row label={S.settings.about.license} hint={S.settings.about.licenseName}>
+          <button
+            type="button"
+            className="font-mono text-[12px] text-accent hover:underline"
+            onClick={() => void openUrl(GPL_V3_URL)}
+          >
+            {__APP_LICENSE__}
+          </button>
+        </Row>
       </div>
+      <p className="text-[10px] leading-relaxed text-text-muted">
+        {S.settings.about.licenseNotice}
+      </p>
       <p className="text-[10px] text-text-muted">{__APP_COPYRIGHT__}</p>
     </div>
   );
