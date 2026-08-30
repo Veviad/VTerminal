@@ -149,7 +149,7 @@ export function ChatWorkspace() {
                     <p className="mt-2 whitespace-pre-wrap">{stream.thinking}</p>
                   </details>
                 )}
-                {stream.content ? <AiMessageView content={stream.content} /> : <span className="text-xs text-text-muted">Thinking…</span>}
+                {stream.content ? <AiMessageView content={stream.content} origin="model" streaming /> : <span className="text-xs text-text-muted">Thinking…</span>}
                 {stream.mcpCalls.length > 0 && (
                   <div className="mt-3">
                     <McpToolGroup calls={stream.mcpCalls} />
@@ -384,7 +384,7 @@ function Message({ message }: { message: ChatDisplayMessage }) {
     <article className={user ? "ml-auto min-w-0 max-w-[86%] overflow-hidden rounded-2xl bg-bg-hover px-4 py-3 text-text-primary" : "min-w-0 max-w-full overflow-hidden rounded-xl border border-border-subtle bg-bg-card p-4 text-text-primary"}>
       <AttachmentStrip attachments={attachments} />
       {message.thinking && <details className="mb-3 text-xs text-text-muted"><summary className="cursor-pointer">Reasoning</summary><p className="mt-2 whitespace-pre-wrap">{message.thinking}</p></details>}
-      <AiMessageView content={displayed.prompt} />
+      <AiMessageView content={displayed.prompt} origin={user ? "literal" : "model"} />
       {displayed.blocks.map((block, index) => <FoldedBlockSection key={`${block.kind}-${block.name}-${index}`} block={block} />)}
       {message.mcp_calls.length > 0 && (
         <div className="mt-3">

@@ -18,6 +18,7 @@ import { setAiPanelOpen } from "./aiPanel";
 import { hydrateAttachments } from "./attachInput";
 import { replayBanner, stripReplayBanners } from "./replayBanner";
 import { archiveTranscriptOnly } from "./sessionArchive";
+import { S } from "./strings";
 import type {
   AiMessage,
   ArchiveDetail,
@@ -36,14 +37,28 @@ function toAiMessages(rows: ArchivedMessage[]): AiMessage[] {
     content: r.content,
     createdAt: r.created_at,
     thinking: r.thinking ?? undefined,
-    kind: r.kind === "command" ? "command" : "text",
+    kind:
+      r.kind === "command"
+        ? "command"
+        : r.kind === "literal"
+          ? "literal"
+          : "text",
     command: r.command
       ? {
           command: r.command.command,
           output: r.command.output,
           exitCode: r.command.exit_code,
-          status: r.command.status,
-          note: r.command.note ?? undefined,
+          status:
+            r.command.status === "running" ||
+            (r.command.status === "done" && r.command.exit_code === null)
+              ? "timeout"
+              : r.command.status,
+          note:
+            r.command.note ??
+            (r.command.status === "running" ||
+            (r.command.status === "done" && r.command.exit_code === null)
+              ? S.aiPanel.restoredRunningCommand
+              : undefined),
           outputPolicy: r.command.output_policy,
           // The live session id is intentionally not restored: archived cards
           // retain display provenance, never a runnable binding to an old PTY.

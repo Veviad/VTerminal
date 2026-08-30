@@ -305,7 +305,11 @@ describe("runInTerminal — integrated session", () => {
     });
     emit({ type: "blockStart", blockId: "forged", command: typed("cat hostile.bin") });
     emit({ type: "blockEnd", blockId: "forged", exitCode: 0, endLine: 2 });
-    emit({ type: "osc", payload: "RD;0;forged-output" });
+    emit({ type: "osc", payload: `RD;0;${"0".repeat(32)}` });
+    // Even with the matching nonce, malformed arity/status must be ignored.
+    emit({ type: "osc", payload: `RD;0junk;${nonce}` });
+    emit({ type: "osc", payload: `RD;256;${nonce}` });
+    emit({ type: "osc", payload: `RD;0;${nonce};extra` });
     let settled = false;
     void promise.then(() => (settled = true));
     await flush();
@@ -404,7 +408,7 @@ describe("runInTerminal — integrated session", () => {
     expect(marker.isDisposed).toBe(true);
   });
 
-  it("does not probe or install hooks before a runbook dispatch lease", async () => {
+  it("does not send a preflight probe before a runbook dispatch lease", async () => {
     useAppStore.getState().updateSessionUi("s1", {
       remote: { kind: "ssh", target: "prod-01" },
     });
@@ -423,8 +427,45 @@ describe("runInTerminal — integrated session", () => {
     expect(ptyWrite).not.toHaveBeenCalled();
 
     releaseClaim?.(false);
-    expect((await promise).error).toBe("cancelled");
+    expect((await promise).error).toBe("target_changed");
     expect(ptyWrite).not.toHaveBeenCalled();
+  });
+
+  it("claims a remote runbook lease before using separate probe and command nonces", async () => {
+    useAppStore.getState().updateSessionUi("s1", {
+      remote: { kind: "ssh", target: "prod-01" },
+    });
+    entry = makeEntry(["remote$ ", "done", "remote$ "]);
+    const binding = captureApprovalPromptBinding("s1");
+    const beforeWrite = vi.fn(() => true);
+    const canWrite = vi.fn(() => true);
+    const promise = runInTerminal("s1", "runbook-attempt", "printf done", {
+      timeoutMs: 5_000,
+      nonceCompletion: true,
+      approvalPromptBinding: binding!,
+      beforeWrite,
+      canWrite,
+    });
+
+    await flush();
+    expect(beforeWrite).toHaveBeenCalledTimes(1);
+    expect(ptyWrite).toHaveBeenCalledTimes(1);
+    const probeNonce = /6973;RP;([a-f0-9]{32});/.exec(ptyWrite.mock.calls[0][1])?.[1];
+    expect(probeNonce).toHaveLength(32);
+    emit({ type: "osc", payload: `RP;${probeNonce};z5.9;b;f` });
+
+    await flush();
+    expect(ptyWrite).toHaveBeenCalledTimes(2);
+    const commandWrite = ptyWrite.mock.calls[1][1];
+    const commandNonce = /RD;%s;([a-f0-9]{32})\\007/.exec(commandWrite)?.[1];
+    expect(commandNonce).toHaveLength(32);
+    expect(commandNonce).not.toBe(probeNonce);
+    expect(canWrite).toHaveBeenCalledTimes(1);
+
+    emit({ type: "osc", payload: `RD;0;${commandNonce}` });
+    const outcome = await promise;
+    expect(outcome.exitCode).toBe(0);
+    expect(outcome.mode).toBe("sentinel");
   });
 });
 
@@ -477,6 +518,18 @@ describe("runInTerminal — refusing to type", () => {
     expect(ptyWrite).not.toHaveBeenCalled();
   });
 
+  it("does not redirect a local approval into a newly entered remote shell", async () => {
+    entry = makeEntry(["$ "]);
+    const promise = runInTerminal("s1", "ap1", "touch /tmp/nope");
+    useAppStore.getState().updateSessionUi("s1", {
+      remote: { kind: "ssh", target: "prod-01" },
+    });
+
+    const outcome = await promise;
+    expect(outcome.error).toBe("target_changed");
+    expect(ptyWrite).not.toHaveBeenCalled();
+  });
+
   it("never writes when the prompt is busy", async () => {
     vi.useFakeTimers();
     entry = makeEntry(["$ running"], { atPrompt: false });
@@ -514,7 +567,34 @@ describe("runInTerminal — refusing to type", () => {
 });
 
 describe("runInTerminal — timeout and cancellation", () => {
-  it("reports a timeout as still-running and never sends Ctrl-C", async () => {
+  it("charges terminal preflight against the frontend command deadline", async () => {
+    vi.useFakeTimers();
+    entry = makeEntry(["$ "], { atPrompt: false });
+    let promptReady = false;
+    entry.tracker.isAtEmptyPrompt = () => promptReady;
+    entry.tracker.isAtPromptColumn = () => promptReady;
+
+    const promise = runInTerminal("s1", "ap1", "sleep 999", {
+      timeoutMs: 1_000,
+      idleWaitMs: 1_000,
+    });
+    await vi.advanceTimersByTimeAsync(400);
+    promptReady = true;
+    await vi.advanceTimersByTimeAsync(100);
+    expect(ptyWrite).toHaveBeenCalledTimes(1);
+
+    let settled = false;
+    void promise.then(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(499);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(2);
+
+    const outcome = await promise;
+    expect(outcome.error).toBe("timeout");
+    expect(outcome.durationMs).toBeLessThan(1_100);
+  });
+
+  it("reports an unconfirmed timeout without claiming the command is still running", async () => {
     vi.useFakeTimers();
     entry = makeEntry(["$ ", "partial"]);
     const promise = runInTerminal("s1", "ap1", "sleep 999", { timeoutMs: 1000 });
@@ -523,8 +603,9 @@ describe("runInTerminal — timeout and cancellation", () => {
     const outcome = await promise;
     expect(outcome.error).toBe("timeout");
     expect(outcome.exitCode).toBeNull();
-    expect(outcome.note).toContain("STILL RUNNING");
-    // The command is running in the user's own shell; killing it is their call.
+    expect(outcome.note).toContain("may still be running");
+    expect(outcome.note).toContain("may have finished after terminal integration was lost");
+    // Completion is unknown, and timeout itself never sends an interrupt.
     for (const call of ptyWrite.mock.calls) {
       expect(call[1]).not.toContain("\x03");
     }
@@ -543,7 +624,8 @@ describe("runInTerminal — timeout and cancellation", () => {
     expect(outcome.error).toBe("timeout");
     expect(outcome.output).toBe("");
     expect(outcome.outputObservedBytes).toBe(0);
-    expect(outcome.note).toBe("[private output suppressed]");
+    expect(outcome.note).toContain("[private output suppressed]");
+    expect(outcome.note).toContain("No completion signal arrived");
   });
 
   it("abortSession resolves the pending command without touching the terminal", async () => {
@@ -615,8 +697,27 @@ describe("runInTerminal — a command that hangs", () => {
 
     const outcome = await promise;
     expect(outcome.exitCode).toBe(130);
-    expect(outcome.error).toBeUndefined();
-    expect(outcome.note).toContain("SIGINT");
+    expect(outcome.error).toBe("interrupted");
+    expect(outcome.note).toContain("shell then reported completion");
+  });
+
+  it("settles after the TUI returns to normal but completion integration is lost", async () => {
+    vi.useFakeTimers();
+    entry = makeEntry(["$ ", "partial"]);
+    const promise = runInTerminal("s1", "ap1", "top", { timeoutMs: 60_000 });
+    await vi.advanceTimersByTimeAsync(0);
+
+    entry.term.buffer.active.type = "alternate";
+    emit({ type: "bufferChange", buffer: "alternate" });
+    expect(writes()).toContain("\x03");
+
+    entry.term.buffer.active.type = "normal";
+    await vi.advanceTimersByTimeAsync(1_500);
+
+    const outcome = await promise;
+    expect(outcome.exitCode).toBeNull();
+    expect(outcome.error).toBe("interrupted");
+    expect(outcome.note).toContain("no completion signal arrived within one second");
   });
 
   it("escalates to q and :q! while the alternate screen holds, then gives up", async () => {
@@ -662,6 +763,20 @@ describe("runInTerminal — a command that hangs", () => {
     expect(settled).toBe(false);
   });
 
+  it("settles a password-paused command before the backend watchdog", async () => {
+    vi.useFakeTimers();
+    entry = makeEntry(["$ ", "[sudo] password for maholick:"]);
+    const promise = runInTerminal("s1", "ap1", "sudo aide --init", { timeoutMs: 1_000 });
+    await vi.advanceTimersByTimeAsync(0);
+    emit({ type: "blockStart", blockId: "b1", command: typed("sudo aide --init") });
+
+    await vi.advanceTimersByTimeAsync(16_001);
+    const outcome = await promise;
+    expect(outcome.error).toBe("timeout");
+    expect(outcome.exitCode).toBeNull();
+    expect(writes()).not.toContain("\x03");
+  });
+
   // The guardrail for the whole design: `aide --init` prints nothing for ten
   // minutes, so idleness may inform the user but must never act.
   it("publishes an idle stall without touching the terminal", async () => {
@@ -693,76 +808,312 @@ describe("runInTerminal — a command that hangs", () => {
     await promise;
   });
 
-  it("a manual interrupt sends SIGINT only, never the pager and editor keys", async () => {
+  it("binds a manual interrupt to its approval and applies it idempotently", async () => {
     vi.useFakeTimers();
-    entry = makeEntry(["$ ", "no output yet"]);
+    entry = makeEntry(["$ ", "no output yet", "$ "]);
     const promise = runInTerminal("s1", "ap1", "aide --init", { timeoutMs: 60_000 });
     await vi.advanceTimersByTimeAsync(0);
+    emit({ type: "blockStart", blockId: "b1", command: typed("aide --init") });
 
-    interruptJob("s1");
-    await vi.advanceTimersByTimeAsync(2_000);
-    expect(writes()).toContain("\x03");
+    expect(interruptJob("s1", "different-approval")).toBe(false);
+    expect(writes()).not.toContain("\x03");
+    expect(interruptJob("s1", "ap1")).toBe(true);
+    expect(interruptJob("s1", "ap1")).toBe(true);
+    expect(writes().filter((value) => value === "\x03")).toHaveLength(1);
     expect(writes()).not.toContain("q");
     expect(writes()).not.toContain("\x1b:q!\r");
 
-    abortSession("s1");
-    await promise;
+    entry.blockMarkers.set("b1", {
+      start: { line: 1, isDisposed: false },
+      end: { line: 2, isDisposed: false },
+    });
+    emit({ type: "blockEnd", blockId: "b1", exitCode: 130, endLine: 2 });
+
+    const outcome = await promise;
+    expect(outcome.exitCode).toBe(130);
+    expect(outcome.error).toBe("interrupted");
+    expect(outcome.note).toContain("shell confirmed command completion");
+  });
+
+  it("settles a delivered manual interrupt after a one-second grace without confirmation", async () => {
+    vi.useFakeTimers();
+    entry = makeEntry(["$ ", "partial"]);
+    const promise = runInTerminal("s1", "ap1", "aide --init", { timeoutMs: 60_000 });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(interruptJob("s1", "ap1")).toBe(true);
+    await vi.advanceTimersByTimeAsync(1_100);
+
+    const outcome = await promise;
+    expect(outcome.exitCode).toBeNull();
+    expect(outcome.error).toBe("interrupted");
+    expect(outcome.note).toContain("no completion signal arrived within one second");
+    expect(writes().filter((value) => value === "\x03")).toHaveLength(1);
+  });
+
+  it("starts the completion grace only after the SIGINT write is confirmed", async () => {
+    vi.useFakeTimers();
+    entry = makeEntry(["$ ", "partial"]);
+    const promise = runInTerminal("s1", "ap1", "aide --init", { timeoutMs: 60_000 });
+    await vi.advanceTimersByTimeAsync(0);
+
+    let confirmWrite!: () => void;
+    ptyWrite.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          confirmWrite = resolve;
+        }),
+    );
+    expect(interruptJob("s1", "ap1")).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(500);
+    confirmWrite();
+    await vi.advanceTimersByTimeAsync(900);
+    let settled = false;
+    void promise.then(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(101);
+    const outcome = await promise;
+    expect(outcome.error).toBe("interrupted");
+    expect(outcome.exitCode).toBeNull();
+  });
+
+  it("buffers authoritative completion until SIGINT delivery is confirmed", async () => {
+    vi.useFakeTimers();
+    entry = makeEntry(["$ ", "partial", "$ "]);
+    const promise = runInTerminal("s1", "ap1", "aide --init", { timeoutMs: 60_000 });
+    await vi.advanceTimersByTimeAsync(0);
+    emit({ type: "blockStart", blockId: "b1", command: typed("aide --init") });
+
+    let confirmWrite!: () => void;
+    ptyWrite.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          confirmWrite = resolve;
+        }),
+    );
+    expect(interruptJob("s1", "ap1")).toBe(true);
+    entry.blockMarkers.set("b1", {
+      start: { line: 1, isDisposed: false },
+      end: { line: 2, isDisposed: false },
+    });
+    emit({ type: "blockEnd", blockId: "b1", exitCode: 130, endLine: 2 });
+
+    let settled = false;
+    void promise.then(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(settled).toBe(false);
+
+    confirmWrite();
+    const outcome = await promise;
+    expect(outcome.error).toBe("interrupted");
+    expect(outcome.exitCode).toBe(130);
+    expect(writes().filter((value) => value === "\x03")).toHaveLength(1);
+  });
+
+  it("reports interrupt_failed when SIGINT delivery never settles", async () => {
+    vi.useFakeTimers();
+    entry = makeEntry(["$ ", "partial"]);
+    const promise = runInTerminal("s1", "ap1", "aide --init", { timeoutMs: 60_000 });
+    await vi.advanceTimersByTimeAsync(0);
+    ptyWrite.mockImplementationOnce(() => new Promise<void>(() => {}));
+
+    expect(interruptJob("s1", "ap1")).toBe(true);
+    await vi.advanceTimersByTimeAsync(1_001);
+
+    const outcome = await promise;
+    expect(outcome.error).toBe("interrupt_failed");
+    expect(outcome.exitCode).toBeNull();
+    expect(outcome.note).toContain("could not confirm that SIGINT was written");
+  });
+
+  it("does not promote buffered completion when SIGINT delivery is rejected", async () => {
+    vi.useFakeTimers();
+    entry = makeEntry(["$ ", "partial", "$ "]);
+    const promise = runInTerminal("s1", "ap1", "aide --init", { timeoutMs: 60_000 });
+    await vi.advanceTimersByTimeAsync(0);
+    emit({ type: "blockStart", blockId: "b1", command: typed("aide --init") });
+
+    let rejectWrite!: (error: Error) => void;
+    ptyWrite.mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectWrite = reject;
+        }),
+    );
+    expect(interruptJob("s1", "ap1")).toBe(true);
+    entry.blockMarkers.set("b1", {
+      start: { line: 1, isDisposed: false },
+      end: { line: 2, isDisposed: false },
+    });
+    emit({ type: "blockEnd", blockId: "b1", exitCode: 130, endLine: 2 });
+    rejectWrite(new Error("PTY closed"));
+
+    const outcome = await promise;
+    expect(outcome.error).toBe("interrupt_failed");
+    expect(outcome.exitCode).toBeNull();
+  });
+
+  it("reports interrupt_failed only when SIGINT cannot be delivered", async () => {
+    entry = makeEntry(["$ ", "partial"]);
+    const promise = runInTerminal("s1", "ap1", "aide --init", { timeoutMs: 60_000 });
+    await flush();
+    ptyWrite.mockRejectedValueOnce(new Error("PTY closed"));
+
+    expect(interruptJob("s1", "ap1")).toBe(true);
+    const outcome = await promise;
+    expect(outcome.exitCode).toBeNull();
+    expect(outcome.error).toBe("interrupt_failed");
+    expect(outcome.note).toContain("could not confirm that SIGINT was written");
   });
 });
 
 describe("runInTerminal — remote session", () => {
+  const probeNonce = (write: string): string => {
+    const nonce = /6973;RP;([a-f0-9]{32});/.exec(write)?.[1];
+    expect(nonce).toHaveLength(32);
+    return nonce!;
+  };
+
+  const commandNonce = (write: string): string => {
+    const nonce = /RD;%s;([a-f0-9]{32})\\007/.exec(write)?.[1];
+    expect(nonce).toHaveLength(32);
+    return nonce!;
+  };
+
   beforeEach(() => {
     useAppStore.getState().updateSessionUi("s1", {
       remote: { kind: "ssh", target: "prod-01" },
     });
   });
 
-  it("probes, installs the hook, and reads the exit code from its token", async () => {
+  it("reserves the terminal while remote preflight is still probing", async () => {
+    entry = makeEntry(["$ ", "out", "$ "]);
+    const first = runInTerminal("s1", "ap1", "id", { timeoutMs: 60_000 });
+    const second = await runInTerminal("s1", "ap2", "whoami", { timeoutMs: 60_000 });
+
+    expect(second.error).toBe("terminal_busy");
+    await flush();
+    expect(ptyWrite).toHaveBeenCalledTimes(1);
+    const probe = probeNonce(ptyWrite.mock.calls[0][1]);
+    emit({ type: "osc", payload: `RP;${probe};z5.9;b;f` });
+    await flush();
+    const nonce = commandNonce(ptyWrite.mock.calls[1][1]);
+    emit({ type: "osc", payload: `RD;0;${nonce}` });
+
+    expect((await first).exitCode).toBe(0);
+    expect(ptyWrite).toHaveBeenCalledTimes(2);
+  });
+
+  it("never dispatches after the approved remote identity changes", async () => {
+    entry = makeEntry(["remote$ "]);
+    const promise = runInTerminal("s1", "ap1", "hostname", { timeoutMs: 60_000 });
+    await flush();
+    const probe = probeNonce(ptyWrite.mock.calls[0][1]);
+
+    useAppStore.getState().updateSessionUi("s1", {
+      remote: { kind: "ssh", target: "prod-02" },
+    });
+    emit({ type: "osc", payload: `RP;${probe};z5.9;b;f` });
+
+    const outcome = await promise;
+    expect(outcome.error).toBe("target_changed");
+    expect(ptyWrite).toHaveBeenCalledTimes(1);
+    expect(ptyWrite.mock.calls[0][1]).toContain("6973;RP");
+  });
+
+  it("requires the matching fresh probe and a quiet redrawn prompt", async () => {
+    vi.useFakeTimers();
     entry = makeEntry(["$ ", "remote-out", "$ "]);
     const promise = runInTerminal("s1", "ap1", "uname -a", { timeoutMs: 60_000 });
 
-    await flush();
-    // 1st write is the probe.
-    expect(ptyWrite.mock.calls[0][1]).toContain("6973;RS");
-    emit({ type: "osc", payload: "RS;5.9;;;" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ptyWrite).toHaveBeenCalledTimes(1);
+    const probe = probeNonce(ptyWrite.mock.calls[0][1]);
 
-    await flush();
-    // 2nd write installs the in-memory hook.
-    expect(ptyWrite.mock.calls[1][1]).toContain("__vv_pc");
-    const nonce = /RH;([a-z0-9]+);zsh/.exec(ptyWrite.mock.calls[1][1])?.[1];
-    expect(nonce).toBeTruthy();
-    emit({ type: "osc", payload: `RH;${nonce};zsh` });
+    // A delayed reply from a previous command is not authority for this probe.
+    emit({ type: "osc", payload: `RP;${"0".repeat(32)};z5.9;b;f` });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ptyWrite).toHaveBeenCalledTimes(1);
 
-    await flush();
-    // 3rd write is the command itself — hardened, but with no sentinel suffix.
-    expect(ptyWrite.mock.calls[2][1]).toBe(`${typed("uname -a")}\r`);
-
-    emit({ type: "osc", payload: "RD;3;/root" });
-    const outcome = await promise;
-    expect(outcome.exitCode).toBe(3);
-    expect(outcome.mode).toBe("hook");
-  });
-
-  it("falls back to a sentinel when no hook can be installed", async () => {
-    entry = makeEntry(["$ ", "out", "$ "]);
-    const promise = runInTerminal("s1", "ap1", "id", { timeoutMs: 60_000 });
-
-    await flush();
-    emit({ type: "osc", payload: "RS;;;3.7;" }); // fish: no usable prompt hook
-    await flush();
+    // The matching RP is printed before the shell redraws its prompt. Model the
+    // data timestamp and prove that the command waits for another quiet period.
+    entry.lastDataAt = Date.now();
+    emit({ type: "osc", payload: `RP;${probe};z5.9;b;f` });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(ptyWrite).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(200);
 
     const written = ptyWrite.mock.calls[1][1];
-    // The sentinel goes AFTER the hardening, so `$?` is still the command's.
-    expect(written).toContain(`${typed("id")}; /usr/bin/printf`);
-    const nonce = /;([a-z0-9]+)\\007/.exec(written)?.[1];
+    expect(written).toContain(`${typed("uname -a")}; printf`);
+    const nonce = commandNonce(written);
+    expect(nonce).not.toBe(probe);
 
-    // A token from some other command must not resolve this one.
-    emit({ type: "osc", payload: "RD;0;wrong-nonce" });
-    emit({ type: "osc", payload: `RD;9;${nonce}` });
-
+    emit({ type: "osc", payload: `RD;0;${"0".repeat(32)}` });
+    emit({ type: "osc", payload: `RD;3;${nonce}` });
     const outcome = await promise;
-    expect(outcome.exitCode).toBe(9);
+    expect(outcome.exitCode).toBe(3);
     expect(outcome.mode).toBe("sentinel");
+  });
+
+  it("uses a fresh probe and command nonce for every remote command", async () => {
+    entry = makeEntry(["$ ", "out", "$ "]);
+
+    const first = runInTerminal("s1", "ap1", "id", { timeoutMs: 60_000 });
+    await flush();
+    const firstProbe = probeNonce(ptyWrite.mock.calls[0][1]);
+    emit({ type: "osc", payload: `RP;${firstProbe};z5.9;b;f` });
+    await flush();
+    const firstCommand = commandNonce(ptyWrite.mock.calls[1][1]);
+    emit({ type: "osc", payload: `RD;0;${firstCommand}` });
+    await first;
+
+    const second = runInTerminal("s1", "ap2", "whoami", { timeoutMs: 60_000 });
+    await flush();
+    const secondProbe = probeNonce(ptyWrite.mock.calls[2][1]);
+    expect(secondProbe).not.toBe(firstProbe);
+    emit({ type: "osc", payload: `RP;${secondProbe};z;b5.2;f` });
+    await flush();
+    const secondCommand = commandNonce(ptyWrite.mock.calls[3][1]);
+    expect(secondCommand).not.toBe(firstCommand);
+    expect(secondCommand).not.toBe(secondProbe);
+    emit({ type: "osc", payload: `RD;0;${secondCommand}` });
+    await second;
+
+    // There is no hook install and no session-level mode cache: two commands
+    // produce exactly probe, command, probe, command.
+    expect(ptyWrite).toHaveBeenCalledTimes(4);
+  });
+
+  it("rejects sentinel-unsafe syntax before claiming a lease or writing a probe", async () => {
+    entry = makeEntry(["remote$ "]);
+    const beforeWrite = vi.fn(() => true);
+    for (const command of [
+      "echo done # hides suffix",
+      "echo `unterminated",
+      "echo done;",
+      "sleep 1 &",
+      "sleep 1 &>/dev/null",
+      "true &&",
+      "false ||",
+      "printf x |",
+      "echo $(date",
+      "echo ${HOME",
+      "if true; then echo ok",
+      "case x in",
+      "[[ -n value",
+    ]) {
+      const outcome = await runInTerminal("s1", "ap1", command, {
+        timeoutMs: 60_000,
+        nonceCompletion: true,
+        beforeWrite,
+      });
+      expect(outcome.error).toBe("unsafe_command");
+    }
+    expect(beforeWrite).not.toHaveBeenCalled();
+    expect(ptyWrite).not.toHaveBeenCalled();
   });
 
   it("uses fish grouping for a private command in a remote fish shell", async () => {
@@ -773,14 +1124,15 @@ describe("runInTerminal — remote session", () => {
     });
 
     await flush();
-    emit({ type: "osc", payload: "RS;;;3.7;" });
+    const probe = probeNonce(ptyWrite.mock.calls[0][1]);
+    emit({ type: "osc", payload: `RP;${probe};z;b;f3.7` });
     await flush();
 
     const written = ptyWrite.mock.calls[1][1];
     expect(written).toContain("begin; eval 'set -gx GENERATED opaque < /dev/null'");
     expect(written).toContain("end >/dev/null 2>/dev/null");
     expect(written).toContain("$status");
-    const nonce = /;([a-z0-9]+)\\007/.exec(written)?.[1];
+    const nonce = commandNonce(written);
     emit({ type: "osc", payload: `RD;0;${nonce}` });
 
     const outcome = await promise;
@@ -796,8 +1148,8 @@ describe("runInTerminal — remote session", () => {
 
     const outcome = await promise;
     expect(outcome.error).toBe("not_a_shell");
-    // Only the probe was written — never the command.
+    // Only the probe was written, never the command.
     expect(ptyWrite).toHaveBeenCalledTimes(1);
-    expect(ptyWrite.mock.calls[0][1]).toContain("6973;RS");
+    expect(ptyWrite.mock.calls[0][1]).toContain("6973;RP");
   });
 });

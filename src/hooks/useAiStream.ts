@@ -28,6 +28,7 @@ import type {
   AgentTargetRole,
   AiMessage,
   Block,
+  SettledCommandStatus,
   SidecarAgentTargets,
   StreamEvent,
   TerminalContext,
@@ -839,6 +840,21 @@ function rejectTerminalDispatch(
   rejectTargetedRun(ownerSessionId, requestId, reason);
 }
 
+function stopAgentAfterTerminalFailure(
+  sessionId: string,
+  requestId: string,
+  message: string,
+): void {
+  const store = useAppStore.getState();
+  if (ownRecordValue(store.aiStreams, sessionId)?.requestId !== requestId)
+    return;
+  // Clear both request and generation ownership before the cancellation IPC can
+  // yield. A late CommandResult or agentStart resolution must not revive this run.
+  store.finishAiStream(sessionId, message);
+  markTranscriptDirty(sessionId);
+  void api.aiCancel(requestId).catch(() => {});
+}
+
 function dispatchPanelEvent(
   sessionId: string,
   requestId: string,
@@ -951,52 +967,96 @@ function dispatchPanelEvent(
         // and the live binding are the authority.
         canWrite: () =>
           canDispatchToTarget(sessionId, requestId, e, target.sessionId),
-      })
-        .then((outcome) => {
+        })
+        .then(async (outcome) => {
           const s = useAppStore.getState();
-          if (s.aiStreams[sessionId]?.requestId === requestId) {
-            s.setCommandOutput(
-              sessionId,
-              e.approval_id,
-              e.output_policy === "private" ? "" : outcome.output,
-            );
-            s.finishCommand(
-              sessionId,
-              e.approval_id,
-              outcome.exitCode,
-              cardStatus(outcome),
-              e.output_policy === "private" ? PRIVATE_OUTPUT_NOTICE : outcome.note,
-              outcome.durationMs,
-            );
-          }
-          return api.submitCommandResult(
+          // A backend watchdog or cancellation may already have settled and
+          // fenced this run. A late local waiter must not submit a second result.
+          if (s.aiStreams[sessionId]?.requestId !== requestId) return;
+          s.setCommandOutput(
+            sessionId,
+            e.approval_id,
+            e.output_policy === "private" ? "" : outcome.output,
+          );
+          s.finishCommand(
+            sessionId,
             e.approval_id,
             outcome.exitCode,
-            modelResult(outcome, e.output_policy),
+            cardStatus(outcome),
+            e.output_policy === "private"
+              ? (outcome.note ?? PRIVATE_OUTPUT_NOTICE)
+              : (outcome.note ?? noteForCommandError(outcome.error)),
             outcome.durationMs,
-            outcome.error ?? null,
           );
+          try {
+            await api.submitCommandResult(
+              e.approval_id,
+              outcome.exitCode,
+              modelResult(outcome, e.output_policy),
+              outcome.durationMs,
+              outcome.error ?? null,
+            );
+          } catch {
+            stopAgentAfterTerminalFailure(
+              sessionId,
+              requestId,
+              S.aiPanel.resultSubmitFailed,
+            );
+            return;
+          }
+          const fence = commandOutcomeFence(outcome);
+          if (fence)
+            stopAgentAfterTerminalFailure(sessionId, requestId, fence);
         })
-        .catch(() => {});
+        .catch(() => {
+          stopAgentAfterTerminalFailure(
+            sessionId,
+            requestId,
+            S.aiPanel.resultSubmitFailed,
+          );
+        });
       break;
     }
     case "CommandOutput":
       store.appendCommandOutput(sessionId, e.approval_id, e.chunk);
       break;
     case "CommandResult": {
+      // A backend watchdog may fire after a Sidecar binding degrades. Release
+      // the exact waiter recorded on the already-validated command card before
+      // consulting the current binding, which may no longer resolve at all.
+      if (e.error === "frontend_timeout") {
+        const command = store.aiStreams[sessionId]?.messages.find(
+          (message) => message.id === `cmd-${e.approval_id}`,
+        )?.command;
+        if (command) {
+          abortSession(
+            command.targetSessionId ?? sessionId,
+            "cancelled",
+            e.approval_id,
+          );
+        }
+      }
       const target = resolveCommandTarget(sessionId, e);
       if (!target.ok) {
         rejectTargetedRun(sessionId, requestId, target.reason, e.approval_id);
         break;
       }
+      const presentation = commandResultPresentation(e.error, e.exit_code);
       store.finishCommand(
         sessionId,
         e.approval_id,
         e.exit_code,
-        undefined,
-        undefined,
+        presentation.status,
+        presentation.note,
         e.duration_ms,
       );
+      if (presentation.fence) {
+        stopAgentAfterTerminalFailure(
+          sessionId,
+          requestId,
+          presentation.fence,
+        );
+      }
       break;
     }
     case "McpToolProposal":
@@ -1099,21 +1159,118 @@ function dispatchPanelEvent(
   }
 }
 
-/** Card badge for a PTY outcome. */
-function cardStatus(o: PtyExecOutcome): "done" | "timeout" | "blocked" {
-  // "still running" is literally true for both: a command we could not kill, and
-  // a full-screen program that refused every rung of the interrupt ladder.
-  if (o.error === "timeout" || o.error === "interrupt_failed") return "timeout";
-  // Never executed at all — the card must not imply the command ran.
-  if (
-    o.error === "terminal_busy" ||
-    o.error === "unsafe_command" ||
-    o.error === "not_a_shell" ||
-    o.error === "terminal_closed"
-  ) {
-    return "blocked";
+/** Card badge for a direct PTY outcome. Missing completion evidence is never
+ *  promoted to success, and a closed terminal is only "not run" when dispatch
+ *  had not selected an execution mode yet. */
+export function cardStatus(o: PtyExecOutcome): SettledCommandStatus {
+  switch (o.error) {
+    case undefined:
+      return o.exitCode === null ? "timeout" : "done";
+    case "interrupted":
+      return "interrupted";
+    case "cancelled":
+      // Cancelling the app-side waiter does not send SIGINT. The foreground
+      // process may still own the terminal, so this is completion unknown.
+      return "timeout";
+    case "terminal_busy":
+    case "unsafe_command":
+    case "not_a_shell":
+    case "target_changed":
+      return "blocked";
+    case "terminal_closed":
+      return o.mode === null ? "blocked" : "timeout";
+    case "timeout":
+    case "command_not_observed":
+    case "interrupt_failed":
+      return "timeout";
   }
-  return "done";
+}
+
+/** A post-dispatch command without trusted completion evidence owns an unknown
+ *  foreground terminal. Stop the run before it can propose another command. */
+export function commandOutcomeFence(o: PtyExecOutcome): string | undefined {
+  if (o.error === "interrupt_failed") return S.aiPanel.interruptFailedRun;
+  if (o.error === "interrupted" && o.exitCode === null)
+    return S.aiPanel.interruptUnconfirmedRun;
+  return cardStatus(o) === "timeout"
+    ? S.aiPanel.completionUnknownRun
+    : undefined;
+}
+
+function noteForCommandError(error: string | null | undefined): string | undefined {
+  switch (error) {
+    case undefined:
+    case null:
+      return undefined;
+    case "interrupted":
+      return S.aiPanel.interruptedCommand;
+    case "cancelled":
+      return S.aiPanel.completionUnknownNote;
+    case "terminal_busy":
+      return "Nothing was executed: the terminal was busy.";
+    case "unsafe_command":
+      return "Nothing was executed: the command could not be typed safely.";
+    case "not_a_shell":
+      return "Nothing was executed: the terminal was not at a shell prompt.";
+    case "target_changed":
+      return "Nothing was executed: the approved terminal target changed.";
+    default:
+      return S.aiPanel.completionUnknownNote;
+  }
+}
+
+export function commandResultPresentation(
+  error: string | null | undefined,
+  exitCode: number | null,
+): { status: SettledCommandStatus; note?: string; fence?: string } {
+  if (!error) {
+    return exitCode === null
+      ? {
+          status: "timeout",
+          note: S.aiPanel.completionUnknownNote,
+          fence: S.aiPanel.completionUnknownRun,
+        }
+      : { status: "done" };
+  }
+  if (error === "interrupted") {
+    return {
+      status: "interrupted",
+      note:
+        exitCode === null
+          ? S.aiPanel.interruptUnknownNote
+          : S.aiPanel.interruptedCommand,
+      ...(exitCode === null
+        ? { fence: S.aiPanel.interruptUnconfirmedRun }
+        : {}),
+    };
+  }
+  if (error === "cancelled") {
+    return {
+      status: "timeout",
+      note: S.aiPanel.completionUnknownNote,
+      fence: S.aiPanel.completionUnknownRun,
+    };
+  }
+  if (
+    error === "terminal_busy" ||
+    error === "unsafe_command" ||
+    error === "not_a_shell" ||
+    error === "target_changed"
+  ) {
+    return { status: "blocked", note: noteForCommandError(error) };
+  }
+  if (error === "interrupt_failed") {
+    return {
+      status: "timeout",
+      note: S.aiPanel.completionUnknownNote,
+      fence: S.aiPanel.interruptFailedRun,
+    };
+  }
+  return {
+    status: "timeout",
+    note: S.aiPanel.completionUnknownNote,
+    fence: S.aiPanel.completionUnknownRun,
+  };
 }
 
 /** What the model sees: the note (if any) explains an unknown exit code. */
@@ -1121,7 +1278,7 @@ function modelResult(
   o: PtyExecOutcome,
   outputPolicy: "normal" | "private" = "normal",
 ): string {
-  if (outputPolicy === "private") return PRIVATE_OUTPUT_NOTICE;
+  if (outputPolicy === "private") return o.note ?? PRIVATE_OUTPUT_NOTICE;
   const where =
     o.mode && o.mode !== "integrated"
       ? "(ran in the nested/remote shell) "

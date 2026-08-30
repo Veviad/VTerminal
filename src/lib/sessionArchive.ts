@@ -23,9 +23,11 @@ import type {
   AiMessage,
   ArchiveMessageInput,
   ArchiveSessionInput,
+  SettledCommandStatus,
 } from "./types";
 import { PRIVATE_OUTPUT_NOTICE } from "./types";
 import { isRunbookTerminalProtected } from "./runbookTerminalPrivacy";
+import { S } from "./strings";
 
 /**
  * Budget for the archive write on the close path.
@@ -41,6 +43,52 @@ const CLOSE_BUDGET_MS = 500;
 /** What the model saw, per card, matching MODEL_TAIL in ptyExec.ts. */
 const CARD_OUTPUT_TAIL = 8_192;
 
+function hasUntrustedCompletion(message: NonNullable<AiMessage["command"]>): boolean {
+  return (
+    message.status === "running" ||
+    (message.status === "done" && message.exitCode === null)
+  );
+}
+
+function archiveCommandStatus(
+  message: NonNullable<AiMessage["command"]>,
+): SettledCommandStatus {
+  if (message.status === "running") return "timeout";
+  if (message.status === "done" && message.exitCode === null) return "timeout";
+  return message.status;
+}
+
+function withCompletionUnknownNote(note: string | null): string {
+  if (note?.includes("Completion unknown")) return note;
+  return note
+    ? `${note} ${S.aiPanel.completionUnknownNote}`
+    : S.aiPanel.completionUnknownNote;
+}
+
+function archiveCommandNote(
+  message: NonNullable<AiMessage["command"]>,
+  status: SettledCommandStatus,
+): string | null {
+  if (message.outputPolicy === "private") {
+    if (status === "timeout") {
+      return `${PRIVATE_OUTPUT_NOTICE} ${S.aiPanel.completionUnknownNote}`;
+    }
+    if (status === "interrupted" && message.exitCode === null) {
+      return `${PRIVATE_OUTPUT_NOTICE} ${S.aiPanel.interruptUnknownNote}`;
+    }
+    return PRIVATE_OUTPUT_NOTICE;
+  }
+
+  const note =
+    message.note ??
+    (hasUntrustedCompletion(message)
+      ? S.aiPanel.orphanedCommand
+      : status === "interrupted" && message.exitCode === null
+        ? S.aiPanel.interruptUnknownNote
+        : null);
+  return status === "timeout" ? withCompletionUnknownNote(note) : note;
+}
+
 /**
  * `AiMessage[]` -> the archive's display shape.
  *
@@ -53,10 +101,11 @@ export function toArchiveMessages(
 ): ArchiveMessageInput[] {
   return messages.map((m) => ({
     role: m.role,
-    // v0.4 rich MCP result cards degrade to an ordinary readable message in
-    // the existing display archive schema. The model transcript separately
-    // retains the tool-call/result pairing needed for Agent continuation.
-    kind: m.kind === "mcp_tool" ? "text" : (m.kind ?? "text"),
+    // Rich MCP result cards degrade to a readable literal message in the display
+    // archive. The explicit kind preserves the render-time trust boundary, while
+    // the model transcript separately retains the tool-call/result pairing needed
+    // for Agent continuation.
+    kind: m.kind === "mcp_tool" ? "literal" : (m.kind ?? "text"),
     content: m.mcp
       ? `${m.mcp.serverName} · ${m.mcp.toolName} (${m.mcp.status})\n\nArguments:\n${JSON.stringify(m.mcp.arguments, null, 2)}${m.mcp.result?.model_text ? `\n\nResult:\n${m.mcp.result.model_text}` : ""}${m.mcp.error ? `\n\nError: ${m.mcp.error}` : ""}`
       : m.content,
@@ -72,11 +121,8 @@ export function toArchiveMessages(
               ? ""
               : m.command.output.slice(-CARD_OUTPUT_TAIL),
           exit_code: m.command.exitCode,
-          status: m.command.status,
-          note:
-            m.command.outputPolicy === "private"
-              ? PRIVATE_OUTPUT_NOTICE
-              : (m.command.note ?? null),
+          status: archiveCommandStatus(m.command),
+          note: archiveCommandNote(m.command, archiveCommandStatus(m.command)),
           output_policy: m.command.outputPolicy ?? "normal",
           target_role: m.command.targetRole ?? null,
           target_label: m.command.targetLabel ?? null,

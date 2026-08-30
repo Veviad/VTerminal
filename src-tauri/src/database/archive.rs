@@ -40,6 +40,48 @@ const MAX_MESSAGES: usize = 200;
 const MAX_MODEL_TRANSCRIPT_BYTES: usize = 256 * 1024;
 /// First-user-turn preview shown in the browser list.
 const PREVIEW_CHARS: usize = 200;
+const COMPLETION_UNKNOWN_NOTE: &str =
+    "Completion unknown: this archived command did not contain a trusted settled status.";
+const INTERRUPT_UNKNOWN_NOTE: &str =
+    "The interrupt was sent, but no completion signal was observed. The exit status is unknown.";
+
+/// Archive statuses are an allowlist, not an arbitrary display string. Missing,
+/// unsupported, legacy/live `running`, and `done` without an exit code all become
+/// completion unknown.
+fn settled_command_status(status: Option<&str>, exit_code: Option<i32>) -> &'static str {
+    match status {
+        Some("done") if exit_code.is_some() => "done",
+        Some("done") => "timeout",
+        Some("skipped") => "skipped",
+        Some("timeout") => "timeout",
+        Some("blocked") => "blocked",
+        Some("interrupted") => "interrupted",
+        Some("running") | None => "timeout",
+        Some(_) => "timeout",
+    }
+}
+
+fn with_completion_unknown_note(note: Option<String>, completion_unknown: bool) -> Option<String> {
+    if !completion_unknown {
+        return note;
+    }
+    match note {
+        Some(note) if note.contains("Completion unknown") => Some(note),
+        Some(note) => Some(format!("{note} {COMPLETION_UNKNOWN_NOTE}")),
+        None => Some(COMPLETION_UNKNOWN_NOTE.to_string()),
+    }
+}
+
+fn private_command_note(status: &str, exit_code: Option<i32>) -> String {
+    const PRIVATE_NOTICE: &str = "[private output suppressed]";
+    if status == "timeout" {
+        format!("{PRIVATE_NOTICE} {COMPLETION_UNKNOWN_NOTE}")
+    } else if status == "interrupted" && exit_code.is_none() {
+        format!("{PRIVATE_NOTICE} {INTERRUPT_UNKNOWN_NOTE}")
+    } else {
+        PRIVATE_NOTICE.to_string()
+    }
+}
 
 /// Keep the last `n` chars on a CHAR boundary.
 ///
@@ -343,18 +385,37 @@ pub fn get(conn: &Connection, session_id: &str) -> Result<Option<ArchiveDetail>,
             // A card is only a card if it has a command — a row whose kind says
             // 'command' but carries no command would render as an empty bubble.
             let command = match (kind.as_str(), cmd_command) {
-                ("command", Some(c)) => Some(ArchivedCommand {
-                    command: c,
-                    output: row.get::<_, Option<String>>(7)?.unwrap_or_default(),
-                    exit_code: row.get(8)?,
-                    status: row
-                        .get::<_, Option<String>>(9)?
-                        .unwrap_or_else(|| "done".into()),
-                    note: row.get(10)?,
-                    output_policy: row.get(11)?,
-                    target_role: row.get(12)?,
-                    target_label: row.get(13)?,
-                }),
+                ("command", Some(c)) => {
+                    let exit_code = row.get(8)?;
+                    let raw_status = row.get::<_, Option<String>>(9)?;
+                    let status = settled_command_status(raw_status.as_deref(), exit_code);
+                    let output_policy = row.get::<_, String>(11)?;
+                    let note = with_completion_unknown_note(
+                        if output_policy == "private" {
+                            Some(private_command_note(status, exit_code))
+                        } else {
+                            row.get::<_, Option<String>>(10)?.or_else(|| {
+                                (status == "interrupted" && exit_code.is_none())
+                                    .then(|| INTERRUPT_UNKNOWN_NOTE.to_string())
+                            })
+                        },
+                        status == "timeout",
+                    );
+                    Some(ArchivedCommand {
+                        command: c,
+                        output: if output_policy == "private" {
+                            String::new()
+                        } else {
+                            row.get::<_, Option<String>>(7)?.unwrap_or_default()
+                        },
+                        exit_code,
+                        status: status.into(),
+                        note,
+                        output_policy,
+                        target_role: row.get(12)?,
+                        target_label: row.get(13)?,
+                    })
+                }
                 _ => None,
             };
             Ok(ArchivedMessage {
@@ -642,13 +703,15 @@ pub fn put_many(
                 // arms are deliberately an allowlist, not a null-default.
                 #[allow(clippy::manual_unwrap_or)]
                 let kind = match m.kind.as_deref() {
-                    Some(k @ ("command" | "compaction")) => k,
+                    Some(k @ ("literal" | "command" | "compaction")) => k,
                     _ => "text",
                 };
                 let (cmd, out, exit, status, note, output_policy, target_role, target_label) =
                     match &m.command {
                         Some(c) => {
                             let private = c.output_policy == "private";
+                            let status =
+                                settled_command_status(Some(c.status.as_str()), c.exit_code);
                             (
                                 Some(head(&c.command, MAX_MESSAGE_CONTENT)),
                                 Some(if private {
@@ -657,16 +720,18 @@ pub fn put_many(
                                     tail(&c.output, MAX_COMMAND_OUTPUT)
                                 }),
                                 c.exit_code,
-                                Some(match c.status.as_str() {
-                                    s
-                                    @ ("running" | "done" | "skipped" | "timeout" | "blocked") => s,
-                                    _ => "done",
-                                }),
-                                if private {
-                                    Some("[private output suppressed]".into())
-                                } else {
-                                    c.note.clone()
-                                },
+                                Some(status),
+                                with_completion_unknown_note(
+                                    if private {
+                                        Some(private_command_note(status, c.exit_code))
+                                    } else {
+                                        c.note.clone().or_else(|| {
+                                            (status == "interrupted" && c.exit_code.is_none())
+                                                .then(|| INTERRUPT_UNKNOWN_NOTE.to_string())
+                                        })
+                                    },
+                                    status == "timeout",
+                                ),
                                 if private {
                                     Some("private")
                                 } else {
@@ -1106,6 +1171,24 @@ mod tests {
     }
 
     #[test]
+    fn literal_display_rows_round_trip_without_losing_their_origin() {
+        let mut conn = mem();
+        let mut r = row("literal-display");
+        let mut literal = msg(0, "assistant");
+        literal.kind = Some("literal".into());
+        literal.content = "<finish> <summary> Literal tool data\n</summary> </finish>".into();
+        r.messages = Some(vec![literal]);
+
+        put(&mut conn, &r, KEEP_ALL).unwrap();
+        let detail = get(&conn, "literal-display").unwrap().unwrap();
+
+        assert_eq!(detail.messages[0].kind, "literal");
+        assert!(detail.messages[0].content.contains("<finish>"));
+        assert!(detail.messages[0].content.contains("<summary>"));
+        assert!(detail.messages[0].command.is_none());
+    }
+
+    #[test]
     fn a_transcript_only_write_preserves_the_stored_scrollback() {
         // The direct twin of workspace.rs's
         // `a_metadata_only_snapshot_preserves_the_stored_blob`: the turn-end tick
@@ -1197,6 +1280,88 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_is_persisted_and_running_is_reconciled_to_unknown() {
+        let mut conn = mem();
+        let mut r = row("command-statuses");
+        let mut interrupted = card(1);
+        interrupted.command.as_mut().unwrap().status = "interrupted".into();
+        interrupted.command.as_mut().unwrap().exit_code = Some(130);
+        let mut orphaned = card(2);
+        orphaned.command.as_mut().unwrap().status = "running".into();
+        orphaned.command.as_mut().unwrap().exit_code = None;
+        let missing_status = card(3);
+        let mut legacy_done = card(4);
+        legacy_done.command.as_mut().unwrap().exit_code = None;
+        let legacy_private_timeout = card(5);
+        let mut unconfirmed_private_interrupt = card(6);
+        let unconfirmed = unconfirmed_private_interrupt.command.as_mut().unwrap();
+        unconfirmed.status = "interrupted".into();
+        unconfirmed.exit_code = None;
+        unconfirmed.output_policy = "private".into();
+        r.messages = Some(vec![
+            interrupted,
+            orphaned,
+            missing_status,
+            legacy_done,
+            legacy_private_timeout,
+            unconfirmed_private_interrupt,
+        ]);
+
+        put(&mut conn, &r, KEEP_ALL).unwrap();
+        conn.execute(
+            "UPDATE archived_messages SET cmd_status = NULL
+             WHERE session_id = 'command-statuses' AND sort_order = 2",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE archived_messages
+                SET cmd_status = 'timeout', cmd_exit_code = NULL,
+                    cmd_note = '[private output suppressed]',
+                    cmd_output_policy = 'private'
+              WHERE session_id = 'command-statuses' AND sort_order = 4",
+            [],
+        )
+        .unwrap();
+
+        let detail = get(&conn, "command-statuses").unwrap().unwrap();
+        let interrupted = detail.messages[0].command.as_ref().unwrap();
+        assert_eq!(interrupted.status, "interrupted");
+        assert_eq!(interrupted.exit_code, Some(130));
+        let orphaned = detail.messages[1].command.as_ref().unwrap();
+        assert_eq!(orphaned.status, "timeout");
+        assert!(orphaned
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("Completion unknown")));
+        let missing_status = detail.messages[2].command.as_ref().unwrap();
+        assert_eq!(missing_status.status, "timeout");
+        assert!(missing_status
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("Completion unknown")));
+        let legacy_done = detail.messages[3].command.as_ref().unwrap();
+        assert_eq!(legacy_done.status, "timeout");
+        assert!(legacy_done
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("Completion unknown")));
+        let legacy_private_timeout = detail.messages[4].command.as_ref().unwrap();
+        assert_eq!(legacy_private_timeout.status, "timeout");
+        let note = legacy_private_timeout.note.as_deref().unwrap();
+        assert_eq!(legacy_private_timeout.output, "");
+        assert!(note.contains("[private output suppressed]"));
+        assert_eq!(note.matches("Completion unknown").count(), 1);
+        let unconfirmed = detail.messages[5].command.as_ref().unwrap();
+        assert_eq!(unconfirmed.status, "interrupted");
+        assert_eq!(unconfirmed.exit_code, None);
+        let note = unconfirmed.note.as_deref().unwrap();
+        assert!(note.contains("[private output suppressed]"));
+        assert!(note.contains("no completion signal was observed"));
+        assert!(note.contains("exit status is unknown"));
+    }
+
+    #[test]
     fn private_command_output_is_discarded_before_archive_storage() {
         let mut conn = mem();
         let mut r = row("private");
@@ -1204,7 +1369,14 @@ mod tests {
         let command = private.command.as_mut().unwrap();
         command.output = "must-never-be-archived".into();
         command.output_policy = "private".into();
-        r.messages = Some(vec![private]);
+        let mut private_timeout = card(2);
+        let timeout = private_timeout.command.as_mut().unwrap();
+        timeout.output = "also-must-never-be-archived".into();
+        timeout.output_policy = "private".into();
+        timeout.status = "timeout".into();
+        timeout.exit_code = None;
+        timeout.note = Some("untrusted private note".into());
+        r.messages = Some(vec![private, private_timeout]);
         put(&mut conn, &r, KEEP_ALL).unwrap();
 
         let detail = get(&conn, "private").unwrap().unwrap();
@@ -1212,14 +1384,25 @@ mod tests {
         assert_eq!(command.output_policy, "private");
         assert_eq!(command.output, "");
         assert_eq!(command.note.as_deref(), Some("[private output suppressed]"));
+        let timeout = detail.messages[1].command.as_ref().unwrap();
+        assert_eq!(timeout.status, "timeout");
+        assert_eq!(timeout.output, "");
+        assert!(timeout
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("[private output suppressed]")
+                && note.contains("Completion unknown")
+                && !note.contains("untrusted private note")));
         let raw: String = conn
             .query_row(
-                "SELECT cmd_output FROM archived_messages WHERE session_id = 'private'",
+                "SELECT group_concat(cmd_output, '') FROM archived_messages
+                 WHERE session_id = 'private'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
         assert!(!raw.contains("must-never-be-archived"));
+        assert!(!raw.contains("also-must-never-be-archived"));
     }
 
     #[test]
@@ -1708,7 +1891,12 @@ mod tests {
         let detail = get(&conn, "a").unwrap().unwrap();
         assert_eq!(detail.messages[0].role, "assistant");
         assert_eq!(detail.messages[0].kind, "text");
-        assert_eq!(detail.messages[1].command.as_ref().unwrap().status, "done");
+        let command = detail.messages[1].command.as_ref().unwrap();
+        assert_eq!(command.status, "timeout");
+        assert!(command
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("Completion unknown")));
     }
 
     #[test]

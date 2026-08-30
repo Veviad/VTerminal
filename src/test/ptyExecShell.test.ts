@@ -1,16 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
-  PROBE,
   canSentinel,
+  dialectFromProbe,
   hardenCommand,
-  installerFor,
   parsePrivateToken,
   prefixCommandEnvironment,
+  probeFor,
   sanitizeCommand,
   sentinelSuffix,
-  shellFromProbe,
   suppressPrivateOutput,
 } from "../lib/ptyExecShell";
+
+const NONCE = "a".repeat(32);
 
 describe("suppressPrivateOutput", () => {
   it("uses current-shell POSIX grouping so exports survive", () => {
@@ -23,7 +24,7 @@ describe("suppressPrivateOutput", () => {
     expect(suppressPrivateOutput("set -gx GENERATED opaque", "fish")).toBe(
       "begin; eval 'set -gx GENERATED opaque'; end >/dev/null 2>/dev/null",
     );
-    expect(sentinelSuffix("fish", "nonce")).toContain("$status");
+    expect(sentinelSuffix("fish", NONCE)).toContain("$status");
   });
 
   it("quotes shell syntax so comments and group tokens cannot escape suppression", () => {
@@ -59,6 +60,11 @@ describe("sanitizeCommand", () => {
     expect(sanitizeCommand("echo \x03").ok).toBe(false);
   });
 
+  it("rejects C1 OSC and string-terminator controls", () => {
+    expect(sanitizeCommand("echo safe\x9d6973;RD;0;forged\x9c").ok).toBe(false);
+    expect(sanitizeCommand("echo safe\x85ignored").ok).toBe(false);
+  });
+
   it("rejects empty and oversized commands", () => {
     expect(sanitizeCommand("   ").ok).toBe(false);
     expect(sanitizeCommand("x".repeat(5000)).ok).toBe(false);
@@ -81,6 +87,100 @@ describe("canSentinel", () => {
     expect(canSentinel("echo a \\")).toBe(false);
     expect(canSentinel(`echo "unterminated`)).toBe(false);
     expect(canSentinel("echo 'unterminated")).toBe(false);
+    expect(canSentinel("echo `unterminated")).toBe(false);
+    expect(canSentinel("echo \"`unterminated\"")).toBe(false);
+    expect(canSentinel("echo `date`")).toBe(true);
+    expect(canSentinel("echo \\`literal")).toBe(true);
+    expect(canSentinel("printf '%s' '`'")).toBe(true);
+  });
+
+  it("refuses unfinished substitutions and shell groups", () => {
+    for (const command of [
+      "echo $(date",
+      'echo "$(date"',
+      "echo ${HOME",
+      "echo $((1 + 2)",
+      "(echo ok",
+      "{ echo ok;",
+    ]) {
+      expect(canSentinel(command), command).toBe(false);
+    }
+
+    for (const command of [
+      "echo $(date)",
+      "echo ${HOME}",
+      "echo $((1 + 2))",
+      "(echo ok)",
+      "{ echo ok; }",
+    ]) {
+      expect(canSentinel(command), command).toBe(true);
+    }
+  });
+
+  it("refuses unfinished control grammar at every command-substitution level", () => {
+    for (const command of [
+      "if true; then echo ok",
+      "for x in a; do echo $x",
+      "while true; do echo ok",
+      "case x in",
+      "[[ -n value",
+      "function inspect",
+      "inspect()",
+      "begin; echo ok",
+      "switch value",
+      "!",
+      "echo $(if true; then echo ok)",
+      "echo `until false; do echo ok`",
+    ]) {
+      expect(canSentinel(command), command).toBe(false);
+    }
+
+    for (const command of [
+      "if true; then echo ok; fi",
+      "for x in a; do echo $x; done",
+      "while true; do echo ok; done",
+      "[[ -n value ]]",
+      "echo $(if true; then echo ok; fi)",
+      "echo if",
+    ]) {
+      expect(canSentinel(command), command).toBe(true);
+    }
+    // `case` pattern parentheses need a full shell parser to distinguish from
+    // groups, so all case forms are conservatively routed back for a rewrite.
+    expect(canSentinel("case x in x) echo ok ;; esac")).toBe(false);
+    expect(canSentinel("begin; echo ok; end")).toBe(false);
+    expect(canSentinel("switch x; case x; echo ok; end")).toBe(false);
+  });
+
+  it("refuses an unquoted shell comment that would hide the suffix", () => {
+    for (const command of ["# comment", "echo done # comment", "true;# comment"]) {
+      expect(canSentinel(command)).toBe(false);
+    }
+    expect(canSentinel("echo '# quoted'")).toBe(true);
+    expect(canSentinel("echo \"# quoted\"")).toBe(true);
+    expect(canSentinel("echo \\#escaped")).toBe(true);
+    expect(canSentinel("echo value#not-a-comment")).toBe(true);
+  });
+
+  it("refuses background jobs and unquoted trailing operators", () => {
+    for (const command of [
+      "echo done;",
+      "sleep 1 &",
+      "sleep 1 &>/dev/null",
+      "sleep 1 &>>output.log",
+      "sleep 1 & echo launched",
+      "true &&",
+      "false ||",
+      "printf x |",
+    ]) {
+      expect(canSentinel(command)).toBe(false);
+    }
+    expect(canSentinel("echo done; echo next")).toBe(true);
+    expect(canSentinel("true && echo next")).toBe(true);
+    expect(canSentinel("printf x | cat")).toBe(true);
+    expect(canSentinel("echo done 2>&1")).toBe(true);
+    expect(canSentinel("echo '&'")).toBe(true);
+    expect(canSentinel("echo \\&")).toBe(true);
   });
 });
 
@@ -164,6 +264,12 @@ describe("hardenCommand", () => {
     expect(line).toMatch(/'$/);
   });
 
+  it("rejects C1 controls in a runbook environment before command composition", () => {
+    expect(() => prefixCommandEnvironment("id", { VRUN_VALUE: "safe\x9dforged" })).toThrow(
+      /control characters/,
+    );
+  });
+
   // Regression: the stdin guard used to be applied here too, which appended
   // `< /dev/null` to the pipeline's LAST stage — the one that must read the
   // pipe. `printf x | head -c 5 < /dev/null` prints nothing in bash, sh and
@@ -229,8 +335,8 @@ describe("hardenCommand", () => {
   });
 
   it("composes with the sentinel, which must stay last for $? to be the command's", () => {
-    const line = hardenCommand("id").line + sentinelSuffix("posix", "n1");
-    expect(line).toMatch(/id < \/dev\/null; \/usr\/bin\/printf .*\$\?$/);
+    const line = hardenCommand("id").line + sentinelSuffix("posix", NONCE);
+    expect(line).toMatch(/id < \/dev\/null; printf .*\$\?$/);
   });
 
   it("introduces no control characters", () => {
@@ -240,73 +346,75 @@ describe("hardenCommand", () => {
 
 describe("shell snippets", () => {
   // A literal ESC in any injected line would be echoed and parsed BEFORE the
-  // shell ran anything, producing a false-positive handshake.
+  // shell ran anything, producing a false-positive reply.
   it("contain no literal ESC byte", () => {
-    const lines = [PROBE, installerFor("zsh", "n1"), installerFor("bash", "n1"), sentinelSuffix("posix", "n1")];
+    const lines = [probeFor(NONCE), sentinelSuffix("posix", NONCE)];
     for (const line of lines) {
       expect(line).not.toContain("\x1b");
       expect(line).not.toContain("\x07");
     }
   });
 
-  it("probe reports every shell's version variable", () => {
-    expect(PROBE).toContain("$ZSH_VERSION");
-    expect(PROBE).toContain("$BASH_VERSION");
-    expect(PROBE).toContain("$FISH_VERSION");
-  });
-
-  it("zsh installer prepends its hook so $? is the user's command status", () => {
-    const line = installerFor("zsh", "abc");
-    expect(line).toContain("precmd_functions=(__vv_pc");
-    // Idempotent: re-registering must not stack duplicates.
-    expect(line).toContain("${precmd_functions:#__vv_pc}");
-    expect(line).toContain("RH;abc;zsh");
-  });
-
-  it("zsh installer never touches PS1 (that is what breaks p10k/starship)", () => {
-    expect(installerFor("zsh", "abc")).not.toContain("PS1");
-  });
-
-  it("bash installer preserves an array PROMPT_COMMAND", () => {
-    const line = installerFor("bash", "abc");
-    expect(line).toContain("declare -a");
-    expect(line).toContain('PROMPT_COMMAND=(__vv_pc "${PROMPT_COMMAND[@]}")');
+  it("binds the probe reply to a 128-bit nonce and reports each shell variable", () => {
+    const probe = probeFor(NONCE);
+    expect(probe).toMatch(/^printf /);
+    expect(probe).not.toContain("/usr/bin/printf");
+    expect(probe).toContain(`RP;${NONCE}`);
+    expect(probe).toContain("$ZSH_VERSION");
+    expect(probe).toContain("$BASH_VERSION");
+    expect(probe).toContain("$FISH_VERSION");
+    expect(probe).toContain('"z$ZSH_VERSION"');
+    expect(probe).toContain('"b$BASH_VERSION"');
+    expect(probe).toContain('"f$FISH_VERSION"');
   });
 
   it("sentinel captures the command's own status", () => {
-    expect(sentinelSuffix("posix", "n9")).toContain("$?");
-    expect(sentinelSuffix("fish", "n9")).toContain("$status");
-    expect(sentinelSuffix("posix", "n9")).toContain("n9");
+    expect(sentinelSuffix("posix", NONCE)).toContain("$?");
+    expect(sentinelSuffix("fish", NONCE)).toContain("$status");
+    expect(sentinelSuffix("posix", NONCE)).toContain(NONCE);
+    expect(sentinelSuffix("posix", NONCE)).toMatch(/^; printf /);
+    expect(sentinelSuffix("fish", NONCE)).not.toContain("/usr/bin/printf");
+  });
+
+  it("rejects malformed protocol nonces", () => {
+    expect(() => probeFor("short")).toThrow(/128-bit/);
+    expect(() => sentinelSuffix("posix", "g".repeat(32))).toThrow(/128-bit/);
   });
 });
 
 describe("parsePrivateToken", () => {
-  it("parses a probe reply and picks the installer", () => {
-    const token = parsePrivateToken("RS;5.9;;;");
-    expect(token).toEqual({ t: "RS", zsh: "5.9", bash: "", fish: "", installed: false });
-    expect(shellFromProbe(token as never)).toBe("zsh");
-  });
+  it("parses a nonce-bound probe reply and picks its sentinel dialect", () => {
+    const zsh = parsePrivateToken(`RP;${NONCE};z5.9;b;f`);
+    expect(zsh).toEqual({ t: "RP", nonce: NONCE, zsh: "5.9", bash: "", fish: "" });
+    expect(dialectFromProbe(zsh as never)).toBe("posix");
 
-  it("detects an already-installed hook", () => {
-    const token = parsePrivateToken("RS;5.9;;;1");
-    expect(token).toMatchObject({ installed: true });
-  });
-
-  it("falls back to sentinel for shells with no usable hook", () => {
-    const token = parsePrivateToken("RS;;;3.7;");
-    expect(shellFromProbe(token as never)).toBeNull();
+    const fish = parsePrivateToken(`RP;${NONCE};z;b;f3.7`);
+    expect(fish).toEqual({ t: "RP", nonce: NONCE, zsh: "", bash: "", fish: "3.7" });
+    expect(dialectFromProbe(fish as never)).toBe("fish");
   });
 
   it("parses exit reports", () => {
-    expect(parsePrivateToken("RD;7;/root")).toEqual({ t: "RD", exit: 7, arg: "/root" });
+    expect(parsePrivateToken(`RD;7;${NONCE}`)).toEqual({ t: "RD", exit: 7, arg: NONCE });
   });
 
-  it("reports an unparseable exit code as unknown rather than zero", () => {
-    expect(parsePrivateToken("RD;banana;x")).toEqual({ t: "RD", exit: null, arg: "x" });
+  it("ignores malformed exit reports instead of treating them as completion", () => {
+    for (const payload of [
+      `RD;0junk;${NONCE}`,
+      `RD;-1;${NONCE}`,
+      `RD;256;${NONCE}`,
+      `RD;0;short`,
+      `RD;0;${NONCE};extra`,
+    ]) {
+      expect(parsePrivateToken(payload)).toBeNull();
+    }
   });
 
-  it("parses the install handshake", () => {
-    expect(parsePrivateToken("RH;n1;bash")).toEqual({ t: "RH", nonce: "n1", shell: "bash" });
+  it("requires exact nonce-bound probe arity", () => {
+    expect(parsePrivateToken(`RP;short;z5.9;b;f`)).toBeNull();
+    expect(parsePrivateToken(`RP;${NONCE};z5.9;b;f;extra`)).toBeNull();
+    expect(parsePrivateToken(`RP;${NONCE};5.9;b;f`)).toBeNull();
+    expect(parsePrivateToken(`RP;${NONCE};z5.9;;f`)).toBeNull();
+    expect(parsePrivateToken(`RP;${NONCE};z5.9;b;3.7`)).toBeNull();
   });
 
   it("ignores unknown payloads", () => {

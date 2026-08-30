@@ -9,11 +9,11 @@ import { tokenizeCommand } from "../../lib/nesting";
 // Agents wait far longer than an interactive user does: a cold `cargo build` or
 // a container pull outlives every ceiling a "sane" ladder would stop at. Claude
 // Code defaults to 2 min and documents 10 min as its maximum, and 2 min is the
-// default here too — but that ceiling exists because it KILLS the process at the
-// deadline. This app never does (the command is running in the user's own shell,
-// see `pty_exec.rs`); the timeout only decides when the agent stops waiting and
-// is told the command is still running. So the ladder runs to the backend's own
-// clamp of 3600s rather than stopping at 10 min.
+// default here too. That ceiling exists because it KILLS the process at the
+// deadline. This app never does (the command runs in the user's own shell, see
+// `pty_exec.rs`); the timeout only decides when completion becomes unknown and
+// the Agent stops before dispatching another command. The ladder therefore runs
+// to the backend's own clamp of 3600s rather than stopping at 10 min.
 const TIMEOUT_CHOICES = [30, 60, 120, 300, 600, 1200, 1800, 3600];
 
 const fmtTimeout = (secs: number) => (secs < 60 ? `${secs}s` : `${secs / 60} min`);

@@ -544,14 +544,14 @@ export function useRunbooks() {
             // Rust emits the exact pager/stdin/input wrapper persisted in the
             // canonical attempt record. Do not transform it a second time here.
             harden: false,
-            // Integrated/hook OSC markers can be replayed by hostile command
-            // output. Runbooks require a fresh per-attempt nonce in every shell.
+            // Integrated OSC markers can be replayed by hostile command output.
+            // Runbooks therefore require a fresh per-attempt completion nonce.
             nonceCompletion: true,
             approvalPromptBinding: approvalPromptBinding ?? undefined,
-            // Prompt/mode detection can wait for seconds. Acquire the Rust lease
-            // only after that work, at the final async boundary before ptyWrite, so
-            // cancellation and dispatch are linearized rather than racing a stale
-            // early claim.
+            // Local prompt detection happens before this lease. A remote probe is
+            // itself a PTY write, so remote attempts claim first, issue their fresh
+            // nonce-bound probe, then synchronously revalidate the target and prompt
+            // epoch immediately before typing the approved command.
             beforeWrite: async () => {
               if (isRunbookRunRevoked(event.run_id)) return false;
               claimAttempted = true;

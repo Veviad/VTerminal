@@ -4,6 +4,7 @@ import { emptyAiStream, useAppStore } from "../stores/appStore";
 import { AiPanel } from "../components/ai/AiPanel";
 import { S } from "../lib/strings";
 import * as api from "../lib/tauri";
+import * as ptyExec from "../lib/ptyExec";
 import type { CatalogEntry, Session } from "../lib/types";
 
 // The AI panel is unmounted entirely when `settingsLoaded` is false, so a bug in
@@ -372,6 +373,108 @@ describe("AiPanel renders", () => {
     ).toBeInTheDocument();
   });
 
+  it("renders interrupted and completion-unknown cards without claiming success", () => {
+    seedReadyPanel({
+      mode: "agent",
+      messages: [
+        {
+          id: "cmd-interrupted",
+          role: "assistant",
+          kind: "command",
+          content: "",
+          createdAt: "2026-08-22T00:00:00.000Z",
+          command: {
+            command: "sleep 60",
+            output: "",
+            exitCode: 130,
+            status: "interrupted",
+          },
+        },
+        {
+          id: "cmd-unknown",
+          role: "assistant",
+          kind: "command",
+          content: "",
+          createdAt: "2026-08-22T00:01:00.000Z",
+          command: {
+            command: "apt list --upgradable",
+            output: "",
+            exitCode: null,
+            status: "timeout",
+          },
+        },
+      ],
+    });
+
+    render(<AiPanel sessionId="s1" />);
+
+    const interrupted = screen.getByText(S.aiPanel.interrupted);
+    const unknown = screen.getByText(S.aiPanel.completionUnknown);
+    expect(interrupted).toBeInTheDocument();
+    expect(screen.getByText(/exit 130/)).toBeInTheDocument();
+    expect(unknown).toBeInTheDocument();
+    expect(screen.queryByText(S.aiPanel.running)).not.toBeInTheDocument();
+    expect(screen.queryByText(`${S.blocks.exit} ?`)).not.toBeInTheDocument();
+    expect(interrupted.querySelector(".animate-pulse")).toBeNull();
+    expect(unknown.querySelector(".animate-pulse")).toBeNull();
+  });
+
+  it("renders a legacy done card without an exit code as completion unknown", () => {
+    seedReadyPanel({
+      mode: "agent",
+      messages: [
+        {
+          id: "cmd-legacy-exit-unknown",
+          role: "assistant",
+          kind: "command",
+          content: "",
+          createdAt: "2026-08-22T00:00:00.000Z",
+          command: {
+            command: "apt list --upgradable",
+            output: "packages",
+            exitCode: null,
+            status: "done",
+          },
+        },
+      ],
+    });
+
+    render(<AiPanel sessionId="s1" />);
+
+    expect(screen.getByText(S.aiPanel.completionUnknown)).toBeInTheDocument();
+    expect(screen.queryByText(`${S.blocks.exit} ?`)).not.toBeInTheDocument();
+  });
+
+  it("binds Interrupt to the exact live command approval id", () => {
+    const interrupt = vi.spyOn(ptyExec, "interruptJob").mockReturnValue(true);
+    seedReadyPanel({
+      mode: "agent",
+      status: "executing",
+      messages: [
+        {
+          id: "cmd-approval-current",
+          role: "assistant",
+          kind: "command",
+          content: "",
+          createdAt: "2026-08-22T00:00:00.000Z",
+          command: {
+            approvalId: "approval-current",
+            command: "apt list --upgradable",
+            output: "",
+            exitCode: null,
+            status: "running",
+            stall: "idle",
+          },
+        },
+      ],
+    });
+
+    render(<AiPanel sessionId="s1" />);
+    fireEvent.click(screen.getByRole("button", { name: S.aiPanel.interrupt }));
+
+    expect(interrupt).toHaveBeenCalledWith("s1", "approval-current");
+  });
+
   it("collapses consecutive MCP calls into one transcript group", () => {
     seedReadyPanel({
       mode: "agent",
@@ -404,6 +507,29 @@ describe("AiPanel renders", () => {
 
     fireEvent.click(group);
     expect(screen.getAllByText("Coolify · get_service")).toHaveLength(2);
+  });
+
+  it("renders archived literal assistant output without model cleanup", () => {
+    seedReadyPanel({
+      messages: [
+        {
+          id: "archived-mcp",
+          role: "assistant",
+          kind: "literal",
+          content:
+            "Coolify · list_services (done)\n\n<finish> <summary> Literal tool data\n</summary> </finish>",
+          createdAt: "2026-08-22T00:00:00.000Z",
+        },
+      ],
+    });
+
+    const { container } = render(<AiPanel sessionId="s1" />);
+
+    expect(container).toHaveTextContent("Literal tool data");
+    expect(container).toHaveTextContent("<finish>");
+    expect(container).toHaveTextContent("<summary>");
+    expect(container).toHaveTextContent("</summary>");
+    expect(container).toHaveTextContent("</finish>");
   });
 
   it("renders the key hint instead of the load hint for an API model", () => {

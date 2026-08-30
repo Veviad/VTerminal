@@ -136,6 +136,149 @@ describe("agent stream lifecycle", () => {
     expect(msg?.command?.status).toBe("skipped");
   });
 
+  it("keeps the first terminal command result when a duplicate arrives", () => {
+    const s = useAppStore.getState();
+    s.initAiStream("a", "agent", "req-monotonic");
+    s.beginCommand("a", "ap-monotonic", "apt update");
+    s.finishCommand(
+      "a",
+      "ap-monotonic",
+      null,
+      "timeout",
+      "Completion unknown",
+      120_000,
+    );
+    useAppStore.getState().finishAiStream("a");
+    useAppStore
+      .getState()
+      .finishCommand("a", "ap-monotonic", 0, "done", undefined, 120_100);
+
+    const stream = useAppStore.getState().aiStreams.a;
+    const command = stream.messages.find(
+      (message) => message.id === "cmd-ap-monotonic",
+    )?.command;
+    expect(stream.status).toBe("idle");
+    expect(command?.status).toBe("timeout");
+    expect(command?.exitCode).toBeNull();
+    expect(command?.note).toBe("Completion unknown");
+    expect(command?.durationMs).toBe(120_000);
+  });
+
+  it("ignores an unmatched command result without changing stream lifecycle", () => {
+    const s = useAppStore.getState();
+    s.initAiStream("a", "agent", "req-unmatched");
+    s.beginCommand("a", "ap-live", "sleep 10");
+    s.finishCommand("a", "different-approval", 0, "done");
+
+    const stream = useAppStore.getState().aiStreams.a;
+    expect(stream.status).toBe("executing");
+    expect(stream.messages[0]?.command?.status).toBe("running");
+  });
+
+  it("settles an orphaned running card as completion unknown when its run ends", () => {
+    const s = useAppStore.getState();
+    s.initAiStream("a", "agent", "req-orphan");
+    s.beginCommand("a", "ap-orphan", "apt update");
+    s.finishAiStream("a");
+
+    const command = useAppStore
+      .getState()
+      .aiStreams.a.messages.find((message) => message.id === "cmd-ap-orphan")
+      ?.command;
+    expect(command?.status).toBe("timeout");
+    expect(command?.note).toContain("Completion unknown");
+    expect(command?.stall).toBeUndefined();
+  });
+
+  it("keeps private output hidden while explaining an orphaned command", () => {
+    const s = useAppStore.getState();
+    s.initAiStream("a", "agent", "req-private-orphan");
+    s.beginCommand(
+      "a",
+      "ap-private-orphan",
+      "generate-secret",
+      undefined,
+      undefined,
+      "private",
+    );
+    s.finishAiStream("a");
+
+    const command = useAppStore
+      .getState()
+      .aiStreams.a.messages.find(
+        (message) => message.id === "cmd-ap-private-orphan",
+      )?.command;
+    expect(command?.status).toBe("timeout");
+    expect(command?.note).toContain("[private output suppressed]");
+    expect(command?.note).toContain("Completion unknown");
+  });
+
+  it("settles an orphaned running card when the Agent pauses", () => {
+    const s = useAppStore.getState();
+    s.initAiStream("a", "agent", "req-paused-orphan");
+    s.beginCommand("a", "ap-paused-orphan", "apt update");
+    s.pauseAiStream("a", {
+      reason: "step_limit",
+      steps: 25,
+      limit: 25,
+    });
+
+    const stream = useAppStore.getState().aiStreams.a;
+    const command = stream.messages.find(
+      (message) => message.id === "cmd-ap-paused-orphan",
+    )?.command;
+    expect(stream.status).toBe("paused");
+    expect(command?.status).toBe("timeout");
+    expect(command?.note).toContain("Completion unknown");
+  });
+
+  it("settles lifecycle and orphaned cards at a hard generation fence", () => {
+    const s = useAppStore.getState();
+    s.initAiStream("a", "agent", "req-fenced");
+    s.beginCommand("a", "ap-fenced", "apt update");
+    s.setCommandStall("a", "ap-fenced", "idle");
+    s.fenceAiGeneration("a");
+
+    const stream = useAppStore.getState().aiStreams.a;
+    const command = stream.messages.find(
+      (message) => message.id === "cmd-ap-fenced",
+    )?.command;
+    expect(stream.status).toBe("idle");
+    expect(stream.requestId).toBeNull();
+    expect(stream.generationId).toBeNull();
+    expect(command?.status).toBe("timeout");
+    expect(command?.note).toContain("Completion unknown");
+    expect(command?.stall).toBeUndefined();
+  });
+
+  it("records a confirmed interrupt as its own settled status", () => {
+    const s = useAppStore.getState();
+    s.initAiStream("a", "agent", "req-interrupted");
+    s.beginCommand("a", "ap-interrupted", "sleep 60");
+    s.finishCommand("a", "ap-interrupted", 130, "interrupted");
+
+    const command = useAppStore
+      .getState()
+      .aiStreams.a.messages.find((message) => message.id === "cmd-ap-interrupted")
+      ?.command;
+    expect(command?.status).toBe("interrupted");
+    expect(command?.exitCode).toBe(130);
+  });
+
+  it("never defaults a null-exit result to successful done", () => {
+    const s = useAppStore.getState();
+    s.initAiStream("a", "agent", "req-null-exit");
+    s.beginCommand("a", "ap-null-exit", "apt list --upgradable");
+    s.finishCommand("a", "ap-null-exit", null);
+
+    const command = useAppStore
+      .getState()
+      .aiStreams.a.messages.find((message) => message.id === "cmd-ap-null-exit")
+      ?.command;
+    expect(command?.status).toBe("timeout");
+    expect(command?.note).toContain("Completion unknown");
+  });
+
   it("queueSteer flushes the in-flight answer ABOVE the user's message", () => {
     // Order is the whole point: the paragraph that was streaming when the user
     // interjected has to close first, or it folds into a bubble BELOW theirs and
