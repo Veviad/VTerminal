@@ -5,6 +5,7 @@ import type {
   Block,
   CatalogEntry,
   ChatMessage,
+  SettledCommandStatus,
   CommandStall,
   DocBucket,
   Effort,
@@ -457,7 +458,7 @@ export interface AppState {
     sessionId: string,
     approvalId: string,
     exitCode: number | null,
-    status?: "done" | "skipped" | "timeout" | "blocked",
+    status?: SettledCommandStatus,
     note?: string,
     durationMs?: number,
   ): void;
@@ -782,6 +783,38 @@ function patchCommand(
         : m,
     ),
   }));
+}
+
+/** A run may end without a PTY result after cancellation, shutdown, or a lost
+ *  frontend callback. Never turn that uncertainty into a successful command. */
+function settleOrphanedCommands(messages: AiMessage[]): AiMessage[] {
+  return messages.map((message) =>
+    message.command?.status === "running"
+      ? {
+          ...message,
+          command: {
+            ...message.command,
+            status: "timeout" as const,
+            note: message.command.note?.includes("Completion unknown")
+              ? message.command.note
+              : message.command.note
+                ? `${message.command.note} ${S.aiPanel.orphanedCommand}`
+                : S.aiPanel.orphanedCommand,
+            stall: undefined,
+          },
+        }
+      : message,
+  );
+}
+
+function settleFencedMessages(messages: AiMessage[]): AiMessage[] {
+  return settleOrphanedCommands(
+    messages.map((message) =>
+      message.steer === "queued"
+        ? { ...message, steer: "undelivered" as const }
+        : message,
+    ),
+  );
 }
 
 function reconcileSidecars(
@@ -1604,7 +1637,14 @@ export const useAppStore = create<AppState>((set, get) => ({
   flushAiStreaming: (sessionId) =>
     set((state) => withAiStream(state, sessionId, (s) => flushStreaming(s))),
 
-  beginCommand: (sessionId, approvalId, command, explanation, target, outputPolicy = "normal") =>
+  beginCommand: (
+    sessionId,
+    approvalId,
+    command,
+    explanation,
+    target,
+    outputPolicy = "normal",
+  ) =>
     set((state) =>
       withAiStream(state, sessionId, (s) => {
         const flushed = flushStreaming(s);
@@ -1621,6 +1661,7 @@ export const useAppStore = create<AppState>((set, get) => ({
               createdAt: new Date().toISOString(),
               kind: "command" as const,
               command: {
+                approvalId,
                 command,
                 output: "",
                 exitCode: null,
@@ -1647,8 +1688,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       withAiStream(state, sessionId, (s) => ({
         ...s,
         messages: s.messages.map((m) =>
-          m.id === `cmd-${approvalId}` && m.command
-            && m.command.outputPolicy !== "private"
+          m.id === `cmd-${approvalId}` &&
+          m.command &&
+          m.command.outputPolicy !== "private"
             ? {
                 ...m,
                 command: {
@@ -1670,7 +1712,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       withAiStream(state, sessionId, (s) => ({
         ...s,
         messages: s.messages.map((m) =>
-          m.id === `cmd-${approvalId}` && m.command && m.command.outputPolicy !== "private"
+          m.id === `cmd-${approvalId}` &&
+          m.command &&
+          m.command.outputPolicy !== "private"
             ? { ...m, command: { ...m.command, output } }
             : m,
         ),
@@ -1687,26 +1731,44 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   finishCommand: (sessionId, approvalId, exitCode, status, note, durationMs) =>
     set((state) =>
-      withAiStream(state, sessionId, (s) => ({
-        ...s,
-        status: "streaming",
-        messages: s.messages.map((m) =>
-          m.id === `cmd-${approvalId}` && m.command
-            ? {
-                ...m,
-                command: {
-                  ...m.command,
-                  exitCode,
-                  status: status ?? ("done" as const),
-                  ...(note ? { note } : {}),
-                  ...(durationMs !== undefined ? { durationMs } : {}),
-                  // A settled card must not keep offering to interrupt.
-                  stall: undefined,
-                },
-              }
-            : m,
-        ),
-      })),
+      withAiStream(state, sessionId, (s) => {
+        let settled = false;
+        const messages = s.messages.map((m) => {
+          if (
+            m.id !== `cmd-${approvalId}` ||
+            !m.command ||
+            m.command.status !== "running"
+          ) {
+            return m;
+          }
+          settled = true;
+          const settledStatus =
+            status ?? (exitCode === null ? "timeout" : "done");
+          return {
+            ...m,
+            command: {
+              ...m.command,
+              exitCode,
+              status: settledStatus,
+              ...(note
+                ? { note }
+                : settledStatus === "timeout"
+                  ? { note: S.aiPanel.completionUnknownNote }
+                  : {}),
+              ...(durationMs !== undefined ? { durationMs } : {}),
+              // A settled card must not keep offering to interrupt.
+              stall: undefined,
+            },
+          };
+        });
+        return settled
+          ? {
+              ...s,
+              status: "streaming",
+              messages,
+            }
+          : s;
+      }),
     ),
 
   finishAiStream: (sessionId, error, usage, generationId) =>
@@ -1727,26 +1789,28 @@ export const useAppStore = create<AppState>((set, get) => ({
           // before agent_start's promise resolves, and the messages below still
           // need to be reconcilable against it. initAiStream clears it.
           // No command card may outlive its run (e.g. spawn failures).
-          messages: flushed.messages.map((m) => {
-            // Anything the loop never confirmed is something the model never
-            // saw. Say so rather than leaving it looking delivered.
-            if (m.steer === "queued")
-              return { ...m, steer: "undelivered" as const };
-            return m.command?.status === "running"
-              ? { ...m, command: { ...m.command, status: "done" as const } }
-              : m;
-          }),
+          messages: settleFencedMessages(flushed.messages),
         };
       }),
     ),
 
   fenceAiGeneration: (sessionId) =>
     set((state) =>
-      withAiStream(state, sessionId, (s) => ({
-        ...s,
-        requestId: null,
-        generationId: null,
-      })),
+      withAiStream(state, sessionId, (s) => {
+        const flushed = flushStreaming(s);
+        return {
+          ...flushed,
+          status:
+            flushed.status === "error" || flushed.status === "paused"
+              ? flushed.status
+              : "idle",
+          requestId: null,
+          generationId: null,
+          pendingProposal: null,
+          attachedBlockIds: [],
+          messages: settleFencedMessages(flushed.messages),
+        };
+      }),
     ),
 
   /** The run stopped at a guard rail. A near-copy of `finishAiStream` on purpose:
@@ -1769,15 +1833,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           lastError: null,
           pause,
           attachedBlockIds: [],
-          messages: flushed.messages.map((m) => {
-            // Identical to the finish path: past the hard cap the loop leaves a
-            // steer in the mailbox precisely so it can be reported as unseen.
-            if (m.steer === "queued")
-              return { ...m, steer: "undelivered" as const };
-            return m.command?.status === "running"
-              ? { ...m, command: { ...m.command, status: "done" as const } }
-              : m;
-          }),
+          messages: settleFencedMessages(flushed.messages),
         };
       }),
     ),

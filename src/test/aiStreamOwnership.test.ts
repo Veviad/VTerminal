@@ -7,6 +7,7 @@ import type {
   Session,
   StreamEvent,
 } from "../lib/types";
+import type { PtyExecOutcome } from "../lib/ptyExec";
 
 const api = vi.hoisted(() => ({
   aiSuggest: vi.fn(),
@@ -47,7 +48,12 @@ vi.mock("../lib/terminalSnapshot", () => ({
   readScreenTail: () => "",
 }));
 
-import { useAiStream } from "../hooks/useAiStream";
+import {
+  cardStatus,
+  commandOutcomeFence,
+  commandResultPresentation,
+  useAiStream,
+} from "../hooks/useAiStream";
 import { useAppStore } from "../stores/appStore";
 
 const SID = "ai-owner";
@@ -128,6 +134,50 @@ beforeEach(() => {
     activeModelId: "test-model",
   });
   useAppStore.getState().addSession(session());
+});
+
+describe("terminal command result classification", () => {
+  it("distinguishes pre-dispatch closure from post-dispatch uncertainty", () => {
+    const beforeDispatch = {
+      exitCode: null,
+      output: "",
+      durationMs: 1,
+      mode: null,
+      error: "terminal_closed" as const,
+    };
+    const afterDispatch = { ...beforeDispatch, mode: "sentinel" as const };
+    expect(cardStatus(beforeDispatch)).toBe("blocked");
+    expect(commandOutcomeFence(beforeDispatch)).toBeUndefined();
+    expect(cardStatus(afterDispatch)).toBe("timeout");
+    expect(commandOutcomeFence(afterDispatch)).toContain("stopped");
+  });
+
+  it("fences every completion-unknown result but not a confirmed interrupt", () => {
+    const confirmed = commandResultPresentation("interrupted", 130);
+    expect(confirmed.status).toBe("interrupted");
+    expect(confirmed).not.toHaveProperty("fence");
+    expect(commandResultPresentation("interrupted", null)).toMatchObject({
+      status: "interrupted",
+      note: expect.stringContaining("exit status is unknown"),
+      fence: expect.stringContaining("stopped"),
+    });
+    expect(commandResultPresentation("cancelled", null)).toMatchObject({
+      status: "timeout",
+      note: expect.stringContaining("Completion unknown"),
+      fence: expect.stringContaining("stopped"),
+    });
+    expect(commandResultPresentation("frontend_timeout", null)).toMatchObject({
+      status: "timeout",
+      fence: expect.stringContaining("stopped"),
+    });
+    expect(commandResultPresentation("timeout", null)).toHaveProperty("fence");
+    expect(
+      commandResultPresentation("command_not_observed", null),
+    ).toHaveProperty("fence");
+    expect(commandResultPresentation("terminal_closed", null)).toHaveProperty(
+      "fence",
+    );
+  });
 });
 
 function installSidecar(): void {
@@ -545,6 +595,221 @@ describe("single-terminal command routing", () => {
     expect(useAppStore.getState().aiStreams[SID].lastError).toBeNull();
     expect(api.aiCancel).not.toHaveBeenCalled();
   });
+
+  it("surfaces and fences a command-result submission failure", async () => {
+    api.submitCommandResult.mockRejectedValueOnce(new Error("IPC closed"));
+    let onEvent!: (event: StreamEvent) => void;
+    api.agentStart.mockImplementationOnce((...args: unknown[]) => {
+      onEvent = args[6] as (event: StreamEvent) => void;
+      return Promise.resolve([]);
+    });
+    const { result } = renderHook(() => useAiStream());
+    await act(async () => result.current.startAgent(SID, "inspect packages"));
+    const requestId = useAppStore.getState().aiStreams[SID].requestId;
+
+    act(() => {
+      onEvent({
+        type: "RunInTerminal",
+        approval_id: "submit-fails",
+        session_id: SID,
+        command: "apt list --upgradable",
+        timeout_secs: 120,
+        explanation: "Inspect available package updates",
+        output_policy: "normal",
+      });
+    });
+
+    await vi.waitFor(() => expect(api.aiCancel).toHaveBeenCalledWith(requestId));
+    const stream = useAppStore.getState().aiStreams[SID];
+    expect(stream.status).toBe("error");
+    expect(stream.requestId).toBeNull();
+    expect(stream.generationId).toBeNull();
+    expect(stream.lastError).toContain("could not report this terminal outcome");
+  });
+
+  it("marks interrupt failure unknown and stops the Agent before another command", async () => {
+    pty.runInTerminal.mockResolvedValueOnce({
+      exitCode: null,
+      output: "partial",
+      durationMs: 1_000,
+      mode: "sentinel",
+      error: "interrupt_failed",
+    });
+    let onEvent!: (event: StreamEvent) => void;
+    api.agentStart.mockImplementationOnce((...args: unknown[]) => {
+      onEvent = args[6] as (event: StreamEvent) => void;
+      return Promise.resolve([]);
+    });
+    const { result } = renderHook(() => useAiStream());
+    await act(async () => result.current.startAgent(SID, "inspect packages"));
+    const requestId = useAppStore.getState().aiStreams[SID].requestId;
+
+    act(() => {
+      onEvent({
+        type: "RunInTerminal",
+        approval_id: "interrupt-fails",
+        session_id: SID,
+        command: "apt list --upgradable",
+        timeout_secs: 120,
+        explanation: "Inspect available package updates",
+        output_policy: "normal",
+      });
+    });
+
+    await vi.waitFor(() => expect(api.aiCancel).toHaveBeenCalledWith(requestId));
+    const stream = useAppStore.getState().aiStreams[SID];
+    const command = stream.messages.find(
+      (message) => message.id === "cmd-interrupt-fails",
+    )?.command;
+    expect(command?.status).toBe("timeout");
+    expect(command?.note).toContain("Completion unknown");
+    expect(stream.lastError).toContain("could not confirm");
+  });
+
+  it("stops the Agent after a post-dispatch completion timeout", async () => {
+    pty.runInTerminal.mockResolvedValueOnce({
+      exitCode: null,
+      output: "partial",
+      durationMs: 120_000,
+      mode: "sentinel",
+      error: "timeout",
+    });
+    let onEvent!: (event: StreamEvent) => void;
+    api.agentStart.mockImplementationOnce((...args: unknown[]) => {
+      onEvent = args[6] as (event: StreamEvent) => void;
+      return Promise.resolve([]);
+    });
+    const { result } = renderHook(() => useAiStream());
+    await act(async () => result.current.startAgent(SID, "inspect packages"));
+    const requestId = useAppStore.getState().aiStreams[SID].requestId;
+
+    act(() => {
+      onEvent({
+        type: "RunInTerminal",
+        approval_id: "completion-unknown",
+        session_id: SID,
+        command: "apt list --upgradable",
+        timeout_secs: 120,
+        explanation: "Inspect available package updates",
+        output_policy: "normal",
+      });
+    });
+
+    await vi.waitFor(() => expect(api.aiCancel).toHaveBeenCalledWith(requestId));
+    const stream = useAppStore.getState().aiStreams[SID];
+    expect(stream.status).toBe("error");
+    expect(stream.lastError).toContain("completion could not be confirmed");
+    expect(
+      stream.messages.find(
+        (message) => message.id === "cmd-completion-unknown",
+      )?.command?.status,
+    ).toBe("timeout");
+  });
+
+  it("releases a backend-timed-out PTY waiter without submitting a duplicate result", async () => {
+    const waiter = deferred<PtyExecOutcome>();
+    pty.runInTerminal.mockReturnValueOnce(waiter.promise);
+    pty.abortSession.mockImplementationOnce(() => {
+      waiter.resolve({
+        exitCode: null,
+        output: "",
+        durationMs: 135_000,
+        mode: "sentinel",
+        error: "cancelled",
+      });
+      return true;
+    });
+    let onEvent!: (event: StreamEvent) => void;
+    api.agentStart.mockImplementationOnce((...args: unknown[]) => {
+      onEvent = args[6] as (event: StreamEvent) => void;
+      return Promise.resolve([]);
+    });
+    const { result } = renderHook(() => useAiStream());
+    await act(async () => result.current.startAgent(SID, "inspect packages"));
+    const requestId = useAppStore.getState().aiStreams[SID].requestId;
+
+    act(() => {
+      onEvent({
+        type: "RunInTerminal",
+        approval_id: "backend-timeout",
+        session_id: SID,
+        command: "apt list --upgradable",
+        timeout_secs: 120,
+        explanation: "Inspect available package updates",
+        output_policy: "normal",
+      });
+    });
+    expect(pty.runInTerminal).toHaveBeenCalledOnce();
+
+    act(() => {
+      onEvent({
+        type: "CommandResult",
+        approval_id: "backend-timeout",
+        exit_code: null,
+        duration_ms: 135_000,
+        error: "frontend_timeout",
+      });
+    });
+    await flushPreflight();
+
+    expect(pty.abortSession).toHaveBeenCalledOnce();
+    expect(pty.abortSession).toHaveBeenCalledWith(
+      SID,
+      "cancelled",
+      "backend-timeout",
+    );
+    expect(api.aiCancel).toHaveBeenCalledWith(requestId);
+    expect(api.submitCommandResult).not.toHaveBeenCalled();
+    const stream = useAppStore.getState().aiStreams[SID];
+    expect(stream.requestId).toBeNull();
+    expect(stream.generationId).toBeNull();
+    expect(stream.status).toBe("error");
+    expect(stream.lastError).toContain("completion could not be confirmed");
+    expect(
+      stream.messages.find(
+        (message) => message.id === "cmd-backend-timeout",
+      )?.command?.status,
+    ).toBe("timeout");
+  });
+
+  it("does not cancel a live waiter for an ordinary backend result echo", async () => {
+    pty.runInTerminal.mockReturnValueOnce(deferred<PtyExecOutcome>().promise);
+    let onEvent!: (event: StreamEvent) => void;
+    api.agentStart.mockImplementationOnce((...args: unknown[]) => {
+      onEvent = args[6] as (event: StreamEvent) => void;
+      return Promise.resolve([]);
+    });
+    const { result } = renderHook(() => useAiStream());
+    await act(async () => result.current.startAgent(SID, "inspect packages"));
+
+    act(() => {
+      onEvent({
+        type: "RunInTerminal",
+        approval_id: "ordinary-result",
+        session_id: SID,
+        command: "apt list --upgradable",
+        timeout_secs: 120,
+        explanation: "Inspect available package updates",
+        output_policy: "normal",
+      });
+      onEvent({
+        type: "CommandResult",
+        approval_id: "ordinary-result",
+        exit_code: 0,
+        duration_ms: 42,
+        error: null,
+      });
+    });
+
+    expect(pty.abortSession).not.toHaveBeenCalled();
+    const command = useAppStore
+      .getState()
+      .aiStreams[SID].messages.find(
+        (message) => message.id === "cmd-ordinary-result",
+      )?.command;
+    expect(command?.status).toBe("done");
+    expect(command?.exitCode).toBe(0);
+  });
 });
 
 describe("AI Sidecar routing", () => {
@@ -644,6 +909,62 @@ describe("AI Sidecar routing", () => {
       "docker compose up -d api",
     ]);
     expect(pty.runInTerminal.mock.calls[0][3]).toMatchObject({ outputPolicy: "private" });
+  });
+
+  it("releases the stored Sidecar waiter before rejecting stale timeout metadata", async () => {
+    installSidecar();
+    pty.runInTerminal.mockReturnValueOnce(deferred<PtyExecOutcome>().promise);
+    let onEvent!: (event: StreamEvent) => void;
+    api.agentStart.mockImplementationOnce((...args: unknown[]) => {
+      onEvent = args[6] as (event: StreamEvent) => void;
+      return Promise.resolve([]);
+    });
+    const { result } = renderHook(() => useAiStream());
+    await act(async () => result.current.startAgent(SID, "inspect remote packages"));
+    const requestId = useAppStore.getState().aiStreams[SID].requestId;
+
+    act(() => {
+      onEvent({
+        type: "RunInTerminal",
+        approval_id: "remote-backend-timeout",
+        session_id: REMOTE_SID,
+        command: "apt list --upgradable",
+        timeout_secs: 120,
+        explanation: "Inspect remote package updates",
+        output_policy: "normal",
+        target_role: "remote",
+        target_session_id: REMOTE_SID,
+      });
+    });
+    expect(pty.runInTerminal).toHaveBeenCalledOnce();
+
+    act(() =>
+      useAppStore.getState().markSidecarDegraded(SID, {
+        role: "remote",
+        reason: "remote_identity_changed",
+      }),
+    );
+    act(() => {
+      onEvent({
+        type: "CommandResult",
+        approval_id: "remote-backend-timeout",
+        exit_code: null,
+        duration_ms: 135_000,
+        error: "frontend_timeout",
+        // Neither field may select the PTY released by this event. The exact
+        // validated target was captured on the command card before dispatch.
+        target_role: "local",
+        target_session_id: SID,
+      });
+    });
+
+    expect(pty.abortSession).toHaveBeenCalledOnce();
+    expect(pty.abortSession).toHaveBeenCalledWith(
+      REMOTE_SID,
+      "cancelled",
+      "remote-backend-timeout",
+    );
+    expect(api.aiCancel).toHaveBeenCalledWith(requestId);
   });
 
   it("rejects mismatched backend target metadata before terminal dispatch", async () => {

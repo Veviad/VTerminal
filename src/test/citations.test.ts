@@ -69,6 +69,37 @@ describe("stripCiteTags", () => {
     );
   });
 
+  it("honors multi-backtick delimiters across lines", () => {
+    const raw = [
+      "``literal code with a `<cite>` example",
+      '<cite index="1-1">kept across lines</cite>',
+      "``",
+      'outside <cite index="2-1">stripped</cite>',
+    ].join("\n");
+
+    expect(stripCiteTags(raw)).toBe(
+      [
+        "``literal code with a `<cite>` example",
+        '<cite index="1-1">kept across lines</cite>',
+        "``",
+        "outside stripped",
+      ].join("\n"),
+    );
+  });
+
+  it("protects cite tags inside a same-line multi-backtick span", () => {
+    const raw =
+      'the ``<cite>`` token is literal, unlike <cite index="1-1">this</cite>';
+    expect(stripCiteTags(raw)).toBe(
+      "the ``<cite>`` token is literal, unlike this",
+    );
+  });
+
+  it("keeps a partial cite marker inside an unclosed multi-backtick span", () => {
+    const raw = "``literal <cite index=\"1-";
+    expect(stripCiteTags(raw)).toBe(raw);
+  });
+
   /** A model explaining HTML may legitimately put the tag in a code sample. Rewriting a
    *  code block would be a worse bug than the one this function fixes. */
   it("leaves cite tags inside a fenced code block alone", () => {
@@ -87,6 +118,52 @@ describe("stripCiteTags", () => {
   it("handles tildes as a fence and an unclosed fence at the end", () => {
     const raw = ["~~~", '<cite index="1-1">kept</cite>'].join("\n");
     expect(stripCiteTags(raw)).toContain('<cite index="1-1">kept</cite>');
+  });
+
+  it("protects a directly list-nested fence until a matching-width close", () => {
+    const raw = [
+      "1. ````html",
+      '   <cite index="1-1">kept</cite>',
+      "   ```",
+      "   ~~~~",
+      '   <cite index="1-2">also kept</cite>',
+      "   ````",
+      'outside <cite index="2-1">stripped</cite>',
+    ].join("\n");
+
+    expect(stripCiteTags(raw)).toBe(
+      [
+        "1. ````html",
+        '   <cite index="1-1">kept</cite>',
+        "   ```",
+        "   ~~~~",
+        '   <cite index="1-2">also kept</cite>',
+        "   ````",
+        "outside stripped",
+      ].join("\n"),
+    );
+  });
+
+  it("protects cite tags in a blockquote-nested fenced code block", () => {
+    const raw = [
+      "> ```html",
+      '> <cite index="1-1">kept</cite>',
+      "> ~~~",
+      '> <cite index="1-2">also kept</cite>',
+      "> ````",
+      'outside <cite index="2-1">stripped</cite>',
+    ].join("\n");
+
+    expect(stripCiteTags(raw)).toBe(
+      [
+        "> ```html",
+        '> <cite index="1-1">kept</cite>',
+        "> ~~~",
+        '> <cite index="1-2">also kept</cite>',
+        "> ````",
+        "outside stripped",
+      ].join("\n"),
+    );
   });
 
   it("is idempotent", () => {

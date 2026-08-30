@@ -653,8 +653,8 @@ pub fn agent_steer(
 }
 
 /// The frontend reports what it observed after typing a command into the live
-/// terminal. Failing when nothing is pending is normal (the run was cancelled
-/// or timed out first), so the caller ignores the error.
+/// terminal. A missing waiter means the result could not be reconciled with the
+/// active Agent run, so the frontend surfaces the failure and fences that run.
 #[tauri::command(rename_all = "snake_case")]
 pub fn submit_command_result(
     pty_exec: State<'_, crate::agent::PtyExecState>,

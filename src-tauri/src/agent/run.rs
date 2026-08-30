@@ -422,11 +422,11 @@ fn base_tools(sidecar: bool) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "finish".into(),
-            description: "Call when the goal is achieved or cannot be achieved. Ends the run.".into(),
+            description: "Invoke this native structured tool when the goal is achieved or cannot be achieved. Put the user-facing result in its summary argument. Never print or imitate <finish>, <summary>, XML, or HTML tool markup in assistant text. Ends the run.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "summary": { "type": "string", "description": "Short summary of what was done / found" }
+                    "summary": { "type": "string", "description": "Short user-facing summary of what was done or found. Do not wrap it in XML or HTML tags." }
                 },
                 "required": ["summary"]
             }),
@@ -1959,6 +1959,23 @@ mod tests {
                 "search_docs".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn finish_tool_forbids_textual_protocol_imitation() {
+        let sent = tools(&config_with_buckets(vec![]));
+        let finish = sent
+            .iter()
+            .find(|tool| tool.name == "finish")
+            .expect("finish tool must be offered");
+
+        assert!(finish.description.contains("native structured tool"));
+        assert!(finish
+            .description
+            .contains("Never print or imitate <finish>, <summary>"));
+        assert!(finish.parameters["properties"]["summary"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("Do not wrap it in XML or HTML tags")));
     }
 
     /// The unknown-tool error used to hardcode "run_command, finish", which would have

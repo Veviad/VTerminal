@@ -18,8 +18,7 @@
  *  across streamed chunks; cleaning at render sees whole (or knowably partial) text.
  */
 
-/** Fence lines, so transformation can skip code blocks. */
-const FENCE = /^\s*(`{3,}|~{3,})/;
+import { markdownProtection } from "./markdownProtection";
 
 /** A complete tag, opening or closing. Attribute-tolerant, case-insensitive. */
 const CITE_TAG = /<\/?cite\b[^>]*>/gi;
@@ -32,16 +31,6 @@ const CITE_TAG = /<\/?cite\b[^>]*>/gi;
  *  mid-word after a bracket. `<ci` is specific enough never to be real text, and the
  *  worst case left is a two-character flash that the next delta resolves. */
 const PARTIAL_CITE = /<\/?ci(t(e\b[^>]*)?)?$/i;
-
-/** Split a line into alternating outside/inside-backticks segments.
- *
- *  Inline code needs the same protection as a fenced block: an answer explaining the HTML
- *  element would write `` `<cite>` ``, and stripping inside it would leave empty inline
- *  code. Odd indices are the code spans.
- */
-function byCodeSpan(line: string): string[] {
-  return line.split(/(`[^`]*`)/);
-}
 
 /** Unwrap `<cite …>text</cite>` to `text`, dropping the tags and keeping the words.
  *
@@ -56,21 +45,12 @@ export function stripCiteTags(content: string): string {
   // The overwhelmingly common case: nothing to do, and no scanning cost.
   if (!hasTag && !hasPartial) return content;
 
-  const lines = content.split("\n");
-  let inFence = false;
-  const cleaned = lines.map((line) => {
-    if (FENCE.test(line)) {
-      inFence = !inFence;
-      return line;
-    }
-    if (inFence) return line;
-    return byCodeSpan(line)
-      .map((seg, i) => (i % 2 === 1 ? seg : seg.replace(CITE_TAG, "")))
-      .join("");
-  });
-
-  let text = cleaned.join("\n");
-  // A half-arrived tag, only outside a fence and only at the very end.
-  if (!inFence) text = text.replace(PARTIAL_CITE, "");
-  return text;
+  const protection = markdownProtection(content);
+  const partial = PARTIAL_CITE.exec(content);
+  const partialStart =
+    partial && !protection.isProtected(partial.index) ? partial.index : content.length;
+  const completeSource = content.slice(0, partialStart);
+  return completeSource.replace(CITE_TAG, (tag: string, offset: number) =>
+    protection.isProtected(offset) ? tag : "",
+  );
 }

@@ -3,18 +3,22 @@ import type { IDisposable, IMarker } from "@xterm/xterm";
 import { getTerm, subscribeTerm, type TermEvent } from "./termRegistry";
 import { readLineRangeResult, type ReadRangeResult } from "./terminalSnapshot";
 import { useAppStore } from "../stores/appStore";
-import { PRIVATE_OUTPUT_NOTICE, type CommandStall, type OutputPolicy } from "./types";
+import {
+  PRIVATE_OUTPUT_NOTICE,
+  type CommandStall,
+  type OutputPolicy,
+  type RemoteContext,
+} from "./types";
 import { protectPrivateTerminal } from "./runbookTerminalPrivacy";
 import {
-  PROBE,
   canSentinel,
+  dialectFromProbe,
   hardenCommand,
-  installerFor,
   parsePrivateToken,
   prefixCommandEnvironment,
+  probeFor,
   sanitizeCommand,
   sentinelSuffix,
-  shellFromProbe,
   suppressPrivateOutput,
   type HardenedCommand,
   type ExecMode,
@@ -29,13 +33,13 @@ import {
 // chunk boundaries). So Rust asks, via StreamEvent::RunInTerminal, and we type
 // the command, watch for it to finish, and report back.
 //
-// Three completion modes, picked per session:
+// Two completion modes, picked per command:
 //   integrated — the local shell runs our zsh hooks: bind to the real Block and
 //                take its exit code from OSC 133;D.
-//   hook       — a remote shell we taught (in memory only) to emit a private
-//                OSC 6973;RD token from its prompt hook.
-//   sentinel   — no usable prompt hook: append a `printf` carrying $? and a
-//                per-command nonce.
+//   sentinel   — a remote or deterministic caller appends a `printf` carrying
+//                the command status and a fresh per-command nonce. Remote
+//                commands first prove the foreground shell with another fresh,
+//                separately-bound nonce.
 //
 // While a job is in flight the terminal is also WATCHED, because a command that
 // hangs is otherwise indistinguishable from one that is working: `hardenCommand`
@@ -46,8 +50,9 @@ import {
 // Invariants worth keeping:
 //   * The COMMAND is typed AT MOST ONCE per job, and never at all if the gate
 //     never opens. Retrying a command in someone's live shell is not recoverable.
-//   * A wall-clock timeout NEVER kills anything. The command is still running in
-//     front of the user; killing it is their call, not ours.
+//   * A wall-clock timeout NEVER kills anything. Missing completion is not proof
+//     that the command is still running; the result remains unknown until the
+//     user verifies the terminal.
 //   * Idle alone NEVER interrupts. `aide --init` emits nothing for ten minutes
 //     and must survive untouched; only the alternate-screen flip is unambiguous
 //     enough to earn an automatic Ctrl-C, and only because the pre-flight gate
@@ -63,6 +68,7 @@ export type ExecError =
   | "not_a_shell"
   | "command_not_observed"
   | "unsafe_command"
+  | "interrupted"
   | "interrupt_failed"
   | "target_changed"
   | "cancelled";
@@ -96,7 +102,7 @@ interface Job {
   nonce: string;
   startedAt: number;
   startLine: number;
-  /** Live anchor for hook/sentinel output. Its disposal proves scrollback loss. */
+  /** Live anchor for sentinel output. Its disposal proves scrollback loss. */
   startMarker: IMarker | null;
   startMarkerListener: IDisposable | null;
   boundBlockId: string | null;
@@ -113,21 +119,24 @@ interface Job {
   lastTickAt: number;
   /** Why the terminal was interrupted, for the model-facing note. */
   interruptedBy: "tui" | "user" | null;
+  userInterruptPending: boolean;
+  interruptGracePending: boolean;
   ladderRunning: boolean;
   finish(outcome: PtyExecOutcome): void;
   /** Hand the terminal back to the shell. `tui` escalates; `user` sends only
    *  SIGINT (extra keys would land on the user's prompt as stray text). */
-  interrupt(trigger: "tui" | "user"): void;
+  interrupt(trigger: "tui" | "user"): boolean;
 }
 
 const jobs = new Map<string, Job>();
-/** Resolved exec mode per session; cleared when a nested session exits. */
+/** Synchronous ownership from the first preflight check until the live Job
+ * settles. This closes the async gap before `jobs.set`, where two callers could
+ * otherwise probe and dispatch into the same terminal concurrently. */
+const preflightReservations = new Map<string, string>();
 interface ResolvedExecMode {
   mode: ExecMode;
   dialect: ShellDialect;
 }
-
-const sessionModes = new Map<string, ResolvedExecMode>();
 
 interface ApprovalPromptSnapshot {
   sessionId: string;
@@ -150,7 +159,6 @@ const IDLE_POLL_MS = 100;
 const QUIESCENCE_MS = 600;
 const BLOCK_BIND_MS = 5_000;
 const PROBE_WAIT_MS = 2_000;
-const HANDSHAKE_WAIT_MS = 2_500;
 const CARD_REFRESH_MS = 750;
 const MODEL_TAIL = 8_192;
 const CARD_TAIL = 4_096;
@@ -159,6 +167,16 @@ const CARD_TAIL = 4_096;
 const STALL_IDLE_MS = 30_000;
 /** Pause between rungs of the interrupt ladder. */
 const LADDER_STEP_MS = 400;
+/** Time allowed for the shell's ordinary completion signal after user SIGINT. */
+const USER_INTERRUPT_GRACE_MS = 1_000;
+/** Time allowed for the PTY bridge to confirm that it accepted user SIGINT. */
+const USER_INTERRUPT_DELIVERY_TIMEOUT_MS = 1_000;
+/**
+ * Absolute frontend reporting slack. Logical command time still pauses at a
+ * password prompt, but the webview must settle before Rust's 30-second
+ * watchdog grace can expire and discard the result channel.
+ */
+const FRONTEND_WATCHDOG_GRACE_MS = 15_000;
 
 /**
  * Escalating attempts to return a hijacked terminal to its shell.
@@ -181,7 +199,7 @@ const CONFIRM_ROW =
   /\[y\/n\]|\(yes\/no|press (?:enter|any key)|continue\?|overwrite\?|\(END\)|^\s*:\s*$|^\s*lines \d+-\d+/i;
 
 export function isBusy(sessionId: string): boolean {
-  return jobs.has(sessionId);
+  return jobs.has(sessionId) || preflightReservations.has(sessionId);
 }
 
 /** Capture the exact visible terminal state the operator is attesting. A human
@@ -296,18 +314,17 @@ function promptMatchesApproval(snapshot: ApprovalPromptSnapshot): boolean {
  * Exported for the command card's Interrupt button: the `input` and `idle`
  * stalls are heuristics, so the app surfaces them and the user decides.
  */
-export function interruptJob(sessionId: string, expectedApprovalId?: string): boolean {
+export function interruptJob(sessionId: string, expectedApprovalId: string): boolean {
   const job = jobs.get(sessionId);
-  if (!job || (expectedApprovalId !== undefined && job.approvalId !== expectedApprovalId)) {
+  if (!job || job.approvalId !== expectedApprovalId) {
     return false;
   }
-  job.interrupt("user");
-  return true;
+  return job.interrupt("user");
 }
 
-/** Forget the negotiated mode — called when `ssh` exits and we are local again. */
-export function resetSessionMode(sessionId: string): void {
-  sessionModes.delete(sessionId);
+/** Compatibility hook for session teardown. Remote execution no longer caches mode. */
+export function resetSessionMode(_sessionId: string): void {
+  // Deliberately empty. Every remote command performs a fresh nonce-bound probe.
 }
 
 /** Release a pending command without touching the terminal. */
@@ -336,7 +353,8 @@ export interface RunOptions {
   environment?: Record<string, string>;
   /** Runbooks set this false because Rust already owns and records the guards. */
   harden?: boolean;
-  /** Atomic backend dispatch authorization acquired after all asynchronous probing. */
+  /** Atomic backend dispatch authorization. Remote deterministic runs acquire
+   *  it before their authorized probe; other runs acquire it before dispatch. */
   beforeWrite?: () => boolean | Promise<boolean>;
   /** Final synchronous target/feature guard, checked immediately before write. */
   canWrite?: () => boolean;
@@ -359,6 +377,8 @@ export async function runInTerminal(
   const tailLimit = opts.tailLimit ?? MODEL_TAIL;
   const privateOutput = opts.outputPolicy === "private";
   const startedAt = Date.now();
+  const remoteAtStart = useAppStore.getState().sessionUi[sessionId]?.remote ?? null;
+  const authorizedRemoteProbe = !!opts.nonceCompletion && !!remoteAtStart;
 
   const sanitized = sanitizeCommand(rawCommand);
   if (!sanitized.ok) {
@@ -373,12 +393,72 @@ export async function runInTerminal(
   }
   const command = sanitized.command;
 
-  if (jobs.has(sessionId)) {
+  if (jobs.has(sessionId) || preflightReservations.has(sessionId)) {
     return busyOutcome(startedAt, null, "another command is still being awaited in this terminal");
   }
   if (!liveEntry(sessionId)) {
     return closedOutcome(startedAt, null);
   }
+  // Remote execution and deterministic callers are known up front to require a
+  // suffix. Reject structurally unsafe input before a lease is claimed or any
+  // capability probe is written to the terminal.
+  if ((remoteAtStart || opts.nonceCompletion) && !canSentinel(command)) {
+    return unsafeSentinelOutcome(startedAt);
+  }
+
+  preflightReservations.set(sessionId, approvalId);
+  try {
+    return await runReservedInTerminal({
+      sessionId,
+      approvalId,
+      command,
+      opts,
+      timeoutMs,
+      idleWaitMs,
+      tailLimit,
+      privateOutput,
+      startedAt,
+      remoteAtStart,
+      authorizedRemoteProbe,
+    });
+  } finally {
+    if (preflightReservations.get(sessionId) === approvalId) {
+      preflightReservations.delete(sessionId);
+    }
+  }
+}
+
+interface ReservedRun {
+  sessionId: string;
+  approvalId: string;
+  command: string;
+  opts: RunOptions;
+  timeoutMs: number;
+  idleWaitMs: number;
+  tailLimit: number;
+  privateOutput: boolean;
+  startedAt: number;
+  remoteAtStart: RemoteContext | null;
+  authorizedRemoteProbe: boolean;
+}
+
+async function runReservedInTerminal({
+  sessionId,
+  approvalId,
+  command,
+  opts,
+  timeoutMs,
+  idleWaitMs,
+  tailLimit,
+  privateOutput,
+  startedAt,
+  remoteAtStart,
+  authorizedRemoteProbe,
+}: ReservedRun): Promise<PtyExecOutcome> {
+  let dispatchAuthorized = false;
+  const commandDeadlineAt = startedAt + timeoutMs;
+  const remainingCommandMs = (maximum = Number.POSITIVE_INFINITY): number =>
+    Math.max(0, Math.min(maximum, commandDeadlineAt - Date.now()));
 
   const approvedPrompt = consumeApprovalPromptBinding(opts.approvalPromptBinding, sessionId);
   if (opts.approvalPromptBinding && (!approvedPrompt || !promptMatchesApproval(approvedPrompt))) {
@@ -395,12 +475,83 @@ export async function runInTerminal(
     };
   }
 
+  const acquireDispatchAuthorization = async (): Promise<boolean> => {
+    if (!opts.beforeWrite) return false;
+    const remaining = remainingCommandMs();
+    if (remaining <= 0) return false;
+    try {
+      return await new Promise<boolean>((resolve) => {
+        let settled = false;
+        let timer: ReturnType<typeof setTimeout>;
+        const finish = (authorized: boolean) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve(authorized);
+        };
+        timer = setTimeout(() => finish(false), remaining);
+        Promise.resolve(opts.beforeWrite!()).then(
+          (authorized) => finish(authorized),
+          () => finish(false),
+        );
+      });
+    } catch {
+      return false;
+    }
+  };
+  const authorizationUnavailable = (mode: ExecMode | null): PtyExecOutcome => ({
+    exitCode: null,
+    output: "",
+    outputTruncated: false,
+    outputObservedBytes: 0,
+    outputCapturedBytes: 0,
+    durationMs: Date.now() - startedAt,
+    mode,
+    error: "target_changed",
+    note: "Nothing was executed: final backend dispatch authorization was unavailable.",
+  });
+
+  // A remote Runbook probe is itself a PTY write. Claim the one-shot backend
+  // dispatch lease first, then recheck the operator-bound epoch before emitting
+  // even this harmless capability challenge.
+  if (authorizedRemoteProbe) {
+    dispatchAuthorized = await acquireDispatchAuthorization();
+    if (!dispatchAuthorized) return authorizationUnavailable(null);
+    if (!remoteIdentityMatches(sessionId, remoteAtStart)) {
+      return {
+        exitCode: null,
+        output: "",
+        outputTruncated: false,
+        outputObservedBytes: 0,
+        outputCapturedBytes: 0,
+        durationMs: Date.now() - startedAt,
+        mode: null,
+        error: "target_changed",
+        note: "Nothing was executed: the remote target changed before the authorized shell probe.",
+      };
+    }
+    if (approvedPrompt && !promptMatchesApproval(approvedPrompt)) {
+      return {
+        exitCode: null,
+        output: "",
+        outputTruncated: false,
+        outputObservedBytes: 0,
+        outputCapturedBytes: 0,
+        durationMs: Date.now() - startedAt,
+        mode: null,
+        error: "target_changed",
+        note: "Nothing was executed: the terminal changed before the authorized shell probe.",
+      };
+    }
+  }
+
   // 1. Wait for the terminal to be safe to type into (never inject blind).
-  // Runbooks always use a fresh sentinel and therefore must not install an
-  // unapproved probe/prompt hook before acquiring their dispatch lease.
-  const resolvedMode = opts.nonceCompletion
-    ? await resolveSentinelPrompt(sessionId, idleWaitMs)
-    : await resolveMode(sessionId, idleWaitMs);
+  // Local Runbooks can use the integrated prompt gate directly. Remote
+  // Runbooks took their lease above and now perform the same fresh probe as any
+  // other remote command.
+  const resolvedMode = opts.nonceCompletion && !authorizedRemoteProbe
+    ? await resolveSentinelPrompt(sessionId, idleWaitMs, remoteAtStart, commandDeadlineAt)
+    : await resolveMode(sessionId, idleWaitMs, remoteAtStart, commandDeadlineAt);
   if (resolvedMode === "closed") return closedOutcome(startedAt, null);
   if (resolvedMode === "busy") {
     return busyOutcome(startedAt, null, "a program is in the foreground or the user is typing");
@@ -413,6 +564,16 @@ export async function runInTerminal(
       mode: null,
       error: "not_a_shell",
       note: "Nothing was executed: the visible terminal is not sitting at a shell prompt (a pager, editor, or another program has it). Ask the user to return to a prompt.",
+    };
+  }
+  if (resolvedMode === "target_changed") {
+    return {
+      exitCode: null,
+      output: "",
+      durationMs: Date.now() - startedAt,
+      mode: null,
+      error: "target_changed",
+      note: "Nothing was executed: the terminal moved between local and remote shell identities during command preflight.",
     };
   }
   // Shell OSC/block markers describe ordinary interactive commands well, but
@@ -439,14 +600,7 @@ export async function runInTerminal(
   // appended after it.
   const nonce = makeNonce();
   if (mode === "sentinel" && !canSentinel(command)) {
-    return {
-      exitCode: null,
-      output: "",
-      durationMs: Date.now() - startedAt,
-      mode,
-      error: "unsafe_command",
-      note: "Nothing was executed: this shell needs an exit-code sentinel appended, which is unsafe for commands using heredocs, line continuations, or unbalanced quotes. Rewrite it as a single self-contained command.",
-    };
+    return unsafeSentinelOutcome(startedAt);
   }
   const hardened = opts.harden === false
     ? { line: command, applied: [] as HardenedCommand["applied"] }
@@ -476,26 +630,16 @@ export async function runInTerminal(
       note: "Nothing was executed: the guarded command and completion instrumentation exceed 4,096 characters.",
     };
   }
-  if (opts.beforeWrite) {
-    let authorized = false;
-    try {
-      authorized = await opts.beforeWrite();
-    } catch {
-      authorized = false;
-    }
-    if (!authorized) {
-      return {
-        exitCode: null,
-        output: "",
-        outputTruncated: false,
-        outputObservedBytes: 0,
-        outputCapturedBytes: 0,
-        durationMs: Date.now() - startedAt,
-        mode,
-        error: "cancelled",
-        note: "Nothing was executed: final backend dispatch authorization was unavailable.",
-      };
-    }
+  if (opts.beforeWrite && !dispatchAuthorized) {
+    dispatchAuthorized = await acquireDispatchAuthorization();
+    if (!dispatchAuthorized) return authorizationUnavailable(mode);
+  }
+
+  // Preflight is part of the frontend command budget. Never dispatch at or
+  // after its deadline, even if the final authorization arrived on the same
+  // event-loop turn.
+  if (remainingCommandMs() <= 0) {
+    return busyOutcome(startedAt, mode, "the command deadline expired during terminal preflight");
   }
 
   // The backend claim above is asynchronous. Re-prove the exact prompt that
@@ -504,8 +648,18 @@ export async function runInTerminal(
   // is settled as unknown without typing into the new foreground program.
   const dispatchEntry = getTerm(sessionId);
   const dispatchBuffer = dispatchEntry?.term.buffer.active;
+  const approvedEpochStillBound = !approvedPrompt || (
+    authorizedRemoteProbe
+      ? dispatchEntry === approvedPrompt.entry
+        && !dispatchEntry?.disposed
+        && dispatchBuffer?.type === approvedPrompt.bufferType
+        && dispatchBuffer.type === "normal"
+        && dispatchEntry.lastUserInputAt === approvedPrompt.lastUserInputAt
+      : promptMatchesApproval(approvedPrompt)
+  );
   const promptStillBound =
-    (!approvedPrompt || promptMatchesApproval(approvedPrompt)) &&
+    remoteIdentityMatches(sessionId, remoteAtStart) &&
+    approvedEpochStillBound &&
     dispatchEntry === promptSnapshot.entry &&
     !dispatchEntry?.disposed &&
     dispatchBuffer?.type === promptSnapshot.bufferType &&
@@ -557,14 +711,19 @@ export async function runInTerminal(
       pausedMs: 0,
       lastTickAt: startedAt,
       interruptedBy: null,
+      userInterruptPending: false,
+      interruptGracePending: false,
       ladderRunning: false,
       finish: () => {},
-      interrupt: () => {},
+      interrupt: () => false,
     };
 
     const timers: ReturnType<typeof setTimeout>[] = [];
     let refresh: ReturnType<typeof setInterval> | undefined;
     let unsubscribe = () => {};
+    let userInterruptWriteConfirmed = false;
+    let userInterruptDeliveryTimer: ReturnType<typeof setTimeout> | null = null;
+    let pendingUserInterruptCompletion: PtyExecOutcome | null = null;
     job.finish = (outcome) => {
       if (job.settled) return;
       job.settled = true;
@@ -587,7 +746,9 @@ export async function runInTerminal(
               outputTruncated: false,
               outputObservedBytes: 0,
               outputCapturedBytes: 0,
-              note: PRIVATE_OUTPUT_NOTICE,
+              note: outcome.note
+                ? `${PRIVATE_OUTPUT_NOTICE} ${outcome.note}`
+                : PRIVATE_OUTPUT_NOTICE,
             }
           : outcome,
       );
@@ -642,7 +803,7 @@ export async function runInTerminal(
      * not an interrupt. `idle` is the weakest and is informational only.
      */
     const classifyStall = (): CommandStall | null => {
-      // `ladderRunning` keeps this pinned while we are still typing quit keys —
+      // `ladderRunning` keeps this pinned while we are still typing quit keys,
       // but NOT after that, so a shell we handed back reclassifies honestly.
       if (onAltScreen() || job.ladderRunning) return "tui";
       const e = getTerm(sessionId);
@@ -654,24 +815,112 @@ export async function runInTerminal(
       return CONFIRM_ROW.test(row) ? "input" : "idle";
     };
 
+    const settleInterruptFailed = () => {
+      if (job.settled) return;
+      const captured = harvest(cursorRow(), tailLimit);
+      job.finish({
+        exitCode: null,
+        output: captured.text,
+        outputTruncated: captured.truncated,
+        outputObservedBytes: captured.observedBytes,
+        outputCapturedBytes: captured.capturedBytes,
+        durationMs: Date.now() - job.startedAt,
+        mode,
+        error: "interrupt_failed",
+        note: "VTerminal could not confirm that SIGINT was written to the terminal. The command may still control it. Do not re-run it. Ask the user to verify the terminal state.",
+      });
+    };
+
+    const armUserInterruptDeliveryDeadline = () => {
+      userInterruptDeliveryTimer = setTimeout(() => {
+        userInterruptDeliveryTimer = null;
+        if (!userInterruptWriteConfirmed) settleInterruptFailed();
+      }, USER_INTERRUPT_DELIVERY_TIMEOUT_MS);
+      timers.push(userInterruptDeliveryTimer);
+    };
+
+    const settleInterruptedUnknown = () => {
+      if (job.settled) return;
+      const captured = harvest(cursorRow(), tailLimit);
+      const interruptAction = job.interruptedBy === "user"
+        ? "The user requested an interrupt, and VTerminal sent SIGINT"
+        : "VTerminal sent interrupt input to the full-screen program";
+      job.finish({
+        exitCode: null,
+        output: captured.text,
+        outputTruncated: captured.truncated,
+        outputObservedBytes: captured.observedBytes,
+        outputCapturedBytes: captured.capturedBytes,
+        durationMs: Date.now() - job.startedAt,
+        mode,
+        error: "interrupted",
+        note: `${interruptAction}, but no completion signal arrived within one second. The command may have stopped, or terminal integration may have been lost while it was finishing. Its exit code is unknown. Do not re-run it unchanged. Ask the user to verify the prompt and command state.`,
+      });
+    };
+
+    const armInterruptedGrace = () => {
+      if (job.settled || job.interruptGracePending) return;
+      job.interruptGracePending = true;
+      timers.push(setTimeout(settleInterruptedUnknown, USER_INTERRUPT_GRACE_MS));
+    };
+
     job.interrupt = (trigger) => {
-      if (job.settled || job.ladderRunning) return;
+      if (job.settled) return false;
+
+      if (trigger === "user") {
+        // The approval id is checked by interruptJob. Repeated gestures for the
+        // same command are acknowledged without sending repeated control bytes.
+        if (job.userInterruptPending || job.ladderRunning || job.interruptGracePending) return true;
+        job.userInterruptPending = true;
+        job.interruptedBy = "user";
+        let write: Promise<void>;
+        try {
+          write = api.ptyWrite(sessionId, "\x03");
+        } catch {
+          settleInterruptFailed();
+          return true;
+        }
+        // Delivery and command completion use separate bounded phases. A shell
+        // can report completion before the Tauri invoke acknowledgement reaches
+        // this webview, so that result is buffered until the write is confirmed.
+        armUserInterruptDeliveryDeadline();
+        void write.then(
+          () => {
+            if (job.settled) return;
+            userInterruptWriteConfirmed = true;
+            if (userInterruptDeliveryTimer) {
+              clearTimeout(userInterruptDeliveryTimer);
+              userInterruptDeliveryTimer = null;
+            }
+            if (pendingUserInterruptCompletion) {
+              const completion = pendingUserInterruptCompletion;
+              pendingUserInterruptCompletion = null;
+              job.finish(completion);
+              return;
+            }
+            armInterruptedGrace();
+          },
+          () => settleInterruptFailed(),
+        );
+        return true;
+      }
+
+      if (job.ladderRunning || job.userInterruptPending || job.interruptGracePending) return false;
       job.ladderRunning = true;
-      job.interruptedBy = trigger;
-      // Only a hijacked screen earns the escalation: in a normal buffer the
-      // later rungs would land on the user's prompt as stray text.
-      const rungs = trigger === "tui" ? LADDER : LADDER.slice(0, 1);
+      job.interruptedBy = "tui";
       void (async () => {
-        for (const keys of rungs) {
+        for (const keys of LADDER) {
           if (job.settled) return;
           await api.ptyWrite(sessionId, keys).catch(() => {});
           // Deliberately NOT registered in `timers`: clearing it on finish would
           // leave this loop awaiting a promise that can never resolve.
           await new Promise((r) => setTimeout(r, LADDER_STEP_MS));
-          // Back in the normal buffer: the shell is reaching its prompt, and the
-          // hook will settle this job with the real exit code (130 for SIGINT).
+          // Back in the normal buffer: give the shell one bounded chance to
+          // report ordinary completion. Never leave the card waiting forever if
+          // terminal integration disappeared during the interrupt.
           if (job.settled || !onAltScreen()) {
             job.ladderRunning = false;
+            if (!job.settled) armInterruptedGrace();
             return;
           }
         }
@@ -683,20 +932,36 @@ export async function runInTerminal(
           durationMs: Date.now() - job.startedAt,
           mode,
           error: "interrupt_failed",
-          note: "This command opened a full-screen program (an editor, pager, or TUI) and VTerminal could not close it — SIGINT, `q` and `:q!` were all refused. It still holds the user's terminal. Propose NOTHING further: tell the user to close it themselves, then stop.",
+          note: "This command opened a full-screen program (an editor, pager, or TUI), and VTerminal could not close it. SIGINT, `q`, and `:q!` were all refused. It may still hold the user's terminal. Propose NOTHING further: tell the user to close it themselves, then stop.",
         });
       })();
+      return true;
     };
 
-    /** Prepended to a normal completion so the model knows 130 means SIGINT. */
+    /** Prepended to a completion observed after VTerminal sent an interrupt. */
     const interruptNote = (): string | undefined => {
       if (job.interruptedBy === "tui") {
-        return "VTerminal sent SIGINT to this command: it opened a full-screen program (editor, pager, or TUI), which the agent cannot exit. Exit code 130 means interrupted, not failed — the command did not do its work. Re-run it in a non-interactive form (add --no-pager, pipe through `| cat`, or use the tool's --non-interactive flag).";
+        return "VTerminal interrupted this command after it opened a full-screen program (editor, pager, or TUI), and the shell then reported completion. Treat the command as interrupted and do not assume it did its work. Re-run it only in a non-interactive form (add --no-pager, pipe through `| cat`, or use the tool's --non-interactive flag).";
       }
       if (job.interruptedBy === "user") {
-        return "The user interrupted this command (SIGINT). Exit code 130 means interrupted, not failed. Do not re-run it unchanged — it was taking too long or waiting for input.";
+        return "The user requested an interrupt, and the shell confirmed command completion after SIGINT. Do not re-run it unchanged. It was taking too long or waiting for input.";
       }
       return undefined;
+    };
+
+    const completionError = (): ExecError | undefined =>
+      job.interruptedBy ? "interrupted" : undefined;
+
+    const settleAuthoritativeCompletion = (outcome: PtyExecOutcome) => {
+      if (
+        job.interruptedBy === "user" &&
+        job.userInterruptPending &&
+        !userInterruptWriteConfirmed
+      ) {
+        pendingUserInterruptCompletion ??= outcome;
+        return;
+      }
+      job.finish(outcome);
     };
 
     const completeWithBlock = (blockId: string, exitCode: number) => {
@@ -708,7 +973,7 @@ export async function runInTerminal(
         markers && !markers.start.isDisposed ? markers.start.line : job.startLine + 1;
       const end = markers?.end && !markers.end.isDisposed ? markers.end.line - 1 : cursorRow();
       const captured = harvest(end, tailLimit, from);
-      job.finish({
+      settleAuthoritativeCompletion({
         exitCode,
         output: captured.text,
         outputTruncated: captured.truncated,
@@ -716,6 +981,7 @@ export async function runInTerminal(
         outputCapturedBytes: captured.capturedBytes,
         durationMs: Date.now() - job.startedAt,
         mode,
+        error: completionError(),
         note: interruptNote(),
       });
     };
@@ -760,7 +1026,7 @@ export async function runInTerminal(
           // from an abandoned command can never be misread as this one's.
           if (mode === "sentinel" && token.arg !== job.nonce) break;
           const captured = harvest(cursorRow(), tailLimit);
-          job.finish({
+          settleAuthoritativeCompletion({
             exitCode: token.exit,
             output: captured.text,
             outputTruncated: captured.truncated,
@@ -768,6 +1034,7 @@ export async function runInTerminal(
             outputCapturedBytes: captured.capturedBytes,
             durationMs: Date.now() - job.startedAt,
             mode,
+            error: completionError(),
             note: interruptNote(),
           });
           break;
@@ -800,7 +1067,7 @@ export async function runInTerminal(
       });
       return;
     }
-    // Hook/sentinel jobs do not receive an authoritative OSC block marker.
+    // Sentinel jobs do not receive an authoritative OSC block marker.
     // Anchor their prompt row directly in xterm so ordinary line shifts remain
     // accurate and disposal tells us when low scrollback dropped early output.
     if (mode !== "integrated") {
@@ -838,7 +1105,9 @@ export async function runInTerminal(
     if (mode === "integrated") {
       timers.push(
         setTimeout(() => {
-          if (!job.boundBlockId) job.finish(notObservedOutcome(job.startedAt, mode));
+          if (!job.boundBlockId && !job.interruptedBy) {
+            job.finish(notObservedOutcome(job.startedAt, mode));
+          }
         }, BLOCK_BIND_MS),
       );
     }
@@ -876,17 +1145,58 @@ export async function runInTerminal(
       store.setCommandStall(sessionId, approvalId, stall);
     }, CARD_REFRESH_MS);
 
-    // Re-armed rather than fixed, so a password prompt cannot burn the budget:
-    // time the USER owns is not time the command spent hanging.
+    const settleTimeout = () => {
+      if (job.settled) return;
+      const captured = harvest(cursorRow(), tailLimit);
+      job.finish({
+        exitCode: null,
+        output: captured.text,
+        outputTruncated: captured.truncated,
+        outputObservedBytes: captured.observedBytes,
+        outputCapturedBytes: captured.capturedBytes,
+        durationMs: Date.now() - job.startedAt,
+        mode,
+        error: "timeout",
+        note: `No completion signal arrived within ${Math.round(
+          timeoutMs / 1000,
+        )}s. The command may still be running, or it may have finished after terminal integration was lost. Its exit code is unknown. VTerminal did not interrupt it. Do not re-run it or assume it succeeded or failed. Ask the user to verify the terminal state.`,
+      });
+    };
+
+    // Re-armed rather than fixed, so a password prompt does not immediately
+    // burn the logical command budget. The initial delay is the budget left
+    // after preflight, not a fresh timeout beginning after dispatch.
     const armDeadline = (ms: number) => {
       timers.push(
         setTimeout(() => {
           if (job.settled) return;
+          // Once an interrupt is in flight, its bounded grace or escalation
+          // owns the outcome. A nearly-expired command deadline must not race it
+          // into a misleading timeout result.
+          if (job.interruptedBy) return;
           const left = timeoutMs - (Date.now() - job.startedAt - job.pausedMs);
           if (left > 0) {
             armDeadline(left);
             return;
           }
+          settleTimeout();
+        }, ms),
+      );
+    };
+    armDeadline(remainingCommandMs());
+
+    // Password pauses and a stalled IPC write cannot postpone the frontend
+    // forever. Rust waits another 30 seconds, leaving at least 15 seconds for
+    // this result to cross the IPC boundary after this absolute cap fires.
+    timers.push(
+      setTimeout(() => {
+        if (job.settled) return;
+        if (job.interruptedBy === "user") {
+          if (userInterruptWriteConfirmed) settleInterruptedUnknown();
+          else settleInterruptFailed();
+          return;
+        }
+        if (job.interruptedBy === "tui") {
           const captured = harvest(cursorRow(), tailLimit);
           job.finish({
             exitCode: null,
@@ -896,21 +1206,45 @@ export async function runInTerminal(
             outputCapturedBytes: captured.capturedBytes,
             durationMs: Date.now() - job.startedAt,
             mode,
-            error: "timeout",
-            note: `The command was typed into the user's live terminal and is STILL RUNNING after ${Math.round(
-              timeoutMs / 1000,
-            )}s. It was NOT killed and its exit code is unknown. Do not re-run it and do not assume it succeeded or failed.`,
+            error: "interrupt_failed",
+            note: "VTerminal could not settle its full-screen interrupt before the frontend reporting deadline. The program may still control the terminal. Ask the user to verify the terminal state.",
           });
-        }, ms),
-      );
-    };
-    armDeadline(timeoutMs);
+          return;
+        }
+        settleTimeout();
+      }, Math.max(0, commandDeadlineAt + FRONTEND_WATCHDOG_GRACE_MS - Date.now())),
+    );
   });
 }
 
 // ---------------------------------------------------------------------------
 
-type ModeResolution = ResolvedExecMode | "busy" | "closed" | "not_a_shell";
+type ModeResolution =
+  | ResolvedExecMode
+  | "busy"
+  | "closed"
+  | "not_a_shell"
+  | "target_changed";
+
+function sameRemoteIdentity(
+  left: RemoteContext | null,
+  right: RemoteContext | null,
+): boolean {
+  if (left === null || right === null) return left === right;
+  return (
+    left.kind === right.kind &&
+    left.target === right.target &&
+    (left.host_id ?? null) === (right.host_id ?? null)
+  );
+}
+
+function remoteIdentityMatches(
+  sessionId: string,
+  expected: RemoteContext | null,
+): boolean {
+  const current = useAppStore.getState().sessionUi[sessionId]?.remote ?? null;
+  return sameRemoteIdentity(current, expected);
+}
 
 function configuredShellDialect(sessionId: string): ShellDialect {
   const shell = useAppStore.getState().sessions.find((session) => session.id === sessionId)?.shell;
@@ -920,56 +1254,78 @@ function configuredShellDialect(sessionId: string): ShellDialect {
 async function resolveSentinelPrompt(
   sessionId: string,
   idleWaitMs: number,
+  expectedRemote: RemoteContext | null,
+  commandDeadlineAt: number,
 ): Promise<ModeResolution> {
-  const remote = useAppStore.getState().sessionUi[sessionId]?.remote ?? null;
-  const ready = await waitForPrompt(sessionId, idleWaitMs, remote ? "nested" : "integrated");
-  return ready === "ok"
+  if (!remoteIdentityMatches(sessionId, expectedRemote)) return "target_changed";
+  const ready = await waitForPrompt(
+    sessionId,
+    Math.max(0, Math.min(idleWaitMs, commandDeadlineAt - Date.now())),
+    expectedRemote ? "nested" : "integrated",
+  );
+  if (ready !== "ok") return ready;
+  return remoteIdentityMatches(sessionId, expectedRemote)
     ? { mode: "sentinel", dialect: configuredShellDialect(sessionId) }
-    : ready;
+    : "target_changed";
 }
 
 /** Wait for a safe prompt, then work out how this session reports exit codes. */
-async function resolveMode(sessionId: string, idleWaitMs: number): Promise<ModeResolution> {
-  const remote = useAppStore.getState().sessionUi[sessionId]?.remote ?? null;
+async function resolveMode(
+  sessionId: string,
+  idleWaitMs: number,
+  expectedRemote: RemoteContext | null,
+  commandDeadlineAt: number,
+): Promise<ModeResolution> {
+  if (!remoteIdentityMatches(sessionId, expectedRemote)) return "target_changed";
 
-  if (!remote) {
-    const ready = await waitForPrompt(sessionId, idleWaitMs, "integrated");
+  if (!expectedRemote) {
+    const ready = await waitForPrompt(
+      sessionId,
+      Math.max(0, Math.min(idleWaitMs, commandDeadlineAt - Date.now())),
+      "integrated",
+    );
     if (ready !== "ok") return ready;
-    return { mode: "integrated", dialect: configuredShellDialect(sessionId) };
+    return remoteIdentityMatches(sessionId, expectedRemote)
+      ? { mode: "integrated", dialect: configuredShellDialect(sessionId) }
+      : "target_changed";
   }
 
-  const cached = sessionModes.get(sessionId);
-  const ready = await waitForPrompt(sessionId, idleWaitMs, "nested");
-  if (ready !== "ok") return ready;
-  if (cached) return cached;
-
-  // Probe first. A missing reply means there is no shell reading this terminal,
-  // which is the one case where typing a command would be actively harmful.
-  const rs = await sendAndAwait(sessionId, PROBE, PROBE_WAIT_MS, (t) => (t.t === "RS" ? t : null));
-  if (!rs) return "not_a_shell";
-  const dialect: ShellDialect = rs.fish ? "fish" : "posix";
-  if (rs.installed) {
-    const resolved = { mode: "hook", dialect } as const;
-    sessionModes.set(sessionId, resolved);
-    return resolved;
-  }
-
-  const shell = shellFromProbe(rs);
-  if (!shell) {
-    const resolved = { mode: "sentinel", dialect } as const;
-    sessionModes.set(sessionId, resolved);
-    return resolved;
-  }
-  const nonce = makeNonce();
-  const rh = await sendAndAwait(
+  const ready = await waitForPrompt(
     sessionId,
-    installerFor(shell, nonce),
-    HANDSHAKE_WAIT_MS,
-    (t) => (t.t === "RH" && t.nonce === nonce ? t : null),
+    Math.max(0, Math.min(idleWaitMs, commandDeadlineAt - Date.now())),
+    "nested",
   );
-  const resolved: ResolvedExecMode = { mode: rh ? "hook" : "sentinel", dialect };
-  sessionModes.set(sessionId, resolved);
-  return resolved;
+  if (ready !== "ok") return ready;
+  // The probe is itself terminal input. Bind it to the same remote fingerprint
+  // the command was approved against, with no async gap before `ptyWrite`.
+  if (!remoteIdentityMatches(sessionId, expectedRemote)) return "target_changed";
+
+  // A fresh capability proves that this exact probe, rather than a cached or
+  // delayed token, was executed by the current foreground shell. A missing
+  // matching reply is the one case where typing the command would be harmful.
+  const probeNonce = makeNonce();
+  const probeWaitMs = Math.max(0, Math.min(PROBE_WAIT_MS, commandDeadlineAt - Date.now()));
+  if (probeWaitMs <= 0) return "busy";
+  const probe = await sendAndAwait(
+    sessionId,
+    probeFor(probeNonce),
+    probeWaitMs,
+    (token) => token.t === "RP" && token.nonce === probeNonce ? token : null,
+  );
+  if (!probe) return "not_a_shell";
+  if (!remoteIdentityMatches(sessionId, expectedRemote)) return "target_changed";
+  // RP is printed before the interactive shell redraws its prompt. Bind the
+  // eventual command only after that prompt is visible and quiet, otherwise the
+  // snapshot below can accidentally describe the probe's output row.
+  const promptReady = await waitForPrompt(
+    sessionId,
+    Math.max(0, Math.min(idleWaitMs, commandDeadlineAt - Date.now())),
+    "nested",
+  );
+  if (promptReady !== "ok") return promptReady;
+  return remoteIdentityMatches(sessionId, expectedRemote)
+    ? { mode: "sentinel", dialect: dialectFromProbe(probe) }
+    : "target_changed";
 }
 
 /** Write a setup line and wait for its private token. */
@@ -1055,7 +1411,20 @@ function liveEntry(sessionId: string): boolean {
 }
 
 function makeNonce(): string {
-  return Math.random().toString(36).slice(2, 10);
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function unsafeSentinelOutcome(startedAt: number): PtyExecOutcome {
+  return {
+    exitCode: null,
+    output: "",
+    durationMs: Date.now() - startedAt,
+    mode: "sentinel",
+    error: "unsafe_command",
+    note: "Nothing was executed: this shell needs an exit-code sentinel appended, which is unsafe for commands using heredocs, unquoted comments, background jobs, trailing operators, line continuations, or unfinished shell syntax. Rewrite it as a single self-contained command.",
+  };
 }
 
 function busyOutcome(startedAt: number, mode: ExecMode | null, why: string): PtyExecOutcome {
@@ -1065,7 +1434,7 @@ function busyOutcome(startedAt: number, mode: ExecMode | null, why: string): Pty
     durationMs: Date.now() - startedAt,
     mode,
     error: "terminal_busy",
-    note: `Nothing was executed — ${why}. No state changed. Wait and propose a harmless check, or finish and tell the user.`,
+    note: `Nothing was executed: ${why}. No state changed. Wait and propose a harmless check, or finish and tell the user.`,
   };
 }
 
