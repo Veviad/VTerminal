@@ -217,6 +217,11 @@ beforeEach(() => {
     return "sess-1";
   });
   mocks.startAgent.mockResolvedValue(undefined);
+  // Every mock the driver `await`s or chains `.catch()` onto must return a
+  // promise. A bare `vi.fn()` returns undefined, and `undefined.catch` throws as
+  // an UNHANDLED rejection — which vitest reports separately from test results,
+  // so a grep for "Tests"/"FAIL" shows a green run while CI fails.
+  mocks.ptyKill.mockResolvedValue(undefined);
 });
 
 describe("scheduled actions driver", () => {
@@ -452,6 +457,9 @@ describe("scheduled actions driver", () => {
   });
 
   it("closes the tab only for a one-off action that opted in", async () => {
+    const rejections: unknown[] = [];
+    const onRejection = (e: PromiseRejectionEvent | ErrorEvent) => rejections.push(e);
+    process.on("unhandledRejection", onRejection);
     mocks.schedulesList.mockResolvedValue([
       action({
         close_tab_when_done: true,
@@ -461,6 +469,10 @@ describe("scheduled actions driver", () => {
     await mount();
     await deliver();
     expect(mocks.ptyKill).toHaveBeenCalledWith("sess-1");
+    process.off("unhandledRejection", onRejection);
+    // The teardown path chains `.catch()` on the kill, so an unhandled rejection
+    // here means a promise the driver relies on was not one.
+    expect(rejections).toEqual([]);
   });
 });
 

@@ -81,9 +81,11 @@ fn next_interval<Tz: TimeZone>(
         return Some(after.clone() + step);
     }
     let mut next = base + step * (steps as i32);
-    // `num_minutes` truncates, so one correction step is enough.
+    // `steps` is `floor(elapsed / every) + 1`, so the product already exceeds
+    // `elapsed` — this is a belt-and-braces guard against a rounding surprise,
+    // not a loop that is expected to run.
     while next <= after {
-        next = next + step;
+        next += step;
     }
     Some(next)
 }

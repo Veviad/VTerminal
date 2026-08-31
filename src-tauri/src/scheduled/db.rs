@@ -351,30 +351,52 @@ pub fn plan_fingerprint(plan_json: &str) -> String {
 
 // ---------------------------------------------------------------- actions ----
 
-fn recurrence_columns(
-    rule: &Recurrence,
-) -> (
-    &'static str,
-    Option<u32>,
-    Option<u8>,
-    Option<u8>,
-    Option<u8>,
-    Option<String>,
-) {
+/// The recurrence columns for one rule.
+///
+/// Named rather than a six-element tuple: the shape-CHECK constraint in v20
+/// enforces that exactly the fields belonging to `kind` are non-NULL, so it is
+/// worth being able to read at a glance which those are.
+struct RecurrenceColumns {
+    kind: &'static str,
+    every_minutes: Option<u32>,
+    at_hour: Option<u8>,
+    at_minute: Option<u8>,
+    weekday_mask: Option<u8>,
+    once_at: Option<String>,
+}
+
+fn recurrence_columns(rule: &Recurrence) -> RecurrenceColumns {
+    let blank = RecurrenceColumns {
+        kind: "once",
+        every_minutes: None,
+        at_hour: None,
+        at_minute: None,
+        weekday_mask: None,
+        once_at: None,
+    };
     match rule {
-        Recurrence::Interval { every_minutes } => {
-            ("interval", Some(*every_minutes), None, None, None, None)
-        }
-        Recurrence::Daily { at } => ("daily", None, Some(at.hour), Some(at.minute), None, None),
-        Recurrence::Weekly { weekdays, at } => (
-            "weekly",
-            None,
-            Some(at.hour),
-            Some(at.minute),
-            Some(Weekday::mask_of(weekdays)),
-            None,
-        ),
-        Recurrence::Once { at } => ("once", None, None, None, None, Some(at.clone())),
+        Recurrence::Interval { every_minutes } => RecurrenceColumns {
+            kind: "interval",
+            every_minutes: Some(*every_minutes),
+            ..blank
+        },
+        Recurrence::Daily { at } => RecurrenceColumns {
+            kind: "daily",
+            at_hour: Some(at.hour),
+            at_minute: Some(at.minute),
+            ..blank
+        },
+        Recurrence::Weekly { weekdays, at } => RecurrenceColumns {
+            kind: "weekly",
+            at_hour: Some(at.hour),
+            at_minute: Some(at.minute),
+            weekday_mask: Some(Weekday::mask_of(weekdays)),
+            ..blank
+        },
+        Recurrence::Once { at } => RecurrenceColumns {
+            once_at: Some(at.clone()),
+            ..blank
+        },
     }
 }
 
@@ -565,8 +587,7 @@ pub fn upsert_action(
     interval_anchor_at: Option<&str>,
     now: &str,
 ) -> Result<(), String> {
-    let (kind, every_minutes, at_hour, at_minute, weekday_mask, once_at) =
-        recurrence_columns(&input.recurrence);
+    let rule = recurrence_columns(&input.recurrence);
     let mcp_json = serde_json::to_string(&input.mcp_selection).map_err(|e| e.to_string())?;
     let buckets_json = serde_json::to_string(&input.doc_buckets).map_err(|e| e.to_string())?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -601,12 +622,12 @@ pub fn upsert_action(
             input.permission_mode.as_str(),
             armed_at,
             steps_sha256,
-            kind,
-            every_minutes,
-            at_hour,
-            at_minute,
-            weekday_mask,
-            once_at,
+            rule.kind,
+            rule.every_minutes,
+            rule.at_hour,
+            rule.at_minute,
+            rule.weekday_mask,
+            rule.once_at,
             input.timezone,
             interval_anchor_at,
             input.missed_run_policy.as_str(),
@@ -1817,13 +1838,19 @@ mod tests {
                 }]
             )
         );
-        let mut selection = McpChatSelection::default();
-        selection.server_ids = vec!["srv-b".into(), "srv-a".into()];
-        let sorted = {
-            let mut other = McpChatSelection::default();
-            other.server_ids = vec!["srv-a".into(), "srv-b".into()];
-            steps_fingerprint(&target, &steps, &other, &[])
+        let selection = McpChatSelection {
+            server_ids: vec!["srv-b".into(), "srv-a".into()],
+            ..Default::default()
         };
+        let sorted = steps_fingerprint(
+            &target,
+            &steps,
+            &McpChatSelection {
+                server_ids: vec!["srv-a".into(), "srv-b".into()],
+                ..Default::default()
+            },
+            &[],
+        );
         assert_eq!(
             steps_fingerprint(&target, &steps, &selection, &[]),
             sorted,
