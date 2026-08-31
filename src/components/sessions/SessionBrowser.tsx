@@ -216,7 +216,9 @@ export function SessionBrowser() {
                   disabled={busyId !== null}
                   className="shrink-0 rounded-md px-2 py-1 text-[11px] text-accent hover:bg-bg-hover disabled:opacity-60"
                 >
-                  {S.sessions.reopen}
+                  {r.message_count > 0
+                    ? S.sessions.reopenWithChat
+                    : S.sessions.reopenTerminal}
                 </button>
                 <button
                   onClick={() =>

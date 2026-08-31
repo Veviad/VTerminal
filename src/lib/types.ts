@@ -311,8 +311,8 @@ export type StreamEvent =
       chunk: string;
       is_stderr: boolean;
     }
-  /** exit_code is null when the command outlived its timeout — it is still
-   *  running in the user's terminal and was NOT killed. */
+  /** exit_code is null when no authoritative completion was observed. The
+   *  command may still be running, or shell integration may have been lost. */
   | {
       type: "CommandResult";
       approval_id: string;
@@ -468,6 +468,18 @@ export interface ImagePart {
  */
 export type CommandStall = "tui" | "password" | "input" | "idle";
 
+/** Live command cards begin in `running` and may settle exactly once. */
+export type CommandStatus =
+  | "running"
+  | "done"
+  | "skipped"
+  | "timeout"
+  | "blocked"
+  | "interrupted";
+
+/** Archive rows are terminal facts. A process cannot still be live after reopen. */
+export type SettledCommandStatus = Exclude<CommandStatus, "running">;
+
 export interface AiMessage {
   id: string;
   role: "user" | "assistant";
@@ -491,8 +503,9 @@ export interface AiMessage {
    *  Archived as metadata plus a disk path, never as inline bytes — see
    *  `sessionArchive`, which maps fields explicitly. */
   attachments?: Attachment[];
-  /** "command" messages render as terminal-output cards in agent transcripts. */
-  kind?: "text" | "command" | "mcp_tool";
+  /** "command" messages render as terminal-output cards in agent transcripts.
+   *  "literal" is archived display data that must not receive model cleanup. */
+  kind?: "text" | "literal" | "command" | "mcp_tool";
   mcp?: {
     approvalId: string;
     serverId: string;
@@ -504,14 +517,18 @@ export interface AiMessage {
     error?: string;
   };
   command?: {
+    /** Live PTY job identity. Deliberately omitted from archive payloads so a
+     *  reopened card can never address a new process by accident. */
+    approvalId?: string;
     command: string;
     output: string;
     exitCode: number | null;
     durationMs?: number;
-    /** "timeout" = still running in the terminal, never killed.
+    /** "timeout" = completion unknown: no trusted completion pulse or confirmed
+     *  interrupt arrived before the observation deadline.
      *  "blocked" = never executed (the terminal was busy, or policy refused it —
      *  see `agent::policy` and StreamEvent::CommandBlocked). */
-    status: "running" | "done" | "skipped" | "timeout" | "blocked";
+    status: CommandStatus;
     /** Short human note shown under the card (why it timed out / was blocked). */
     note?: string;
     /** The model's one-sentence reason for running this. Shown on the card —
@@ -940,14 +957,16 @@ export interface ArchivedMessage {
   id: string;
   sort_order: number;
   role: "user" | "assistant";
-  kind: "text" | "command" | "compaction";
+  kind: "text" | "literal" | "command" | "compaction";
   content: string;
   thinking: string | null;
   command: {
     command: string;
     output: string;
     exit_code: number | null;
-    status: "running" | "done" | "skipped" | "timeout" | "blocked";
+    /** `running` is accepted only for archives written by older versions and is
+     *  reconciled to `timeout` while restoring. New writes use the settled type. */
+    status: SettledCommandStatus | "running";
     note: string | null;
     output_policy: OutputPolicy;
     target_role: AgentTargetRole | null;
@@ -1010,14 +1029,14 @@ export interface ArchiveSessionInput {
 
 export interface ArchiveMessageInput {
   role: "user" | "assistant";
-  kind: "text" | "command" | "compaction" | null;
+  kind: "text" | "literal" | "command" | "compaction" | null;
   content: string;
   thinking: string | null;
   command: {
     command: string;
     output: string;
     exit_code: number | null;
-    status: string;
+    status: SettledCommandStatus;
     note: string | null;
     output_policy: OutputPolicy;
     target_role: AgentTargetRole | null;

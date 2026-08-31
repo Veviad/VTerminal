@@ -70,6 +70,9 @@ pub fn run(conn: &Connection) -> Result<(), String> {
     if version < 18 {
         migrate_v18(conn)?;
     }
+    if version < 19 {
+        migrate_v19(conn)?;
+    }
     crate::runbooks::db::ensure_v6_runtime_indexes(conn)?;
 
     Ok(())
@@ -589,6 +592,110 @@ fn migrate_v18(conn: &Connection) -> Result<(), String> {
     .map_err(|error| format!("migration v18 failed: {error}"))
 }
 
+fn migrate_v19(conn: &Connection) -> Result<(), String> {
+    // SQLite cannot widen a CHECK constraint in place. Rebuild both the parent
+    // and its attachment child so active foreign-key enforcement never cascades
+    // away the attachment rows while archived_messages is replaced.
+    conn.execute_batch(
+        r#"
+        BEGIN;
+        ALTER TABLE archived_attachments RENAME TO archived_attachments_v18;
+        ALTER TABLE archived_messages RENAME TO archived_messages_v18;
+        DROP INDEX idx_archived_attachments_order;
+        DROP INDEX idx_archived_messages_order;
+
+        CREATE TABLE archived_messages (
+            id                TEXT PRIMARY KEY,
+            session_id        TEXT NOT NULL
+                              REFERENCES archived_sessions(session_id) ON DELETE CASCADE,
+            sort_order        INTEGER NOT NULL,
+            role              TEXT NOT NULL CHECK (role IN ('user','assistant')),
+            kind              TEXT NOT NULL DEFAULT 'text'
+                              CHECK (kind IN ('text','literal','command','compaction')),
+            content           TEXT NOT NULL,
+            thinking          TEXT,
+            cmd_command       TEXT,
+            cmd_output        TEXT,
+            cmd_exit_code     INTEGER,
+            -- Archive rows are terminal facts. A legacy live `running` card is
+            -- reconciled below rather than allowed to survive a restart.
+            cmd_status        TEXT CHECK (cmd_status IS NULL OR cmd_status IN
+                                  ('done','skipped','timeout','blocked','interrupted')),
+            cmd_note          TEXT,
+            created_at        TEXT NOT NULL,
+            cmd_target_role   TEXT CHECK (cmd_target_role IS NULL OR
+                                  cmd_target_role IN ('local','remote')),
+            cmd_target_label  TEXT,
+            cmd_output_policy TEXT NOT NULL DEFAULT 'normal'
+                              CHECK (cmd_output_policy IN ('normal','private'))
+        );
+        CREATE UNIQUE INDEX idx_archived_messages_order
+            ON archived_messages(session_id, sort_order);
+
+        CREATE TABLE archived_attachments (
+            id         TEXT PRIMARY KEY,
+            message_id TEXT NOT NULL
+                       REFERENCES archived_messages(id) ON DELETE CASCADE,
+            sort_order INTEGER NOT NULL,
+            kind       TEXT NOT NULL CHECK (kind IN ('image','text')),
+            name       TEXT NOT NULL,
+            media_type TEXT NOT NULL,
+            bytes      INTEGER NOT NULL,
+            path       TEXT,
+            width      INTEGER,
+            height     INTEGER
+        );
+        CREATE UNIQUE INDEX idx_archived_attachments_order
+            ON archived_attachments(message_id, sort_order);
+
+        INSERT INTO archived_messages
+            (id, session_id, sort_order, role, kind, content, thinking,
+             cmd_command, cmd_output, cmd_exit_code, cmd_status, cmd_note,
+             created_at, cmd_target_role, cmd_target_label, cmd_output_policy)
+        SELECT id, session_id, sort_order, role, kind, content, thinking,
+               cmd_command,
+               CASE WHEN cmd_output_policy = 'private' THEN '' ELSE cmd_output END,
+               cmd_exit_code,
+               CASE
+                 WHEN cmd_status = 'running' OR
+                      (cmd_status = 'done' AND cmd_exit_code IS NULL)
+                 THEN 'timeout'
+                 ELSE cmd_status
+               END,
+               CASE
+                 WHEN (cmd_status = 'timeout' OR cmd_status = 'running' OR
+                       (cmd_status = 'done' AND cmd_exit_code IS NULL)) AND
+                      cmd_output_policy = 'private' THEN
+                   '[private output suppressed] Completion unknown: this archived command did not contain a trusted settled status.'
+                 WHEN (cmd_status = 'timeout' OR cmd_status = 'running' OR
+                       (cmd_status = 'done' AND cmd_exit_code IS NULL)) AND
+                      cmd_note IS NULL THEN
+                   'Completion unknown: this archived command did not contain a trusted settled status.'
+                 WHEN (cmd_status = 'timeout' OR cmd_status = 'running' OR
+                       (cmd_status = 'done' AND cmd_exit_code IS NULL)) AND
+                      instr(cmd_note, 'Completion unknown') = 0 THEN
+                   cmd_note || ' Completion unknown: this archived command did not contain a trusted settled status.'
+                 ELSE cmd_note
+               END,
+               created_at, cmd_target_role, cmd_target_label, cmd_output_policy
+          FROM archived_messages_v18;
+
+        INSERT INTO archived_attachments
+            (id, message_id, sort_order, kind, name, media_type, bytes, path,
+             width, height)
+        SELECT id, message_id, sort_order, kind, name, media_type, bytes, path,
+               width, height
+          FROM archived_attachments_v18;
+
+        DROP TABLE archived_attachments_v18;
+        DROP TABLE archived_messages_v18;
+        INSERT INTO schema_version (version) VALUES (19);
+        COMMIT;
+        "#,
+    )
+    .map_err(|error| format!("migration v19 failed: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;
@@ -615,7 +722,175 @@ mod tests {
         let first = version(&conn);
         super::run(&conn).unwrap();
         assert_eq!(version(&conn), first);
-        assert_eq!(first, 18);
+        assert_eq!(first, 19);
+    }
+
+    #[test]
+    fn v18_to_v19_settles_running_cards_and_preserves_attachments() {
+        let conn = mem();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+            INSERT INTO schema_version (version) VALUES (18);
+            CREATE TABLE archived_sessions (session_id TEXT PRIMARY KEY);
+            CREATE TABLE archived_messages (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES archived_sessions(session_id) ON DELETE CASCADE,
+                sort_order INTEGER NOT NULL,
+                role TEXT NOT NULL CHECK (role IN ('user','assistant')),
+                kind TEXT NOT NULL DEFAULT 'text' CHECK (kind IN ('text','command','compaction')),
+                content TEXT NOT NULL,
+                thinking TEXT,
+                cmd_command TEXT,
+                cmd_output TEXT,
+                cmd_exit_code INTEGER,
+                cmd_status TEXT CHECK (cmd_status IS NULL OR cmd_status IN
+                    ('running','done','skipped','timeout','blocked')),
+                cmd_note TEXT,
+                created_at TEXT NOT NULL,
+                cmd_target_role TEXT CHECK (cmd_target_role IS NULL OR
+                    cmd_target_role IN ('local','remote')),
+                cmd_target_label TEXT,
+                cmd_output_policy TEXT NOT NULL DEFAULT 'normal'
+                    CHECK (cmd_output_policy IN ('normal','private'))
+            );
+            CREATE UNIQUE INDEX idx_archived_messages_order
+                ON archived_messages(session_id, sort_order);
+            CREATE TABLE archived_attachments (
+                id TEXT PRIMARY KEY,
+                message_id TEXT NOT NULL REFERENCES archived_messages(id) ON DELETE CASCADE,
+                sort_order INTEGER NOT NULL,
+                kind TEXT NOT NULL CHECK (kind IN ('image','text')),
+                name TEXT NOT NULL,
+                media_type TEXT NOT NULL,
+                bytes INTEGER NOT NULL,
+                path TEXT,
+                width INTEGER,
+                height INTEGER
+            );
+            CREATE UNIQUE INDEX idx_archived_attachments_order
+                ON archived_attachments(message_id, sort_order);
+
+            INSERT INTO archived_sessions VALUES ('s1');
+            INSERT INTO archived_messages
+                (id, session_id, sort_order, role, kind, content, cmd_command,
+                 cmd_output, cmd_status, created_at)
+            VALUES ('s1:0', 's1', 0, 'assistant', 'command', '', 'apt update',
+                    'packages', 'running', '2026-01-01T00:00:01Z');
+            INSERT INTO archived_messages
+                (id, session_id, sort_order, role, kind, content, cmd_command,
+                 cmd_output, cmd_exit_code, cmd_status, cmd_note,
+                 cmd_output_policy, created_at)
+            VALUES ('s1:1', 's1', 1, 'assistant', 'command', '',
+                    'apt list --upgradable', 'packages', NULL, 'done',
+                    '[private output suppressed]', 'private',
+                    '2026-01-01T00:00:02Z'),
+                   ('s1:2', 's1', 2, 'assistant', 'command', '',
+                    'apt list --upgradable', 'packages', NULL, 'timeout',
+                    '[private output suppressed]', 'private',
+                    '2026-01-01T00:00:03Z');
+            INSERT INTO archived_attachments
+                (id, message_id, sort_order, kind, name, media_type, bytes, path)
+            VALUES ('s1:0:0', 's1:0', 0, 'text', 'result.txt', 'text/plain', 8,
+                    '/tmp/result.txt');
+            "#,
+        )
+        .unwrap();
+
+        super::migrate_v19(&conn).unwrap();
+
+        assert_eq!(version(&conn), 19);
+        let card: (String, String) = conn
+            .query_row(
+                "SELECT cmd_status, cmd_note FROM archived_messages WHERE id = 's1:0'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(card.0, "timeout");
+        assert!(card.1.contains("Completion unknown"));
+        let legacy_done: (String, String) = conn
+            .query_row(
+                "SELECT cmd_status, cmd_note FROM archived_messages WHERE id = 's1:1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(legacy_done.0, "timeout");
+        assert!(legacy_done.1.contains("[private output suppressed]"));
+        assert!(legacy_done.1.contains("Completion unknown"));
+        let legacy_done_output: String = conn
+            .query_row(
+                "SELECT cmd_output FROM archived_messages WHERE id = 's1:1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_done_output, "");
+        let legacy_timeout: (String, String) = conn
+            .query_row(
+                "SELECT cmd_status, cmd_note FROM archived_messages WHERE id = 's1:2'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(legacy_timeout.0, "timeout");
+        assert!(legacy_timeout.1.contains("[private output suppressed]"));
+        assert_eq!(legacy_timeout.1.matches("Completion unknown").count(), 1);
+        let legacy_timeout_output: String = conn
+            .query_row(
+                "SELECT cmd_output FROM archived_messages WHERE id = 's1:2'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_timeout_output, "");
+        let attachment: (String, String) = conn
+            .query_row(
+                "SELECT name, path FROM archived_attachments WHERE id = 's1:0:0'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(attachment, ("result.txt".into(), "/tmp/result.txt".into()));
+
+        conn.execute(
+            "INSERT INTO archived_messages
+                (id, session_id, sort_order, role, kind, content, created_at)
+             VALUES ('s1:3', 's1', 3, 'assistant', 'literal',
+                     '<finish> literal tool data </finish>',
+                     '2026-01-01T00:00:04Z')",
+            [],
+        )
+        .unwrap();
+        let literal_kind: String = conn
+            .query_row(
+                "SELECT kind FROM archived_messages WHERE id = 's1:3'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(literal_kind, "literal");
+
+        let fk_errors: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(fk_errors, 0);
+        conn.execute(
+            "UPDATE archived_messages SET cmd_status = 'interrupted' WHERE id = 's1:0'",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "UPDATE archived_messages SET cmd_status = 'running' WHERE id = 's1:0'",
+                [],
+            )
+            .is_err(),
+            "new archives must never persist a live running status"
+        );
     }
 
     #[test]
@@ -638,7 +913,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 18);
+        assert_eq!(version(&conn), 19);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'chat_%' ORDER BY name")
             .unwrap()
@@ -675,7 +950,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 18);
+        assert_eq!(version(&conn), 19);
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(archived_sessions)")
             .unwrap()
@@ -734,7 +1009,7 @@ mod tests {
     fn v17_to_v18_imports_existing_standalone_chat_usage_once() {
         let conn = mem();
         super::run(&conn).unwrap();
-        conn.execute("DELETE FROM schema_version WHERE version = 18", [])
+        conn.execute("DELETE FROM schema_version WHERE version >= 18", [])
             .unwrap();
         conn.execute_batch(
             "DROP TABLE token_usage_events;
@@ -752,7 +1027,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 18);
+        assert_eq!(version(&conn), 19);
         let imported: (String, String, i64, i64) = conn
             .query_row(
                 "SELECT model_label, provider, input_tokens, output_tokens
@@ -808,7 +1083,7 @@ mod tests {
         .unwrap();
 
         super::run(&conn).unwrap();
-        assert_eq!(version(&conn), 18);
+        assert_eq!(version(&conn), 19);
         let migrated: (String, Option<String>, Option<String>) = conn
             .query_row(
                 "SELECT cmd_command, cmd_target_role, cmd_target_label
@@ -921,7 +1196,7 @@ mod tests {
         )
         .unwrap();
         super::run(&conn).unwrap();
-        assert_eq!(version(&conn), 18);
+        assert_eq!(version(&conn), 19);
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM command_history", [], |r| r.get(0))
             .unwrap();
@@ -954,7 +1229,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 18);
+        assert_eq!(version(&conn), 19);
         let migrated: (String, i64, Option<i64>, String, String) = conn
             .query_row(
                 "SELECT source_kind, hidden, builtin_order, created_at, updated_at
@@ -995,7 +1270,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 18);
+        assert_eq!(version(&conn), 19);
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(runbook_drafts)")
             .unwrap()
@@ -1029,7 +1304,7 @@ mod tests {
         super::run(&conn).unwrap();
 
         // Upgrades run the whole chain, so this lands on the current head.
-        assert_eq!(version(&conn), 18);
+        assert_eq!(version(&conn), 19);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()
@@ -1075,7 +1350,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 18);
+        assert_eq!(version(&conn), 19);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()
@@ -1191,7 +1466,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 18);
+        assert_eq!(version(&conn), 19);
         let has_password: bool = conn
             .query_row(
                 "SELECT has_password FROM ssh_hosts WHERE id = 'h1'",

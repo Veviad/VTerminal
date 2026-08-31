@@ -53,7 +53,7 @@ export function McpContent({ block }: { block: unknown }) {
     }
     return (
       <div className="min-w-0 max-w-full overflow-hidden break-words text-[11px] text-text-secondary [overflow-wrap:anywhere]">
-        <AiMessageView content={text} />
+        <AiMessageView content={text} origin="literal" />
       </div>
     );
   }

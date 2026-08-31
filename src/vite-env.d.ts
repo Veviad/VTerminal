@@ -4,15 +4,14 @@ declare const __APP_VERSION__: string;
 declare const __BUILD_NUMBER__: string;
 declare const __GIT_HASH__: string;
 declare const __APP_AUTHOR__: string;
+declare const __APP_LICENSE__: string;
 declare const __APP_PUBLISHER__: string;
 declare const __APP_COPYRIGHT__: string;
 
-// Nothing in the app touches a node builtin, so @types/node is deliberately not a
-// dependency. `src/test/themeContrast.test.ts` is the sole exception: it reads
-// `app.css` to parse the `@theme` baseline that the default theme falls through
-// to, rather than mirroring those 20 values into a second place that can drift.
-// A vite `?raw` import would avoid this, but vitest stubs CSS imports to an empty
-// string. Only the one signature that test uses is declared.
+// Nothing in the production app touches a node builtin, so @types/node is
+// deliberately not a dependency. Tests use readFileSync to verify checked-in
+// styles and project metadata without duplicating values that can drift. Only
+// the signature those tests use is declared.
 declare module "node:fs" {
   export function readFileSync(path: string, encoding: "utf8"): string;
 }

@@ -13,6 +13,7 @@ vi.mock("../lib/termRegistry", () => ({
 }));
 
 import { archiveOnClose, buildArchiveRow, toArchiveMessages } from "../lib/sessionArchive";
+import { S } from "../lib/strings";
 import { emptyAiStream, emptySessionUi, useAppStore } from "../stores/appStore";
 import type { AiMessage, ArchiveSessionInput, Session } from "../lib/types";
 import {
@@ -106,6 +107,36 @@ describe("toArchiveMessages", () => {
     ]);
   });
 
+  it("archives degraded MCP output with an explicit literal origin", () => {
+    const envelope = "<finish> <summary> Literal tool data\n</summary> </finish>";
+    const mcp: AiMessage = {
+      id: "mcp-1",
+      role: "assistant",
+      kind: "mcp_tool",
+      content: "",
+      createdAt: "2026-08-01T00:00:00.000Z",
+      mcp: {
+        approvalId: "approval-1",
+        serverId: "coolify",
+        serverName: "Coolify",
+        toolName: "list_services",
+        arguments: {},
+        status: "done",
+        result: {
+          content: [],
+          is_error: false,
+          model_text: envelope,
+          truncated: false,
+        },
+      },
+    };
+
+    const archived = toArchiveMessages([mcp])[0];
+
+    expect(archived.kind).toBe("literal");
+    expect(archived.content).toContain(envelope);
+  });
+
   /** The bytes are already on disk and a text file's contents were folded into
    *  `content` at send time, so sending either here would duplicate the whole
    *  transcript inside a 500ms close budget. */
@@ -181,6 +212,37 @@ describe("toArchiveMessages", () => {
     });
   });
 
+  it("persists interrupts and reconciles every untrusted completion state", () => {
+    const interrupted = cardMsg("cmd-interrupted");
+    interrupted.command = {
+      ...interrupted.command!,
+      status: "interrupted",
+      exitCode: 130,
+    };
+    const running = cardMsg("cmd-running");
+    running.command = {
+      ...running.command!,
+      status: "running",
+      exitCode: null,
+      note: undefined,
+    };
+    const legacyDone = cardMsg("cmd-legacy-done");
+    legacyDone.command = {
+      ...legacyDone.command!,
+      status: "done",
+      exitCode: null,
+      note: undefined,
+    };
+
+    const archived = toArchiveMessages([interrupted, running, legacyDone]);
+
+    expect(archived[0].command?.status).toBe("interrupted");
+    expect(archived[1].command?.status).toBe("timeout");
+    expect(archived[1].command?.note).toContain("Completion unknown");
+    expect(archived[2].command?.status).toBe("timeout");
+    expect(archived[2].command?.note).toContain("Completion unknown");
+  });
+
   it("drops private command bytes before building the archive payload", () => {
     const privateCard = cardMsg("cmd-private");
     privateCard.command = {
@@ -195,6 +257,60 @@ describe("toArchiveMessages", () => {
     expect(archived.note).toBe("[private output suppressed]");
     expect(archived.output_policy).toBe("private");
     expect(JSON.stringify(archived)).not.toContain("must-never-enter-archive-ipc");
+  });
+
+  it("keeps a privacy-safe completion-unknown explanation for private cards", () => {
+    const privateCard = cardMsg("cmd-private-timeout");
+    privateCard.command = {
+      ...privateCard.command!,
+      output: "must-never-enter-archive-ipc",
+      exitCode: null,
+      status: "timeout",
+      note: S.aiPanel.completionUnknownNote,
+      outputPolicy: "private",
+    };
+
+    const archived = toArchiveMessages([privateCard])[0].command!;
+
+    expect(archived.output).toBe("");
+    expect(archived.note).toContain("[private output suppressed]");
+    expect(archived.note).toContain("Completion unknown");
+    expect(archived.note?.match(/Completion unknown/g)).toHaveLength(1);
+    expect(JSON.stringify(archived)).not.toContain("must-never-enter-archive-ipc");
+  });
+
+  it("keeps a privacy-safe unknown-exit explanation for an unconfirmed interrupt", () => {
+    const privateCard = cardMsg("cmd-private-interrupted");
+    privateCard.command = {
+      ...privateCard.command!,
+      output: "must-never-enter-archive-ipc",
+      exitCode: null,
+      status: "interrupted",
+      outputPolicy: "private",
+    };
+
+    const archived = toArchiveMessages([privateCard])[0].command!;
+
+    expect(archived.output).toBe("");
+    expect(archived.note).toContain("[private output suppressed]");
+    expect(archived.note).toContain("no completion signal was observed");
+    expect(archived.note).toContain("exit status is unknown");
+  });
+
+  it("adds completion-unknown copy to an existing timeout note once", () => {
+    const timeout = cardMsg("cmd-timeout");
+    timeout.command = {
+      ...timeout.command!,
+      exitCode: null,
+      status: "timeout",
+      note: "The observation deadline elapsed.",
+    };
+
+    const archived = toArchiveMessages([timeout])[0].command!;
+
+    expect(archived.note).toContain("The observation deadline elapsed.");
+    expect(archived.note).toContain("Completion unknown");
+    expect(archived.note?.match(/Completion unknown/g)).toHaveLength(1);
   });
 
   it("keeps the TAIL of a long command output", () => {

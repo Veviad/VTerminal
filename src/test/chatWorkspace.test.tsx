@@ -90,6 +90,48 @@ describe("Chat workspace autoscroll", () => {
     expect(screen.getByRole("heading", { name: "Start a chat" })).toBeInTheDocument();
   });
 
+  it("cleans live and saved model wrappers while preserving user markup literally", () => {
+    const envelope = (body: string) =>
+      `<finish> <summary> ${body}\n</summary> </finish>`;
+    const withSavedAnswer: ChatDetail = {
+      ...detail,
+      summary: { ...detail.summary, message_count: 2 },
+      messages: [
+        { ...detail.messages[0], content: envelope("User literal") },
+        {
+          id: "answer-a",
+          sort_order: 1,
+          role: "assistant",
+          content: envelope("Saved assistant"),
+          thinking: null,
+          model: "Chat Test",
+          prompt_tokens: 1,
+          completion_tokens: 1,
+          citations: [],
+          mcp_calls: [],
+          attachments: [],
+          created_at: "2026-08-23T10:01:00Z",
+        },
+      ],
+    };
+    useChatStore.setState((state) => ({
+      current: withSavedAnswer,
+      summaries: [withSavedAnswer.summary],
+      stream: { ...state.stream, content: envelope("Live assistant") },
+    }));
+
+    const { container } = render(<ChatWorkspace />);
+    const articles = screen.getAllByRole("article");
+
+    expect(articles[0]).toHaveTextContent("<finish>");
+    expect(articles[0]).toHaveTextContent("User literal");
+    expect(articles[1]).not.toHaveTextContent("<finish>");
+    expect(articles[1]).toHaveTextContent("Saved assistant");
+    expect(screen.getByText("Live assistant")).toBeVisible();
+    expect(container.textContent?.match(/<finish>/g)).toHaveLength(1);
+    expect(container.textContent?.match(/<summary>/g)).toHaveLength(1);
+  });
+
   it("does not pull a reader back to the bottom while tokens stream", () => {
     render(<ChatWorkspace />);
     const timeline = screen.getByTestId("chat-timeline");

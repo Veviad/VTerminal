@@ -89,6 +89,17 @@ describe("SessionBrowser", () => {
     expect(screen.getAllByText(/12 cmds · 8 AI · 1420 lines/).length).toBe(2);
     expect(screen.getByText(/~\/Code\/proj · 12 cmds/)).toBeTruthy();
     expect(screen.getAllByText("2h ago").length).toBe(2);
+    expect(screen.getAllByRole("button", { name: "Reopen with chat" })).toHaveLength(2);
+  });
+
+  it("distinguishes chat restores from terminal-only history rows", async () => {
+    rows = [row(), row({ session_id: "s2", message_count: 0, model: "" })];
+    render(<SessionBrowser />);
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Reopen terminal" })).toBeTruthy(),
+    );
+    expect(screen.getByRole("button", { name: "Reopen with chat" })).toBeTruthy();
   });
 
   it("shows a loading state, then the list — not an empty state", async () => {

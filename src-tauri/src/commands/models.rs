@@ -617,18 +617,20 @@ mod tests {
 
     #[test]
     fn mtp_install_resolution_preserves_legacy_targets_and_detects_ready_bundles() {
-        let qwen = catalog::find("local/qwen3.5-4b").unwrap().local.unwrap();
-        let legacy = qwen.mtp.legacy().unwrap();
-        let old = resolve_install(qwen, &[installed(legacy)]);
-        assert!(old.target.is_some());
-        assert_eq!(old.mtp.state, MtpInstallState::UpgradeAvailable);
-        assert_eq!(old.mtp.download_bytes, qwen.artifact.size_bytes);
-        assert_eq!(
-            old.mtp.disk_delta_bytes,
-            qwen.artifact.size_bytes - legacy.size_bytes
-        );
-        let optimized = resolve_install(qwen, &[installed(qwen.artifact)]);
-        assert_eq!(optimized.mtp.state, MtpInstallState::Ready);
+        for id in ["local/qwen3.5-2b", "local/qwen3.5-4b"] {
+            let qwen = catalog::find(id).unwrap().local.unwrap();
+            let legacy = qwen.mtp.legacy().unwrap();
+            let old = resolve_install(qwen, &[installed(legacy)]);
+            assert!(old.target.is_some());
+            assert_eq!(old.mtp.state, MtpInstallState::UpgradeAvailable);
+            assert_eq!(old.mtp.download_bytes, qwen.artifact.size_bytes);
+            assert_eq!(
+                old.mtp.disk_delta_bytes,
+                qwen.artifact.size_bytes - legacy.size_bytes
+            );
+            let optimized = resolve_install(qwen, &[installed(qwen.artifact)]);
+            assert_eq!(optimized.mtp.state, MtpInstallState::Ready);
+        }
 
         let gemma = catalog::find("local/gemma-4-e2b").unwrap().local.unwrap();
         let target_only = resolve_install(gemma, &[installed(gemma.artifact)]);

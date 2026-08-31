@@ -106,7 +106,7 @@ pub const VISION_CATALOG: &[VisionModel] = &[
         default_prompt: OCR_PROMPT,
     },
     // General vision: "what is this UI doing", "read this chart". Same publisher
-    // and Q4_K_M naming as the six existing local chat entries, so the download
+    // and Q4_K_M naming as the seven existing local chat entries, so the download
     // path needs nothing new.
     VisionModel {
         id: "vision/qwen3-vl-4b",

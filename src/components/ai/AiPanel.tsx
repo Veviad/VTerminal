@@ -868,7 +868,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
         {/* Live answer stream */}
         {streamingContent && (
           <div className="text-text-primary">
-            <AiMessageView content={streamingContent} />
+            <AiMessageView content={streamingContent} origin="model" streaming />
           </div>
         )}
         {busy &&
@@ -1455,7 +1455,7 @@ function MessageRow({
           const { prompt, blocks } = splitFoldedBlocks(message.content);
           return (
             <>
-              {prompt && <AiMessageView content={prompt} />}
+              {prompt && <AiMessageView content={prompt} origin="literal" />}
               {blocks.map((block, i) => (
                 <FoldedBlockSection
                   key={`${block.kind}-${block.name}-${i}`}
@@ -1474,7 +1474,12 @@ function MessageRow({
       {message.thinking && (
         <ThinkingSection content={message.thinking} live={false} />
       )}
-      {message.content && <AiMessageView content={message.content} />}
+      {message.content && (
+        <AiMessageView
+          content={message.content}
+          origin={message.kind === "literal" ? "literal" : "model"}
+        />
+      )}
       <MessageMeta message={message} />
     </div>
   );
@@ -1636,10 +1641,16 @@ function CommandMessage({
 }) {
   const cmd = message.command;
   if (!cmd) return null;
-  const failed = cmd.status === "done" && (cmd.exitCode ?? 0) !== 0;
+  // Older archives can contain `done` with no exit code after a lost completion
+  // echo. That is not authoritative success and must never render as green
+  // `exit ?`, even before persistence normalization has had a chance to run.
+  const status =
+    cmd.status === "done" && cmd.exitCode === null ? "timeout" : cmd.status;
+  const failed = status === "done" && (cmd.exitCode ?? 0) !== 0;
   const stall =
-    cmd.status === "running" && cmd.stall ? STALL_UI[cmd.stall] : null;
+    status === "running" && cmd.stall ? STALL_UI[cmd.stall] : null;
   const interruptSessionId = cmd.targetSessionId ?? sessionId;
+  const approvalId = cmd.approvalId;
   const targetName =
     cmd.targetLabel ??
     (cmd.targetRole === "remote" ? "SSH target" : "local shell");
@@ -1682,22 +1693,27 @@ function CommandMessage({
         <code className="min-w-0 truncate font-mono text-[11px] text-text-primary">
           $ {cmd.command}
         </code>
-        {cmd.status === "running" ? (
+        {status === "running" ? (
           <span className="flex shrink-0 items-center gap-1 text-[10px] text-accent">
             <span className="inline-block h-1 w-1 animate-pulse rounded-full bg-accent" />
             {S.aiPanel.running}
           </span>
-        ) : cmd.status === "skipped" ? (
+        ) : status === "skipped" ? (
           <span className="shrink-0 rounded bg-bg-elevated px-1.5 py-0.5 font-mono text-[9px] text-text-secondary">
             {S.aiPanel.skipped}
           </span>
-        ) : cmd.status === "timeout" ? (
-          // The command was NOT killed — it is still running in the terminal.
-          <span className="flex shrink-0 items-center gap-1 rounded bg-warning/15 px-1.5 py-0.5 text-[9px] text-warning">
-            <span className="inline-block h-1 w-1 animate-pulse rounded-full bg-warning" />
-            {S.aiPanel.stillRunning}
+        ) : status === "interrupted" ? (
+          <span className="shrink-0 rounded bg-warning/15 px-1.5 py-0.5 font-mono text-[9px] text-warning">
+            <span>{S.aiPanel.interrupted}</span>
+            {cmd.exitCode !== null && (
+              <span> · {S.blocks.exit} {cmd.exitCode}</span>
+            )}
           </span>
-        ) : cmd.status === "blocked" ? (
+        ) : status === "timeout" ? (
+          <span className="shrink-0 rounded bg-warning/15 px-1.5 py-0.5 font-mono text-[9px] text-warning">
+            {S.aiPanel.completionUnknown}
+          </span>
+        ) : status === "blocked" ? (
           <span className="shrink-0 rounded bg-bg-elevated px-1.5 py-0.5 font-mono text-[9px] text-text-secondary">
             {S.aiPanel.notRun}
           </span>
@@ -1738,10 +1754,10 @@ function CommandMessage({
         <div className="flex items-center gap-2 bg-warning/10 px-2.5 py-1 text-[10px] text-warning">
           <stall.icon size={11} className="shrink-0" />
           <span className="min-w-0 flex-1">{stall.label}</span>
-          {stall.offer && interruptSessionId && (
+          {stall.offer && interruptSessionId && approvalId && (
             <button
               onClick={() => {
-                interruptJob(interruptSessionId);
+                interruptJob(interruptSessionId, approvalId);
               }}
               title={S.aiPanel.interruptHint}
               className="shrink-0 rounded border border-warning/40 px-1.5 py-0.5 font-medium transition-colors duration-150 hover:bg-warning/20"

@@ -253,8 +253,8 @@ pub enum StreamEvent {
     },
     CommandResult {
         approval_id: String,
-        /// None when the command outlived its timeout: it is still running in
-        /// the user's terminal and was deliberately NOT killed.
+        /// None when the terminal did not provide authoritative completion.
+        /// The command may still be running, or shell integration may be lost.
         exit_code: Option<i32>,
         duration_ms: u64,
         #[serde(skip_serializing_if = "Option::is_none")]

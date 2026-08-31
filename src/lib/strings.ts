@@ -191,7 +191,8 @@ export const S = {
     running: "running…",
     privateOutput: "Private output.",
     privateOutputHint: "Standard output and errors are discarded and cannot be sent to the agent.",
-    stillRunning: "still running",
+    completionUnknown: "completion unknown",
+    interrupted: "interrupted",
     notRun: "not run",
     runsIn: "runs in",
     localShell: "this terminal",
@@ -203,6 +204,23 @@ export const S = {
     stallIdle: "No output for a while — it may be working, or stuck",
     interrupt: "Interrupt",
     interruptHint: "Send Ctrl-C to this command",
+    orphanedCommand:
+      "Completion unknown: the agent run ended before the terminal reported a completion pulse or confirmed an interrupt.",
+    restoredRunningCommand:
+      "Completion unknown: this archived command was still marked running when the session was saved.",
+    resultSubmitFailed:
+      "VTerminal could not report this terminal outcome to the agent. The run was stopped before another command could start.",
+    completionUnknownRun:
+      "Terminal completion could not be confirmed. The agent run was stopped before another command could start.",
+    completionUnknownNote:
+      "Completion unknown: the terminal did not report a completion pulse or confirm an interrupt.",
+    interruptedCommand: "The command was interrupted before completion.",
+    interruptUnknownNote:
+      "The interrupt was sent, but no completion signal was observed. The exit status is unknown.",
+    interruptFailedRun:
+      "VTerminal could not confirm that the terminal accepted the interrupt. The agent run was stopped before another command could start.",
+    interruptUnconfirmedRun:
+      "The interrupt was sent, but terminal completion could not be confirmed. The agent run was stopped before another command could start.",
     // Steering a run that is already going. Delivery is at the next round
     // boundary, never mid-step, so the wording never promises "now".
     steerPlaceholder: "Redirect the agent — delivered at its next step…",
@@ -325,7 +343,8 @@ export const S = {
     empty: "No past sessions yet — closing a tab archives it.",
     noResults: "No matching sessions",
     untitled: "Untitled session",
-    reopen: "Reopen",
+    reopenWithChat: "Reopen with chat",
+    reopenTerminal: "Reopen terminal",
     reopenFailed: "Could not reopen that session — it may have been pruned.",
     remove: "Remove",
     confirmRemove: "Click again to remove",
@@ -340,6 +359,8 @@ export const S = {
     manage: "Retention…",
   },
   tabs: {
+    allOpen: "All open terminals",
+    allOpenHint: (count: number) => `All open terminals (${count})`,
     connected: "Connected to a remote host",
     disconnected: "Not connected — use Reconnect",
     rename: "Rename",
@@ -587,7 +608,7 @@ export const S = {
         "How many commands the agent may chain before it pauses to check in. Nothing is lost — you can continue from where it stopped. Sending a message mid-run grants a fresh allowance. 1–100 — type a value or step by 5.",
       commandTimeout: "Command timeout",
       commandTimeoutHint:
-        "How long to wait for a command before moving on. It is never killed — the agent is told it is still running.",
+        "How long to wait for a terminal completion signal. The command is never killed. If completion cannot be confirmed, the Agent stops and asks you to verify the terminal.",
       webAccess: "Allow internet access",
       // The last sentence is the honesty clause, and it stays. Command blocking
       // recognises tool NAMES; it cannot see inside a script the agent wrote in
@@ -763,11 +784,14 @@ export const S = {
       build: "Build",
       description:
         `A lean AI-powered terminal. Local models run in-process (no external daemon) with ${isWindows() ? "Vulkan acceleration and CPU fallback" : "Metal acceleration"}; models are pulled directly from Hugging Face.`,
-      // Labels only. The names behind them (author, publisher, copyright) are
-      // build-time constants read from package.json / tauri.conf.json — see
-      // vite.config.ts. Attribution is metadata, not UI copy to translate.
+      // Attribution values and the SPDX identifier are build-time constants read
+      // from package.json / tauri.conf.json. Labels and explanatory copy stay here.
       author: "Author",
       publisher: "Publisher",
+      license: "License",
+      licenseName: "GNU General Public License version 3",
+      licenseNotice:
+        "VTerminal is free software. You may redistribute and modify it under GPLv3. There is no warranty, to the extent permitted by law.",
     },
   },
   statusBar: {

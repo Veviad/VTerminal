@@ -6,6 +6,7 @@ const archiveTranscriptMock = vi.fn();
 const archivePutMock = vi.fn();
 const hydrateAttachmentsMock = vi.fn(async (_sessionId: string) => {});
 const focusMock = vi.fn();
+const setAiPanelOpenMock = vi.fn();
 
 vi.mock("../lib/tauri", () => ({
   archiveGet: (id: string) => archiveGetMock(id),
@@ -19,7 +20,7 @@ vi.mock("../lib/attachInput", () => ({
 }));
 
 vi.mock("../lib/aiPanel", () => ({
-  setAiPanelOpen: vi.fn(),
+  setAiPanelOpen: (open: boolean) => setAiPanelOpenMock(open),
 }));
 
 vi.mock("../lib/termRegistry", () => ({
@@ -118,6 +119,7 @@ beforeEach(() => {
   archivePutMock.mockResolvedValue(undefined);
   hydrateAttachmentsMock.mockClear();
   focusMock.mockClear();
+  setAiPanelOpenMock.mockClear();
   useAppStore.setState({
     sessions: [],
     activeSessionId: null,
@@ -125,6 +127,49 @@ beforeEach(() => {
     aiStreams: {},
     restoreScrollbackLines: 1_000,
     scrollbackLines: 10_000,
+  });
+});
+
+describe("reopenSession Ask/Agent transcript", () => {
+  it("restores every saved AI message and model turn from History", async () => {
+    const messages = Array.from({ length: 8 }, (_, index) => ({
+      id: `source:${index}`,
+      sort_order: index,
+      role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
+      kind: "text" as const,
+      content: `message ${index + 1}`,
+      thinking: null,
+      command: null,
+      attachments: [],
+      created_at: `2026-08-01T00:00:0${index + 1}.000Z`,
+    }));
+    archiveGetMock.mockResolvedValueOnce({
+      ...detail,
+      summary: {
+        ...detail.summary,
+        message_count: 8,
+        has_model_transcript: true,
+      },
+      messages,
+    });
+    archiveTranscriptMock.mockResolvedValueOnce([
+      { role: "user", content: "message 1" },
+      { role: "assistant", content: "message 2" },
+    ]);
+
+    await expect(reopenSession("source", createSession)).resolves.toBe(
+      "replacement-1",
+    );
+
+    const stream = useAppStore.getState().aiStreams["replacement-1"];
+    expect(stream.messages.map((message) => message.content)).toEqual(
+      messages.map((message) => message.content),
+    );
+    expect(stream.modelTranscript).toHaveLength(2);
+    expect(stream.mode).toBe("ask");
+    expect(stream.permissionMode).toBe("ask");
+    expect(stream.restoredAt).toBe(detail.summary.closed_at);
+    expect(setAiPanelOpenMock).toHaveBeenCalledWith(true);
   });
 });
 
@@ -164,6 +209,128 @@ describe("reopenSession attachment ownership", () => {
 });
 
 describe("reopenSession command provenance", () => {
+  it("preserves the literal origin of archived MCP display output", async () => {
+    const envelope = "<finish> <summary> Literal tool data\n</summary> </finish>";
+    archiveGetMock.mockResolvedValueOnce({
+      ...detail,
+      summary: {
+        ...detail.summary,
+        message_count: 1,
+        first_prompt: null,
+      },
+      messages: [
+        {
+          id: "source:0",
+          sort_order: 0,
+          role: "assistant",
+          kind: "literal",
+          content: `Coolify · list_services (done)\n\nResult:\n${envelope}`,
+          thinking: null,
+          command: null,
+          attachments: [],
+          created_at: "2026-08-01T00:00:01.000Z",
+        },
+      ],
+    } satisfies ArchiveDetail);
+
+    await expect(reopenSession("source", createSession)).resolves.toBe(
+      "replacement-1",
+    );
+
+    const restored =
+      useAppStore.getState().aiStreams["replacement-1"].messages[0];
+    expect(restored.kind).toBe("literal");
+    expect(restored.content).toContain(envelope);
+    const replacement = archivePutMock.mock.calls[0][0] as ArchiveSessionInput;
+    expect(replacement.messages?.[0].kind).toBe("literal");
+    expect(replacement.messages?.[0].content).toContain(envelope);
+  });
+
+  it("settles a legacy archived running card as completion unknown", async () => {
+    archiveGetMock.mockResolvedValueOnce({
+      ...detail,
+      summary: {
+        ...detail.summary,
+        message_count: 1,
+        agent_command_count: 1,
+        first_prompt: null,
+      },
+      messages: [
+        {
+          id: "source:0",
+          sort_order: 0,
+          role: "assistant",
+          kind: "command",
+          content: "",
+          thinking: null,
+          command: {
+            command: "apt update",
+            output: "Reading package lists...",
+            exit_code: null,
+            status: "running",
+            note: null,
+            output_policy: "normal",
+            target_role: null,
+            target_label: null,
+          },
+          attachments: [],
+          created_at: "2026-08-01T00:00:01.000Z",
+        },
+      ],
+    } satisfies ArchiveDetail);
+
+    await expect(reopenSession("source", createSession)).resolves.toBe("replacement-1");
+
+    const restored = useAppStore.getState().aiStreams["replacement-1"].messages[0].command;
+    expect(restored?.status).toBe("timeout");
+    expect(restored?.note).toContain("Completion unknown");
+    expect(restored).not.toHaveProperty("approvalId");
+    const replacement = archivePutMock.mock.calls[0][0] as ArchiveSessionInput;
+    expect(replacement.messages?.[0].command?.status).toBe("timeout");
+  });
+
+  it("settles a legacy done card with no exit code as completion unknown", async () => {
+    archiveGetMock.mockResolvedValueOnce({
+      ...detail,
+      summary: {
+        ...detail.summary,
+        message_count: 1,
+        agent_command_count: 1,
+        first_prompt: null,
+      },
+      messages: [
+        {
+          id: "source:0",
+          sort_order: 0,
+          role: "assistant",
+          kind: "command",
+          content: "",
+          thinking: null,
+          command: {
+            command: "apt list --upgradable",
+            output: "packages",
+            exit_code: null,
+            status: "done",
+            note: null,
+            output_policy: "normal",
+            target_role: null,
+            target_label: null,
+          },
+          attachments: [],
+          created_at: "2026-08-01T00:00:01.000Z",
+        },
+      ],
+    } satisfies ArchiveDetail);
+
+    await expect(reopenSession("source", createSession)).resolves.toBe("replacement-1");
+
+    const restored = useAppStore.getState().aiStreams["replacement-1"].messages[0].command;
+    expect(restored?.status).toBe("timeout");
+    expect(restored?.note).toContain("Completion unknown");
+    const replacement = archivePutMock.mock.calls[0][0] as ArchiveSessionInput;
+    expect(replacement.messages?.[0].command?.status).toBe("timeout");
+  });
+
   it("restores archived Sidecar labels without reviving an old PTY binding", async () => {
     const commandDetail: ArchiveDetail = {
       summary: {

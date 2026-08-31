@@ -4,8 +4,8 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 
-import { stripCiteTags } from "../../lib/citations";
 import { sanitizeExternalWebUrl } from "../../lib/externalUrl";
+import { sanitizeModelMarkdown } from "../../lib/modelOutput";
 
 function ExternalChatLink({ children, href, title }: ComponentPropsWithoutRef<"a">) {
   const safeUrl = typeof href === "string" ? sanitizeExternalWebUrl(href) : null;
@@ -34,14 +34,25 @@ function ExternalChatLink({ children, href, title }: ComponentPropsWithoutRef<"a
   );
 }
 
-/** The one place model prose is rendered — every assistant message and the live
- *  streaming buffer both come through here.
- *
- *  `stripCiteTags` runs at render rather than on the way in so the stored `content` stays
- *  the wire truth (what was sent, what is archived, what gets replayed), which is the same
- *  stance `splitFoldedBlocks` takes for folded attachments. It is a no-op on the vast
- *  majority of messages — see its own doc comment for why it is needed at all. */
-export function AiMessageView({ content }: { content: string }) {
+export type AiMessageOrigin = "model" | "literal";
+
+/**
+ * Render Markdown with an explicit trust/origin boundary. Model prose receives
+ * presentation-only cleanup for known provider markup. User prompts and MCP tool
+ * output are literal data and must never be rewritten as if the model authored them.
+ */
+export function AiMessageView({
+  content,
+  origin,
+  streaming = false,
+}: {
+  content: string;
+  origin: AiMessageOrigin;
+  streaming?: boolean;
+}) {
+  const markdown = origin === "model"
+    ? sanitizeModelMarkdown(content, { streaming })
+    : content;
   return (
     <div className="prose max-w-none text-[13px] leading-relaxed prose-p:my-1.5 prose-pre:my-2 prose-headings:my-2">
       <ReactMarkdown
@@ -49,7 +60,7 @@ export function AiMessageView({ content }: { content: string }) {
         rehypePlugins={[rehypeHighlight]}
         components={{ a: ExternalChatLink }}
       >
-        {stripCiteTags(content)}
+        {markdown}
       </ReactMarkdown>
     </div>
   );

@@ -79,6 +79,28 @@ describe("MCP tool card", () => {
     expect(screen.queryByText("null")).toBeNull();
   });
 
+  it("preserves model-looking control tags in literal MCP text", () => {
+    const completed = call("done");
+    completed.result = {
+      ...completed.result!,
+      content: [{
+        type: "text",
+        text: "<finish> <summary> Literal tool data\n</summary> </finish>",
+      }],
+    };
+    render(<McpToolCard call={completed} />);
+
+    const toggle = screen.getByRole("button", { name: /Coolify · list_services/ });
+    fireEvent.click(toggle);
+
+    const literal = screen.getByText(/Literal tool data/);
+    expect(literal).toBeVisible();
+    expect(toggle.parentElement).toHaveTextContent("<finish>");
+    expect(toggle.parentElement).toHaveTextContent("<summary>");
+    expect(toggle.parentElement).toHaveTextContent("</summary>");
+    expect(toggle.parentElement).toHaveTextContent("</finish>");
+  });
+
   it("renders one call directly without an extra group", () => {
     render(<McpToolGroup calls={calls(["done"])} />);
 

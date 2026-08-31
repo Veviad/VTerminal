@@ -19,8 +19,8 @@ function getGitInfo() {
 const pkg = JSON.parse(readFileSync("./package.json", "utf-8"));
 // Attribution is NOT app copy: `publisher`/`copyright` are the fields Tauri
 // stamps into the bundle itself (Info.plist NSHumanReadableCopyright on macOS,
-// installer metadata elsewhere), and `author` is npm's. The About panel reads
-// those same manifests so the window and the .app can never disagree.
+// installer metadata elsewhere), while `author` and `license` are npm's. The
+// About panel reads those same manifests so the window and the .app cannot drift.
 // `src-tauri/**` is excluded from the dev watcher, so editing tauri.conf.json
 // needs a dev-server restart to show up — as with the git hash below.
 const tauriConf = JSON.parse(readFileSync("./src-tauri/tauri.conf.json", "utf-8"));
@@ -48,6 +48,7 @@ export default defineConfig(async () => ({
     __BUILD_NUMBER__: JSON.stringify(process.env.BUILD_NUMBER || process.env.GITHUB_RUN_NUMBER || buildNumber),
     __GIT_HASH__: JSON.stringify(gitHash),
     __APP_AUTHOR__: JSON.stringify(author),
+    __APP_LICENSE__: JSON.stringify(pkg.license ?? ""),
     __APP_PUBLISHER__: JSON.stringify(tauriConf.bundle?.publisher ?? ""),
     __APP_COPYRIGHT__: JSON.stringify(tauriConf.bundle?.copyright ?? ""),
   },

@@ -144,6 +144,7 @@ the model being downloaded.
 
 | Model | MTP acceleration | Notes |
 |---|---|---|
+| Qwen3.5 2B | Built into the optimized GGUF | Ultrafast additional option for laptops with 8 GB or more RAM |
 | Qwen3.5 4B / 9B | Built into the optimized GGUF | 9B is the default, sized to run on a 32 GB machine |
 | Qwen3.6 27B | Built into the optimized GGUF | Needs a large-memory machine |
 | Gemma 4 E2B / E4B / 31B | Small companion MTP download | |

@@ -1,4 +1,5 @@
 import { ArrowLeft } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useAppStore, type SettingsTab } from "../../stores/appStore";
 import { ModelsSettings } from "./ModelsSettings";
 import { AppearanceSection } from "./AppearanceSection";
@@ -13,12 +14,13 @@ import { StatisticsSection } from "./StatisticsSection";
 import { Row } from "../ui/Row";
 import { S } from "../../lib/strings";
 
+const GPL_V3_URL = "https://www.gnu.org/licenses/gpl-3.0.html";
+
 // The Docs tab is listed even while the feature is off: its own toggle is the first
 // thing inside it, and a tab that only appears once the feature is enabled leaves the
 // switch nowhere to be found.
 const TABS: { id: SettingsTab; label: string }[] = [
   { id: "models", label: S.settings.tabs.models },
-  { id: "statistics", label: S.settings.tabs.statistics },
   { id: "agent", label: S.settings.tabs.agent },
   { id: "mcp", label: S.settings.tabs.mcp },
   { id: "docs", label: S.settings.tabs.docs },
@@ -26,6 +28,7 @@ const TABS: { id: SettingsTab; label: string }[] = [
   { id: "appearance", label: S.settings.tabs.appearance },
   { id: "terminal", label: S.settings.tabs.terminal },
   { id: "hosts", label: S.settings.tabs.hosts },
+  { id: "statistics", label: S.settings.tabs.statistics },
   { id: "updates", label: S.settings.tabs.updates },
   { id: "about", label: S.settings.tabs.about },
 ];
@@ -109,7 +112,19 @@ function AboutSection() {
         <Row label={S.settings.about.publisher}>
           <span className="text-[12px] text-text-primary">{__APP_PUBLISHER__}</span>
         </Row>
+        <Row label={S.settings.about.license} hint={S.settings.about.licenseName}>
+          <button
+            type="button"
+            className="font-mono text-[12px] text-accent hover:underline"
+            onClick={() => void openUrl(GPL_V3_URL)}
+          >
+            {__APP_LICENSE__}
+          </button>
+        </Row>
       </div>
+      <p className="text-[10px] leading-relaxed text-text-muted">
+        {S.settings.about.licenseNotice}
+      </p>
       <p className="text-[10px] text-text-muted">{__APP_COPYRIGHT__}</p>
     </div>
   );
