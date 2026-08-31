@@ -73,16 +73,72 @@ struct WindowsRuntimePayload {
 }
 
 #[cfg(any(target_os = "windows", test))]
+const WINDOWS_RUNTIME_ANCHORS: [&str; 4] =
+    ["llama-common.dll", "llama.dll", "ggml.dll", "ggml-base.dll"];
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_runtime_dll_name(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_str()?.to_ascii_lowercase();
+    ((name.starts_with("llama") || name.starts_with("ggml")) && name.ends_with(".dll"))
+        .then_some(name)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn reconcile_windows_runtime_dlls(
+    directory: &Path,
+    expected: &std::collections::HashSet<String>,
+) -> Result<(), String> {
+    for entry in std::fs::read_dir(directory)
+        .map_err(|error| format!("could not inspect managed runtime: {error}"))?
+    {
+        let entry =
+            entry.map_err(|error| format!("could not inspect a managed runtime entry: {error}"))?;
+        if !entry
+            .file_type()
+            .map_err(|error| format!("could not inspect a managed runtime file: {error}"))?
+            .is_file()
+        {
+            continue;
+        }
+        let path = entry.path();
+        let Some(name) = windows_runtime_dll_name(&path) else {
+            continue;
+        };
+        if !expected.contains(&name) {
+            std::fs::remove_file(&path).map_err(|error| {
+                format!(
+                    "could not remove stale runtime DLL {}: {error}",
+                    path.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "windows", test))]
 fn bundled_windows_runtime(source: &Path) -> Result<Option<WindowsRuntimePayload>, String> {
-    const CORE: [&str; 3] = ["llama.dll", "ggml.dll", "ggml-base.dll"];
     let root = source
         .parent()
         .ok_or_else(|| "the bundled CLI has no parent directory".to_string())?;
-    let core: Vec<_> = CORE
-        .iter()
-        .map(|name| root.join(name))
-        .filter(|path| path.is_file())
-        .collect();
+    let mut core = Vec::new();
+    for entry in std::fs::read_dir(root)
+        .map_err(|error| format!("could not inspect {}: {error}", root.display()))?
+    {
+        let entry =
+            entry.map_err(|error| format!("could not inspect a local runtime entry: {error}"))?;
+        if !entry
+            .file_type()
+            .map_err(|error| format!("could not inspect a local runtime file: {error}"))?
+            .is_file()
+        {
+            continue;
+        }
+        let path = entry.path();
+        if windows_runtime_dll_name(&path).is_some() {
+            core.push(path);
+        }
+    }
     let backend_dir = root.join("llama-backends");
     let mut backends = Vec::new();
     if backend_dir.is_dir() {
@@ -116,8 +172,20 @@ fn bundled_windows_runtime(source: &Path) -> Result<Option<WindowsRuntimePayload
     if core.is_empty() && backends.is_empty() {
         return Ok(None);
     }
-    if core.len() != CORE.len() {
-        return Err("the bundled local runtime is missing a required llama/GGML DLL".into());
+    let core_names: std::collections::HashSet<_> = core
+        .iter()
+        .filter_map(|path| windows_runtime_dll_name(path))
+        .collect();
+    let missing: Vec<_> = WINDOWS_RUNTIME_ANCHORS
+        .iter()
+        .filter(|name| !core_names.contains(**name))
+        .copied()
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "the bundled local runtime is missing required llama/GGML DLLs: {}",
+            missing.join(", ")
+        ));
     }
     let has_vulkan = backends.iter().any(|path| {
         path.file_name()
@@ -134,6 +202,7 @@ fn bundled_windows_runtime(source: &Path) -> Result<Option<WindowsRuntimePayload
             "the bundled local runtime must include Vulkan and at least one CPU backend".into(),
         );
     }
+    core.sort();
     backends.sort();
     Ok(Some(WindowsRuntimePayload { core, backends }))
 }
@@ -221,6 +290,12 @@ fn install(source: &Path, destination: &Path) -> Result<(), String> {
                     &backend_destination.join(source.file_name().unwrap()),
                 )?;
             }
+            let expected_core = runtime
+                .core
+                .iter()
+                .filter_map(|path| windows_runtime_dll_name(path))
+                .collect();
+            reconcile_windows_runtime_dlls(parent, &expected_core)?;
             let expected: std::collections::HashSet<_> = runtime
                 .backends
                 .iter()
@@ -245,9 +320,7 @@ fn install(source: &Path, destination: &Path) -> Result<(), String> {
                 }
             }
         } else {
-            for name in ["llama.dll", "ggml.dll", "ggml-base.dll"] {
-                let _ = std::fs::remove_file(parent.join(name));
-            }
+            reconcile_windows_runtime_dlls(parent, &std::collections::HashSet::new())?;
             if backend_destination.is_dir() {
                 for entry in std::fs::read_dir(&backend_destination)
                     .map_err(|error| format!("could not inspect managed backends: {error}"))?
@@ -393,12 +466,62 @@ mod tests {
         for name in ["llama.dll", "ggml.dll", "ggml-base.dll"] {
             std::fs::write(root.join(name), b"dll").unwrap();
         }
-        assert!(bundled_windows_runtime(&cli).is_err());
         std::fs::write(backends.join("ggml-cpu-x64.dll"), b"cpu").unwrap();
         std::fs::write(backends.join("ggml-vulkan.dll"), b"vulkan").unwrap();
+        let error = bundled_windows_runtime(&cli).unwrap_err();
+        assert!(error.contains("llama-common.dll"));
+
+        std::fs::write(root.join("llama-common.dll"), b"common").unwrap();
+        std::fs::write(root.join("ggml-future.dll"), b"future").unwrap();
+        std::fs::write(root.join("unrelated.dll"), b"other").unwrap();
         let payload = bundled_windows_runtime(&cli).unwrap().unwrap();
-        assert_eq!(payload.core.len(), 3);
+        let core_names: Vec<_> = payload
+            .core
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            core_names,
+            [
+                "ggml-base.dll",
+                "ggml-future.dll",
+                "ggml.dll",
+                "llama-common.dll",
+                "llama.dll"
+            ]
+        );
         assert_eq!(payload.backends.len(), 2);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn windows_runtime_reconciliation_removes_only_stale_managed_dlls() {
+        let root = std::env::temp_dir().join(format!(
+            "vterminal-cli-runtime-reconcile-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(root.join("ggml-directory.dll")).unwrap();
+        for name in [
+            "llama.dll",
+            "llama-old.dll",
+            "GGML-OLD.DLL",
+            "unrelated.dll",
+        ] {
+            std::fs::write(root.join(name), b"dll").unwrap();
+        }
+
+        reconcile_windows_runtime_dlls(
+            &root,
+            &std::collections::HashSet::from(["llama.dll".into()]),
+        )
+        .unwrap();
+
+        assert!(root.join("llama.dll").is_file());
+        assert!(!root.join("llama-old.dll").exists());
+        assert!(!root.join("GGML-OLD.DLL").exists());
+        assert!(root.join("unrelated.dll").is_file());
+        assert!(root.join("ggml-directory.dll").is_dir());
 
         std::fs::remove_dir_all(root).unwrap();
     }

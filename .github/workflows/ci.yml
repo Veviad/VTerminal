@@ -46,6 +46,9 @@ jobs:
       - name: Site release renderer fixtures
         run: npm run test:site-release
 
+      - name: Windows installer branding contract
+        run: npm run test:windows-installer
+
       - name: Bundled WSL MCP relay
         run: go test ./...
         working-directory: src-tauri/mcp-relay

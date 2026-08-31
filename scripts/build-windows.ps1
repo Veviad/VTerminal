@@ -21,7 +21,60 @@ $release = Join-Path $cargoTarget "$target\release"
 $sidecarDestination = Join-Path $repo "src-tauri\binaries\vterminal-docs-$target.exe"
 $runtimeDestination = Join-Path $repo "src-tauri\binaries\llama-runtime"
 $backendDestination = Join-Path $repo "src-tauri\binaries\llama-backends"
-$requiredRuntimeDlls = @("llama.dll", "ggml.dll", "ggml-base.dll")
+$requiredRuntimeDlls = @("llama.dll", "llama-common.dll", "ggml.dll", "ggml-base.dll")
+
+function Test-StagedLocalRuntime([string]$Executable, [string]$Runtime, [string]$Backends) {
+  $smokeRoot = Join-Path ([IO.Path]::GetTempPath()) "vterminal-loader-$([guid]::NewGuid().ToString('N'))"
+  New-Item -ItemType Directory -Path $smokeRoot | Out-Null
+  try {
+    $smokeExecutable = Join-Path $smokeRoot "vterminal-docs.exe"
+    Copy-Item -LiteralPath $Executable -Destination $smokeExecutable
+    Copy-Item -Path (Join-Path $Runtime "*.dll") -Destination $smokeRoot
+    $smokeBackends = Join-Path $smokeRoot "llama-backends"
+    New-Item -ItemType Directory -Path $smokeBackends | Out-Null
+    Copy-Item -Path (Join-Path $Backends "*.dll") -Destination $smokeBackends
+
+    if (-not ("VTerminal.WindowsBuildErrorMode" -as [type])) {
+      Add-Type -Namespace VTerminal -Name WindowsBuildErrorMode -MemberDefinition @'
+[DllImport("kernel32.dll")]
+public static extern uint SetErrorMode(uint mode);
+'@
+    }
+    # Suppress Windows loader dialogs so a missing DLL fails the build instead
+    # of leaving an unattended CI runner waiting for an OK button.
+    $previousErrorMode = [VTerminal.WindowsBuildErrorMode]::SetErrorMode(0x8003)
+    try {
+      $startInfo = [Diagnostics.ProcessStartInfo]::new()
+      $startInfo.FileName = $smokeExecutable
+      # Windows PowerShell 5.1 uses .NET Framework, which exposes Arguments but
+      # not the newer ArgumentList collection.
+      $startInfo.Arguments = "--help"
+      $startInfo.UseShellExecute = $false
+      $startInfo.RedirectStandardOutput = $true
+      $startInfo.RedirectStandardError = $true
+      $process = [Diagnostics.Process]::new()
+      $process.StartInfo = $startInfo
+      if (-not $process.Start()) {
+        throw "Could not start the staged vterminal-docs loader smoke test."
+      }
+      if (-not $process.WaitForExit(15000)) {
+        $process.Kill()
+        throw "The staged vterminal-docs loader smoke test did not exit within 15 seconds."
+      }
+      $stdout = $process.StandardOutput.ReadToEnd()
+      $stderr = $process.StandardError.ReadToEnd()
+      if ($process.ExitCode -ne 0 -or $stdout -notmatch "vterminal-docs") {
+        throw "The staged vterminal-docs loader smoke test failed with exit $($process.ExitCode).`n$stdout`n$stderr"
+      }
+    }
+    finally {
+      [VTerminal.WindowsBuildErrorMode]::SetErrorMode($previousErrorMode) | Out-Null
+    }
+  }
+  finally {
+    Remove-Item -LiteralPath $smokeRoot -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
 
 Push-Location $repo
 try {
@@ -78,18 +131,34 @@ try {
   # core and modules from this SAME build output so stale hard links in Cargo's
   # profile directory can never mix ABIs. Core DLLs must be beside each EXE;
   # CPU/Vulkan modules are loaded later from llama-backends.
+  $selectedRuntime = Join-Path $selectedBuild "bin"
+  $runtimeDlls = @(Get-ChildItem -LiteralPath $selectedRuntime -Filter "*.dll" -File | Sort-Object Name)
+  $unsupportedRuntimeDlls = @(
+    $runtimeDlls | Where-Object Name -NotMatch '^(?:llama|ggml).*\.dll$'
+  )
+  if ($unsupportedRuntimeDlls.Count -ne 0) {
+    throw "The llama.cpp build emitted runtime DLLs outside the managed llama*/ggml* contract: $($unsupportedRuntimeDlls.Name -join ', '). Update setup and CLI repair before packaging them."
+  }
+  $missingRuntimeDlls = @(
+    $requiredRuntimeDlls | Where-Object {
+      $name = $_
+      $null -eq ($runtimeDlls | Where-Object Name -EQ $name)
+    }
+  )
+  if ($runtimeDlls.Count -eq 0 -or $missingRuntimeDlls.Count -ne 0) {
+    throw "The selected llama.cpp build is missing required runtime DLLs: $($missingRuntimeDlls -join ', ')."
+  }
   New-Item -ItemType Directory -Force -Path $runtimeDestination | Out-Null
   Get-ChildItem -Path $runtimeDestination -Filter "*.dll" -File | Remove-Item -Force
-  foreach ($name in $requiredRuntimeDlls) {
-    $source = Join-Path (Join-Path $selectedBuild "bin") $name
-    Copy-Item -LiteralPath $source -Destination (Join-Path $runtimeDestination $name) -Force
-    $releaseDestination = Join-Path $release $name
+  foreach ($dll in $runtimeDlls) {
+    Copy-Item -LiteralPath $dll.FullName -Destination (Join-Path $runtimeDestination $dll.Name) -Force
+    $releaseDestination = Join-Path $release $dll.Name
     # Cargo may hard-link the selected output into the profile directory.
     # PowerShell refuses to overwrite two names for the same file identity, so
     # unlink the profile name first. The selected build output remains pinned
     # and is then copied back as an independent, ABI-matched file.
     Remove-Item -LiteralPath $releaseDestination -Force -ErrorAction SilentlyContinue
-    Copy-Item -LiteralPath $source -Destination $releaseDestination -Force
+    Copy-Item -LiteralPath $dll.FullName -Destination $releaseDestination -Force
   }
 
   $selectedBackends = Join-Path $selectedBuild "backends"
@@ -102,7 +171,7 @@ try {
   }
 
   $stagedRuntime = @(Get-ChildItem -LiteralPath $runtimeDestination -Filter "*.dll" -File | Select-Object -ExpandProperty Name | Sort-Object)
-  $expectedRuntime = @($requiredRuntimeDlls | Sort-Object)
+  $expectedRuntime = @($runtimeDlls | Select-Object -ExpandProperty Name | Sort-Object)
   if (Compare-Object $expectedRuntime $stagedRuntime) {
     throw "The staged llama runtime DLL set is incomplete or contains unexpected files."
   }
@@ -111,6 +180,11 @@ try {
       $null -eq ($stagedBackends | Where-Object Name -Match '^ggml-cpu(?:-.+)?\.dll$')) {
     throw "The staged backend payload must contain Vulkan and at least one CPU implementation."
   }
+
+  # Run from an isolated directory containing only the files that will be
+  # packaged. This catches normal PE imports such as llama-common.dll before an
+  # installer can be produced; Cargo's profile directory must not mask them.
+  Test-StagedLocalRuntime (Join-Path $release "vterminal-docs.exe") $runtimeDestination $backendDestination
 
   if ($RequireAuthenticode) {
     $env:VTERMINAL_REQUIRE_WINDOWS_SIGNING = "1"

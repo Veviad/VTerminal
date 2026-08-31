@@ -268,6 +268,8 @@ jobs:
           $bundle = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc/release/bundle/nsis'
           $installer = @(Get-ChildItem $bundle -Filter '*setup.exe' -File)
           if ($installer.Count -ne 1) { throw "Expected one NSIS setup executable, found $($installer.Count)." }
+          $installRoot = Join-Path $env:RUNNER_TEMP 'vterminal-release-installer-smoke'
+          ./scripts/verify-windows-installer.ps1 -Installer $installer[0].FullName -InstallRoot $installRoot
           $updaterSignature = "$($installer[0].FullName).sig"
           if (-not (Test-Path $updaterSignature)) { throw 'The signed Windows updater signature is missing.' }
           $authenticode = Get-AuthenticodeSignature $installer[0].FullName
