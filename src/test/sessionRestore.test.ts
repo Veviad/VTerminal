@@ -54,7 +54,7 @@ vi.mock("../lib/tauri", () => ({
 vi.mock("../lib/ptyExec", () => ({
   abortSession: (sessionId: string, reason: string) => abortSessionMock(sessionId, reason),
   isBusy: () => false,
-  resetSessionMode: vi.fn(),
+  forgetShellProof: vi.fn(),
 }));
 
 vi.mock("../lib/sessionArchive", () => ({

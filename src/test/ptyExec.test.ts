@@ -28,7 +28,7 @@ const {
   abortSession,
   captureApprovalPromptBinding,
   interruptJob,
-  resetSessionMode,
+  forgetShellProof,
 } = await import("../lib/ptyExec");
 const { hardenCommand, suppressPrivateOutput } = await import("../lib/ptyExecShell");
 const {
@@ -153,7 +153,7 @@ beforeEach(() => {
   ptyWrite.mockClear();
   listeners.clear();
   resetRunbookTerminalPrivacyForTests();
-  resetSessionMode("s1");
+  forgetShellProof("s1");
   useAppStore.setState({
     sessions: [
       {
@@ -1058,13 +1058,40 @@ describe("runInTerminal — remote session", () => {
     expect(outcome.mode).toBe("sentinel");
   });
 
-  it("uses a fresh probe and command nonce for every remote command", async () => {
+  /** Drive one command all the way through probe → dispatch → completion, so
+   *  the session is left holding a live shell proof.
+   *
+   *  Every re-probe test settles its run through this too: an unsettled remote
+   *  command holds the terminal lease for the whole probe wait, and the next
+   *  test would read `terminal_busy` instead of what it is checking. */
+  const proveShell = async (
+    approvalId: string,
+    command: string,
+    settle: () => Promise<unknown> = flush,
+  ): Promise<void> => {
+    const before = ptyWrite.mock.calls.length;
+    const run = runInTerminal("s1", approvalId, command, { timeoutMs: 60_000 });
+    await settle();
+    expect(ptyWrite.mock.calls.length).toBe(before + 1);
+    const probe = probeNonce(ptyWrite.mock.calls[before][1]);
+    emit({ type: "osc", payload: `RP;${probe};z;b5.2;f` });
+    await settle();
+    emit({
+      type: "osc",
+      payload: `RD;0;${commandNonce(ptyWrite.mock.calls[before + 1][1])}`,
+    });
+    expect((await run).exitCode).toBe(0);
+  };
+
+  const tickFakeTimers = () => vi.advanceTimersByTimeAsync(0);
+
+  it("probes once per proven shell epoch and reuses it for later commands", async () => {
     entry = makeEntry(["$ ", "out", "$ "]);
 
     const first = runInTerminal("s1", "ap1", "id", { timeoutMs: 60_000 });
     await flush();
     const firstProbe = probeNonce(ptyWrite.mock.calls[0][1]);
-    emit({ type: "osc", payload: `RP;${firstProbe};z5.9;b;f` });
+    emit({ type: "osc", payload: `RP;${firstProbe};z;b5.2;f` });
     await flush();
     const firstCommand = commandNonce(ptyWrite.mock.calls[1][1]);
     emit({ type: "osc", payload: `RD;0;${firstCommand}` });
@@ -1072,19 +1099,108 @@ describe("runInTerminal — remote session", () => {
 
     const second = runInTerminal("s1", "ap2", "whoami", { timeoutMs: 60_000 });
     await flush();
-    const secondProbe = probeNonce(ptyWrite.mock.calls[2][1]);
-    expect(secondProbe).not.toBe(firstProbe);
-    emit({ type: "osc", payload: `RP;${secondProbe};z;b5.2;f` });
-    await flush();
-    const secondCommand = commandNonce(ptyWrite.mock.calls[3][1]);
+    // The whole point: a probe is a visible `printf` line in the user's own
+    // terminal, and the epoch the first one attested is still the live one, so
+    // the second command goes straight in — probe, command, command.
+    expect(ptyWrite).toHaveBeenCalledTimes(3);
+    const secondCommand = commandNonce(ptyWrite.mock.calls[2][1]);
+    // Reusing the PROOF is not reusing the completion token: attribution stays
+    // per command, so a replayed RD from `id` can never settle `whoami`.
     expect(secondCommand).not.toBe(firstCommand);
-    expect(secondCommand).not.toBe(secondProbe);
+    expect(secondCommand).not.toBe(firstProbe);
+    emit({ type: "osc", payload: `RD;0;${firstCommand}` });
     emit({ type: "osc", payload: `RD;0;${secondCommand}` });
-    await second;
 
-    // There is no hook install and no session-level mode cache: two commands
-    // produce exactly probe, command, probe, command.
+    expect((await second).exitCode).toBe(0);
+    expect(ptyWrite).toHaveBeenCalledTimes(3);
+  });
+
+  it("re-probes when the user has touched the keyboard since the proof", async () => {
+    entry = makeEntry(["$ ", "out", "$ "]);
+    await proveShell("ap1", "id");
+
+    // The keystroke may still be sitting unread in the remote shell's input
+    // queue: a `python3` typed while our command ran becomes the foreground
+    // program a moment later, which is exactly what the probe catches.
+    entry.lastUserInputAt = Date.now() - 5_000;
+    await proveShell("ap2", "whoami");
+
     expect(ptyWrite).toHaveBeenCalledTimes(4);
+    expect(ptyWrite.mock.calls[2][1]).toContain("6973;RP");
+  });
+
+  it("re-probes after a command that never reported its own sentinel", async () => {
+    vi.useFakeTimers();
+    entry = makeEntry(["$ ", "out", "$ "]);
+    const first = runInTerminal("s1", "ap1", "id", { timeoutMs: 1_000 });
+    await vi.advanceTimersByTimeAsync(0);
+    emit({ type: "osc", payload: `RP;${probeNonce(ptyWrite.mock.calls[0][1])};z;b5.2;f` });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ptyWrite).toHaveBeenCalledTimes(2);
+
+    // No RD ever arrives. The terminal is left in a state nothing here can
+    // vouch for, so the proof it was carrying does not survive it.
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect((await first).error).toBe("timeout");
+
+    await proveShell("ap2", "whoami", tickFakeTimers);
+    expect(ptyWrite).toHaveBeenCalledTimes(4);
+    expect(ptyWrite.mock.calls[2][1]).toContain("6973;RP");
+  });
+
+  it("re-probes once a proof is older than its ceiling", async () => {
+    vi.useFakeTimers();
+    entry = makeEntry(["$ ", "out", "$ "]);
+    const first = runInTerminal("s1", "ap1", "id", { timeoutMs: 60_000 });
+    await vi.advanceTimersByTimeAsync(0);
+    emit({ type: "osc", payload: `RP;${probeNonce(ptyWrite.mock.calls[0][1])};z;b5.2;f` });
+    await vi.advanceTimersByTimeAsync(0);
+    emit({ type: "osc", payload: `RD;0;${commandNonce(ptyWrite.mock.calls[1][1])}` });
+    await first;
+
+    // An ssh link can die without announcing it. Nothing observable changes,
+    // so the clock is the only thing left that can invalidate the proof.
+    await vi.advanceTimersByTimeAsync(5 * 60_000 + 1);
+    await proveShell("ap2", "whoami", tickFakeTimers);
+    expect(ptyWrite).toHaveBeenCalledTimes(4);
+    expect(ptyWrite.mock.calls[2][1]).toContain("6973;RP");
+  });
+
+  it("re-probes after the terminal itself is replaced", async () => {
+    entry = makeEntry(["$ ", "out", "$ "]);
+    await proveShell("ap1", "id");
+
+    entry = makeEntry(["$ ", "out", "$ "]);
+    await proveShell("ap2", "whoami");
+
+    expect(ptyWrite).toHaveBeenCalledTimes(4);
+    expect(ptyWrite.mock.calls[2][1]).toContain("6973;RP");
+  });
+
+  it("re-probes after the nested block ends", async () => {
+    entry = makeEntry(["$ ", "out", "$ "]);
+    await proveShell("ap1", "id");
+
+    // `ssh` returned: useSessions clears the remote context and calls this, so
+    // the proof now describes a shell that no longer exists.
+    forgetShellProof("s1");
+    await proveShell("ap2", "whoami");
+
+    expect(ptyWrite).toHaveBeenCalledTimes(4);
+    expect(ptyWrite.mock.calls[2][1]).toContain("6973;RP");
+  });
+
+  it("never reuses one host's proof for another", async () => {
+    entry = makeEntry(["$ ", "out", "$ "]);
+    await proveShell("ap1", "id");
+
+    useAppStore.getState().updateSessionUi("s1", {
+      remote: { kind: "ssh", target: "prod-02" },
+    });
+    await proveShell("ap2", "whoami");
+
+    expect(ptyWrite).toHaveBeenCalledTimes(4);
+    expect(ptyWrite.mock.calls[2][1]).toContain("6973;RP");
   });
 
   it("rejects sentinel-unsafe syntax before claiming a lease or writing a probe", async () => {
