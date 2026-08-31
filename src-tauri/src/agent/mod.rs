@@ -1,6 +1,10 @@
 pub mod context;
 pub mod exec;
 pub mod history;
+// The user's own standing instructions, appended to the system prompt of every
+// conversational surface. Lives beside `prompts` because it is the same concern
+// and has the same non-agent callers (Chat, Ask).
+pub mod instructions;
 // The agent loop is provider-agnostic — it drives the `Provider` trait, so it
 // works against a cloud model in a build with no local engine compiled in.
 pub mod policy;

@@ -386,7 +386,7 @@ pub async fn ai_ask(
     let model = active_model(&app);
     let native_web =
         crate::commands::settings::read_bool(&app, "ai_web_access", true) && model.native_web_fetch;
-    let mut messages = vec![ChatMessage::system(format!(
+    let mut system_prompt = format!(
         "{}{}{}\n\nCurrent terminal context:\n{}",
         prompts::ASK,
         if native_web {
@@ -403,7 +403,16 @@ pub async fn ai_ask(
             ""
         },
         context.render()
-    ))];
+    );
+    // After the context block, not before it: the context is DATA about the tab,
+    // and instructions that follow their data are the ones a model actually
+    // applies. Same position as the agent path, for the same reason.
+    crate::agent::instructions::append(
+        &app,
+        crate::agent::instructions::Surface::Chat,
+        &mut system_prompt,
+    );
+    let mut messages = vec![ChatMessage::system(system_prompt)];
     for h in history.iter().rev().take(12).rev() {
         if h.role == "assistant" {
             messages.push(ChatMessage::assistant(h.content.clone()));
@@ -949,6 +958,14 @@ pub async fn agent_start(
              before relying on it.",
         );
     }
+    // Strictly last, so the block's closing tag ends the prompt and nothing the
+    // app writes can read as part of the user's own text. See
+    // `instructions::append` for why recency is the reason and not caching.
+    crate::agent::instructions::append(
+        &app,
+        crate::agent::instructions::Surface::Agent,
+        &mut system_prompt,
+    );
     let cancel_rx = ai_state.register(&request_id);
 
     let _ = on_event.send(StreamEvent::Started {

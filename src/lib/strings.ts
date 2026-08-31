@@ -376,6 +376,7 @@ export const S = {
       models: "Models",
       statistics: "Statistics",
       agent: "Agent",
+      instructions: "Instructions",
       mcp: "MCP",
       docs: "Knowledge",
       updates: "Updates",
@@ -615,6 +616,38 @@ export const S = {
       // an earlier step, or through an alias in your own dotfiles.
       webAccessHint:
         "Off: the agent's commands may not reach the network (curl, wget, git fetch/pull/clone, package installs, ssh), and models with a built-in web tool stop being offered one. Chat and models keep working. Command blocking is best-effort — a script the agent wrote earlier can still reach out.",
+    },
+    instructions: {
+      title: "Custom instructions",
+      // The first sentence is the whole mental model: this is ADDED to the
+      // built-in prompt, not a replacement for it. Users who have met a
+      // "system prompt" box elsewhere expect replacement, and quietly deleting
+      // the rules that keep the agent from hanging a real terminal is not a
+      // failure they could diagnose.
+      intro:
+        "Text you write here is added to the end of the model's built-in instructions — it never replaces them. Use it for standing preferences: conventions to keep, tools to prefer, the language to answer in.",
+      // The honesty clause, in the same spirit as `agent.webAccessHint`. Prose
+      // in a prompt cannot move a gate that is enforced in Rust, and a settings
+      // field that looks like it might is worse than one that says it cannot.
+      limits:
+        "Instructions cannot grant permissions, approve commands, or lift the internet block — those are enforced in code, outside the conversation. They are also left out of tab naming, command suggestions, error explanations and Runbook authoring, whose output the app parses.",
+      global: "All AI",
+      globalHint: "Applied everywhere below — Agent, Ask and Chat.",
+      globalPlaceholder:
+        "e.g. This fleet runs Debian 12 with systemd. Prefer POSIX sh over bashisms.",
+      agent: "Agent only",
+      agentHint: "Added after the shared text when the Agent runs commands.",
+      agentPlaceholder: "e.g. Show me `git status` before and after anything that writes.",
+      chat: "Chat and Ask only",
+      chatHint: "Added after the shared text in the Chat workspace and the Ask panel.",
+      chatPlaceholder: "e.g. Answer in German. Lead with the command, then one line of why.",
+      // Saving is on blur rather than per keystroke: every save is a Rust store
+      // write, and a 4000-character field would make one per character.
+      saveHint: "Saved when you click away.",
+      saved: "Saved",
+      charCount: (used: number, max: number) => `${used.toLocaleString()} / ${max.toLocaleString()}`,
+      tooLong: (max: number) => `Too long — the limit is ${max.toLocaleString()} characters.`,
+      clear: "Clear",
     },
     docs: {
       title: "Knowledge",

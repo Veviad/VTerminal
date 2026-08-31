@@ -5,6 +5,7 @@ import { ModelsSettings } from "./ModelsSettings";
 import { AppearanceSection } from "./AppearanceSection";
 import { TerminalSection } from "./TerminalSection";
 import { AgentSection } from "./AgentSection";
+import { InstructionsSection } from "./InstructionsSection";
 import { DocsSettings } from "./DocsSettings";
 import { RunbooksSettings } from "./RunbooksSettings";
 import { SshHostsSection } from "./SshHostsSection";
@@ -22,6 +23,7 @@ const GPL_V3_URL = "https://www.gnu.org/licenses/gpl-3.0.html";
 const TABS: { id: SettingsTab; label: string }[] = [
   { id: "models", label: S.settings.tabs.models },
   { id: "agent", label: S.settings.tabs.agent },
+  { id: "instructions", label: S.settings.tabs.instructions },
   { id: "mcp", label: S.settings.tabs.mcp },
   { id: "docs", label: S.settings.tabs.docs },
   { id: "runbooks", label: S.settings.tabs.runbooks },
@@ -74,6 +76,7 @@ export function SettingsPage() {
             {tab === "models" && <ModelsSettings />}
             {tab === "statistics" && <StatisticsSection />}
             {tab === "agent" && <AgentSection />}
+            {tab === "instructions" && <InstructionsSection />}
             {tab === "mcp" && <McpSettings />}
             {tab === "docs" && <DocsSettings />}
             {tab === "runbooks" && <RunbooksSettings />}

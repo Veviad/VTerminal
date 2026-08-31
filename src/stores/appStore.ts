@@ -104,6 +104,7 @@ export type SettingsTab =
   | "statistics"
   | "mcp"
   | "agent"
+  | "instructions"
   | "docs"
   | "runbooks"
   | "appearance"
@@ -603,6 +604,13 @@ export interface AppState {
   agentCommandTimeoutSecs: number;
   agentCommandPolicyRules: import("../lib/types").CommandPolicyRule[];
   aiWebAccess: boolean;
+  /** Standing instructions appended to the system prompt. Mirrors only — the
+   *  composition, the cap and the framing all live in Rust
+   *  (`agent::instructions`), so editing these frontend-side changes what the
+   *  Settings screen shows and nothing about what a model receives. */
+  customInstructions: string;
+  agentCustomInstructions: string;
+  chatCustomInstructions: string;
   autoUpdateEnabled: boolean;
   /** Document buckets, EXPERIMENTAL. A mirror of the setting for rendering only —
    *  the capability itself is gated in Rust, which withholds the `search_docs`
@@ -2025,6 +2033,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   agentCommandTimeoutSecs: 120,
   agentCommandPolicyRules: [],
   aiWebAccess: true,
+  // Empty, not null: these are bound to textareas, and a controlled input whose
+  // value is null is an uncontrolled input with a React warning.
+  customInstructions: "",
+  agentCustomInstructions: "",
+  chatCustomInstructions: "",
   autoUpdateEnabled: false,
   docsEnabled: false,
   runbooksEnabled: false,

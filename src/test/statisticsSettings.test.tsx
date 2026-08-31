@@ -91,6 +91,7 @@ describe("Statistics settings", () => {
     expect(labels).toEqual([
       S.settings.tabs.models,
       S.settings.tabs.agent,
+      S.settings.tabs.instructions,
       S.settings.tabs.mcp,
       S.settings.tabs.docs,
       S.settings.tabs.runbooks,

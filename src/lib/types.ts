@@ -1253,6 +1253,16 @@ export interface Settings {
    *  for models that have one, picks the agent/ask web prompt tier, and makes
    *  `agent::policy` refuse network commands before they are proposed. */
   ai_web_access: boolean;
+  /** The user's own standing instructions, APPENDED to the built-in system prompt
+   *  of the conversational surfaces — never replacing it. `null` when unset, which
+   *  is what keeps a default install's prompt byte-identical to what it was before
+   *  the feature existed. `agent::instructions` in Rust owns the framing, the
+   *  4000-character cap and the boundary that excludes the one-shot helpers. */
+  custom_instructions: string | null;
+  /** Agent mode only (interactive and scheduled), after `custom_instructions`. */
+  agent_custom_instructions: string | null;
+  /** Ask and the Chat workspace only, after `custom_instructions`. */
+  chat_custom_instructions: string | null;
   /** Opt-in experimental release checks. Installation always remains explicit. */
   auto_update_enabled: boolean;
   /** Document buckets, EXPERIMENTAL and off by default. Enforced in Rust: while
@@ -1677,6 +1687,12 @@ export interface SettingsPatch {
   agent_command_timeout_secs: number;
   agent_command_policy_rules: CommandPolicyRule[];
   ai_web_access: boolean;
+  /** Clearable strings: "" clears. Rust REJECTS anything over 4000 characters
+   *  rather than truncating, so a save can fail on these three where it cannot on
+   *  a clamped number. */
+  custom_instructions: string;
+  agent_custom_instructions: string;
+  chat_custom_instructions: string;
   auto_update_enabled: boolean;
   docs_enabled: boolean;
   runbooks_enabled: boolean;
