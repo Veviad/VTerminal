@@ -195,7 +195,7 @@ jobs:
       # loader before starting any cached test executable.
       - name: Expose local-model runtime DLLs to tests
         run: |
-          $requiredRuntime = @('llama.dll', 'ggml.dll', 'ggml-base.dll')
+          $requiredRuntime = @('llama.dll', 'llama-common.dll', 'ggml.dll', 'ggml-base.dll')
           $buildRoot = Join-Path $env:CARGO_TARGET_DIR 'debug\build'
           $candidates = @(
             Get-ChildItem -LiteralPath $buildRoot -Directory -Filter 'llama-cpp-sys-2-*' | ForEach-Object {
@@ -293,6 +293,8 @@ jobs:
           $bundle = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc/release/bundle/nsis'
           $installer = @(Get-ChildItem $bundle -Filter '*setup.exe' -File)
           if ($installer.Count -ne 1) { throw "Expected one NSIS installer, found $($installer.Count)." }
+          $installRoot = Join-Path $env:RUNNER_TEMP 'vterminal-installer-smoke'
+          ./scripts/verify-windows-installer.ps1 -Installer $installer[0].FullName -InstallRoot $installRoot
 
       - name: Cache summary
         if: always()

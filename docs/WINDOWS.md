@@ -42,8 +42,10 @@ The first hash must match the installer entry in `SHA256SUMS.txt`. The preview
 installer is intentionally not Authenticode signed, so the reported status is
 expected to be `NotSigned`; Windows therefore reports an unknown publisher and
 SmartScreen may require **More info → Run anyway**. It installs for the current
-user and bootstraps WebView2 when the runtime is absent; it does not request an
-administrator-level WSL installation.
+user, uses the Veviad icon and branded artwork, follows the system's English or
+German installer language, and bootstraps WebView2 when the runtime is absent.
+It does not request an administrator-level WSL installation. Setup also blocks
+an older installer from overwriting a newer VTerminal version.
 
 On first launch, VTerminal checks the default WSL distribution and Bash. After
 setup or repair, close and reopen VTerminal. New PowerShell windows also pick up
@@ -66,7 +68,10 @@ npm run build:windows
 
 This produces a per-user NSIS installer. The build contains dynamically loaded
 CPU and Vulkan llama.cpp backends; the same installer starts without a Vulkan
-device and retries model allocation entirely on CPU when GPU loading fails.
+device and retries model allocation entirely on CPU when GPU loading fails. The
+packager takes every runtime DLL from one ABI-matched llama.cpp build, requires
+the llama, llama-common and GGML anchors, and runs the staged companion from an
+isolated directory before creating the installer.
 The managed PATH transformation can be exercised without touching the registry:
 
 ```powershell
@@ -162,6 +167,9 @@ x64 VMs and retain the installer hashes and logs with the release candidate:
 5. Generate chat, vision, and embeddings on representative NVIDIA, AMD, and
    Intel Vulkan systems and a no-GPU VM. Force a low-memory Vulkan allocation
    failure and confirm automatic CPU retry plus the visible fallback reason.
+   Confirm `llama-common.dll` and the other staged runtime DLLs are present both
+   beside `vterminal.exe` and in the managed companion directory, then run
+   `vterminal-docs.exe --help` from that directory.
 6. Exercise WebView2 installation and an already-installed WebView2 runtime,
    terminal clipboard selection/paste, host file and directory dialogs, PDF text
    extraction, image/vision attachment handling, external links, and display
@@ -179,7 +187,10 @@ scheduled workflow runs all three jobs without restoring or saving a cache to
 preserve clean-build coverage. Windows CI also disables incremental compilation
 and development/test debug information because hosted runners do not retain a
 debugging session and those artifacts substantially increase MSVC work and cache
-size.
+size. Package and release jobs silently install the generated NSIS artifact into
+an isolated runner directory, compare staged and installed runtime hashes, run
+both bundled and managed companion loader checks, silently uninstall, and verify
+that the managed payload and PATH entry were removed.
 Windows local-inference builds require CMake's Ninja generator in addition to
 the MSVC toolchain and pinned Vulkan SDK; `scripts/build-windows.ps1` verifies
 Ninja and selects it explicitly before Cargo configures llama.cpp. The script
