@@ -1085,6 +1085,22 @@ describe("runInTerminal — remote session", () => {
 
   const tickFakeTimers = () => vi.advanceTimersByTimeAsync(0);
 
+  /** The same drive, named as the assertion the re-probe tests are making: the
+   *  next command writes a probe of its own before it writes anything else.
+   *
+   *  Reading the sequence relative to what is already on the mock, rather than
+   *  from a fixed index, keeps each test's setup free to write as much as it
+   *  needs to arrange the epoch it is invalidating. */
+  const expectReprobe = async (
+    approvalId: string,
+    settle: () => Promise<unknown> = flush,
+  ): Promise<void> => {
+    const before = ptyWrite.mock.calls.length;
+    await proveShell(approvalId, "whoami", settle);
+    expect(ptyWrite.mock.calls[before][1]).toContain("6973;RP");
+    expect(ptyWrite.mock.calls.length).toBe(before + 2);
+  };
+
   it("probes once per proven shell epoch and reuses it for later commands", async () => {
     entry = makeEntry(["$ ", "out", "$ "]);
 
@@ -1123,10 +1139,7 @@ describe("runInTerminal — remote session", () => {
     // queue: a `python3` typed while our command ran becomes the foreground
     // program a moment later, which is exactly what the probe catches.
     entry.lastUserInputAt = Date.now() - 5_000;
-    await proveShell("ap2", "whoami");
-
-    expect(ptyWrite).toHaveBeenCalledTimes(4);
-    expect(ptyWrite.mock.calls[2][1]).toContain("6973;RP");
+    await expectReprobe("ap2");
   });
 
   it("re-probes after a command that never reported its own sentinel", async () => {
@@ -1143,9 +1156,7 @@ describe("runInTerminal — remote session", () => {
     await vi.advanceTimersByTimeAsync(20_000);
     expect((await first).error).toBe("timeout");
 
-    await proveShell("ap2", "whoami", tickFakeTimers);
-    expect(ptyWrite).toHaveBeenCalledTimes(4);
-    expect(ptyWrite.mock.calls[2][1]).toContain("6973;RP");
+    await expectReprobe("ap2", tickFakeTimers);
   });
 
   it("re-probes once a proof is older than its ceiling", async () => {
@@ -1161,9 +1172,7 @@ describe("runInTerminal — remote session", () => {
     // An ssh link can die without announcing it. Nothing observable changes,
     // so the clock is the only thing left that can invalidate the proof.
     await vi.advanceTimersByTimeAsync(5 * 60_000 + 1);
-    await proveShell("ap2", "whoami", tickFakeTimers);
-    expect(ptyWrite).toHaveBeenCalledTimes(4);
-    expect(ptyWrite.mock.calls[2][1]).toContain("6973;RP");
+    await expectReprobe("ap2", tickFakeTimers);
   });
 
   it("re-probes after the terminal itself is replaced", async () => {
@@ -1171,10 +1180,7 @@ describe("runInTerminal — remote session", () => {
     await proveShell("ap1", "id");
 
     entry = makeEntry(["$ ", "out", "$ "]);
-    await proveShell("ap2", "whoami");
-
-    expect(ptyWrite).toHaveBeenCalledTimes(4);
-    expect(ptyWrite.mock.calls[2][1]).toContain("6973;RP");
+    await expectReprobe("ap2");
   });
 
   it("re-probes after the nested block ends", async () => {
@@ -1184,10 +1190,7 @@ describe("runInTerminal — remote session", () => {
     // `ssh` returned: useSessions clears the remote context and calls this, so
     // the proof now describes a shell that no longer exists.
     forgetShellProof("s1");
-    await proveShell("ap2", "whoami");
-
-    expect(ptyWrite).toHaveBeenCalledTimes(4);
-    expect(ptyWrite.mock.calls[2][1]).toContain("6973;RP");
+    await expectReprobe("ap2");
   });
 
   it("never reuses one host's proof for another", async () => {
@@ -1197,10 +1200,7 @@ describe("runInTerminal — remote session", () => {
     useAppStore.getState().updateSessionUi("s1", {
       remote: { kind: "ssh", target: "prod-02" },
     });
-    await proveShell("ap2", "whoami");
-
-    expect(ptyWrite).toHaveBeenCalledTimes(4);
-    expect(ptyWrite.mock.calls[2][1]).toContain("6973;RP");
+    await expectReprobe("ap2");
   });
 
   it("rejects sentinel-unsafe syntax before claiming a lease or writing a probe", async () => {
