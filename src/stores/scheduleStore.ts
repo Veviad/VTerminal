@@ -1,5 +1,7 @@
 import { create } from "zustand";
 
+import { ownRecordValue } from "../lib/records";
+
 import {
   emptyScheduleInput,
   isTerminalScheduleRunStatus,
@@ -294,7 +296,7 @@ export function selectLiveScheduleRun(
   activeRunId: string | null,
   runsById: Record<string, ScheduleRun>,
 ): ScheduleRun | null {
-  const selected = activeRunId ? runsById[activeRunId] : undefined;
+  const selected = activeRunId ? ownRecordValue(runsById, activeRunId) : undefined;
   if (selected && !isTerminalScheduleRunStatus(selected.status)) return selected;
   return selectLiveScheduleRuns(runsById)[0] ?? null;
 }

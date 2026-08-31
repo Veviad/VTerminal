@@ -19,6 +19,11 @@ import {
   scheduleOwnerOf,
   unregisterLiveScheduleJob,
 } from "../lib/scheduleLiveJobs";
+// Every record read below is keyed by a runtime id. `ownRecordValue` is the
+// repo's own `hasOwnProperty` + `Reflect.get` accessor for exactly that: a
+// plain `record[key]` is reachable by `__proto__`, which is the reasoning
+// `runbookStore` records for keeping its revision map a `Map`.
+import { ownRecordValue } from "../lib/records";
 import { useAppStore } from "../stores/appStore";
 import { useScheduleStore } from "../stores/scheduleStore";
 import { useAiStream } from "./useAiStream";
@@ -110,7 +115,7 @@ function seedDims(): { cols: number; rows: number } {
 async function waitForRemote(sessionId: string, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const ui = useAppStore.getState().sessionUi[sessionId];
+    const ui = ownRecordValue(useAppStore.getState().sessionUi, sessionId);
     if (ui?.remote) return true;
     const session = useAppStore.getState().sessions.find((s) => s.id === sessionId);
     if (!session || session.exited) return false;
@@ -122,7 +127,7 @@ async function waitForRemote(sessionId: string, timeoutMs: number): Promise<bool
 /** `Array.prototype.at` is above this project's lib target. */
 function lastContent(messages: { content: string }[] | undefined): string | null {
   if (!messages || messages.length === 0) return null;
-  return messages[messages.length - 1].content ?? null;
+  return messages[messages.length - 1].content;
 }
 
 function scrollbackTail(sessionId: string, bytes = 2048): string {
@@ -250,7 +255,7 @@ export function useScheduledActions() {
         // A prompt step. `startAgent` is async and awaits `api.agentStart`, which
         // resolves only when the backend run terminates — so this IS the
         // completion signal. Do not poll `status`.
-        const before = useAppStore.getState().aiStreams[sessionId];
+        const before = ownRecordValue(useAppStore.getState().aiStreams, sessionId);
         if (before && before.status !== "idle") {
           const busy: StepResult = {
             status: "failed",
@@ -262,7 +267,7 @@ export function useScheduledActions() {
         }
         const messagesBefore = before?.messages.length ?? 0;
         await startAgentRef.current(sessionId, step.text);
-        const after = useAppStore.getState().aiStreams[sessionId];
+        const after = ownRecordValue(useAppStore.getState().aiStreams, sessionId);
         // `startAgent` returns immediately, having done nothing, if the session
         // was busy or a sidecar is unhealthy. An await on that resolves instantly
         // and would otherwise look like a step that finished in two milliseconds.
@@ -341,8 +346,9 @@ export function useScheduledActions() {
         getTerm(remembered) !== undefined &&
         scheduleOwnerOf(remembered) === null &&
         (fire.target_host_id === null
-          ? !app.sessionUi[remembered]?.remote
-          : app.sessionUi[remembered]?.remote?.host_id === fire.target_host_id);
+          ? !ownRecordValue(app.sessionUi, remembered)?.remote
+          : ownRecordValue(app.sessionUi, remembered)?.remote?.host_id ===
+            fire.target_host_id);
 
       let sessionId = reusable ? (remembered as string) : null;
       const dims = seedDims();

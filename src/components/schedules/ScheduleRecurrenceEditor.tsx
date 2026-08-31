@@ -60,11 +60,11 @@ export function ScheduleRecurrenceEditor({
   previewFor,
 }: {
   value: ScheduleRecurrence;
-  onChange(next: ScheduleRecurrence): void;
+  onChange: (next: ScheduleRecurrence) => void;
   /** Fire times from the BACKEND, computed by the same function the scheduler
    *  uses. Two implementations of "when does this fire" would drift, and the one
    *  the user reads has to be the one that acts. */
-  previewFor(rule: ScheduleRecurrence): Promise<string[]>;
+  previewFor: (rule: ScheduleRecurrence) => Promise<string[]>;
 }) {
   const [preview, setPreview] = useState<string[]>([]);
 
@@ -84,14 +84,17 @@ export function ScheduleRecurrenceEditor({
     const time = at ?? { hour: 3, minute: 0 };
     switch (kind) {
       case "interval":
-        return onChange({ kind: "interval", every_minutes: 60 });
+        onChange({ kind: "interval", every_minutes: 60 });
+        return;
       case "daily":
-        return onChange({ kind: "daily", at: time });
+        onChange({ kind: "daily", at: time });
+        return;
       case "weekly":
-        return onChange({ kind: "weekly", weekdays: ["monday"], at: time });
+        onChange({ kind: "weekly", weekdays: ["monday"], at: time });
+        return;
       case "once": {
         const soon = new Date(Date.now() + 60 * 60 * 1000);
-        return onChange({
+        onChange({
           kind: "once",
           at:
             toRfc3339(
@@ -100,6 +103,7 @@ export function ScheduleRecurrenceEditor({
                 .slice(0, 16),
             ) ?? soon.toISOString(),
         });
+        return;
       }
     }
   };
@@ -152,14 +156,14 @@ export function ScheduleRecurrenceEditor({
                       key={day}
                       type="button"
                       aria-pressed={on}
-                      onClick={() =>
+                      onClick={() => {
                         onChange({
                           ...value,
                           weekdays: on
                             ? value.weekdays.filter((d) => d !== day)
                             : [...value.weekdays, day],
-                        })
-                      }
+                        });
+                      }}
                       className={`rounded border px-1.5 py-0.5 text-[10px] transition-colors ${
                         on
                           ? "border-accent/40 bg-accent/10 text-accent"

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { S } from "../../lib/strings";
 import * as tauri from "../../lib/tauri";
+import { ownRecordValue } from "../../lib/records";
 import { buildSshCommand } from "../../lib/ssh";
 import { useSchedules } from "../../hooks/useSchedules";
 import { blockingIssues, useScheduleStore } from "../../stores/scheduleStore";
@@ -41,7 +42,12 @@ export function ScheduleEditor() {
   const [hosts, setHosts] = useState<SshHost[]>([]);
 
   useEffect(() => {
-    void tauri.sshHostsList().then(setHosts).catch(() => setHosts([]));
+    void tauri
+      .sshHostsList()
+      .then(setHosts)
+      .catch(() => {
+        setHosts([]);
+      });
   }, []);
 
   // Debounced so every keystroke does not become an IPC round trip, but still
@@ -49,7 +55,9 @@ export function ScheduleEditor() {
   useEffect(() => {
     if (!draft) return;
     const handle = setTimeout(() => void validateDraft(draft.input), 250);
-    return () => clearTimeout(handle);
+    return () => {
+      clearTimeout(handle);
+    };
   }, [draft, validateDraft]);
 
   const previewFor = useCallback(
@@ -231,7 +239,7 @@ export function ScheduleEditor() {
             value={input.permission_mode}
             options={SCHEDULE_PERMISSION_MODES.map((mode) => ({
               value: mode,
-              label: S.schedules.permissionOptions[mode],
+              label: ownRecordValue(S.schedules.permissionOptions, mode) ?? mode,
               tone: mode === "auto_all" ? ("warning" as const) : ("accent" as const),
             }))}
             onChange={(mode: SchedulePermissionMode) => patchDraft({ permission_mode: mode })}
@@ -385,7 +393,7 @@ function NumberField({
   min: number;
   max: number;
   error?: string;
-  onChange(next: number): void;
+  onChange: (next: number) => void;
 }) {
   return (
     <Field label={label} error={error}>

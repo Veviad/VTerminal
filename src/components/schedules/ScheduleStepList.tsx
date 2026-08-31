@@ -14,11 +14,11 @@ export function ScheduleStepList({
   issueFor,
 }: {
   steps: ScheduleStep[];
-  onPatch(index: number, patch: Partial<ScheduleStep>): void;
-  onAdd(kind: ScheduleStepKind): void;
-  onRemove(index: number): void;
-  onMove(from: number, to: number): void;
-  issueFor(index: number): string | undefined;
+  onPatch: (index: number, patch: Partial<ScheduleStep>) => void;
+  onAdd: (kind: ScheduleStepKind) => void;
+  onRemove: (index: number) => void;
+  onMove: (from: number, to: number) => void;
+  issueFor: (index: number) => string | undefined;
 }) {
   return (
     <div className="space-y-2">
@@ -33,17 +33,35 @@ export function ScheduleStepList({
             index={index}
             total={steps.length}
             issue={issueFor(index)}
-            onPatch={(patch) => onPatch(index, patch)}
-            onRemove={() => onRemove(index)}
-            onMove={(delta) => onMove(index, index + delta)}
+            onPatch={(patch) => {
+              onPatch(index, patch);
+            }}
+            onRemove={() => {
+              onRemove(index);
+            }}
+            onMove={(delta) => {
+              onMove(index, index + delta);
+            }}
           />
         ))}
       </ol>
       <div className="flex gap-1.5">
-        <button type="button" className={secondaryButton} onClick={() => onAdd("command")}>
+        <button
+          type="button"
+          className={secondaryButton}
+          onClick={() => {
+            onAdd("command");
+          }}
+        >
           <SquareTerminal size={11} /> {S.schedules.addCommand}
         </button>
-        <button type="button" className={secondaryButton} onClick={() => onAdd("prompt")}>
+        <button
+          type="button"
+          className={secondaryButton}
+          onClick={() => {
+            onAdd("prompt");
+          }}
+        >
           <Sparkles size={11} /> {S.schedules.addPrompt}
         </button>
       </div>
@@ -64,9 +82,9 @@ function StepRow({
   index: number;
   total: number;
   issue?: string;
-  onPatch(patch: Partial<ScheduleStep>): void;
-  onRemove(): void;
-  onMove(delta: number): void;
+  onPatch: (patch: Partial<ScheduleStep>) => void;
+  onRemove: () => void;
+  onMove: (delta: number) => void;
 }) {
   // A live dry-run of the same gate the terminal applies. Showing the reason as
   // you type turns "the schedule silently did nothing at 3am" into a red line at
@@ -85,7 +103,9 @@ function StepRow({
         </span>
         <input
           value={step.title}
-          onChange={(e) => onPatch({ title: e.target.value })}
+          onChange={(e) => {
+            onPatch({ title: e.target.value });
+          }}
           className="min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 py-0.5 text-[11px] text-text-secondary hover:border-border-subtle focus:border-accent focus:outline-none"
           aria-label={`Step ${index + 1} title`}
         />
@@ -95,7 +115,9 @@ function StepRow({
             the AI composer's attachment handling. */}
         <button
           type="button"
-          onClick={() => onMove(-1)}
+          onClick={() => {
+            onMove(-1);
+          }}
           disabled={index === 0}
           title={S.schedules.moveUp}
           aria-label={S.schedules.moveUp}
@@ -105,7 +127,9 @@ function StepRow({
         </button>
         <button
           type="button"
-          onClick={() => onMove(1)}
+          onClick={() => {
+            onMove(1);
+          }}
           disabled={index === total - 1}
           title={S.schedules.moveDown}
           aria-label={S.schedules.moveDown}
@@ -127,7 +151,9 @@ function StepRow({
 
       <textarea
         value={step.text}
-        onChange={(e) => onPatch({ text: e.target.value })}
+        onChange={(e) => {
+          onPatch({ text: e.target.value });
+        }}
         rows={step.kind === "command" ? 2 : 3}
         spellCheck={step.kind === "prompt"}
         placeholder={
@@ -149,7 +175,9 @@ function StepRow({
         <input
           type="checkbox"
           checked={step.continue_on_failure}
-          onChange={(e) => onPatch({ continue_on_failure: e.target.checked })}
+          onChange={(e) => {
+            onPatch({ continue_on_failure: e.target.checked });
+          }}
           className="accent-accent"
         />
         {S.schedules.stepContinue}

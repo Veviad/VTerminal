@@ -1,6 +1,7 @@
 import { Ban, ExternalLink, Trash2 } from "lucide-react";
 import { useEffect } from "react";
 
+import { ownRecordValue } from "../../lib/records";
 import { S } from "../../lib/strings";
 import { useSchedules } from "../../hooks/useSchedules";
 import { isTerminalScheduleRunStatus, type ScheduleRun } from "../../lib/schedules";
@@ -25,7 +26,7 @@ export function ScheduleRuns() {
   const { refreshHistory, refreshRun, cancelRun, deleteRun } = useSchedules();
   // Prefer the durable registry over the history snapshot: a live run's status
   // arrives by notice, and the history list is only re-read on demand.
-  const selected = activeRunId ? (runsById[activeRunId] ?? null) : null;
+  const selected = activeRunId ? (ownRecordValue(runsById, activeRunId) ?? null) : null;
 
   useEffect(() => {
     void refreshHistory();
@@ -87,8 +88,8 @@ function RunDetail({
   onDelete,
 }: {
   run: ScheduleRun;
-  onCancel(): void;
-  onDelete(): void;
+  onCancel: () => void;
+  onDelete: () => void;
 }) {
   const setActiveSession = useAppStore((s) => s.setActiveSession);
   const sessions = useAppStore((s) => s.sessions);

@@ -74,7 +74,9 @@ export function SchedulesWorkspace() {
           </nav>
         </div>
         <button
-          onClick={() => openRightPanel("ai")}
+          onClick={() => {
+          openRightPanel("ai");
+        }}
           title={S.schedules.close}
           aria-label={S.schedules.close}
           className="shrink-0 rounded-md p-1 text-text-muted hover:bg-bg-hover hover:text-text-secondary"
@@ -124,11 +126,13 @@ function ViewTab({
   value: SchedulesView;
   active: SchedulesView;
   badge?: boolean;
-  onChange(view: SchedulesView): void;
+  onChange: (view: SchedulesView) => void;
 }) {
   return (
     <button
-      onClick={() => onChange(value)}
+      onClick={() => {
+        onChange(value);
+      }}
       className={`relative flex items-center gap-1 rounded px-2 py-1 text-[10px] transition-colors ${
         active === value
           ? "bg-bg-hover text-text-primary"

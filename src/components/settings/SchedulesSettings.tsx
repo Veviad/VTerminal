@@ -27,8 +27,12 @@ export function SchedulesSettings() {
       return;
     }
     void schedulesList()
-      .then((actions) => setCount(actions.length))
-      .catch(() => setCount(null));
+      .then((actions) => {
+        setCount(actions.length);
+      })
+      .catch(() => {
+        setCount(null);
+      });
   }, [enabled]);
 
   const pruneOlderThan = async (days: number) => {

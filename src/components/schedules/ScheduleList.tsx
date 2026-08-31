@@ -118,11 +118,11 @@ function ActionDetail({
 }: {
   action: ScheduleAction;
   busy: string | null;
-  onEdit(): void;
-  onToggle(enabled: boolean): void;
-  onDuplicate(): void;
-  onDelete(): void;
-  onRunNow(): void;
+  onEdit: () => void;
+  onToggle: (enabled: boolean) => void;
+  onDuplicate: () => void;
+  onDelete: () => void;
+  onRunNow: () => void;
 }) {
   return (
     <div className="space-y-3">
@@ -212,7 +212,9 @@ function ActionDetail({
           {S.schedules.edit}
         </button>
         <button
-          onClick={() => onToggle(!action.enabled)}
+          onClick={() => {
+            onToggle(!action.enabled);
+          }}
           className={secondaryButton}
           disabled={busy === `enable:${action.id}`}
         >

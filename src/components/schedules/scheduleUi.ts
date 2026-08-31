@@ -63,18 +63,26 @@ export function formatDuration(ms: number | null | undefined): string {
   return remainder ? `${minutes} min ${remainder} s` : `${minutes} min`;
 }
 
-const WEEKDAY_SHORT: Record<ScheduleWeekday, string> = {
-  monday: "Mon",
-  tuesday: "Tue",
-  wednesday: "Wed",
-  thursday: "Thu",
-  friday: "Fri",
-  saturday: "Sat",
-  sunday: "Sun",
-};
-
+/** A `switch` rather than a record lookup, for the same reason the tone
+ *  functions below are: no `default` means a new weekday is a TypeScript error
+ *  rather than an `undefined` rendered into a chip. */
 export function weekdayShort(day: ScheduleWeekday): string {
-  return WEEKDAY_SHORT[day];
+  switch (day) {
+    case "monday":
+      return "Mon";
+    case "tuesday":
+      return "Tue";
+    case "wednesday":
+      return "Wed";
+    case "thursday":
+      return "Thu";
+    case "friday":
+      return "Fri";
+    case "saturday":
+      return "Sat";
+    case "sunday":
+      return "Sun";
+  }
 }
 
 /** The user's own week start, not a hard-coded Monday — the app is RTL-aware and
