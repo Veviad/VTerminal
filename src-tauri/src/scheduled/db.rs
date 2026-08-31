@@ -434,14 +434,16 @@ fn action_from_row(row: &Row<'_>, steps: Vec<ScheduledStep>) -> rusqlite::Result
             cwd: row.get("target_cwd")?,
         }
     };
-    let parse_enum = |value: String| -> String { value };
-    let execution_mode: ExecutionMode = parse_enum(row.get("execution_mode")?)
+    let execution_mode: ExecutionMode = row
+        .get::<_, String>("execution_mode")?
         .parse()
         .unwrap_or(ExecutionMode::Headless);
-    let permission_mode: PermissionMode = parse_enum(row.get("permission_mode")?)
+    let permission_mode: PermissionMode = row
+        .get::<_, String>("permission_mode")?
         .parse()
         .unwrap_or(PermissionMode::Ask);
-    let missed_run_policy: MissedRunPolicy = parse_enum(row.get("missed_run_policy")?)
+    let missed_run_policy: MissedRunPolicy = row
+        .get::<_, String>("missed_run_policy")?
         .parse()
         .unwrap_or(MissedRunPolicy::Skip);
     let last_status: Option<ScheduledRunStatus> = row

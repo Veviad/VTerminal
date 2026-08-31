@@ -486,6 +486,51 @@ async fn run_prompt_step(
         None => ExecTarget::Subprocess,
     };
     let request_id = format!("sched-{run_id}-{}", step.id);
+
+    // Run-LOCAL rendezvous state, deliberately not the app-managed ones. The
+    // consequence is the desirable one: `agent_set_permission_mode` answers "no
+    // active run" for a scheduled run, and `respond_to_approval` from the webview
+    // cannot approve something this run's policy already skipped.
+    let approvals = Arc::new(ApprovalState::default());
+    let skipped = Arc::new(AtomicU32::new(0));
+    let sink = auto_skip_sink(approvals.clone(), skipped.clone());
+
+    // MCP, on the same terms as every other surface. `prepare_mcp_context`
+    // returns `None` for an empty selection, so an action with no servers pays
+    // nothing — and the conversation id is the ACTION id, not the run id, so an
+    // hourly schedule reuses one warm session instead of paying a sandboxed
+    // stdio launch on every fire.
+    //
+    // Safe to offer because the gate is unchanged: `mcp/chat.rs` checks
+    // `grant_matches` before it registers anything, and `auto_skip_sink` denies
+    // an `McpToolProposal` the instant one appears. So a tool the user has
+    // pre-approved through the ordinary card works, and one they have not is
+    // refused at once rather than waiting out the MCP gate's own timeout.
+    let mcp_manager = app.state::<crate::mcp::client::McpManager>();
+    let mcp_approvals = app.state::<crate::mcp::approval::McpApprovalState>();
+    let mcp_context = match crate::agent::prepare_mcp_context(
+        app,
+        &mcp_manager,
+        &mcp_approvals,
+        &request_id,
+        &action.id,
+        &action.input.mcp_selection,
+        resolved.model,
+        &sink,
+    )
+    .await
+    {
+        Ok(context) => context,
+        Err(error) => {
+            // A server that cannot be reached fails THIS step, not the run: a
+            // later step may not need it at all.
+            return StepOutcome::failed(format!("the MCP servers could not be prepared: {error}"));
+        }
+    };
+    let mcp_tools = mcp_context
+        .as_ref()
+        .map(crate::mcp::chat::McpRunContext::tool_defs)
+        .unwrap_or_default();
     let config = AgentConfig {
         request_id: request_id.clone(),
         shell: shell_for(app),
@@ -505,9 +550,7 @@ async fn run_prompt_step(
         policy_scope_single: action.input.target.policy_scope(),
         policy_scope_remote: "remote:unknown".into(),
         doc_buckets,
-        // MCP is wired in a later step; an empty vector means no MCP tools are
-        // offered at all, which is the correct conservative default.
-        mcp_tools: Vec::new(),
+        mcp_tools,
         exec_target,
     };
 
@@ -538,11 +581,6 @@ async fn run_prompt_step(
         system_prompt.push_str(&format!("\n\n{}", crate::agent::prompts::AGENT_DOCS));
     }
 
-    // Run-LOCAL rendezvous state, deliberately not the app-managed ones. The
-    // consequence is the desirable one: `agent_set_permission_mode` answers "no
-    // active run" for a scheduled run, and `respond_to_approval` from the webview
-    // cannot approve something this run's policy already skipped.
-    let approvals = Arc::new(ApprovalState::default());
     let permissions = AgentPermissionState::default();
     let pty_exec = PtyExecState::default();
     let steers = SteerState::default();
@@ -555,9 +593,6 @@ async fn run_prompt_step(
         },
     );
     steers.register(&request_id);
-
-    let skipped = Arc::new(AtomicU32::new(0));
-    let sink = auto_skip_sink(approvals.clone(), skipped.clone());
 
     let outcome = crate::agent::run::run_agent(
         resolved.provider.as_ref(),
@@ -572,7 +607,7 @@ async fn run_prompt_step(
         &steers,
         Some(app),
         None,
-        None,
+        mcp_context.as_ref(),
         cancel,
         &sink,
     )

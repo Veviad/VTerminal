@@ -54,6 +54,22 @@ pub fn clamp_for_schedule(mode: PermissionMode) -> Result<PermissionMode, String
     }
 }
 
+/// Whether a mode auto-runs anything beyond a read.
+///
+/// `AutoSmart` belongs on the wrong side of this line and it is easy to miss:
+/// `policy_auto_runs` answers `read_only() || RuleDecision::Allow` for it, so a
+/// saved Allow rule makes a STATE-CHANGING command auto-run. Checking only
+/// `AutoAll` left a cap whose own message said "Use Auto (reads)" letting through
+/// the one mode between the two — which is exactly the coupling the attachment
+/// cap exists to prevent, since a bucket or an MCP result is attacker-
+/// controllable text and the commands it influences would never be reviewed.
+const fn exceeds_reads_only(mode: PermissionMode) -> bool {
+    matches!(
+        mode,
+        PermissionMode::AutoSmart | PermissionMode::AutoAll | PermissionMode::Full
+    )
+}
+
 /// Same rule as the frontend's `sanitizeCommand` and `ssh_hosts`' own check: an
 /// ESC could forge an OSC completion token and `\r` / `\n` would split one
 /// command into several. In tab mode these bytes are typed into a real PTY.
@@ -110,20 +126,20 @@ pub fn validate(
     // mode rather than trying to sanitise the text.
     let has_attachments =
         !input.doc_buckets.is_empty() || !input.mcp_selection.server_ids.is_empty();
-    if has_attachments && input.permission_mode == PermissionMode::AutoAll {
+    if has_attachments && exceeds_reads_only(input.permission_mode) {
         issues.push(ScheduledValidationIssue::blocking(
             "permission_mode",
-            "An action that searches knowledge buckets or calls MCP tools cannot also run every \
-             command unattended — retrieved text would effectively be authorizing commands. \
-             Use Auto (reads) with these attachments, or remove them.",
+            "An action that searches knowledge buckets or calls MCP tools cannot also run \
+             state-changing commands unattended — retrieved text would effectively be \
+             authorizing them. Use Auto (reads) with these attachments, or remove them.",
         ));
     }
 
-    if input.web_access && input.permission_mode == PermissionMode::AutoAll {
+    if input.web_access && exceeds_reads_only(input.permission_mode) {
         issues.push(ScheduledValidationIssue::advisory(
             "web_access",
-            "Web access plus Auto (all) means fetched pages can influence commands that run \
-             without review. Consider Auto (reads).",
+            "Web access plus a mode above Auto (reads) means fetched pages can influence \
+             commands that run without review. Consider Auto (reads).",
         ));
     }
 
@@ -636,23 +652,64 @@ mod tests {
     /// The coupling that matters most: untrusted text entering the loop AND
     /// unreviewed writes leaving it. Either alone is defensible.
     #[test]
-    fn attachments_cap_the_mode_below_auto_all() {
+    fn attachments_cap_the_mode_at_auto_read() {
         let mut input = base(ScheduledTarget::LocalShell { cwd: None });
         input.permission_mode = PermissionMode::AutoAll;
+        // Without attachments, Auto (all) is allowed.
         assert!(blocking(&validate(&input, None)).is_empty());
 
-        let mut with_bucket = input.clone();
-        with_bucket.doc_buckets = vec![KnowledgeBucketRef::Local {
-            bucket_id: "b1".into(),
-        }];
-        assert!(blocking(&validate(&with_bucket, None)).contains(&"permission_mode"));
-        // Auto (reads) with the same attachment is fine.
-        with_bucket.permission_mode = PermissionMode::AutoRead;
-        assert!(blocking(&validate(&with_bucket, None)).is_empty());
+        // Every mode above Auto (reads) is refused once anything untrusted can
+        // reach the loop. `AutoSmart` is the one that slipped through a check
+        // written as `== AutoAll`: it auto-runs whatever a saved Allow rule
+        // permits, including writes.
+        for mode in [
+            PermissionMode::AutoSmart,
+            PermissionMode::AutoAll,
+            PermissionMode::Full,
+        ] {
+            let mut with_bucket = input.clone();
+            with_bucket.permission_mode = mode;
+            with_bucket.doc_buckets = vec![KnowledgeBucketRef::Local {
+                bucket_id: "b1".into(),
+            }];
+            assert!(
+                blocking(&validate(&with_bucket, None)).contains(&"permission_mode"),
+                "{mode:?} must be refused when a bucket is attached"
+            );
 
-        let mut with_mcp = input.clone();
-        with_mcp.mcp_selection.server_ids = vec!["srv".into()];
-        assert!(blocking(&validate(&with_mcp, None)).contains(&"permission_mode"));
+            let mut with_mcp = input.clone();
+            with_mcp.permission_mode = mode;
+            with_mcp.mcp_selection.server_ids = vec!["srv".into()];
+            assert!(
+                blocking(&validate(&with_mcp, None)).contains(&"permission_mode"),
+                "{mode:?} must be refused when an MCP server is attached"
+            );
+        }
+
+        // At or below the cap, the same attachments are fine.
+        for mode in [PermissionMode::Ask, PermissionMode::AutoRead] {
+            let mut ok = input.clone();
+            ok.permission_mode = mode;
+            ok.doc_buckets = vec![KnowledgeBucketRef::Local {
+                bucket_id: "b1".into(),
+            }];
+            ok.mcp_selection.server_ids = vec!["srv".into()];
+            assert!(
+                blocking(&validate(&ok, None)).is_empty(),
+                "{mode:?} must be allowed with attachments"
+            );
+        }
+    }
+
+    /// The predicate the cap is built on, stated directly — the ladder's order is
+    /// what makes `AutoSmart` belong above the line.
+    #[test]
+    fn only_ask_and_auto_read_stay_within_reads_only() {
+        assert!(!exceeds_reads_only(PermissionMode::Ask));
+        assert!(!exceeds_reads_only(PermissionMode::AutoRead));
+        assert!(exceeds_reads_only(PermissionMode::AutoSmart));
+        assert!(exceeds_reads_only(PermissionMode::AutoAll));
+        assert!(exceeds_reads_only(PermissionMode::Full));
     }
 
     #[test]
