@@ -1,8 +1,10 @@
 !macro NSIS_HOOK_PREINSTALL
   Delete "$INSTDIR\vterminal-docs.exe"
-  Delete "$INSTDIR\llama.dll"
-  Delete "$INSTDIR\ggml.dll"
-  Delete "$INSTDIR\ggml-base.dll"
+  ; The app directory is installer-managed. Clear every previously staged core
+  ; DLL so feature-off upgrades and llama.cpp dependency changes cannot retain
+  ; an obsolete ABI beside the new executable.
+  Delete "$INSTDIR\llama*.dll"
+  Delete "$INSTDIR\ggml*.dll"
   Delete "$INSTDIR\llama-backends\*.dll"
   RMDir "$INSTDIR\llama-backends"
 !macroend
@@ -18,9 +20,8 @@
 
   ; Clear any local payload left by a same-user feature-on installation before
   ; either installing its replacement or deliberately downgrading feature-off.
-  Delete "$LOCALAPPDATA\Programs\VTerminal\bin\llama.dll"
-  Delete "$LOCALAPPDATA\Programs\VTerminal\bin\ggml.dll"
-  Delete "$LOCALAPPDATA\Programs\VTerminal\bin\ggml-base.dll"
+  Delete "$LOCALAPPDATA\Programs\VTerminal\bin\llama*.dll"
+  Delete "$LOCALAPPDATA\Programs\VTerminal\bin\ggml*.dll"
   Delete "$LOCALAPPDATA\Programs\VTerminal\bin\llama-backends\*.dll"
   RMDir "$LOCALAPPDATA\Programs\VTerminal\bin\llama-backends"
 
@@ -28,11 +29,15 @@
   ; pure-Rust/cloud binary, so skip this optional block when llama.dll is absent.
   IfFileExists "$INSTDIR\llama.dll" vterminal_install_local_runtime vterminal_install_path
 vterminal_install_local_runtime:
-  ; The companion imports these before Rust main(), so they must sit beside it.
+  ; The companion imports the complete CMake runtime before Rust main(), so all
+  ; staged root DLLs must sit beside it. The build validates required anchors
+  ; and smoke-tests this exact set in isolation before NSIS runs.
   ClearErrors
-  CopyFiles /SILENT "$INSTDIR\llama.dll" "$LOCALAPPDATA\Programs\VTerminal\bin\llama.dll"
-  CopyFiles /SILENT "$INSTDIR\ggml.dll" "$LOCALAPPDATA\Programs\VTerminal\bin\ggml.dll"
-  CopyFiles /SILENT "$INSTDIR\ggml-base.dll" "$LOCALAPPDATA\Programs\VTerminal\bin\ggml-base.dll"
+  CopyFiles /SILENT "$INSTDIR\llama*.dll" "$LOCALAPPDATA\Programs\VTerminal\bin"
+  IfErrors 0 +2
+    Abort "Could not install the VTerminal llama runtime."
+  ClearErrors
+  CopyFiles /SILENT "$INSTDIR\ggml*.dll" "$LOCALAPPDATA\Programs\VTerminal\bin"
   IfErrors 0 +2
     Abort "Could not install the VTerminal companion runtime."
 
@@ -56,9 +61,8 @@ vterminal_install_path:
     Abort "Could not remove the VTerminal companion directory from the user PATH (exit $0)."
   Delete "$LOCALAPPDATA\Programs\VTerminal\bin\llama-backends\*.dll"
   RMDir "$LOCALAPPDATA\Programs\VTerminal\bin\llama-backends"
-  Delete "$LOCALAPPDATA\Programs\VTerminal\bin\llama.dll"
-  Delete "$LOCALAPPDATA\Programs\VTerminal\bin\ggml.dll"
-  Delete "$LOCALAPPDATA\Programs\VTerminal\bin\ggml-base.dll"
+  Delete "$LOCALAPPDATA\Programs\VTerminal\bin\llama*.dll"
+  Delete "$LOCALAPPDATA\Programs\VTerminal\bin\ggml*.dll"
   Delete "$LOCALAPPDATA\Programs\VTerminal\bin\vterminal-docs.exe"
   RMDir "$LOCALAPPDATA\Programs\VTerminal\bin"
 !macroend

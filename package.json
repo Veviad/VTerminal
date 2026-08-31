@@ -16,7 +16,8 @@
     "build:windows:release": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-windows.ps1 -CreateUpdaterArtifacts",
     "build:windows:signed": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-windows.ps1 -CreateUpdaterArtifacts -RequireAuthenticode",
     "test": "vitest --run",
-    "test:site-release": "node --test scripts/site-release/release-data.node-test.mjs"
+    "test:site-release": "node --test scripts/site-release/release-data.node-test.mjs",
+    "test:windows-installer": "node --test scripts/windows-installer.node-test.mjs"
   },
   "dependencies": {
     "@tailwindcss/typography": "^0.5.19",
@@ -43,7 +44,7 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.2.4",
-    "@tauri-apps/cli": "^2.10.1",
+    "@tauri-apps/cli": "^2.11.4",
     "@testing-library/jest-dom": "^7.0.1",
     "@testing-library/react": "^16.3.3",
     "@types/react": "^19.0.0",

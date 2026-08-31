@@ -6,6 +6,7 @@
       "binaries/vterminal-mcp-relay": "vterminal-mcp-relay"
     },
     "windows": {
+      "allowDowngrades": false,
       "signCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ../scripts/sign-windows.ps1 %1",
       "webviewInstallMode": {
         "type": "downloadBootstrapper",
@@ -13,6 +14,12 @@
       },
       "nsis": {
         "installMode": "currentUser",
+        "languages": ["English", "German"],
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "headerImage": "windows/installer-header.bmp",
+        "uninstallerHeaderImage": "windows/installer-header.bmp",
+        "sidebarImage": "windows/installer-sidebar.bmp",
         "installerHooks": "./windows/installer-hooks.nsh"
       }
     }
