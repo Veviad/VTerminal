@@ -13,7 +13,7 @@ import { toggleAiPanel } from "../../lib/aiPanel";
 import { describeSshTarget } from "../../lib/ssh";
 import { S } from "../../lib/strings";
 import type { HistoryEntry, SshHost } from "../../lib/types";
-import { useRunbookStore } from "../../stores/runbookStore";
+import { openRightPanel } from "../../lib/rightPanel";
 import { shortcutFor, usesAlternateAction } from "../../lib/keymap";
 import { useChatStore } from "../../stores/chatStore";
 
@@ -172,7 +172,18 @@ export function CommandPalette() {
               section: "actions" as const,
               label: "Open Runbooks",
               keywords: "checklist automation security install infrastructure",
-              run: () => useRunbookStore.getState().setWorkspaceOpen(true),
+              run: () => openRightPanel("runbooks"),
+            },
+          ]
+        : []),
+      ...(live().schedulesEnabled
+        ? [
+            {
+              id: "act-schedules",
+              section: "actions" as const,
+              label: "Open Scheduled Actions",
+              keywords: "schedule cron recurring nightly timer automation unattended",
+              run: () => openRightPanel("schedules"),
             },
           ]
         : []),

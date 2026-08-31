@@ -1,4 +1,13 @@
-import { Settings, Cpu, History, ListChecks, MessageCircle, ScanText, SquareTerminal } from "lucide-react";
+import {
+  CalendarClock,
+  Cpu,
+  History,
+  ListChecks,
+  MessageCircle,
+  ScanText,
+  Settings,
+  SquareTerminal,
+} from "lucide-react";
 import { useState } from "react";
 import { useAppStore } from "../../stores/appStore";
 import { ModelMenu } from "./ModelMenu";
@@ -7,6 +16,8 @@ import { TabStrip } from "./TabStrip";
 import { S } from "../../lib/strings";
 import { RunbookStatusIndicator } from "../runbooks";
 import { selectLiveRunbookRun, useRunbookStore } from "../../stores/runbookStore";
+import { selectLiveScheduleRun, useScheduleStore } from "../../stores/scheduleStore";
+import { toggleRightPanel, useRightPanel } from "../../lib/rightPanel";
 import { useChatStore } from "../../stores/chatStore";
 import { getTerm } from "../../lib/termRegistry";
 import { Dropdown } from "../ui/Dropdown";
@@ -34,11 +45,18 @@ export function Header() {
   const readerKind = useAppStore((s) => s.imageReader().kind);
   const readerLabel = useAppStore((s) => s.imageReader().label);
   const runbooksEnabled = useAppStore((s) => s.runbooksEnabled);
-  const runbooksOpen = useRunbookStore((s) => s.workspaceOpen);
   const activeRun = useRunbookStore((s) => s.activeRun);
   const runsById = useRunbookStore((s) => s.runsById);
-  const setRunbooksOpen = useRunbookStore((s) => s.setWorkspaceOpen);
   const visibleRun = selectLiveRunbookRun(activeRun, runsById);
+  const schedulesEnabled = useAppStore((s) => s.schedulesEnabled);
+  const scheduleRuns = useScheduleStore((s) => s.runsById);
+  const activeScheduleRunId = useScheduleStore((s) => s.activeRunId);
+  const liveScheduleRun = selectLiveScheduleRun(activeScheduleRunId, scheduleRuns);
+  // One resolver owns which aside is mounted, so "both open" is neither
+  // representable in practice nor decided by render order.
+  const rightPanel = useRightPanel();
+  const runbooksOpen = rightPanel === "runbooks";
+  const schedulesOpen = rightPanel === "schedules";
   const workspaceMode = useChatStore((s) => s.workspaceMode);
   const switchWorkspace = (mode: "terminal" | "chat") => {
     void useChatStore.getState().setWorkspaceMode(mode);
@@ -131,10 +149,7 @@ export function Header() {
           <RunbookStatusIndicator />
         ) : runbooksEnabled ? (
           <button
-            onClick={() => {
-              setSettingsOpen(false);
-              setRunbooksOpen(!runbooksOpen);
-            }}
+            onClick={() => toggleRightPanel("runbooks")}
             className={`rounded-lg p-1.5 transition-colors duration-150 ${
               runbooksOpen
                 ? "bg-accent/10 text-accent"
@@ -146,6 +161,39 @@ export function Header() {
             <ListChecks size={16} />
           </button>
         ) : null}
+        {/* Scheduled Actions. Deliberately NOT the button-becomes-a-pill swap
+            `RunbookStatusIndicator` does: a runbook run follows a click the user
+            just made and they are already looking here, but a scheduled run
+            fires on a timer — reflowing this cluster under their cursor with no
+            gesture is a misclick hazard. A 6px dot costs no layout. */}
+        {schedulesEnabled && (
+          <button
+            onClick={() => toggleRightPanel("schedules")}
+            className={`relative rounded-lg p-1.5 transition-colors duration-150 ${
+              schedulesOpen
+                ? "bg-accent/10 text-accent"
+                : liveScheduleRun
+                  ? "text-accent hover:bg-bg-hover"
+                  : "text-text-muted hover:bg-bg-hover hover:text-text-secondary"
+            }`}
+            title={
+              liveScheduleRun
+                ? `${S.schedules.title} — ${liveScheduleRun.action_name} is running`
+                : schedulesOpen
+                  ? S.schedules.close
+                  : S.schedules.open
+            }
+            aria-label={schedulesOpen ? S.schedules.close : S.schedules.open}
+          >
+            <CalendarClock size={16} />
+            {liveScheduleRun && (
+              <span
+                className="absolute -end-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-accent"
+                aria-hidden
+              />
+            )}
+          </button>
+        )}
         {/* Settings stays the trailing item — it is the one control people hit by
             muscle memory rather than by looking. Uses the neutral active
             treatment, not the accent one: accent means "the AI surface is live",

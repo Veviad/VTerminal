@@ -191,6 +191,13 @@ export async function connectToHost(
   target: ConnectTarget,
   createSession: (spec?: LaunchSpec) => Promise<string>,
   currentSessionId?: string,
+  /** Extra launch options for the `"new-tab"` path, merged into the one
+   *  `createSession` call. Added for scheduled runs, which need an UNFOCUSED tab
+   *  with seeded dimensions — a background pane never fits, so without `dims`
+   *  every command in the run would see 80×24 and truncate. Reimplementing the
+   *  connect in the caller would fork `buildSshCommand` handling and lose
+   *  password autofill, so it is widened here instead. */
+  spec?: Pick<LaunchSpec, "activate" | "dims" | "userTitle">,
 ): Promise<string | null> {
   const gated = sanitizeCommand(buildSshCommand(hostRow));
   if (!gated.ok) {
@@ -209,6 +216,7 @@ export async function connectToHost(
     // createSession types the command itself once the first prompt lands, so
     // the pending note must be registered before it can possibly fire.
     const sessionId = await createSession({
+      ...spec,
       hostId: hostRow.id,
       title: hostRow.label,
       initialCommand: gated.command,

@@ -18,6 +18,7 @@ mod pty;
 #[cfg(target_os = "macos")]
 mod restart;
 pub mod runbooks;
+pub mod scheduled;
 mod ssh_config;
 #[cfg(target_os = "windows")]
 mod windows_fs;
@@ -121,6 +122,9 @@ pub fn run() {
             app.manage(std::sync::Arc::new(
                 commands::runbooks::RunbookCommandState::new(app_data.clone()),
             ));
+            app.manage(std::sync::Arc::new(
+                scheduled::scheduler::SchedulerState::default(),
+            ));
             #[cfg(feature = "local-llm")]
             {
                 if let Ok(resources) = app.path().resource_dir() {
@@ -154,6 +158,10 @@ pub fn run() {
                 log::warn!("shell integration setup failed: {e}");
             }
             commands::mcp::auto_start_configured_servers(app.handle());
+            // No-op unless `scheduled_actions_enabled` is on. It never fires an
+            // occurrence on the first sight of a rule, and catch-up additionally
+            // waits for the app to settle — nothing auto-runs at launch.
+            scheduled::scheduler::start_if_enabled(app.handle());
             Ok(())
         })
         .on_menu_event(|app, event| {
@@ -341,6 +349,27 @@ pub fn run() {
             commands::runbooks::runbooks_evidence_read,
             commands::runbooks::runbooks_export,
             commands::runbooks::runbooks_export_package,
+            // scheduled actions (experimental; every command gated on
+            // scheduled_actions_enabled)
+            commands::scheduled::scheduled_actions_list,
+            commands::scheduled::scheduled_action_get,
+            commands::scheduled::scheduled_action_validate,
+            commands::scheduled::scheduled_action_preview,
+            commands::scheduled::scheduled_action_create,
+            commands::scheduled::scheduled_action_update,
+            commands::scheduled::scheduled_action_set_enabled,
+            commands::scheduled::scheduled_action_delete,
+            commands::scheduled::scheduled_action_run_now,
+            commands::scheduled::scheduled_run_cancel,
+            commands::scheduled::scheduled_runs_list,
+            commands::scheduled::scheduled_run_get,
+            commands::scheduled::scheduled_run_delete,
+            commands::scheduled::scheduled_runs_prune,
+            commands::scheduled::scheduled_run_attach,
+            commands::scheduled::scheduled_step_begin,
+            commands::scheduled::scheduled_step_finish,
+            commands::scheduled::scheduled_run_finish,
+            commands::scheduled::scheduled_run_is_active,
             // vision sidecar
             commands::vision::vision_catalog,
             commands::vision::vision_download,

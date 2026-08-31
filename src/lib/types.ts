@@ -1279,6 +1279,15 @@ export interface Settings {
    *  Spelled out rather than imported: this file is deliberately import-free.
    *  `EvidenceRecordingPolicy` in lib/runbooks.ts is the same union. */
   runbooks_output_recording: "none" | "runbook" | "all";
+  /** Scheduled Actions, EXPERIMENTAL and off by default. Rust gates every
+   *  `scheduled_*` command, so this is the capability gate; turning it off also
+   *  cancels whatever is in flight rather than merely hiding the panel. */
+  scheduled_actions_enabled: boolean;
+  /** Tab execution for scheduled runs, off by default and gated separately from
+   *  the feature itself. It types into a real PTY with a pre-armed permission
+   *  mode, and the webview timers that drive it are throttled while the window
+   *  is backgrounded — so it is for watching a run, not for unattended work. */
+  scheduled_tab_execution_enabled: boolean;
   log_level: string;
 }
 
@@ -1699,6 +1708,8 @@ export interface SettingsPatch {
   // Loose on the patch side, as `cursor_style` is: Rust parses and rejects an
   // unknown value rather than trusting the caller's type.
   runbooks_output_recording: string;
+  scheduled_actions_enabled: boolean;
+  scheduled_tab_execution_enabled: boolean;
   log_level: string;
 }
 

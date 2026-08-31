@@ -95,6 +95,7 @@ describe("Statistics settings", () => {
       S.settings.tabs.mcp,
       S.settings.tabs.docs,
       S.settings.tabs.runbooks,
+      S.settings.tabs.schedules,
       S.settings.tabs.appearance,
       S.settings.tabs.terminal,
       S.settings.tabs.hosts,

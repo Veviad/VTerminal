@@ -381,6 +381,7 @@ export const S = {
       docs: "Knowledge",
       updates: "Updates",
       runbooks: "Runbooks",
+      schedules: "Schedules",
       appearance: "Appearance",
       terminal: "Terminal",
       hosts: "SSH hosts",
@@ -812,6 +813,25 @@ export const S = {
       recordingRetention:
         "Recorded output is kept until the run is deleted. Deleting a run removes its artifacts from disk.",
     },
+    schedules: {
+      title: "Scheduled Actions",
+      intro:
+        "Run a saved sequence of commands and AI prompts on a schedule, against a local shell or a saved SSH host. Every run keeps a per-step record of what ran, what was skipped and why.",
+      enable: "Enable Scheduled Actions",
+      enableHint:
+        "Experimental. This is the one feature that runs commands with nobody watching, from permission you gave when you saved the action rather than at the moment it runs. Actions fire only while VTerminal is open; nothing runs at launch.",
+      disabledNotice:
+        "While disabled, Rust refuses every scheduled command, the scheduler stops, and any run in flight is cancelled.",
+      enabledNotice:
+        "An action authorizes nothing until you arm a permission mode on it. Editing its steps, its target or its attachments resets that mode, so an old approval can never cover new commands.",
+      tabExecution: "Allow runs in a terminal tab",
+      tabExecutionHint:
+        "Off by default, and separate from the switch above. A tab run types into a real terminal you can watch — but the browser timers that drive it are throttled while the window is minimised, which is exactly when a schedule fires. Headless is the mode for genuinely unattended work.",
+      retention: "Keep run history for",
+      retentionHint:
+        "Older finished runs are removed. In-flight runs are never pruned.",
+      days: (n: number) => (n === 1 ? "1 day" : `${n} days`),
+    },
     about: {
       version: "Version",
       build: "Build",
@@ -826,6 +846,121 @@ export const S = {
       licenseNotice:
         "VTerminal is free software. You may redistribute and modify it under GPLv3. There is no warranty, to the extent permitted by law.",
     },
+  },
+  schedules: {
+    title: "Scheduled Actions",
+    open: "Open Scheduled Actions",
+    close: "Close Scheduled Actions",
+    views: { list: "Actions", editor: "Editor", runs: "Runs" },
+    empty: "No scheduled actions yet",
+    emptyHint: "An action runs a saved sequence of commands and prompts on a schedule.",
+    newAction: "New action",
+    edit: "Edit",
+    duplicate: "Duplicate",
+    remove: "Delete",
+    runNow: "Run now",
+    cancel: "Cancel run",
+    save: "Save",
+    discard: "Discard",
+    enabled: "Enabled",
+    disabled: "Disabled",
+    enable: "Enable",
+    disable: "Disable",
+    nextRun: "Next run",
+    neverRuns: "Never — this rule has no next occurrence",
+    notScheduled: "Disabled",
+    lastRun: "Last run",
+    noRunsYet: "Has not run yet",
+    // The honest limitation, in the UI rather than a code comment.
+    executionMode: "Where it runs",
+    executionHeadless: "In the background",
+    executionTab: "In a terminal tab",
+    executionHint:
+      "Background runs need no terminal and keep going while the window is minimised. A tab run types into a real terminal you can watch, but the timers driving it are throttled when VTerminal is not in front — which is usually when a schedule fires.",
+    tabExecutionOff:
+      "Tab runs are switched off. Enable them in Settings → Schedules, or leave this action in the background.",
+    target: "Target",
+    targetLocal: "Local shell",
+    targetHost: "Saved SSH host",
+    targetCwd: "Working directory",
+    targetCwdHint: "Absolute path. Leave empty for the shell's own default.",
+    targetCommandPreview: "This is the command that will be typed:",
+    permission: "Commands the AI proposes",
+    permissionHint:
+      "This is a standing authorization: it applies at 03:00 with nobody watching. Anything it does not cover is skipped immediately and recorded, never run silently.",
+    permissionReArm:
+      "Saving these changes re-arms the permission mode, because the steps it was granted for have changed.",
+    permissionOptions: {
+      ask: "Nothing — report only",
+      auto_read: "Reads only",
+      auto_smart: "Reads, plus commands your saved rules allow",
+      auto_all: "Everything except privileged and unreviewable commands",
+    },
+    permissionDescriptions: {
+      ask: "Every proposed command is skipped and recorded. The run becomes a dry report of what the AI wanted to do.",
+      auto_read:
+        "Commands that only read run automatically. Anything that changes state is skipped and recorded.",
+      auto_smart:
+        "Reads, plus anything a rule you saved in Settings → Agent explicitly allows for this target.",
+      auto_all:
+        "Everything except privileged commands, commands whose real behaviour cannot be determined, and reads that could reveal secrets. Those are always skipped.",
+    },
+    recurrence: "Runs",
+    recurrenceOptions: {
+      interval: "Every",
+      daily: "Daily",
+      weekly: "Weekly",
+      once: "Once",
+    },
+    everyMinutes: "minutes",
+    everyHours: "hours",
+    atTime: "at",
+    nextThree: "Next occurrences",
+    previewLabel: "Preview — computed from the unsaved rule",
+    missedRuns: "If the app was closed when it was due",
+    missedSkip: "Skip it",
+    missedCatchUp: "Run it once, shortly after launch",
+    missedHint:
+      "A skipped occurrence is still recorded, so the history shows the gap. A catch-up waits until the app has settled and runs at most once, however many were missed.",
+    steps: "Steps",
+    addCommand: "Command",
+    addPrompt: "Prompt",
+    stepCommand: "Command",
+    stepPrompt: "Prompt",
+    stepCommandPlaceholder: "df -h",
+    stepPromptPlaceholder: "Summarise anything unusual in the disk usage above.",
+    stepContinue: "Carry on if this step fails",
+    moveUp: "Move up",
+    moveDown: "Move down",
+    removeStep: "Remove step",
+    advanced: "Limits",
+    maxIterations: "Model steps per prompt",
+    commandTimeout: "Command timeout (seconds)",
+    maxRunSecs: "Whole-run budget (seconds)",
+    webAccess: "Allow web access during this action",
+    webAccessHint:
+      "Off by default and independent of the global setting, which can only narrow it. Under a schedule, a fetched page can influence commands nobody reviews.",
+    closeTabWhenDone: "Close the tab when the run finishes",
+    context: "Context",
+    runsTitle: "Runs",
+    runsEmpty: "No runs recorded yet",
+    runTrigger: { schedule: "On schedule", catch_up: "Caught up", manual: "Run by you" },
+    skipped: "Skipped",
+    commandsSkipped: (n: number) =>
+      n === 1 ? "1 command skipped" : `${n} commands skipped`,
+    commandsBlocked: (n: number) =>
+      n === 1 ? "1 command blocked by a rule" : `${n} commands blocked by a rule`,
+    outputTruncated: "Output truncated to the last 8 KiB",
+    outputWithheld: "Output withheld — this step read something sensitive",
+    revealTab: "Reveal tab",
+    overdue: (n: number) =>
+      n === 1
+        ? "1 action was due while VTerminal was closed"
+        : `${n} actions were due while VTerminal was closed`,
+    unknownStep:
+      "This step was dispatched but never reported back — the app stopped before it finished. It may or may not have run.",
+    pausedStep:
+      "The AI reached its step limit and paused. Nothing continues a paused run on its own; open it in a terminal to carry on.",
   },
   statusBar: {
     noModel: "no model",

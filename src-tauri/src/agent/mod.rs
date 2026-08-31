@@ -64,6 +64,43 @@ pub enum PermissionMode {
     Full,
 }
 
+impl PermissionMode {
+    /// The same spelling serde puts on the wire, spelled a second time so a
+    /// scheduled action can round-trip a mode through a SQLite CHECK constraint.
+    /// `permission_mode_as_str_matches_its_serde_spelling` pins the two together
+    /// — the guardrail `ProviderId` earned the hard way.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::AutoRead => "auto_read",
+            Self::AutoSmart => "auto_smart",
+            Self::AutoAll => "auto_all",
+            Self::Full => "full",
+        }
+    }
+}
+
+impl std::fmt::Display for PermissionMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for PermissionMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "ask" => Ok(Self::Ask),
+            "auto_read" => Ok(Self::AutoRead),
+            "auto_smart" => Ok(Self::AutoSmart),
+            "auto_all" => Ok(Self::AutoAll),
+            "full" => Ok(Self::Full),
+            other => Err(format!("unknown permission mode: {other}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Deserialize)]
 pub struct AgentPermissionModes {
     #[serde(default)]
@@ -673,6 +710,27 @@ mod steer_tests {
         assert!(!state.has_pending("req-1"));
         // Still registered, so the run can be steered again next round.
         assert!(state.push("req-1", "s2".into(), "again".into()).is_ok());
+    }
+
+    /// `PermissionMode::as_str` namespaces a scheduled action's SQLite CHECK
+    /// value while serde spells the same enum for the frontend. Two spellings of
+    /// one name is precisely the `ProviderId::OpenAi` bug, so assert they agree
+    /// for every variant rather than trusting that they will stay in step.
+    #[test]
+    fn permission_mode_as_str_matches_its_serde_spelling() {
+        for mode in [
+            PermissionMode::Ask,
+            PermissionMode::AutoRead,
+            PermissionMode::AutoSmart,
+            PermissionMode::AutoAll,
+            PermissionMode::Full,
+        ] {
+            let wire = serde_json::to_string(&mode).unwrap();
+            assert_eq!(wire, format!("\"{}\"", mode.as_str()), "{mode:?}");
+            assert_eq!(mode.as_str().parse::<PermissionMode>().unwrap(), mode);
+        }
+        assert!("auto-all".parse::<PermissionMode>().is_err());
+        assert!("AutoAll".parse::<PermissionMode>().is_err());
     }
 
     #[test]

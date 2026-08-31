@@ -437,7 +437,25 @@ pub fn ssh_hosts_delete(
 ) -> Result<(), String> {
     let host = {
         let conn = db.0.lock().map_err(|_| "db poisoned")?;
-        queries::get_ssh_host(&conn, &id)?.ok_or_else(|| format!("no ssh host {id}"))?
+        let host = queries::get_ssh_host(&conn, &id)?.ok_or_else(|| format!("no ssh host {id}"))?;
+        // `scheduled_actions.target_host_id` is ON DELETE RESTRICT, because a
+        // scheduled action is a persisted authorization bound to one host
+        // identity and a dangling binding is a silently broken row. Name the
+        // blocking actions here rather than letting the foreign key surface as a
+        // raw SQLite error — and check BEFORE deleting the vault entry, which no
+        // rollback could restore.
+        let blocking =
+            crate::commands::scheduled::blocking_actions_for_host(&conn, &id).unwrap_or_default();
+        if !blocking.is_empty() {
+            return Err(format!(
+                "{} scheduled action{} target this host: {}. Retarget or delete {} first.",
+                blocking.len(),
+                if blocking.len() == 1 { "" } else { "s" },
+                blocking.join(", "),
+                if blocking.len() == 1 { "it" } else { "them" },
+            ));
+        }
+        host
     };
     if host.has_password {
         crate::credentials::state(&app).delete(&saved_host_credential_id(&host))?;

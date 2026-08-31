@@ -5,9 +5,16 @@
 //! compatible and add a database migration before removing a value.
 
 use serde::{Deserialize, Serialize};
-use std::fmt;
-use std::str::FromStr;
 
+/// Pair a Rust variant with the ONE string that is simultaneously its serde
+/// spelling, its SQLite CHECK value and its `as_str()`.
+///
+/// Exported because `crate::scheduled` needs the same guarantee and a second
+/// copy of the macro would be a second place for a literal to drift — which is
+/// exactly how `ProviderId::OpenAi` shipped as `"open_ai"` against a frontend
+/// that said `"openai"`. `::std::fmt` and `::std::str::FromStr` are written out
+/// in full so the macro does not depend on what the calling module imported.
+#[macro_export]
 macro_rules! string_enum {
     (
         $(#[$meta:meta])*
@@ -35,13 +42,13 @@ macro_rules! string_enum {
             }
         }
 
-        impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        impl ::std::fmt::Display for $name {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
                 f.write_str(self.as_str())
             }
         }
 
-        impl FromStr for $name {
+        impl ::std::str::FromStr for $name {
             type Err = String;
 
             fn from_str(value: &str) -> Result<Self, Self::Err> {

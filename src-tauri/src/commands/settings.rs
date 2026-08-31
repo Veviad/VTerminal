@@ -142,6 +142,17 @@ pub fn get_settings(app: tauri::AppHandle<Wry>) -> Result<Value, String> {
         // may never drop below it. `runbook` defers to the package and is the
         // default because it reproduces the pre-policy behaviour exactly.
         "runbooks_output_recording": get("runbooks_output_recording", json!("runbook")),
+        // Scheduled Actions are experimental and are the ONE feature that runs
+        // model-proposed commands with nobody watching, from an authorization the
+        // user gave earlier rather than in the moment. Keep the backend
+        // unreachable until they opt in; every `scheduled_*` command enforces it,
+        // and turning it off cancels whatever is in flight.
+        "scheduled_actions_enabled": get("scheduled_actions_enabled", json!(false)),
+        // Tab execution needs its own switch rather than riding the feature flag:
+        // it types into a real PTY with a pre-armed permission mode, and the
+        // webview timers that drive it are throttled while the window is
+        // backgrounded — so it is for watching a run, not for unattended work.
+        "scheduled_tab_execution_enabled": get("scheduled_tab_execution_enabled", json!(false)),
         "log_level": get("log_level", json!("info")),
     }))
 }
@@ -223,10 +234,13 @@ pub fn save_settings(
     docs_enabled: Option<bool>,
     runbooks_enabled: Option<bool>,
     runbooks_output_recording: Option<String>,
+    scheduled_actions_enabled: Option<bool>,
+    scheduled_tab_execution_enabled: Option<bool>,
     log_level: Option<String>,
 ) -> Result<(), String> {
     let store = app.store(STORE_NAME).map_err(|e| e.to_string())?;
     let runbooks_gate_change = runbooks_enabled;
+    let scheduled_gate_change = scheduled_actions_enabled;
     let docs_gate_enabled = docs_enabled.is_some_and(|next| {
         next && !store
             .get("docs_enabled")
@@ -448,6 +462,12 @@ pub fn save_settings(
         v.parse::<crate::runbooks::state::EvidenceRecordingPolicy>()?;
         store.set("runbooks_output_recording", json!(v));
     }
+    if let Some(v) = scheduled_actions_enabled {
+        store.set("scheduled_actions_enabled", json!(v));
+    }
+    if let Some(v) = scheduled_tab_execution_enabled {
+        store.set("scheduled_tab_execution_enabled", json!(v));
+    }
     if let Some(v) = log_level {
         store.set("log_level", json!(v));
     }
@@ -462,6 +482,24 @@ pub fn save_settings(
             } else {
                 command_state.cancellations.cancel_all();
                 command_state.pty.cancel_all();
+            }
+        }
+    }
+    if let Some(v) = scheduled_gate_change {
+        // Turning the feature off must DISARM, not merely hide: a disabled
+        // feature whose scheduler task is still ticking, and whose in-flight run
+        // is still typing commands, is worse than either state. The loop notices
+        // the gate on its next pass and returns.
+        if let Some(state) = crate::scheduled::scheduler::state(&app) {
+            if v {
+                crate::scheduled::scheduler::start_if_enabled(&app);
+            } else {
+                for run_id in state.cancel_all() {
+                    log::info!(
+                        "scheduled actions: cancelling {run_id} — the feature was switched off"
+                    );
+                }
+                state.wake();
             }
         }
     }

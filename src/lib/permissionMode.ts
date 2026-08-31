@@ -5,6 +5,16 @@
  * tab always starts at `ask`, which is the same safety property the boolean
  * `autoAccept` this replaced was guarding.
  *
+ * Scheduled Actions widen that in exactly one place, and the rule is worth
+ * stating precisely because the old sentence read as absolute. A fresh USER tab
+ * still starts at `ask`, and nothing persists a mode for an interactive session.
+ * A schedule-owned session is SEEDED from an authorization the user gave when
+ * they saved the action — bound to that action's target, steps and attachments,
+ * re-armed whenever any of those change, capped below `full`, and reset back to
+ * `ask` the moment the run ends so a leftover tab cannot hand its mode to the
+ * user's own next turn. See `src-tauri/src/scheduled/mod.rs` for the full set of
+ * bounds, all of which are enforced in Rust.
+ *
  * The backend owns classification and dispatch. The frontend stores the chosen
  * mode for the session, sends it to the active run, and renders explanations.
  * It never infers approval from proposal fields. Explicitly selecting Full may

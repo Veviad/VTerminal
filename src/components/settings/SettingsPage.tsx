@@ -8,6 +8,7 @@ import { AgentSection } from "./AgentSection";
 import { InstructionsSection } from "./InstructionsSection";
 import { DocsSettings } from "./DocsSettings";
 import { RunbooksSettings } from "./RunbooksSettings";
+import { SchedulesSettings } from "./SchedulesSettings";
 import { SshHostsSection } from "./SshHostsSection";
 import { UpdatesSection } from "./UpdatesSection";
 import { McpSettings } from "./McpSettings";
@@ -27,6 +28,7 @@ const TABS: { id: SettingsTab; label: string }[] = [
   { id: "mcp", label: S.settings.tabs.mcp },
   { id: "docs", label: S.settings.tabs.docs },
   { id: "runbooks", label: S.settings.tabs.runbooks },
+  { id: "schedules", label: S.settings.tabs.schedules },
   { id: "appearance", label: S.settings.tabs.appearance },
   { id: "terminal", label: S.settings.tabs.terminal },
   { id: "hosts", label: S.settings.tabs.hosts },
@@ -80,6 +82,7 @@ export function SettingsPage() {
             {tab === "mcp" && <McpSettings />}
             {tab === "docs" && <DocsSettings />}
             {tab === "runbooks" && <RunbooksSettings />}
+            {tab === "schedules" && <SchedulesSettings />}
             {tab === "appearance" && <AppearanceSection />}
             {tab === "terminal" && <TerminalSection />}
             {tab === "hosts" && <SshHostsSection />}

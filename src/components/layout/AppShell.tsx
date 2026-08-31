@@ -12,7 +12,9 @@ import { S } from "../../lib/strings";
 import { Kbd } from "../ui/Kbd";
 import { shortcutFor } from "../../lib/keymap";
 import { RunbooksWorkspace } from "../runbooks";
-import { useRunbookStore } from "../../stores/runbookStore";
+import { useRightPanel } from "../../lib/rightPanel";
+import { SchedulesWorkspace } from "../schedules";
+import { useScheduledActions } from "../../hooks/useScheduledActions";
 import { resolveAiOwner, sidecarForSession } from "../../lib/sidecar";
 import { SidecarWorkspace } from "../sidecar/SidecarWorkspace";
 import { ChatWorkspace } from "../chat/ChatWorkspace";
@@ -26,10 +28,13 @@ export function AppShell() {
   const paletteOpen = useAppStore((s) => s.paletteOpen);
   const sessionBrowserOpen = useAppStore((s) => s.sessionBrowserOpen);
   const settingsOpen = useAppStore((s) => s.settingsOpen);
-  const runbooksEnabled = useAppStore((s) => s.runbooksEnabled);
-  const runbooksOpen = useRunbookStore((s) => s.workspaceOpen);
   const workspaceMode = useChatStore((s) => s.workspaceMode);
+  const rightPanel = useRightPanel();
   useGlobalShortcuts();
+  // Mounted unconditionally and gated internally. Runbooks can initialise on
+  // panel mount because its runs are user-started; a scheduled action fires with
+  // the panel closed, so its driver cannot live inside the panel.
+  useScheduledActions();
   const sidecar = activeSessionId ? sidecarForSession(sidecars, activeSessionId) : null;
   const aiSessionId = activeSessionId ? resolveAiOwner(sidecars, activeSessionId) : null;
   const linkedIds = sidecar
@@ -54,11 +59,16 @@ export function AppShell() {
             {sidecar && <SidecarWorkspace binding={sidecar} />}
             {sessions.length === 0 && <EmptyState />}
           </main>
-          {settingsLoaded && runbooksEnabled && runbooksOpen ? (
-            <RunbooksWorkspace sessionId={activeSessionId} />
-          ) : (
-            settingsLoaded && <AiPanel sessionId={aiSessionId} />
-          )}
+          {settingsLoaded &&
+            (rightPanel === "runbooks" ? (
+              <RunbooksWorkspace sessionId={activeSessionId} />
+            ) : rightPanel === "schedules" ? (
+              // No `sessionId`: a scheduled target is a local shell or a saved
+              // host, never "the tab that happens to be active".
+              <SchedulesWorkspace />
+            ) : (
+              <AiPanel sessionId={aiSessionId} />
+            ))}
         </div>
         <div
           className="absolute inset-0"
