@@ -2,17 +2,11 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import path from "node:path";
 
-const repository = fileURLToPath(new URL("../", import.meta.url));
-const tauriDirectory = path.join(repository, "src-tauri");
+process.chdir(fileURLToPath(new URL("../", import.meta.url)));
+const verifier = await readFile("scripts/verify-windows-installer.ps1", "utf8");
 
-async function json(relativePath) {
-  return JSON.parse(await readFile(path.join(repository, relativePath), "utf8"));
-}
-
-async function bitmap(relativePath, expectedWidth, expectedHeight) {
-  const bytes = await readFile(path.join(tauriDirectory, relativePath));
+function bitmap(relativePath, bytes, expectedWidth, expectedHeight) {
   assert.equal(bytes.toString("ascii", 0, 2), "BM", `${relativePath} must be a BMP`);
   assert.equal(bytes.readUInt32LE(14), 40, `${relativePath} must use the Windows 3.x BMP header`);
   assert.equal(bytes.readInt32LE(18), expectedWidth, `${relativePath} has the wrong width`);
@@ -23,8 +17,8 @@ async function bitmap(relativePath, expectedWidth, expectedHeight) {
 }
 
 test("NSIS uses the Veviad icon and branded wizard artwork", async () => {
-  const base = await json("src-tauri/tauri.conf.json");
-  const windows = await json("src-tauri/tauri.windows.conf.json");
+  const base = JSON.parse(await readFile("src-tauri/tauri.conf.json", "utf8"));
+  const windows = JSON.parse(await readFile("src-tauri/tauri.windows.conf.json", "utf8"));
   const configuration = windows.bundle.windows;
   const nsis = configuration.nsis;
 
@@ -37,12 +31,22 @@ test("NSIS uses the Veviad icon and branded wizard artwork", async () => {
   assert.equal(nsis.sidebarImage, "windows/installer-sidebar.bmp");
   assert.ok(base.bundle.icon.includes(nsis.installerIcon));
 
-  await bitmap(nsis.headerImage, 150, 57);
-  await bitmap(nsis.sidebarImage, 164, 314);
+  bitmap(
+    nsis.headerImage,
+    await readFile("src-tauri/windows/installer-header.bmp"),
+    150,
+    57,
+  );
+  bitmap(
+    nsis.sidebarImage,
+    await readFile("src-tauri/windows/installer-sidebar.bmp"),
+    164,
+    314,
+  );
 });
 
 test("the Windows icon contains every required shell size", async () => {
-  const bytes = await readFile(path.join(tauriDirectory, "icons/icon.ico"));
+  const bytes = await readFile("src-tauri/icons/icon.ico");
   assert.equal(bytes.readUInt16LE(0), 0, "ICO reserved field must be zero");
   assert.equal(bytes.readUInt16LE(2), 1, "ICO must contain icons");
   const count = bytes.readUInt16LE(4);
@@ -50,8 +54,8 @@ test("the Windows icon contains every required shell size", async () => {
 
   for (let index = 0; index < count; index += 1) {
     const entry = 6 + index * 16;
-    const width = bytes[entry] || 256;
-    const height = bytes[entry + 1] || 256;
+    const width = bytes.readUInt8(entry) || 256;
+    const height = bytes.readUInt8(entry + 1) || 256;
     const length = bytes.readUInt32LE(entry + 8);
     const offset = bytes.readUInt32LE(entry + 12);
     assert.equal(width, height, `ICO frame ${index} must be square`);
@@ -64,8 +68,29 @@ test("the Windows icon contains every required shell size", async () => {
 });
 
 test("the local-model overlay bundles every staged runtime and backend DLL", async () => {
-  const localModels = await json("src-tauri/tauri.windows.local-llm.conf.json");
+  const localModels = JSON.parse(
+    await readFile("src-tauri/tauri.windows.local-llm.conf.json", "utf8"),
+  );
   const resources = localModels.bundle.resources;
   assert.equal(resources["binaries/llama-runtime/*.dll"], "");
   assert.equal(resources["binaries/llama-backends/*.dll"], "llama-backends/");
+});
+
+test("icon verification owns native handles and supports runspace reuse", () => {
+  assert.match(verifier, /if \(-not \("VTerminal\.IconResource" -as \[type\]\)\) \{/);
+  assert.match(
+    verifier,
+    /return \[Drawing\.Icon\]::FromHandle\(\$handles\[0\]\)\.Clone\(\)/,
+  );
+  assert.match(
+    verifier,
+    /finally \{\s+\[VTerminal\.IconResource\]::DestroyIcon\(\$handles\[0\]\)/,
+  );
+});
+
+test("installer verification waits for GUI setup processes", () => {
+  assert.match(
+    verifier,
+    /Start-Process -FilePath \$Executable -ArgumentList \$ArgumentList -Wait -PassThru/,
+  );
 });

@@ -83,6 +83,24 @@ function Invoke-HelpSmoke([string]$Executable) {
   }
 }
 
+function Invoke-InstallerProcess(
+  [string]$Executable,
+  [string[]]$ArgumentList,
+  [string]$Action
+) {
+  # PowerShell does not wait for GUI executables when they are invoked with &.
+  # Start-Process -Wait also follows the temporary child used by NSIS uninstall.
+  $process = Start-Process -FilePath $Executable -ArgumentList $ArgumentList -Wait -PassThru
+  try {
+    if ($process.ExitCode -ne 0) {
+      throw "The silent Windows $Action failed with exit $($process.ExitCode)."
+    }
+  }
+  finally {
+    $process.Dispose()
+  }
+}
+
 function Get-NormalizedIconHash($Icon) {
   $size = 32
   $rectangle = [Drawing.Rectangle]::new(0, 0, $size, $size)
@@ -130,6 +148,8 @@ function Get-IconResource([string]$Path) {
     throw "Could not read the 32x32 Windows icon resource from $Path."
   }
   try {
+    # Clone uses CopyIcon and owns an independent HICON. Release the original
+    # handle returned by PrivateExtractIconsW immediately to avoid leaking it.
     return [Drawing.Icon]::FromHandle($handles[0]).Clone()
   }
   finally {
@@ -173,7 +193,8 @@ try {
 catch {
   Add-Type -AssemblyName System.Drawing
 }
-Add-Type -Namespace VTerminal -Name IconResource -MemberDefinition @'
+if (-not ("VTerminal.IconResource" -as [type])) {
+  Add-Type -Namespace VTerminal -Name IconResource -MemberDefinition @'
 [DllImport("user32.dll", EntryPoint = "PrivateExtractIconsW", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
 public static extern uint PrivateExtractIcons(
   string fileName,
@@ -188,6 +209,7 @@ public static extern uint PrivateExtractIcons(
 [DllImport("user32.dll", SetLastError = true)]
 public static extern bool DestroyIcon(IntPtr icon);
 '@
+}
 $expectedIcon = Get-IconResource $expectedIconPath
 try {
   $expectedIconHash = Get-NormalizedIconHash $expectedIcon
@@ -211,11 +233,11 @@ $cleanupFailure = $null
 $uninstaller = $null
 
 try {
-  & $installerPath "/S" "/D=$installDirectory"
-  if ($LASTEXITCODE -ne 0) {
-    throw "The silent Windows install failed with exit $LASTEXITCODE."
-  }
+  Invoke-InstallerProcess -Executable $installerPath -ArgumentList @("/S", "/D=$installDirectory") -Action "install"
 
+  if (-not (Test-Path -LiteralPath $installDirectory -PathType Container)) {
+    throw "The silent Windows installer did not create $installDirectory."
+  }
   $uninstallers = @(Get-ChildItem -LiteralPath $installDirectory -Filter "uninstall*.exe" -File)
   if ($uninstallers.Count -ne 1) {
     throw "Expected one uninstaller in $installDirectory; found $($uninstallers.Count)."
@@ -251,10 +273,7 @@ catch {
 finally {
   try {
     if ($null -ne $uninstaller -and (Test-Path -LiteralPath $uninstaller -PathType Leaf)) {
-      & $uninstaller "/S"
-      if ($LASTEXITCODE -ne 0) {
-        throw "The silent Windows uninstall failed with exit $LASTEXITCODE."
-      }
+      Invoke-InstallerProcess -Executable $uninstaller -ArgumentList @("/S") -Action "uninstall"
     }
 
     # NSIS can finish deleting its temporary uninstaller just after the parent
