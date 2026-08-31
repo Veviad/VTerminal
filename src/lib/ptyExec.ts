@@ -38,8 +38,10 @@ import {
 //                take its exit code from OSC 133;D.
 //   sentinel   — a remote or deterministic caller appends a `printf` carrying
 //                the command status and a fresh per-command nonce. Remote
-//                commands first prove the foreground shell with another fresh,
-//                separately-bound nonce.
+//                commands must also prove that a shell — not a pager or a REPL
+//                — is reading the terminal; that proof is a separately-bound
+//                nonce probe, and it is reused for as long as the terminal
+//                epoch it was taken in is provably unchanged (`ShellProof`).
 //
 // While a job is in flight the terminal is also WATCHED, because a command that
 // hangs is otherwise indistinguishable from one that is working: `hardenCommand`
@@ -322,9 +324,14 @@ export function interruptJob(sessionId: string, expectedApprovalId: string): boo
   return job.interrupt("user");
 }
 
-/** Compatibility hook for session teardown. Remote execution no longer caches mode. */
-export function resetSessionMode(_sessionId: string): void {
-  // Deliberately empty. Every remote command performs a fresh nonce-bound probe.
+/**
+ * Forget a session's remote shell proof.
+ *
+ * Called when the nested block ends (the local shell is back in the foreground,
+ * so the proof describes a shell that no longer exists) and when the tab closes.
+ */
+export function forgetShellProof(sessionId: string): void {
+  shellProofs.delete(sessionId);
 }
 
 /** Release a pending command without touching the terminal. */
@@ -724,9 +731,17 @@ async function runReservedInTerminal({
     let userInterruptWriteConfirmed = false;
     let userInterruptDeliveryTimer: ReturnType<typeof setTimeout> | null = null;
     let pendingUserInterruptCompletion: PtyExecOutcome | null = null;
+    /** Whether this job's own nonce-bound RD came back. Anything else — a
+     *  timeout, an interrupt, a closed terminal, a line that never reached a
+     *  shell — leaves a terminal nothing here can vouch for, so the next remote
+     *  command re-probes rather than inheriting this one's proof. */
+    let completionProved = false;
     job.finish = (outcome) => {
       if (job.settled) return;
       job.settled = true;
+      if (remoteAtStart && mode === "sentinel" && !completionProved) {
+        forgetShellProof(sessionId);
+      }
       if (opts.nonceCompletion) {
         getTerm(sessionId)?.tracker.endRunbookOutputIsolation();
       }
@@ -1025,6 +1040,10 @@ async function runReservedInTerminal({
           // In sentinel mode the nonce makes attribution exact, so a late token
           // from an abandoned command can never be misread as this one's.
           if (mode === "sentinel" && token.arg !== job.nonce) break;
+          // Our own text ran to completion in the foreground shell and printed
+          // this token: the epoch the probe attested is still the live one.
+          completionProved = true;
+          if (remoteAtStart) renewShellProof(sessionId);
           const captured = harvest(cursorRow(), tailLimit);
           settleAuthoritativeCompletion({
             exitCode: token.exit,
@@ -1246,6 +1265,98 @@ function remoteIdentityMatches(
   return sameRemoteIdentity(current, expected);
 }
 
+/**
+ * A remote shell capability proof, and the epoch it describes.
+ *
+ * The probe is not free: it is a whole extra command line in the user's
+ * terminal, echoed by the remote shell like anything else typed there. Paying
+ * it per command meant three agent steps over ssh printed three
+ * `printf '\033]6973;RP;…'` lines nobody asked for, interleaved with the
+ * commands the user actually approved.
+ *
+ * What it buys is a fact about the TERMINAL, not about the command: a
+ * POSIX-ish shell rather than a pager, an editor or a REPL is reading this
+ * input, and this is its dialect. So it survives exactly as long as that epoch
+ * demonstrably does.
+ */
+interface ShellProof {
+  /** The TermEntry object itself: a replaced terminal is a different epoch. */
+  entry: NonNullable<ReturnType<typeof getTerm>>;
+  remote: RemoteContext | null;
+  dialect: ShellDialect;
+  /**
+   * `lastUserInputAt` AT PROBE TIME, never advanced by a renewal. The user's
+   * keystrokes may still be sitting unread in the shell's input queue, so a
+   * `python3\r` typed while our command was running becomes the foreground
+   * program a moment later — the exact case the probe exists to catch.
+   */
+  lastUserInputAt: number;
+  /** Last moment a nonce-bound token proved this shell alive. The TTL clock. */
+  provenAt: number;
+}
+
+const shellProofs = new Map<string, ShellProof>();
+
+/**
+ * The one failure a proof cannot observe: an ssh link that dies SILENTLY
+ * between two commands. A link that announces itself is already covered —
+ * the local shell prints its prompt, the nested block ends, and
+ * `forgetShellProof` fires from `useSessions`. Re-probing after a quiet
+ * stretch costs one line the user will not see twice in a run.
+ */
+const PROOF_TTL_MS = 5 * 60_000;
+
+/**
+ * The live proof for this session, or null when one must be taken.
+ *
+ * Every miss deletes the stale entry rather than leaving it to be re-checked:
+ * once any of these has failed, the recorded epoch is gone for good.
+ */
+function reusableShellProof(
+  sessionId: string,
+  expectedRemote: RemoteContext | null,
+): ShellProof | null {
+  const proof = shellProofs.get(sessionId);
+  if (!proof) return null;
+  const entry = getTerm(sessionId);
+  const usable =
+    !!entry &&
+    !entry.disposed &&
+    entry === proof.entry &&
+    sameRemoteIdentity(proof.remote, expectedRemote) &&
+    entry.lastUserInputAt === proof.lastUserInputAt &&
+    Date.now() - proof.provenAt <= PROOF_TTL_MS;
+  if (!usable) {
+    shellProofs.delete(sessionId);
+    return null;
+  }
+  return proof;
+}
+
+function rememberShellProof(
+  sessionId: string,
+  remote: RemoteContext | null,
+  dialect: ShellDialect,
+): void {
+  const entry = getTerm(sessionId);
+  if (!entry || entry.disposed) return;
+  shellProofs.set(sessionId, {
+    entry,
+    remote,
+    dialect,
+    lastUserInputAt: entry.lastUserInputAt,
+    provenAt: Date.now(),
+  });
+}
+
+/** A command that reported its own nonce-bound RD is a stronger liveness
+ *  signal than the probe was, so it restarts the TTL — but never the
+ *  keyboard-quiet snapshot, which is what makes queued user input safe. */
+function renewShellProof(sessionId: string): void {
+  const proof = shellProofs.get(sessionId);
+  if (proof) proof.provenAt = Date.now();
+}
+
 function configuredShellDialect(sessionId: string): ShellDialect {
   const shell = useAppStore.getState().sessions.find((session) => session.id === sessionId)?.shell;
   return shell?.split("/").pop() === "fish" ? "fish" : "posix";
@@ -1300,6 +1411,11 @@ async function resolveMode(
   // the command was approved against, with no async gap before `ptyWrite`.
   if (!remoteIdentityMatches(sessionId, expectedRemote)) return "target_changed";
 
+  // Checked HERE rather than before the wait above: `waitForPrompt` can block
+  // for `idleWaitMs`, and a keystroke during it must invalidate the proof.
+  const proven = reusableShellProof(sessionId, expectedRemote);
+  if (proven) return { mode: "sentinel", dialect: proven.dialect };
+
   // A fresh capability proves that this exact probe, rather than a cached or
   // delayed token, was executed by the current foreground shell. A missing
   // matching reply is the one case where typing the command would be harmful.
@@ -1323,9 +1439,12 @@ async function resolveMode(
     "nested",
   );
   if (promptReady !== "ok") return promptReady;
-  return remoteIdentityMatches(sessionId, expectedRemote)
-    ? { mode: "sentinel", dialect: dialectFromProbe(probe) }
-    : "target_changed";
+  if (!remoteIdentityMatches(sessionId, expectedRemote)) return "target_changed";
+  const dialect = dialectFromProbe(probe);
+  // Recorded only now, so the keyboard-quiet snapshot is taken as late as
+  // possible: anything the user typed while the prompt redrew is already in it.
+  rememberShellProof(sessionId, expectedRemote, dialect);
+  return { mode: "sentinel", dialect };
 }
 
 /** Write a setup line and wait for its private token. */

@@ -10,7 +10,7 @@ import {
   acquireWebgl,
 } from "../lib/termRegistry";
 import { detectNesting } from "../lib/nesting";
-import { abortSession, resetSessionMode } from "../lib/ptyExec";
+import { abortSession, forgetShellProof } from "../lib/ptyExec";
 import { sanitizeCommand } from "../lib/ptyExecShell";
 import {
   clearPendingConnect,
@@ -292,7 +292,8 @@ export function useSessions() {
               s.updateSessionUi(sessionId, { longRunningCommand: null });
             }
             // `ssh` returned — we are back on the local shell, so local cwd is
-            // trustworthy again and any remote exec mode must be forgotten.
+            // trustworthy again and the remote shell proof describes a shell
+            // that no longer exists.
             if (s.sessionUi[sessionId]?.nestedBlockId === blockId) {
               // The SSH role stopped being SSH. Cancel before publishing the
               // identity transition so no hidden Sidecar continues generating.
@@ -304,7 +305,7 @@ export function useSessions() {
                 nestedBlockId: null,
                 remoteHost: null,
               });
-              resetSessionMode(sessionId);
+              forgetShellProof(sessionId);
             }
             emitTerm(sessionId, {
               type: "blockEnd",
@@ -645,8 +646,8 @@ export function useSessions() {
         const cancellation = cancelLinkedSessionWork(sessionId, "closed");
         if (cancellation) await cancellation;
         // Only cleared on nested-block end otherwise, so a tab closed while inside
-        // ssh leaks its negotiated exec mode for the life of the app.
-        resetSessionMode(sessionId);
+        // ssh leaks its remote shell proof for the life of the app.
+        forgetShellProof(sessionId);
         clearPendingConnect(sessionId);
         clearLongRunningTimer(sessionId);
         cancelNaming(sessionId);
