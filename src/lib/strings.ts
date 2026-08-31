@@ -854,6 +854,11 @@ export const S = {
     views: { list: "Actions", editor: "Editor", runs: "Runs" },
     empty: "No scheduled actions yet",
     emptyHint: "An action runs a saved sequence of commands and prompts on a schedule.",
+    // Distinct from `empty` on purpose: saying "none yet" beside a populated
+    // list is simply false, and it was what the panel did before anything was
+    // selected.
+    selectAction: "Select an action to see its steps and its last run.",
+    selectRun: "Select a run to see what each step did.",
     newAction: "New action",
     edit: "Edit",
     duplicate: "Duplicate",

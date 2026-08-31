@@ -1,5 +1,5 @@
 import { CalendarClock, Play, Plus, SquareTerminal } from "lucide-react";
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 
 import { S } from "../../lib/strings";
 import { useSchedules } from "../../hooks/useSchedules";
@@ -24,6 +24,13 @@ export function ScheduleList() {
   const busy = useScheduleStore((s) => s.busyAction);
   const { setEnabled, remove, duplicate, runNow } = useSchedules();
   const selected = actions.find((a) => a.id === selectedId) ?? null;
+  // Land on something. A populated list beside an empty pane invites the reader
+  // to conclude the pane is the truth — which is how "No scheduled actions yet"
+  // came to sit next to two of them.
+  const firstActionId = actions.length > 0 ? actions[0].id : null;
+  useEffect(() => {
+    if (!selected && firstActionId) selectAction(firstActionId);
+  }, [selected, firstActionId, selectAction]);
   // Derived, never stored: a stored "is overdue" is stale the second after it is
   // written, and this drives a banner that has to be true when it is read.
   const overdue = useMemo(() => selectOverdueActions(actions, Date.now()), [actions]);
@@ -85,11 +92,17 @@ export function ScheduleList() {
         )}
         {!selected ? (
           <div className="space-y-1">
-            <p className="text-[12px] text-text-secondary">{S.schedules.empty}</p>
-            <p className="text-[10px] text-text-muted">{S.schedules.emptyHint}</p>
-            <button onClick={() => beginDraft(null)} className={`${primaryButton} mt-2`}>
-              <Plus size={11} /> {S.schedules.newAction}
-            </button>
+            <p className="text-[12px] text-text-secondary">
+              {actions.length > 0 ? S.schedules.selectAction : S.schedules.empty}
+            </p>
+            {actions.length === 0 && (
+              <>
+                <p className="text-[10px] text-text-muted">{S.schedules.emptyHint}</p>
+                <button onClick={() => beginDraft(null)} className={`${primaryButton} mt-2`}>
+                  <Plus size={11} /> {S.schedules.newAction}
+                </button>
+              </>
+            )}
           </div>
         ) : (
           <ActionDetail

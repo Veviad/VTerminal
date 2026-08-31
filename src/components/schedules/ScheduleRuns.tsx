@@ -36,7 +36,15 @@ export function ScheduleRuns() {
     if (activeRunId) void refreshRun(activeRunId);
   }, [activeRunId, refreshRun]);
 
-  const rows = history.map((run) => runsById[run.id] ?? run);
+  const rows = history.map((run) => ownRecordValue(runsById, run.id) ?? run);
+
+  // Same reasoning as the actions list: never show "no runs recorded yet" beside
+  // a list of them. Keyed on the first id rather than on `rows`, which is a fresh
+  // array on every render and would re-run this effect every time.
+  const firstRunId = rows.length > 0 ? rows[0].id : null;
+  useEffect(() => {
+    if (!activeRunId && firstRunId) selectRun(firstRunId);
+  }, [activeRunId, firstRunId, selectRun]);
 
   return (
     <div className="flex min-h-0 flex-1">
@@ -75,7 +83,9 @@ export function ScheduleRuns() {
             onDelete={() => void deleteRun(selected.id)}
           />
         ) : (
-          <p className="text-[11px] text-text-muted">{S.schedules.runsEmpty}</p>
+          <p className="text-[11px] text-text-muted">
+            {rows.length > 0 ? S.schedules.selectRun : S.schedules.runsEmpty}
+          </p>
         )}
       </div>
     </div>
