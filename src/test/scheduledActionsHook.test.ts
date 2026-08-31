@@ -457,9 +457,6 @@ describe("scheduled actions driver", () => {
   });
 
   it("closes the tab only for a one-off action that opted in", async () => {
-    const rejections: unknown[] = [];
-    const onRejection = (e: PromiseRejectionEvent | ErrorEvent) => rejections.push(e);
-    process.on("unhandledRejection", onRejection);
     mocks.schedulesList.mockResolvedValue([
       action({
         close_tab_when_done: true,
@@ -469,10 +466,33 @@ describe("scheduled actions driver", () => {
     await mount();
     await deliver();
     expect(mocks.ptyKill).toHaveBeenCalledWith("sess-1");
-    process.off("unhandledRejection", onRejection);
-    // The teardown path chains `.catch()` on the kill, so an unhandled rejection
-    // here means a promise the driver relies on was not one.
-    expect(rejections).toEqual([]);
+  });
+
+  /** The driver chains `.catch()` onto everything it dispatches, so a mock that
+   *  returns a bare `undefined` throws — and vitest reports that as an unhandled
+   *  rejection rather than a failed test, which is how it survived a local run
+   *  filtered to the "Tests" summary line and only turned up in CI. Asserting
+   *  the shape here makes the next such omission a red test instead. */
+  it("every dispatch the driver chains .catch() onto returns a promise", async () => {
+    mocks.schedulesList.mockResolvedValue([
+      action({
+        close_tab_when_done: true,
+        recurrence: { kind: "once", at: "2026-06-01T09:00:00+02:00" },
+      }),
+    ]);
+    await mount();
+    await deliver();
+    for (const [name, mock] of [
+      ["ptyKill", mocks.ptyKill],
+      ["scheduleRunIsActive", mocks.scheduleRunIsActive],
+      ["scheduleStepFinish", mocks.scheduleStepFinish],
+      ["scheduleRunFinish", mocks.scheduleRunFinish],
+    ] as const) {
+      for (const result of mock.mock.results) {
+        expect(result.type, `${name} threw`).toBe("return");
+        expect(result.value, `${name} must return a promise`).toBeInstanceOf(Promise);
+      }
+    }
   });
 });
 
