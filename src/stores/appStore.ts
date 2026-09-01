@@ -107,6 +107,7 @@ export type SettingsTab =
   | "instructions"
   | "docs"
   | "runbooks"
+  | "schedules"
   | "appearance"
   | "terminal"
   | "hosts"
@@ -619,6 +620,13 @@ export interface AppState {
   docsEnabled: boolean;
   /** Experimental Runbooks capability mirror. Enforcement lives in Rust. */
   runbooksEnabled: boolean;
+  /** Experimental Scheduled Actions capability mirror. Enforcement lives in
+   *  Rust: every `scheduled_*` command refuses while the backend flag is off,
+   *  and flipping it off cancels in-flight runs. This mirror only shapes UI. */
+  schedulesEnabled: boolean;
+  /** Whether a scheduled action may drive a real terminal tab. A SECOND switch
+   *  on purpose — see the wire comment in `types.ts`. */
+  schedulesTabExecutionEnabled: boolean;
   /** Retention FLOOR for runbook terminal output. Preflight may raise a single
    *  run above it; `runbooks_start` re-clamps, so this mirror only shapes the
    *  choices offered and never decides what is actually kept. */
@@ -2041,6 +2049,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   autoUpdateEnabled: false,
   docsEnabled: false,
   runbooksEnabled: false,
+  schedulesEnabled: false,
+  schedulesTabExecutionEnabled: false,
   runbooksOutputRecording: "runbook",
   docBuckets: [],
   knowledgeBuckets: [],

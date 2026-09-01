@@ -5,6 +5,8 @@ import { useAppStore } from "../stores/appStore";
 import { useRunbookStore } from "../stores/runbookStore";
 import { abortSession, interruptJob } from "../lib/ptyExec";
 import { revokeAllLiveRunbookRuns } from "../lib/runbookLiveJobs";
+import { revokeAllLiveScheduleRuns } from "../lib/scheduleLiveJobs";
+import { useScheduleStore } from "../stores/scheduleStore";
 import type { EvidenceRecordingPolicy } from "../lib/runbooks";
 import { updateAllTermOptions } from "../lib/termRegistry";
 import { clampPanelRatio } from "../lib/panelRatio";
@@ -60,6 +62,8 @@ export function useSettings() {
       autoUpdateEnabled: s.auto_update_enabled,
       docsEnabled: s.docs_enabled,
       runbooksEnabled: s.runbooks_enabled,
+      schedulesEnabled: s.scheduled_actions_enabled,
+      schedulesTabExecutionEnabled: s.scheduled_tab_execution_enabled,
       runbooksOutputRecording: s.runbooks_output_recording,
       hasApiKey: {
         anthropic: s.has_anthropic_api_key,
@@ -75,6 +79,17 @@ export function useSettings() {
     // close before the persistence IPC. A terminal claim response may already
     // be in flight; setting this mirror synchronously makes its final canWrite
     // check fail even if Rust persisted the setting a moment earlier.
+    if (patch.scheduled_actions_enabled === false) {
+      // A capability revocation, so the mirror closes before the IPC. Rust
+      // cancels the runs; this stops a tab-mode dispatch that is already in
+      // flight from passing its final `canWrite` check.
+      useAppStore.setState({ schedulesEnabled: false });
+      useScheduleStore.getState().setWorkspaceOpen(false);
+      for (const job of revokeAllLiveScheduleRuns()) {
+        interruptJob(job.sessionId, job.attemptId);
+        abortSession(job.sessionId, "cancelled", job.attemptId);
+      }
+    }
     if (patch.runbooks_enabled === false) {
       useAppStore.setState({ runbooksEnabled: false });
       const runbooks = useRunbookStore.getState();
@@ -100,6 +115,9 @@ export function useSettings() {
       } catch {
         if (patch.runbooks_enabled !== undefined) {
           useAppStore.setState({ runbooksEnabled: false });
+        }
+        if (patch.scheduled_actions_enabled !== undefined) {
+          useAppStore.setState({ schedulesEnabled: false });
         }
       }
       throw error;
@@ -194,6 +212,14 @@ export function useSettings() {
       useAppStore.setState({ docsEnabled: patch.docs_enabled });
     if (patch.runbooks_enabled !== undefined) {
       useAppStore.setState({ runbooksEnabled: patch.runbooks_enabled });
+    }
+    if (patch.scheduled_actions_enabled !== undefined) {
+      useAppStore.setState({ schedulesEnabled: patch.scheduled_actions_enabled });
+    }
+    if (patch.scheduled_tab_execution_enabled !== undefined) {
+      useAppStore.setState({
+        schedulesTabExecutionEnabled: patch.scheduled_tab_execution_enabled,
+      });
     }
     if (patch.runbooks_output_recording !== undefined) {
       // Rust already rejected anything outside the union before this resolved.

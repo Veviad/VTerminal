@@ -18,9 +18,10 @@ use crate::provider::{
 /// terminal, so it executes in whatever shell that tab is in (including a
 /// remote host) and the user watches it happen.
 ///
-/// `Subprocess` is the original captured `zsh -lc` path. It is retained because
-/// it is the only way to drive the loop headlessly — `examples/smoke_agent.rs`
-/// has no PTY at all.
+/// `Subprocess` is the original captured `zsh -lc` path. It is the only way to
+/// drive the loop headlessly, and has two users: `examples/smoke_agent.rs`, which
+/// has no PTY at all, and `crate::scheduled`, whose headless runs execute with
+/// nobody watching.
 pub enum ExecTarget {
     Pty {
         session_id: String,
@@ -32,6 +33,24 @@ pub enum ExecTarget {
         remote_session_id: String,
     },
     Subprocess,
+    /// A captured subprocess whose approved command is first wrapped for a
+    /// non-interactive remote session.
+    ///
+    /// The wrap happens AFTER classification and approval, so `policy::assess`
+    /// and `evaluate_rules` always see the command the model actually proposed,
+    /// in the target's own scope — never an `ssh …` line the model never wrote.
+    /// Keeping this a trait is deliberate: `agent/` must not learn what ssh is,
+    /// the same lesson as `runbooks::agent_executor::AgentCommandHost`.
+    SubprocessWrapped {
+        wrapper: std::sync::Arc<dyn CommandWrapper>,
+    },
+}
+
+/// Rewrites an approved command for a different execution context.
+pub trait CommandWrapper: Send + Sync {
+    fn wrap(&self, command: &str) -> Result<String, String>;
+    /// One line naming where the command will run, for the run record.
+    fn describe(&self) -> String;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,7 +110,10 @@ impl ExecTarget {
                 role: None,
                 session_id: Some(session_id.clone()),
             }),
-            Self::Subprocess => Ok(CommandTarget {
+            // A wrapped subprocess is still a single destination with no role.
+            // The wrap happens at dispatch, after policy and approval, so nothing
+            // about routing changes here.
+            Self::Subprocess | Self::SubprocessWrapped { .. } => Ok(CommandTarget {
                 role: None,
                 session_id: None,
             }),
@@ -983,9 +1005,13 @@ async fn process_tool_calls(
                                 )
                                 .await
                             }
-                            ExecTarget::Subprocess => {
+                            ExecTarget::Subprocess | ExecTarget::SubprocessWrapped { .. } => {
                                 let (target_role, target_session_id) =
                                     command_target.event_metadata();
+                                // The event reports what the MODEL proposed. The
+                                // wrapper is transport, and showing an `ssh …`
+                                // line the model never wrote would make the run
+                                // record lie about what was approved.
                                 let _ = on_event.send(StreamEvent::CommandStarted {
                                     approval_id: approval_id.clone(),
                                     command: final_command.clone(),
@@ -994,10 +1020,41 @@ async fn process_tool_calls(
                                     target_role,
                                     target_session_id,
                                 });
+                                let dispatched = match &config.exec_target {
+                                    ExecTarget::SubprocessWrapped { wrapper } => {
+                                        match wrapper.wrap(&final_command) {
+                                            Ok(wrapped) => wrapped,
+                                            Err(reason) => {
+                                                // Fail this command, not the run:
+                                                // the model can be told and try
+                                                // something else.
+                                                let (role, session) =
+                                                    command_target.event_metadata();
+                                                let _ = on_event.send(StreamEvent::CommandResult {
+                                                    approval_id: approval_id.clone(),
+                                                    exit_code: None,
+                                                    duration_ms: 0,
+                                                    error: Some(reason.clone()),
+                                                    target_role: role,
+                                                    target_session_id: session,
+                                                });
+                                                messages.push(command_tool_result(
+                                                    &call.id,
+                                                    &command_target,
+                                                    &format!(
+                                                        "The command could not be prepared for the remote target: {reason}"
+                                                    ),
+                                                ));
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    _ => final_command.clone(),
+                                };
                                 exec::run_command(
                                     &config.shell,
                                     config.cwd.as_deref(),
-                                    &final_command,
+                                    &dispatched,
                                     &approval_id,
                                     config.command_timeout_secs,
                                     effective_output_policy,

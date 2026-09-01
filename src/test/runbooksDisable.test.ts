@@ -76,6 +76,8 @@ function settings(runbooksEnabled: boolean, overrides: Partial<Settings> = {}): 
     docs_enabled: false,
     runbooks_enabled: runbooksEnabled,
     runbooks_output_recording: "runbook",
+    scheduled_actions_enabled: false,
+    scheduled_tab_execution_enabled: false,
     log_level: "info",
     ...overrides,
   };

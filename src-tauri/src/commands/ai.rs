@@ -27,7 +27,7 @@ use crate::provider::{ChatMessage, ChatParams, Provider, ToolChoiceMode};
 ///   off for remote servers and the step cap is the only limit there, preserving
 ///   the promise in `models::remote` that a wrong value costs a wrong tooltip and
 ///   never a failed request.
-fn agent_context_window(app: &tauri::AppHandle<Wry>, model: &CatalogModel) -> u32 {
+pub fn agent_context_window(app: &tauri::AppHandle<Wry>, model: &CatalogModel) -> u32 {
     context_window_for(
         model.provider,
         model.context_tokens,

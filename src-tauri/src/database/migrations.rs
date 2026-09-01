@@ -73,6 +73,9 @@ pub fn run(conn: &Connection) -> Result<(), String> {
     if version < 19 {
         migrate_v19(conn)?;
     }
+    if version < 20 {
+        crate::scheduled::db::migrate_v20(conn)?;
+    }
     crate::runbooks::db::ensure_v6_runtime_indexes(conn)?;
 
     Ok(())
@@ -715,6 +718,61 @@ mod tests {
         .unwrap()
     }
 
+    /// The chain test for v20, in the style of
+    /// `v13_to_v14_preserves_password_presence_and_adds_private_output_policy`:
+    /// an existing database must gain the scheduled tables without losing a row,
+    /// and the new foreign key must bind to the ssh host that was already there.
+    #[test]
+    fn v19_to_v20_preserves_existing_tables_and_adds_scheduled_actions() {
+        let conn = mem();
+        super::run(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO ssh_hosts (id, label, hostname, source, created_at, updated_at)
+               VALUES ('h1', 'prod-01', 'prod-01.test', 'manual', 't', 't');
+             INSERT INTO command_history
+                (id, session_id, cwd, command, shell, started_at)
+               VALUES ('c1', 's1', '/tmp', 'ls', 'zsh', 't');",
+        )
+        .unwrap();
+        conn.execute("DELETE FROM schema_version WHERE version >= 20", [])
+            .unwrap();
+        conn.execute_batch(
+            "DROP TABLE scheduled_events;
+             DROP TABLE scheduled_step_attempts;
+             DROP TABLE scheduled_runs;
+             DROP TABLE scheduled_steps;
+             DROP TABLE scheduled_actions;",
+        )
+        .unwrap();
+        assert_eq!(version(&conn), 19);
+
+        super::run(&conn).unwrap();
+
+        assert_eq!(version(&conn), 20);
+        // Pre-existing rows survive.
+        let hosts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ssh_hosts", [], |r| r.get(0))
+            .unwrap();
+        let history: i64 = conn
+            .query_row("SELECT COUNT(*) FROM command_history", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!((hosts, history), (1, 1));
+        // And the new table's foreign key binds to the host that was already there.
+        conn.execute(
+            "INSERT INTO scheduled_actions
+               (id, name, target_kind, target_host_id, execution_mode, steps_sha256,
+                recurrence_kind, at_hour, at_minute, timezone, created_at, updated_at)
+             VALUES ('a1','nightly','ssh_host','h1','headless','sha','daily',3,0,'UTC','t','t')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute("DELETE FROM ssh_hosts WHERE id = 'h1'", [])
+                .is_err(),
+            "ON DELETE RESTRICT must protect a host a schedule targets"
+        );
+    }
+
     #[test]
     fn run_is_idempotent() {
         let conn = mem();
@@ -722,7 +780,7 @@ mod tests {
         let first = version(&conn);
         super::run(&conn).unwrap();
         assert_eq!(version(&conn), first);
-        assert_eq!(first, 19);
+        assert_eq!(first, 20);
     }
 
     #[test]
@@ -913,7 +971,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 19);
+        assert_eq!(version(&conn), 20);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'chat_%' ORDER BY name")
             .unwrap()
@@ -950,7 +1008,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 19);
+        assert_eq!(version(&conn), 20);
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(archived_sessions)")
             .unwrap()
@@ -1012,7 +1070,14 @@ mod tests {
         conn.execute("DELETE FROM schema_version WHERE version >= 18", [])
             .unwrap();
         conn.execute_batch(
-            "DROP TABLE token_usage_events;
+            // Rewinding the recorded version rewinds past v20 as well, so its
+            // tables have to go with it or the re-run hits "table already exists".
+            "DROP TABLE scheduled_events;
+             DROP TABLE scheduled_step_attempts;
+             DROP TABLE scheduled_runs;
+             DROP TABLE scheduled_steps;
+             DROP TABLE scheduled_actions;
+             DROP TABLE token_usage_events;
              INSERT INTO chat_threads
                 (id, title, created_at, updated_at)
              VALUES ('chat-1', 'Chat', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z');
@@ -1027,7 +1092,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 19);
+        assert_eq!(version(&conn), 20);
         let imported: (String, String, i64, i64) = conn
             .query_row(
                 "SELECT model_label, provider, input_tokens, output_tokens
@@ -1083,7 +1148,7 @@ mod tests {
         .unwrap();
 
         super::run(&conn).unwrap();
-        assert_eq!(version(&conn), 19);
+        assert_eq!(version(&conn), 20);
         let migrated: (String, Option<String>, Option<String>) = conn
             .query_row(
                 "SELECT cmd_command, cmd_target_role, cmd_target_label
@@ -1196,7 +1261,7 @@ mod tests {
         )
         .unwrap();
         super::run(&conn).unwrap();
-        assert_eq!(version(&conn), 19);
+        assert_eq!(version(&conn), 20);
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM command_history", [], |r| r.get(0))
             .unwrap();
@@ -1229,7 +1294,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 19);
+        assert_eq!(version(&conn), 20);
         let migrated: (String, i64, Option<i64>, String, String) = conn
             .query_row(
                 "SELECT source_kind, hidden, builtin_order, created_at, updated_at
@@ -1270,7 +1335,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 19);
+        assert_eq!(version(&conn), 20);
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(runbook_drafts)")
             .unwrap()
@@ -1304,7 +1369,7 @@ mod tests {
         super::run(&conn).unwrap();
 
         // Upgrades run the whole chain, so this lands on the current head.
-        assert_eq!(version(&conn), 19);
+        assert_eq!(version(&conn), 20);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()
@@ -1350,7 +1415,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 19);
+        assert_eq!(version(&conn), 20);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()
@@ -1466,7 +1531,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 19);
+        assert_eq!(version(&conn), 20);
         let has_password: bool = conn
             .query_row(
                 "SELECT has_password FROM ssh_hosts WHERE id = 'h1'",

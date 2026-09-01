@@ -21,11 +21,24 @@ async function refreshPickerBuckets(): Promise<void> {
 /** Source-aware knowledge picker. Only proven-compatible, non-empty buckets are
  * attachable here. Settings shows managed buckets that need remediation, while
  * unmarked collections remain hidden and legacy v0.2.0 bindings stay Advanced-only. */
-export function BucketPicker({ sessionId }: { sessionId: string }) {
+/** Either a live session owns the selection, or the caller does.
+ *
+ *  The controlled mode exists because `withAiStream` returns `{}` — a SILENT
+ *  no-op — for any id that is not in `state.sessions`, so a synthetic id like
+ *  `"schedule:abc"` produces a picker where every click does nothing and nothing
+ *  anywhere reports a problem. Symmetric with `McpPicker`, which already has it. */
+export function BucketPicker(props: {
+  sessionId?: string;
+  attached?: KnowledgeBucketRef[];
+  onAttach?: (ref: KnowledgeBucketRef) => void;
+  onDetach?: (ref: KnowledgeBucketRef) => void;
+}) {
+  const { sessionId } = props;
   const docsEnabled = useAppStore((s) => s.docsEnabled);
   const buckets = useAppStore((s) => s.knowledgeBuckets);
-  const stream = useAppStore((s) => s.aiStreams[sessionId]);
+  const stream = useAppStore((s) => (sessionId ? s.aiStreams[sessionId] : undefined));
   const attached =
+    props.attached ??
     stream?.attachedBucketRefs ??
     stream?.attachedBucketIds?.map(normalizeKnowledgeBucketRef) ??
     NO_REFS;
@@ -71,8 +84,16 @@ export function BucketPicker({ sessionId }: { sessionId: string }) {
 
   if (!docsEnabled || attachable.length === 0) return null;
 
-  const attach = useAppStore.getState().attachBucketToAi;
-  const detach = useAppStore.getState().detachBucketFromAi;
+  const storeAttach = useAppStore.getState().attachBucketToAi;
+  const storeDetach = useAppStore.getState().detachBucketFromAi;
+  const attach = (ref: KnowledgeBucketRef) => {
+    if (props.onAttach) return props.onAttach(ref);
+    if (sessionId) storeAttach(sessionId, ref);
+  };
+  const detach = (ref: KnowledgeBucketRef) => {
+    if (props.onDetach) return props.onDetach(ref);
+    if (sessionId) storeDetach(sessionId, ref);
+  };
 
   return (
     <div className="relative" ref={ref}>
@@ -114,7 +135,7 @@ export function BucketPicker({ sessionId }: { sessionId: string }) {
                       type="checkbox"
                       checked={on}
                       onChange={() =>
-                        on ? detach(sessionId, bucket.ref) : attach(sessionId, bucket.ref)
+                        on ? detach(bucket.ref) : attach(bucket.ref)
                       }
                     />
                     <span className="min-w-0 flex-1">

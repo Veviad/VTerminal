@@ -48,6 +48,15 @@ pub fn init(app_data_dir: &Path) -> Result<Connection, String> {
     // This is fail-closed: starting with a stale "running" mutation is less
     // safe than refusing startup with an actionable database error.
     crate::runbooks::db::interrupt_active_runs(&mut conn)?;
+    // Same contract, separate table. A scheduled run left `running` would also
+    // hold the partial unique index that enforces one in-flight run per action,
+    // which silently disables that action forever — so this must happen on every
+    // open, not only after a clean quit. Non-fatal: a missed reconciliation costs
+    // one mislabelled row, while an error here becomes an io::Error in `setup`
+    // and would brick startup.
+    if let Err(e) = crate::scheduled::db::interrupt_active_runs(&mut conn) {
+        log::warn!("could not reconcile interrupted scheduled runs: {e}");
+    }
     // Full evidence crosses SQLite and the filesystem. Reconcile every pending
     // reservation before rebuilding reports so only size/hash-verified,
     // durably renamed artifacts can be described as available.
