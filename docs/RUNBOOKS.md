@@ -258,7 +258,7 @@ Each phase is one action:
 | `shell` | One inline command. No control characters, newlines, heredocs or here-strings; 4,096 characters maximum. |
 | `agent` | Bounded Markdown instructions for the configured model. It proposes commands; each one is approved separately in the same visible terminal. |
 | `manual` | Asks you for an outcome, a required comment and an optional evidence note. |
-| `ansible.playbook` | Native in 0.2.10. Uses a user-installed `ansible-runner` as the explicit local controller, binds approval to exact project/inventory digests, retains structured per-host outcomes, forces check and verify phases into preview-only check mode, and still requires verification after apply. |
+| `ansible.playbook` | Native. Uses a user-installed `ansible-runner` as the explicit local controller, binds approval to exact project/inventory digests, retains structured per-host outcomes, forces check and verify phases into preview-only check mode, and still requires verification after apply. |
 
 An Ansible action references files beneath the package's `ansible/` directory.
 VTerminal launches `ansible-runner` locally without inheriting the visible

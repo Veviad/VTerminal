@@ -57,7 +57,7 @@
       <section class="guide-hero" aria-labelledby="guide-title">
         <div class="guide-hero-inner">
             <span class="guide-status"
-            >Available in 0.2.10 · Experimental · Disabled by default</span
+            >Experimental · Disabled by default</span
             >
           <h1 id="guide-title">Reusable Runbooks</h1>
           <p class="guide-hero-copy">
@@ -245,7 +245,6 @@
             id="ai-authoring"
             aria-labelledby="ai-authoring-title"
           >
-            <p class="eyebrow">New in 0.2.8</p>
             <h2 id="ai-authoring-title">Turn What You Just Did Into a Runbook</h2>
             <p>
               <strong>New → Generate with AI</strong> authors a draft from a
@@ -305,13 +304,16 @@
             aria-labelledby="included-examples-title"
           >
             <p class="eyebrow">Ready to Run</p>
-            <h2 id="included-examples-title">Three Included macOS Assessments</h2>
+            <h2 id="included-examples-title">Included Packages</h2>
             <p>
-              VTerminal includes three packages for macOS 13 and newer. They are
-              assessment-only: they use no model actions and declare no network,
-              privilege or write capability. Each stops on an unsupported
-              target and, on a supported Mac, continues through independent
-              findings to produce a useful full report.
+              Four packages ship with VTerminal. The three macOS assessments
+              below target macOS 13 and newer and are assessment-only: they use
+              no model actions and declare no network, privilege or write
+              capability. Each stops on an unsupported target and, on a
+              supported Mac, continues through independent findings to produce a
+              useful full report. A fourth, <code>ansible-localhost-example</code>,
+              demonstrates the Ansible executor against a local inventory and
+              does declare one write.
             </p>
 
             <div class="guide-grid">
@@ -725,7 +727,7 @@ spec:
               <article class="guide-card">
                 <h3><code>ansible.playbook</code></h3>
                 <p>
-                  Native in 0.2.10. It invokes a user-installed
+                  Native. It invokes a user-installed
                   <code>ansible-runner</code> as the explicit local controller,
                   binds approval to exact project and inventory digests, and
                   retains structured per-host outcomes. Check and verify are
@@ -891,7 +893,7 @@ spec:
             id="ansible"
             aria-labelledby="ansible-title"
           >
-            <p class="eyebrow">Native in 0.2.10</p>
+            <p class="eyebrow">Native</p>
             <h2 id="ansible-title">Ansible Runner, Explicitly Controlled</h2>
             <p>
               <code>ansible.playbook</code> executes through a user-installed
