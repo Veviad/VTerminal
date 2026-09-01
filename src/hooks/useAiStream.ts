@@ -883,6 +883,13 @@ function dispatchPanelEvent(
     case "ThinkingDelta":
       store.appendThinking(sessionId, e.content);
       break;
+    case "Compacted":
+      // Informational: the run continues, and the Checkpoint that follows
+      // carries the compacted history. Deliberately does NOT touch `status` —
+      // this is not a settlement, and treating it as one would leave the panel
+      // idle while the loop kept running.
+      store.noteCompaction(sessionId, e.removed_messages, e.after_tokens, requestId);
+      break;
     case "CommandProposal": {
       const target = resolveCommandTarget(sessionId, e);
       if (!target.ok) {

@@ -973,6 +973,19 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             </button>
           </div>
         )}
+        {/* Not a guard rail and not an error — the run carried on. It is here at
+            all because the model's memory of this conversation was rewritten, and
+            a silent rewrite is indistinguishable from a model that got the answer
+            wrong. Stays visible after the run settles, unlike the streaming
+            indicators: that is when the user reads the answer it affected. */}
+        {stream?.compaction && (
+          <p className="rounded-lg border border-border-subtle px-3 py-2 text-[11px] text-text-muted">
+            {S.aiPanel.compacted(
+              stream.compaction.removedMessages,
+              stream.compaction.count,
+            )}
+          </p>
+        )}
         {stream?.lastError && (
           <p className="rounded-lg bg-error-subtle px-3 py-2 text-[11px] text-error">
             {S.aiPanel.errorPrefix}: {stream.lastError}

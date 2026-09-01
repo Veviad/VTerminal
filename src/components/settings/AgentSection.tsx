@@ -18,6 +18,12 @@ const TIMEOUT_CHOICES = [30, 60, 120, 300, 600, 1200, 1800, 3600];
 
 const fmtTimeout = (secs: number) => (secs < 60 ? `${secs}s` : `${secs / 60} min`);
 
+// The ends are the backend's clamp (`compact::MIN/MAX_THRESHOLD_PERCENT`), and
+// they are not arbitrary: below 50% the kept tail is already a quarter of the
+// window, so a summary would be re-summarized almost at once; above 95% there is
+// no room left to send the summarization request itself.
+const THRESHOLD_CHOICES = [50, 60, 70, 75, 80, 85, 90, 95];
+
 function quoteArgvToken(token: string): string {
   if (token !== "" && !/[\s'\"]/.test(token)) return token;
   if (!token.includes("'")) return `'${token}'`;
@@ -119,6 +125,46 @@ export function AgentSection() {
           checked={s.aiWebAccess}
           onChange={(v) => void save({ ai_web_access: v })}
         />
+      </section>
+
+      {/* Its own section rather than another row under Agent: it is the only
+          thing on this screen that also changes Chat and Ask. */}
+      <section className="space-y-3">
+        <h3 className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">
+          {S.settings.agent.contextTitle}
+        </h3>
+        <p className="text-[11px] leading-relaxed text-text-secondary">
+          {S.settings.agent.contextIntro}
+        </p>
+
+        <Toggle
+          label={S.settings.agent.autoCompact}
+          hint={S.settings.agent.autoCompactHint}
+          checked={s.autoCompactEnabled}
+          onChange={(v) => void save({ auto_compact_enabled: v })}
+        />
+
+        {/* Hidden while off, not disabled: a threshold for something that never
+            happens is a control with no meaning. */}
+        {s.autoCompactEnabled && (
+          <Row
+            label={S.settings.agent.compactThreshold}
+            hint={S.settings.agent.compactThresholdHint}
+          >
+            <select
+              value={s.autoCompactThresholdPercent}
+              aria-label={S.settings.agent.compactThreshold}
+              onChange={(e) => void save({ auto_compact_threshold_percent: Number(e.target.value) })}
+              className="rounded-md border border-border-subtle bg-bg-card px-2 py-1 text-[12px] text-text-primary"
+            >
+              {THRESHOLD_CHOICES.map((n) => (
+                <option key={n} value={n}>
+                  {S.settings.agent.compactThresholdValue(n)}
+                </option>
+              ))}
+            </select>
+          </Row>
+        )}
       </section>
 
       <section className="space-y-3">

@@ -5,7 +5,7 @@ import { ChatWorkspace, isNearChatBottom } from "../components/chat/ChatWorkspac
 import type { ChatDetail } from "../lib/types";
 import * as api from "../lib/tauri";
 import { useAppStore } from "../stores/appStore";
-import { useChatStore } from "../stores/chatStore";
+import { useChatStore, idleStream } from "../stores/chatStore";
 import { createMockMcpServer } from "./mcpTestUtils";
 
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
@@ -54,17 +54,7 @@ describe("Chat workspace autoscroll", () => {
     useChatStore.setState({
       summaries: [detail.summary],
       current: detail,
-      stream: {
-        status: "streaming",
-        requestId: "request-a",
-        content: "",
-        thinking: "",
-        model: null,
-        citations: [],
-        mcpCalls: [],
-        pendingMcpProposal: null,
-        lastError: null,
-      },
+      stream: { ...idleStream(), status: "streaming", requestId: "request-a" },
       pendingAttachments: [],
       attachError: null,
       attachStatus: null,
@@ -302,17 +292,7 @@ describe("Chat workspace autoscroll", () => {
     useChatStore.setState({
       summaries: [completed.summary],
       current: completed,
-      stream: {
-        status: "idle",
-        requestId: null,
-        content: "",
-        thinking: "",
-        model: null,
-        citations: [],
-        mcpCalls: [],
-        pendingMcpProposal: null,
-        lastError: null,
-      },
+      stream: idleStream(),
     });
     let rejectRegeneration!: (reason: Error) => void;
     const regeneration = new Promise<void>((_resolve, reject) => {

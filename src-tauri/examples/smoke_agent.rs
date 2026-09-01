@@ -129,6 +129,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .ok()
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or(32_768),
+        // Off unless asked for, so the default smoke keeps exercising the tool
+        // loop and the pause. `SMOKE_AUTO_COMPACT=1` with a small
+        // `SMOKE_CONTEXT_TOKENS` is how to watch a real model summarize its own
+        // history — the one thing the deterministic harness cannot show, since
+        // there the summary is scripted.
+        auto_compact: std::env::var("SMOKE_AUTO_COMPACT").is_ok_and(|v| v.trim() == "1"),
+        compact_threshold_percent: vterminal_lib::agent::compact::DEFAULT_THRESHOLD_PERCENT,
         command_timeout_secs: 30,
         // The smoke run drives a local GGUF, which has no server-side web tool
         // for this to switch on anyway.

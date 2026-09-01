@@ -1171,4 +1171,35 @@ describe("AiPanel renders", () => {
     expect(screen.getByText(/context window/i)).toBeTruthy();
     expect(screen.queryByText(/Settings → Agent/)).toBeNull();
   });
+
+  /** A compaction is neither an error nor a guard rail — the run carried on. It
+   *  is on screen because the model's memory of the conversation was rewritten,
+   *  and a silent rewrite is indistinguishable from a wrong answer. */
+  it("says when the conversation was summarized, without a Continue button", () => {
+    useAppStore.setState({
+      sessions: [session("s1")],
+      aiStreams: {
+        s1: {
+          ...emptyAiStream(),
+          mode: "agent",
+          status: "idle",
+          messages: [
+            {
+              id: "m1",
+              role: "assistant",
+              content: "here is what I found",
+              kind: "text",
+              createdAt: new Date().toISOString(),
+            },
+          ],
+          compaction: { count: 1, removedMessages: 12, afterTokens: 9_000 },
+        },
+      },
+    });
+    render(<AiPanel sessionId="s1" />);
+    expect(screen.getByText(/replaced by a summary/i)).toBeTruthy();
+    // Not a pause: nothing to continue, and no red error treatment.
+    expect(screen.queryByRole("button", { name: "Continue" })).toBeNull();
+    expect(screen.queryByText(/^Error/)).toBeNull();
+  });
 });

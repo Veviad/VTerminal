@@ -163,6 +163,28 @@ async fn run_scenario_with_context(
     context_tokens: u32,
     history: Vec<ChatMessage>,
 ) -> ScenarioResult {
+    run_scenario_full(
+        provider,
+        decisions,
+        web_access,
+        max_iterations,
+        context_tokens,
+        false,
+        history,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_scenario_full(
+    provider: &ScriptedProvider,
+    decisions: Vec<ApprovalResponse>,
+    web_access: bool,
+    max_iterations: u32,
+    context_tokens: u32,
+    auto_compact: bool,
+    history: Vec<ChatMessage>,
+) -> ScenarioResult {
     let approvals = Arc::new(ApprovalState::default());
     let decisions = Arc::new(Mutex::new(VecDeque::from(decisions)));
     let events = Arc::new(Mutex::new(Vec::<Value>::new()));
@@ -201,6 +223,8 @@ async fn run_scenario_with_context(
         effort: vterminal_lib::provider::Effort::Off,
         max_iterations,
         context_tokens,
+        auto_compact,
+        compact_threshold_percent: 85,
         command_timeout_secs: 5,
         web_access,
         policy_rules: vec![],
@@ -702,4 +726,124 @@ async fn context_pressure_returns_a_resumable_context_pause() {
         .transcript
         .iter()
         .any(|message| message.content.contains("unknown tool")));
+}
+
+/// Six exchanges of ~1800 characters: enough for a cut that leaves a quarter of
+/// an 8k window behind and still has something worth summarizing.
+fn long_history(pairs: usize) -> Vec<ChatMessage> {
+    let mut history = Vec::new();
+    for i in 0..pairs {
+        history.push(ChatMessage::user(format!(
+            "step {i} question {}",
+            "q".repeat(1_800)
+        )));
+        history.push(ChatMessage::assistant(format!(
+            "step {i} answer {}",
+            "a".repeat(1_800)
+        )));
+    }
+    history
+}
+
+#[tokio::test]
+async fn context_pressure_compacts_and_continues_instead_of_pausing() {
+    let provider = ScriptedProvider::new([
+        // Round 1 fills 7_000 of an 8_192 window — past the 85% threshold.
+        ScriptedRound::Reply {
+            text: String::new(),
+            calls: vec![call("unknown-1", "missing_tool", json!({}))],
+            usage: (7_000, 10),
+            finish: FinishReason::ToolCalls,
+        },
+        // The compaction round itself. It is an ordinary provider call, so it
+        // consumes a scripted round like any other.
+        ScriptedRound::Reply {
+            text: "The user is walking through six steps; all answered.".into(),
+            calls: vec![],
+            usage: (6_000, 40),
+            finish: FinishReason::Stop,
+        },
+        finish("done-1"),
+    ]);
+
+    let result = run_scenario_full(&provider, vec![], false, 5, 8_192, true, long_history(6)).await;
+
+    assert_eq!(result.outcome.termination, AgentTermination::Completed);
+    assert_eq!(result.outcome.stats.compactions, 1);
+    // The summarization round is billed like every other round: 7_000 + 6_000 +
+    // 100. Dropping it would under-report the run by its single most expensive
+    // request, since compaction reads the whole span it replaces.
+    assert_eq!(result.outcome.prompt_tokens, 13_100);
+    assert_eq!(result.outcome.completion_tokens, 60);
+
+    let compacted: Vec<&Value> = result
+        .events
+        .iter()
+        .filter(|event| event["type"] == "Compacted")
+        .collect();
+    assert_eq!(
+        compacted.len(),
+        1,
+        "the swap has to be announced exactly once"
+    );
+    assert!(compacted[0]["removed_messages"].as_u64().unwrap() > 0);
+    assert!(
+        compacted[0]["after_tokens"].as_u64().unwrap()
+            < compacted[0]["before_tokens"].as_u64().unwrap()
+    );
+
+    // The third request the provider saw is the round AFTER the compaction: the
+    // oldest turn is gone, the summary is in its place, and the newest turns are
+    // still there verbatim.
+    let final_input = &provider.inputs()[2];
+    assert!(final_input
+        .iter()
+        .any(|m| m.content.contains("<compacted_history>")));
+    assert!(final_input
+        .iter()
+        .any(|m| m.content.contains("walking through six steps")));
+    assert!(
+        !final_input
+            .iter()
+            .any(|m| m.content.contains("step 0 question")),
+        "the summarized span must be gone, not duplicated"
+    );
+    assert!(final_input
+        .iter()
+        .any(|m| m.content.contains("step 5 answer")));
+    // Still exactly one system prompt, still ending in a tool-pair-valid shape.
+    assert_eq!(
+        final_input
+            .iter()
+            .filter(|m| m.role == Role::System)
+            .count(),
+        1
+    );
+}
+
+/// The pause is still the answer when compaction cannot help — a run with no
+/// history to summarize is the shape where the current turn IS the overflow.
+#[tokio::test]
+async fn a_run_with_nothing_to_summarize_still_pauses() {
+    let provider = ScriptedProvider::new([ScriptedRound::Reply {
+        text: String::new(),
+        calls: vec![call("unknown-1", "missing_tool", json!({}))],
+        usage: (7_000, 10),
+        finish: FinishReason::ToolCalls,
+    }]);
+
+    let result = run_scenario_full(&provider, vec![], false, 5, 8_192, true, vec![]).await;
+
+    assert!(matches!(
+        result.outcome.termination,
+        AgentTermination::Paused {
+            reason: vterminal_lib::agent::PauseReason::ContextLimit,
+            ..
+        }
+    ));
+    assert_eq!(result.outcome.stats.compactions, 0);
+    assert!(!result
+        .events
+        .iter()
+        .any(|event| event["type"] == "Compacted"));
 }

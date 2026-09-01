@@ -334,6 +334,11 @@ mod tests {
             ("explain", prompts::EXPLAIN),
             ("name_session", prompts::NAME_SESSION),
             ("runbook_author", prompts::RUNBOOK_AUTHOR),
+            // The compaction summarizer belongs in this list, not with the
+            // conversational surfaces: its output is substituted for real turns
+            // of the conversation, so "always answer in bullet points, in
+            // German" would rewrite the memory of every long chat.
+            ("compact", prompts::COMPACT),
         ] {
             assert!(
                 !prompt.contains(OPEN_TAG),

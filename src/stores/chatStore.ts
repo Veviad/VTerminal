@@ -29,7 +29,10 @@ import type {
 import { sameKnowledgeBucket } from "../lib/knowledge";
 import { useAppStore } from "./appStore";
 
-const idleStream = (): ChatStreamState => ({
+/** A settled stream. Exported for the same reason `appStore.emptyAiStream` is:
+ *  tests that hand-roll this object drift the moment a field is added, and the
+ *  field they miss is the one the component reads. */
+export const idleStream = (): ChatStreamState => ({
   status: "idle",
   requestId: null,
   content: "",
@@ -38,6 +41,7 @@ const idleStream = (): ChatStreamState => ({
   citations: [],
   mcpCalls: [],
   pendingMcpProposal: null,
+  compaction: null,
   lastError: null,
 });
 
@@ -472,6 +476,20 @@ async function streamTurn(
           detail = { ...detail, model_transcript: event.transcript };
           void persist(detail);
         }
+        if (event.type === "Compacted") {
+          // Informational — the turn is still streaming, and the Checkpoint that
+          // follows persists the compacted transcript. Only the notice is state
+          // here; the transcript itself stays whatever Rust hands back.
+          set((state) => ({
+            stream: {
+              ...state.stream,
+              compaction: {
+                count: (state.stream.compaction?.count ?? 0) + 1,
+                removedMessages: event.removed_messages,
+              },
+            },
+          }));
+        }
         if (event.type === "Done") {
           usage = { prompt: event.prompt_tokens, completion: event.completion_tokens };
         }
@@ -842,7 +860,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
         summaries: ordered(state.summaries.map((chat) => chat.id === summary.id ? summary : chat)),
       };
     });
-    set((state) => ({ stream: { ...idleStream(), lastError: state.stream.lastError } }));
+    // `lastError` and `compaction` outlive the stream that produced them, for the
+    // same reason: both describe the answer now sitting above them, and the user
+    // reads that answer after the turn has settled.
+    set((state) => ({
+      stream: {
+        ...idleStream(),
+        lastError: state.stream.lastError,
+        compaction: state.stream.compaction,
+      },
+    }));
     if (useAppStore.getState().activeModelId.startsWith("local/")) {
       void api.modelStatus().then((status) => {
         useAppStore.getState().setModelStatus(
