@@ -164,7 +164,15 @@ pub async fn chat_start(
     );
     let cancel = ai_state.register(&request_id);
 
-    let mut messages = vec![ChatMessage::system(CHAT_SYSTEM)];
+    // The Chat workspace shares the `Chat` surface with Ask: neither executes
+    // anything, and a user who asks for German answers in one means both.
+    let mut system_prompt = CHAT_SYSTEM.to_string();
+    crate::agent::instructions::append(
+        &app,
+        crate::agent::instructions::Surface::Chat,
+        &mut system_prompt,
+    );
+    let mut messages = vec![ChatMessage::system(system_prompt)];
     messages.extend(history.unwrap_or_default());
     let (images, note) =
         crate::commands::ai::gate_images(resolved.model, images.unwrap_or_default());

@@ -114,6 +114,15 @@ pub fn get_settings(app: tauri::AppHandle<Wry>) -> Result<Value, String> {
         // it was pinned at this default. Default stays `true`: flipping it would
         // silently take the web away from every existing install on upgrade.
         "ai_web_access": get("ai_web_access", json!(true)),
+        // The user's own standing instructions, APPENDED to the built-in system
+        // prompt of the conversational surfaces — never replacing it. `null` on a
+        // fresh install, which is what keeps the default prompt byte-identical to
+        // what it was before the feature existed. See `agent::instructions` for
+        // why the built-ins are not editable and why the one-shot helpers
+        // (suggest / explain / tab naming / runbook authoring) are excluded.
+        crate::agent::instructions::GLOBAL_KEY: get(crate::agent::instructions::GLOBAL_KEY, Value::Null),
+        crate::agent::instructions::AGENT_KEY: get(crate::agent::instructions::AGENT_KEY, Value::Null),
+        crate::agent::instructions::CHAT_KEY: get(crate::agent::instructions::CHAT_KEY, Value::Null),
         // Experimental and opt-in: upgrading an existing install must never
         // start release traffic or prompts without the user's choice.
         "auto_update_enabled": get("auto_update_enabled", json!(false)),
@@ -206,6 +215,10 @@ pub fn save_settings(
     agent_command_timeout_secs: Option<u32>,
     agent_command_policy_rules: Option<Vec<crate::agent::policy::CommandPolicyRule>>,
     ai_web_access: Option<bool>,
+    // Clearable strings, like `shell_path` above: an empty string clears them.
+    custom_instructions: Option<String>,
+    agent_custom_instructions: Option<String>,
+    chat_custom_instructions: Option<String>,
     auto_update_enabled: Option<bool>,
     docs_enabled: Option<bool>,
     runbooks_enabled: Option<bool>,
@@ -394,6 +407,29 @@ pub fn save_settings(
     }
     if let Some(v) = ai_web_access {
         store.set("ai_web_access", json!(v));
+    }
+    // Validated, not clamped. `sanitize` REJECTS anything over the cap rather
+    // than truncating it: a number that is clamped loses nothing a user can
+    // notice, and a paragraph that is silently cut in half loses the half that
+    // mattered. The three run before `store.save()` below, so a rejected field
+    // takes the whole request with it and the UI's mirror stays truthful.
+    for (key, value) in [
+        (crate::agent::instructions::GLOBAL_KEY, custom_instructions),
+        (
+            crate::agent::instructions::AGENT_KEY,
+            agent_custom_instructions,
+        ),
+        (
+            crate::agent::instructions::CHAT_KEY,
+            chat_custom_instructions,
+        ),
+    ] {
+        if let Some(raw) = value {
+            match crate::agent::instructions::sanitize(&raw)? {
+                Some(text) => store.set(key, json!(text)),
+                None => store.set(key, Value::Null),
+            }
+        }
     }
     if let Some(v) = auto_update_enabled {
         store.set("auto_update_enabled", json!(v));

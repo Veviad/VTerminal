@@ -54,6 +54,9 @@ export function useSettings() {
       agentCommandTimeoutSecs: s.agent_command_timeout_secs,
       agentCommandPolicyRules: s.agent_command_policy_rules ?? [],
       aiWebAccess: s.ai_web_access,
+      customInstructions: s.custom_instructions ?? "",
+      agentCustomInstructions: s.agent_custom_instructions ?? "",
+      chatCustomInstructions: s.chat_custom_instructions ?? "",
       autoUpdateEnabled: s.auto_update_enabled,
       docsEnabled: s.docs_enabled,
       runbooksEnabled: s.runbooks_enabled,
@@ -175,6 +178,16 @@ export function useSettings() {
       useAppStore.setState({ agentCommandPolicyRules: patch.agent_command_policy_rules });
     if (patch.ai_web_access !== undefined)
       useAppStore.setState({ aiWebAccess: patch.ai_web_access });
+    // Mirrored with the SENT text, not the stored text: Rust trims and drops
+    // stray control bytes, so the two can differ by whitespace. Re-reading to
+    // reconcile that would fight the textarea the user is still typing in; the
+    // next `loadSettings` settles it.
+    if (patch.custom_instructions !== undefined)
+      useAppStore.setState({ customInstructions: patch.custom_instructions });
+    if (patch.agent_custom_instructions !== undefined)
+      useAppStore.setState({ agentCustomInstructions: patch.agent_custom_instructions });
+    if (patch.chat_custom_instructions !== undefined)
+      useAppStore.setState({ chatCustomInstructions: patch.chat_custom_instructions });
     if (patch.auto_update_enabled !== undefined)
       useAppStore.setState({ autoUpdateEnabled: patch.auto_update_enabled });
     if (patch.docs_enabled !== undefined)
