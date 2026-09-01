@@ -23,7 +23,7 @@
     />
     <meta
       property="og:description"
-      content="Command blocks, a multi-step AI agent, MCP tools, and local or Qdrant knowledge buckets. Local models run in-process via llama.cpp; nothing runs without you."
+      content="Command blocks, a multi-step AI agent, MCP tools, scheduled actions, and local or Qdrant knowledge buckets. Local models run in-process via llama.cpp; nothing runs that you did not authorize."
     />
     <meta property="og:url" content="https://vterminal.veviad.com/" />
     <meta
@@ -41,7 +41,7 @@
     />
     <meta
       name="twitter:description"
-      content="Command blocks, a multi-step AI agent, MCP tools, and local or Qdrant knowledge buckets. Local models run in-process via llama.cpp; nothing runs without you."
+      content="Command blocks, a multi-step AI agent, MCP tools, scheduled actions, and local or Qdrant knowledge buckets. Local models run in-process via llama.cpp; nothing runs that you did not authorize."
     />
 
     <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
@@ -297,7 +297,7 @@
           >
             <span class="announcement-badge" data-release-text="version">Latest</span>
             <span class="announcement-label">
-              Updated v0.4.0 · Startup fix included, reinstall if affected
+              Scheduled Actions and standing instructions for the AI
             </span>
             <svg class="ui-icon" aria-hidden="true"><use href="#i-arrow-right" /></svg>
           </a>
@@ -482,10 +482,12 @@
                     <h3>Nothing Runs Without You</h3>
                   </div>
                   <p class="why-item-copy">
-                    Every command a model writes passes an approval gate.
-                    Natural-language suggestions are <em>inserted</em> into your
-                    prompt, never executed. Restored tabs never reconnect on
-                    their own.
+                    In a session you are driving, every command a model writes
+                    passes an approval gate. A scheduled action runs only what
+                    you armed it for in advance, and skips and records
+                    everything else. Natural-language suggestions are
+                    <em>inserted</em> into your prompt, never executed. Restored
+                    tabs never reconnect on their own.
                   </p>
                 </div>
               </article>
@@ -610,7 +612,7 @@
           <div>
             <p class="eyebrow">The AI</p>
             <h2 class="section-heading" id="ai-title">
-              Six Ways In. One Keystroke Each.
+              Eight Ways In.
             </h2>
             <p class="section-lead">
               The same <code>Provider</code> trait covers in-process llama.cpp,
@@ -701,6 +703,32 @@
                 Drag, paste or pick. An optional on-device vision sidecar
                 transcribes screenshots, so even a non-vision chat model can work
                 with them.
+              </p>
+            </article>
+            <article class="assistant-card">
+              <span class="feature-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-wand" /></svg>
+              </span>
+              <h3>Standing Instructions</h3>
+              <p>
+                Conventions to keep, tools to prefer, the language to answer in.
+                Three fields — all AI, Agent only, Chat and Ask — added to the
+                built-in instructions rather than replacing them. They tune how
+                the model works; they cannot grant a permission or approve a
+                command.
+              </p>
+            </article>
+            <article class="assistant-card">
+              <span class="feature-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-gauge" /></svg>
+              </span>
+              <h3>Scheduled Actions</h3>
+              <p>
+                A saved sequence of commands and prompts, run on a schedule
+                against a local shell or a saved SSH host. Experimental and off
+                by default. It fires only while VTerminal is open — no tray
+                icon, no launch agent, no background process — and every step is
+                recorded, including what it wanted to do and was not allowed to.
               </p>
             </article>
           </div>
@@ -1131,7 +1159,7 @@
             </span>
             <span class="trust-badge" role="listitem">
               <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
-              Runs in Your Visible PTY
+              Every Step Recorded
             </span>
             <span class="trust-badge" role="listitem">
               <svg class="ui-icon" aria-hidden="true"><use href="#i-check" /></svg>
@@ -1162,11 +1190,20 @@
               </span>
               <h3>Arming It Is the Authorization</h3>
               <p>
-                The permission mode is per session, never persisted, and never
-                inherited by a new tab. Reads and Smart retain approval gates,
-                Auto runs standard commands but protects sensitive operations,
-                and Full runs every executable command without approval. Deny
-                rules and disabled capabilities still block execution.
+                For a session you are driving, the permission mode is per
+                session, never persisted, and never inherited by a new tab.
+                Reads and Smart retain approval gates, Auto runs standard
+                commands but protects sensitive operations, and Full runs every
+                executable command without approval. Deny rules and disabled
+                capabilities still block execution.
+              </p>
+              <p>
+                A scheduled action is the one exception, and it is bounded.
+                <em>Full</em> is not offered to it at all. The arming is tied to
+                that action's target, steps and attachments, and editing any of
+                them resets it. Attaching a knowledge bucket or an MCP server
+                caps it at reads. Anything the mode does not cover is skipped
+                and recorded, never left waiting.
               </p>
             </article>
             <article class="security-item">
@@ -1175,9 +1212,16 @@
               </span>
               <h3>In Your Visible Terminal</h3>
               <p>
-                Approved commands run in the tab you're looking at, not a hidden
-                subprocess. You see exactly what ran, and it runs wherever
-                that tab is, including over <code>ssh</code>.
+                For an agent run you start, approved commands run in the tab
+                you're looking at, not a hidden subprocess. You see exactly what
+                ran, and it runs wherever that tab is, including over
+                <code>ssh</code>.
+              </p>
+              <p>
+                A scheduled action runs in the background by default, where
+                there is no tab to watch — so every step is recorded instead:
+                the command, its exit code and a capped extract of its output.
+                Driving a real terminal tab is a separate opt-in.
               </p>
             </article>
             <article class="security-item">
@@ -1210,7 +1254,9 @@
               <p>
                 Restored sessions never replay anything. An <code>ssh</code> tab
                 you had open offers <em>Reconnect</em>; it does not reconnect
-                itself.
+                itself. A scheduled action set to catch up on a missed
+                occurrence runs at most once, and only after the app has
+                settled — never as part of starting up.
               </p>
             </article>
           </div>
