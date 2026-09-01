@@ -580,6 +580,23 @@ async fn run_prompt_step(
     if docs_attached {
         system_prompt.push_str(&format!("\n\n{}", crate::agent::prompts::AGENT_DOCS));
     }
+    // LAST, after the scheduled tier, the web tier, the context and the docs
+    // tier — so the user's own closing tag ends the prompt and nothing the app
+    // writes can read as their text.
+    //
+    // A scheduled prompt step is an Agent run, and would otherwise be the only
+    // Agent-class surface that ignored the user's standing instructions: Ask and
+    // Chat both call this, and so does `agent_start`. It widens nothing this
+    // module's doc bounds — the framing states in its own words that the text
+    // authorises nothing, and enforcement is `policy_auto_runs` plus
+    // `auto_skip_sink`, neither of which reads prose. What it buys is the fleet
+    // knowledge ("these hosts are Debian", "never touch /srv") that an
+    // unattended run most needs and can least ask for.
+    crate::agent::instructions::append(
+        app,
+        crate::agent::instructions::Surface::Agent,
+        &mut system_prompt,
+    );
 
     let permissions = AgentPermissionState::default();
     let pty_exec = PtyExecState::default();
