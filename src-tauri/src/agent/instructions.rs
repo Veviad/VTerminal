@@ -7,7 +7,7 @@
 //! that are correctness requirements rather than preferences — `AGENT`'s "no
 //! pagers, no stdin, one line" exists because commands are typed into a real
 //! TTY, `AGENT_WEB_CURL` ships a pipeline verified against a real minified page,
-//! and `AGENT_DOCS` carries the promise that retrieved text is data.
+//! and `AGENT_DOCS`/`SCHEDULED` carry the promise that retrieved text is data.
 //! Half of those are pinned by tests in `prompts::tests` precisely because they
 //! must survive a rewrite. A "replace the system prompt" box hands the user a
 //! way to delete all of it from a settings field, and the failure is silent: the
@@ -29,9 +29,9 @@
 //! `agent::policy` and the permission mode are enforced in code; no prose reaches
 //! them. That is already true without the paragraph — the paragraph exists so a
 //! model that reads "don't ask me about rm" does not spend the run trying to act
-//! on an instruction that cannot take effect. It is also what any future
-//! unattended surface would need before this block could ride along on it: the
-//! text has to be inert with respect to authorization, not merely ignored.
+//! on an instruction that cannot take effect. It matters most on the scheduled
+//! path, which is the app's one persisted execution authorization: custom
+//! instructions ride along there too, and this is why doing so does not widen it.
 
 use tauri::Wry;
 
@@ -49,7 +49,7 @@ pub const MAX_CHARS: usize = 4000;
 /// this module's header for why they are excluded rather than merely unwired.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Surface {
-    /// Agent mode — the one surface that proposes commands.
+    /// Agent mode, interactive or scheduled.
     Agent,
     /// Ask (the terminal-side panel) and the Chat workspace. Both are
     /// conversational and neither executes anything.
@@ -246,8 +246,8 @@ mod tests {
             .contains("Only scoped."));
     }
 
-    /// The three clauses that make this safe to append to a prompt whose model
-    /// can propose commands. Pinned as invariants, not
+    /// The three clauses that make this safe to append to an agent prompt — and
+    /// to a SCHEDULED one, where nobody is watching. Pinned as invariants, not
     /// phrasing: each is one rewrite away from becoming a paragraph that merely
     /// describes the feature.
     #[test]

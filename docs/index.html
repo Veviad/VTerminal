@@ -612,7 +612,7 @@
           <div>
             <p class="eyebrow">The AI</p>
             <h2 class="section-heading" id="ai-title">
-              Eight Ways In.
+              Every Way In. One Keystroke Each.
             </h2>
             <p class="section-lead">
               The same <code>Provider</code> trait covers in-process llama.cpp,
@@ -731,6 +731,30 @@
                 recorded, including what it wanted to do and was not allowed to.
               </p>
             </article>
+            <article class="assistant-card">
+              <span class="feature-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-chat" /></svg>
+              </span>
+              <h3>Chat Workspace</h3>
+              <p>
+                A conversation with no terminal attached, kept in its own
+                threads with their own history, model and MCP servers. It can
+                search Knowledge, but it has no <code>run_command</code>: the
+                terminal stays Agent-only.
+              </p>
+            </article>
+            <article class="assistant-card">
+              <span class="feature-icon" aria-hidden="true">
+                <svg class="ui-icon"><use href="#i-branch" /></svg>
+              </span>
+              <h3>Local and Remote Together</h3>
+              <p>
+                Pair a local tab with a live <code>ssh</code> tab and drive both
+                from one conversation. Each target keeps its own approval mode,
+                and the run stops if either tab drifts from the machine it was
+                bound to.
+              </p>
+            </article>
           </div>
         </div>
       </section>
@@ -748,7 +772,8 @@
           <p class="section-lead">
             Connect several remote or local MCP servers, choose them per chat,
             and expose only the tools that conversation needs. MCP tools work in
-            Ask and Agent, while terminal commands remain Agent-only. See the
+            Ask, Agent and the Chat workspace, while terminal commands remain
+            Agent-only. See the
             <a href="https://github.com/Veviad/VTerminal/blob/main/docs/MCP.md"
               >MCP setup and security guide</a
             >.
@@ -933,9 +958,8 @@
                 <code>metadata.vterminal</code> contract stores the exact profile,
                 vector and payload schema in Qdrant itself. Unmarked collections
                 stay hidden instead of asking every client to recreate a fragile
-                local field mapping. Existing v0.2.0 local bindings remain under
-                Advanced for this compatibility release as read-only search
-                sources. Qdrant stores extracted chunks, metadata and vectors, not
+                local field mapping. Local bindings from before the managed
+                contract remain under Advanced as read-only search sources. Qdrant stores extracted chunks, metadata and vectors, not
                 original binaries.
                 Profiles fingerprint the model, revision, dimensions and exact
                 query/document transforms; changing one creates a new profile
@@ -1635,7 +1659,11 @@
           <ul class="keys-grid">
             <li><kbd>⌘T / Ctrl+Shift+T</kbd> <span>New tab</span></li>
             <li><kbd>⌘W / Ctrl+Shift+W</kbd> <span>Close tab</span></li>
-            <li><kbd>⌘1…9 / Ctrl+Shift+1…9</kbd> <span>Jump to tab</span></li>
+            <li>
+              <kbd>⌘1…8 / Ctrl+Shift+1…8</kbd> <span>Jump to that tab</span>
+            </li>
+            <li><kbd>⌘9 / Ctrl+Shift+9</kbd> <span>Jump to the last tab</span></li>
+            <li><kbd>⌘Y / Ctrl+Shift+Y</kbd> <span>Past sessions</span></li>
             <li><kbd>⌘K / Ctrl+Shift+K</kbd> <span>Command palette</span></li>
             <li><kbd>⌘I / Ctrl+Shift+I</kbd> <span>AI suggestion</span></li>
             <li><kbd>⌘J / Ctrl+Shift+J</kbd> <span>Toggle AI panel</span></li>
