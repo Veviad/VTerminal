@@ -531,6 +531,10 @@ async fn run_prompt_step(
         .as_ref()
         .map(crate::mcp::chat::McpRunContext::tool_defs)
         .unwrap_or_default();
+
+    // One read for the window and both compaction knobs, so the pause guard and
+    // the compactor cannot disagree about how big the window is.
+    let compaction = crate::commands::ai::compaction_settings(app, resolved.model);
     let config = AgentConfig {
         request_id: request_id.clone(),
         shell: shell_for(app),
@@ -541,7 +545,15 @@ async fn run_prompt_step(
         // Mirrors the on-device load clamp, not the raw catalog number: reading
         // `model.context_tokens` directly makes the guard inert, because the
         // default local model declares 262_144 and loads at 32_768.
-        context_tokens: crate::commands::ai::agent_context_window(app, resolved.model),
+        context_tokens: compaction.window_tokens,
+        // A scheduled run compacts like an interactive one. It grants nothing:
+        // enforcement is `policy_auto_runs` plus `auto_skip_sink`, neither of
+        // which reads prose — so a summary of earlier steps rides along without
+        // widening the one persisted execution authorization. It matters MORE
+        // here: nobody is at the keyboard to click Continue on a pause, so a run
+        // that fills its window at 03:00 otherwise records a step limit and stops.
+        auto_compact: compaction.enabled,
+        compact_threshold_percent: compaction.threshold_percent,
         command_timeout_secs: u64::from(action.input.command_timeout_secs),
         web_access,
         policy_rules: crate::commands::settings::read_command_policy_rules(app),

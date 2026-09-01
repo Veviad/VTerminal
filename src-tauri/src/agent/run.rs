@@ -1,6 +1,7 @@
 use serde_json::json;
 use tauri::ipc::Channel;
 
+use super::compact;
 use super::exec;
 use super::{
     AgentPermissionState, AgentTargetRole, ApprovalDecision, ApprovalResponse, ApprovalState,
@@ -135,6 +136,16 @@ pub struct AgentConfig {
     /// clamp in `commands/models.rs` may have lowered for RAM — so the guard is
     /// optimistic there. Still strictly better than a raw provider error.
     pub context_tokens: u32,
+    /// Whether a run that fills `context_tokens` may summarize its own oldest
+    /// rounds and carry on, instead of pausing (`agent::compact`).
+    ///
+    /// Deliberately two scalars rather than a `compact::Settings`: that type
+    /// carries the window too, and a second copy of `context_tokens` is a second
+    /// chance for the guard and the compactor to disagree about how big the
+    /// window is. `commands::ai` fills both from one `compaction_settings` call.
+    pub auto_compact: bool,
+    /// Percent of `context_tokens`, already through `compact::clamp_threshold`.
+    pub compact_threshold_percent: u32,
     pub command_timeout_secs: u64,
     /// Whether this run may reach the web. Per-run rather than per-model:
     /// it folds the user's setting together with what the model can do, and
@@ -218,6 +229,10 @@ pub struct AgentRunStats {
     pub commands_executed: u32,
     pub commands_skipped: u32,
     pub commands_blocked: u32,
+    /// How many times this run summarized its own history. Worth recording: it
+    /// is the difference between "the model forgot" and "the model never knew",
+    /// and it is invisible in the transcript the run returns.
+    pub compactions: u32,
 }
 
 #[derive(Debug)]
@@ -238,7 +253,7 @@ impl AgentRunOutcome {
     /// interpolate the transcript or a provider error body.
     pub fn metadata_log_line(&self, request_id: &str, model: &str) -> String {
         format!(
-            "request={} model={} termination={} elapsed_ms={} rounds={} tool_calls={} proposals={} executed={} skipped={} blocked={} prompt_tokens={} completion_tokens={}",
+            "request={} model={} termination={} elapsed_ms={} rounds={} tool_calls={} proposals={} executed={} skipped={} blocked={} compactions={} prompt_tokens={} completion_tokens={}",
             request_id,
             model,
             self.termination.as_str(),
@@ -249,6 +264,7 @@ impl AgentRunOutcome {
             self.stats.commands_executed,
             self.stats.commands_skipped,
             self.stats.commands_blocked,
+            self.stats.compactions,
             self.prompt_tokens,
             self.completion_tokens,
         )
@@ -1290,6 +1306,13 @@ pub async fn run_agent(
     // Constant across the run: effort never changes mid-run.
     let round_max_tokens = round_max_tokens(config.effort);
     let context_reserve = context_reserve(round_max_tokens);
+    // One window, shared with the pause guard below — see `AgentConfig`.
+    let compaction = compact::Settings {
+        enabled: config.auto_compact,
+        window_tokens: config.context_tokens,
+        threshold_percent: config.compact_threshold_percent,
+    };
+    let mut compact_attempts: u32 = 0;
     // Last round's INPUT size — the live measure of how full the window is.
     // Stays 0 when the provider reports no usage (some third-party
     // OpenAI-compat shims), which is exactly what makes the guard below
@@ -1338,6 +1361,78 @@ pub async fn run_agent(
         if iteration >= budget {
             pause_reason = PauseReason::StepLimit;
             break;
+        }
+
+        // Summarize the oldest rounds rather than pausing, when that is possible.
+        //
+        // Two triggers, both on the MEASURED input size. `compaction.wants` is
+        // the user's threshold (85% by default) and fires early, while there is
+        // still room to send the summarization request; `context_exhausted` is
+        // the hard guard that predates it and still owns the pause. Ordered this
+        // way because a run that continues from a summary is strictly better than
+        // a pause the user may not be at the keyboard to notice — and capped,
+        // because if three summaries have not shrunk the window then the next
+        // round's input is something compaction cannot shrink, and the pause is
+        // the truthful answer.
+        //
+        // Safe HERE and almost nowhere else: this is the same point
+        // `append_steers` is allowed to write, for the same reason — every tool
+        // call has its result, so the transcript is tool-pair-complete and a cut
+        // on a user turn cannot orphan anything.
+        if compact_attempts < compact::MAX_PER_RUN
+            && compaction.enabled
+            && (compaction.wants(last_prompt_tokens)
+                || context_exhausted(last_prompt_tokens, config.context_tokens, context_reserve))
+        {
+            // ATTEMPTS, not successes. A summarization round that keeps failing
+            // (a 429 the retry ladder could not ride out) would otherwise be
+            // re-attempted at the top of every remaining iteration, spending a
+            // request each time on the way to the same pause.
+            compact_attempts = compact_attempts.saturating_add(1);
+            if let compact::Outcome::Compacted(compacted) = compact::compact(
+                provider,
+                &mut messages,
+                config.context_tokens,
+                cancel.clone(),
+            )
+            .await
+            {
+                let _ = on_event.send(StreamEvent::Compacted {
+                    removed_messages: compacted.removed_messages,
+                    before_tokens: compacted.before_tokens,
+                    after_tokens: compacted.after_tokens,
+                });
+                stats.compactions = stats.compactions.saturating_add(1);
+                // The summarization round is billed like any other. It reads the
+                // whole older span, so leaving it out under-reports the run by
+                // more than any single round in it.
+                total_usage.0 = total_usage.0.saturating_add(compacted.usage.0);
+                total_usage.1 = total_usage.1.saturating_add(compacted.usage.1);
+                // Checkpoint immediately: the transcript the frontend holds is
+                // now the one it would resume from, and it no longer matches the
+                // one it was given.
+                checkpoints.mark_changed();
+                checkpoints.emit(&messages, on_event);
+                // The measurement belonged to a transcript that no longer exists.
+                // 0 is exactly what the guard below already treats as "the
+                // provider reported no usage", so it degrades to the step cap for
+                // one round, until the next round bills the compacted prompt.
+                last_prompt_tokens = 0;
+            }
+            // Compaction is an await on the provider, so Stop may have arrived
+            // during it — and a cancelled summarization would otherwise fall
+            // through to the guard below and be reported as a pause.
+            if *cancel.borrow() {
+                return finish_outcome(
+                    messages,
+                    AgentTermination::Cancelled,
+                    total_usage,
+                    stats,
+                    started,
+                    &mut checkpoints,
+                    on_event,
+                );
+            }
         }
 
         // Stop one round SHORT of the window rather than letting the provider
@@ -1742,6 +1837,8 @@ mod tests {
             effort: crate::provider::Effort::Off,
             max_iterations: 10,
             context_tokens: 32_768,
+            auto_compact: false,
+            compact_threshold_percent: compact::DEFAULT_THRESHOLD_PERCENT,
             command_timeout_secs: 30,
             web_access: false,
             policy_rules: vec![],
@@ -2258,6 +2355,7 @@ mod tests {
                 commands_executed: 1,
                 commands_skipped: 0,
                 commands_blocked: 0,
+                compactions: 0,
             },
             elapsed_ms: 45,
         };

@@ -88,3 +88,68 @@ describe("AgentSection — internet access", () => {
     }));
   });
 });
+
+describe("AgentSection — conversation context", () => {
+  beforeEach(() => {
+    saveSettings.mockClear();
+    useAppStore.setState({
+      aiWebAccess: true,
+      agentMaxIterations: 10,
+      agentCommandTimeoutSecs: 120,
+      agentCommandPolicyRules: [],
+      autoCompactEnabled: true,
+      autoCompactThresholdPercent: 85,
+    });
+  });
+
+  it("is on by default and writes the key the backend reads", async () => {
+    render(<AgentSection />);
+    const toggle = screen.getByRole("switch", { name: S.settings.agent.autoCompact });
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+
+    fireEvent.click(toggle);
+    await waitFor(() =>
+      expect(saveSettings).toHaveBeenCalledWith({ auto_compact_enabled: false }),
+    );
+  });
+
+  it("offers the threshold, defaulted to 85%", async () => {
+    render(<AgentSection />);
+    const select = screen.getByRole("combobox", { name: S.settings.agent.compactThreshold });
+    expect((select as HTMLSelectElement).value).toBe("85");
+
+    fireEvent.change(select, { target: { value: "70" } });
+    await waitFor(() =>
+      expect(saveSettings).toHaveBeenCalledWith({ auto_compact_threshold_percent: 70 }),
+    );
+  });
+
+  /** Every offered value has to be one Rust will actually store — it clamps to
+   *  50..=95 on write AND on read, so an option outside that range would silently
+   *  save as something else and the select would then disagree with the backend. */
+  it("only offers thresholds the backend accepts", () => {
+    render(<AgentSection />);
+    const select = screen.getByRole("combobox", { name: S.settings.agent.compactThreshold });
+    const values = Array.from((select as HTMLSelectElement).options).map((o) => Number(o.value));
+    expect(values.length).toBeGreaterThan(1);
+    expect(Math.min(...values)).toBeGreaterThanOrEqual(50);
+    expect(Math.max(...values)).toBeLessThanOrEqual(95);
+  });
+
+  /** A threshold for something that never happens is a control with no meaning. */
+  it("hides the threshold while compaction is off", () => {
+    useAppStore.setState({ autoCompactEnabled: false });
+    render(<AgentSection />);
+    expect(
+      screen.queryByRole("combobox", { name: S.settings.agent.compactThreshold }),
+    ).toBeNull();
+  });
+
+  /** The hint has to name what the OFF state does, because that is the state this
+   *  feature replaced and it is not a neutral one: the oldest turns were deleted
+   *  with no notice, and an agent run stopped at the window. */
+  it("says what turning it off costs", () => {
+    expect(S.settings.agent.autoCompactHint).toMatch(/dropped with no summary/i);
+    expect(S.settings.agent.autoCompactHint).toMatch(/pauses/i);
+  });
+});

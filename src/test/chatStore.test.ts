@@ -34,7 +34,7 @@ vi.mock("../lib/tauri", () => ({
   knowledgeBucketsList: vi.fn(async () => []),
 }));
 
-import { useChatStore } from "../stores/chatStore";
+import { useChatStore, idleStream } from "../stores/chatStore";
 import { useAppStore } from "../stores/appStore";
 
 function summary(id: string, archived = false, messages = 1): ChatSummary {
@@ -115,7 +115,7 @@ describe("Chat workspace store", () => {
       current: null,
       search: "",
       archivedOpen: false,
-      stream: { status: "idle", requestId: null, content: "", thinking: "", model: null, citations: [], mcpCalls: [], pendingMcpProposal: null, lastError: null },
+      stream: idleStream(),
       pendingAttachments: [],
       attachError: null,
       attachStatus: null,
@@ -198,7 +198,7 @@ describe("Chat workspace store", () => {
     useChatStore.setState({
       current: detail(active),
       summaries: [active],
-      stream: { status: "streaming", requestId: "request", content: "", thinking: "", model: null, citations: [], mcpCalls: [], pendingMcpProposal: null, lastError: null },
+      stream: { ...idleStream(), status: "streaming", requestId: "request" },
     });
 
     await useChatStore.getState().archive(true);

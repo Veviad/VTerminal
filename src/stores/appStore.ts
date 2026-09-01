@@ -195,6 +195,20 @@ export interface AiStreamState {
     steps: number;
     limit: number;
   } | null;
+  /** Set when this run replaced its oldest turns with a summary of them.
+   *
+   *  Announced for the same reason a stripped image is (`history.rs`): a model
+   *  that silently forgot the first half of a conversation answers as though it
+   *  remembers, and the user cannot tell that from a wrong answer.
+   *
+   *  Transient like `pause` and `restoredAt` — not a synthetic message, never
+   *  archived, cleared by `initAiStream`. `count` accumulates within a run, so a
+   *  second compaction updates the same line instead of stacking notices. */
+  compaction: {
+    count: number;
+    removedMessages: number;
+    afterTokens: number;
+  } | null;
   /** Steering messages typed mid-run that the backend has NOT yet confirmed
    *  delivering. Only StreamEvent::SteerDelivered removes an entry, so anything
    *  left here is something the model never saw. */
@@ -300,6 +314,7 @@ export function emptyAiStream(): AiStreamState {
     mcpSelection: { server_ids: [], disabled_tools: {} },
     permissionMode: "ask",
     pause: null,
+    compaction: null,
     steerQueue: [],
     attachedBlockIds: [],
     attachedBucketIds: [],
@@ -480,6 +495,14 @@ export interface AppState {
     usage?: { prompt: number; completion: number },
     generationId?: string,
   ): void;
+  /** Note that the backend summarized this run's oldest turns. Never settles the
+   *  run: the loop continues, and the next event is an ordinary Checkpoint. */
+  noteCompaction(
+    sessionId: string,
+    removedMessages: number,
+    afterTokens: number,
+    generationId?: string,
+  ): void;
   /** Record which model is serving the in-flight request. */
   setAiStreamModel(sessionId: string, model: string): void;
   /** Store the transcript an agent turn produced, to hand back on the next one.
@@ -601,6 +624,12 @@ export interface AppState {
   visionModelId: string | null;
   visionPrompt: string | null;
   visionAutoLoadOnStart: boolean;
+  /** Summarize the oldest turns instead of losing them. Mirrors only: the
+   *  threshold, the cut and the summary all live in Rust (`agent::compact`), so
+   *  these two values change what Settings shows and nothing about what happens
+   *  to a transcript. */
+  autoCompactEnabled: boolean;
+  autoCompactThresholdPercent: number;
   agentMaxIterations: number;
   agentCommandTimeoutSecs: number;
   agentCommandPolicyRules: import("../lib/types").CommandPolicyRule[];
@@ -1336,7 +1365,28 @@ export const useAppStore = create<AppState>((set, get) => ({
         // it happens HERE: the Continue path dispatches through initAiStream, so
         // a second click cannot resume the same pause twice.
         pause: null,
+        // A compaction belongs to the run that did it: a fresh request (or a
+        // Continue, which dispatches through here) starts with a clean line.
+        compaction: null,
       })),
+    ),
+
+  noteCompaction: (sessionId, removedMessages, afterTokens, generationId) =>
+    set((state) =>
+      withAiStream(state, sessionId, (s) =>
+        // Same generation guard every mid-run action uses: a compaction belonging
+        // to a superseded request must not annotate the run that replaced it.
+        generationId !== undefined && s.generationId !== generationId
+          ? s
+          : {
+              ...s,
+              compaction: {
+                count: (s.compaction?.count ?? 0) + 1,
+                removedMessages,
+                afterTokens,
+              },
+            },
+      ),
     ),
 
   setAiStreamModel: (sessionId, model) =>
@@ -1390,6 +1440,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         // offer to resume a finished run against a transcript the user has only
         // just reopened and has not read.
         pause: null,
+        // The transcript being restored may well BE a compacted one, but that
+        // happened in a run that is over; the note describes this run.
+        compaction: null,
         lastError: null,
         restoredAt: capturedAt,
       })),
@@ -2037,6 +2090,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   visionModelId: null,
   visionPrompt: null,
   visionAutoLoadOnStart: true,
+  autoCompactEnabled: true,
+  autoCompactThresholdPercent: 85,
   agentMaxIterations: 10,
   agentCommandTimeoutSecs: 120,
   agentCommandPolicyRules: [],

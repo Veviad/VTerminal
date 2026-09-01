@@ -1,3 +1,7 @@
+// Summarizing the oldest span of a conversation rather than dropping it. Beside
+// `history` because it is the same concern from the other end: that module makes
+// a transcript SAFE to send, this one makes it FIT.
+pub mod compact;
 pub mod context;
 pub mod exec;
 pub mod history;
@@ -355,6 +359,23 @@ pub enum StreamEvent {
     Checkpoint {
         sequence: u32,
         transcript: Vec<crate::provider::ChatMessage>,
+    },
+    /// The oldest part of the conversation was replaced by a summary of itself.
+    ///
+    /// Informational, and deliberately so: the run continues, the transcript is
+    /// tool-pair-valid, and a `Checkpoint` carrying the compacted history follows
+    /// immediately. It exists because the swap must be VISIBLE — the same rule
+    /// `history::strip_stale_images` follows for a removed image. A model that
+    /// silently forgot the first half of a conversation answers as though it
+    /// remembers, and the user has no way to tell that from a wrong answer.
+    Compacted {
+        /// Messages the summary replaced.
+        removed_messages: u32,
+        /// Estimated size before and after, in tokens. Estimates, not
+        /// measurements — the real number only exists once the provider has
+        /// billed the next round.
+        before_tokens: u32,
+        after_tokens: u32,
     },
     Done {
         prompt_tokens: u32,

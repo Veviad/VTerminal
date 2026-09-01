@@ -74,6 +74,58 @@ fn tool_result(id: &str, content: impl Into<String>) -> ChatMessage {
     }
 }
 
+/// Compact when the conversation has reached the threshold, and say so.
+///
+/// Bills the summarization round into `total_usage` itself — it reads the whole
+/// span it replaces, so it is the most expensive request the turn makes, and
+/// leaving that to two call sites is how one of them ends up forgetting.
+///
+/// Returns true when the transcript changed, which is the caller's cue to
+/// re-checkpoint: the frontend persists what it is given, so a compaction the
+/// store never hears about is undone by the next reopen.
+///
+/// A failed summarization is NOT an error for the turn. The user asked a
+/// question; the honest fallback is to send what we have and let the provider
+/// answer or refuse, exactly as it did before compaction existed.
+async fn compact_if_needed(
+    provider: &dyn crate::provider::Provider,
+    messages: &mut Vec<ChatMessage>,
+    used_tokens: u32,
+    settings: crate::agent::compact::Settings,
+    // ATTEMPTS so far in this turn, incremented here. Bounded for the same reason
+    // the agent loop bounds it: a summarization that keeps failing would be
+    // retried before every one of the eight tool rounds, spending a request each
+    // time to reach the same place.
+    attempts: &mut u32,
+    total_usage: &mut (u32, u32),
+    cancel: &tokio::sync::watch::Receiver<bool>,
+    on_event: &Channel<StreamEvent>,
+) -> bool {
+    use crate::agent::compact;
+
+    if !settings.wants(used_tokens) || *attempts >= compact::MAX_PER_RUN {
+        return false;
+    }
+    *attempts += 1;
+    match compact::compact(provider, messages, settings.window_tokens, cancel.clone()).await {
+        compact::Outcome::Compacted(stats) => {
+            total_usage.0 = total_usage.0.saturating_add(stats.usage.0);
+            total_usage.1 = total_usage.1.saturating_add(stats.usage.1);
+            let _ = on_event.send(StreamEvent::Compacted {
+                removed_messages: stats.removed_messages,
+                before_tokens: stats.before_tokens,
+                after_tokens: stats.after_tokens,
+            });
+            true
+        }
+        // Nothing was removed in either case, so there is nothing to announce:
+        // `Compacted` exists because a summary REPLACES turns the user can see,
+        // and neither of these did. The turn then either fits after all or the
+        // provider says it does not, which is the pre-compaction behaviour.
+        compact::Outcome::NothingToDo | compact::Outcome::Failed(_) => false,
+    }
+}
+
 async fn search_docs(
     app: &tauri::AppHandle<Wry>,
     docs: &DocsDb,
@@ -180,20 +232,71 @@ pub async fn chat_start(
         crate::commands::ai::with_note(prompt, note),
         images,
     ));
-    history::normalize(&mut messages);
 
     let _ = on_event.send(StreamEvent::Started {
         request_id: request_id.clone(),
         model: model_label,
     });
+
+    // BEFORE `normalize`, deliberately. The trim inside it is a silent deletion
+    // from the oldest end — run it first and it would delete exactly the turns
+    // compaction is here to summarize. Estimated rather than measured, because
+    // nothing has been billed yet; every later pass uses the provider's own
+    // `prompt_tokens`.
+    let compaction = crate::commands::ai::compaction_settings(&app, resolved.model);
+    let estimated = crate::agent::compact::estimate_tokens(&messages);
+    let mut compact_attempts = 0u32;
     let mut total_usage = (0u32, 0u32);
+    compact_if_needed(
+        provider.as_ref(),
+        &mut messages,
+        estimated,
+        compaction,
+        &mut compact_attempts,
+        &mut total_usage,
+        &cancel,
+        &on_event,
+    )
+    .await;
+    history::normalize_with(&mut messages, compaction.budget());
+    // Last round's INPUT size, straight from the provider. Not a sum: this is how
+    // full the window is right now.
+    let mut last_prompt_tokens = 0u32;
 
     for round in 0..=MAX_CLIENT_TOOL_ROUNDS {
         if *cancel.borrow() {
             let _ = on_event.send(StreamEvent::Cancelled);
             ai_state.finish(&request_id);
             mcp_approvals.drain_for_request(&request_id);
-            return Ok(history::storage_snapshot(&messages));
+            return Ok(history::storage_snapshot_with(
+                &messages,
+                compaction.budget(),
+            ));
+        }
+
+        // Between rounds, on the measured number. A single turn can cross the
+        // threshold on its own here: eight rounds of Knowledge passages, MCP
+        // results and fetched pages accumulate in `messages` and nothing trims
+        // them, which is the one way the Chat workspace could run out of window
+        // even before this feature existed. Safe at this point for the same
+        // reason a steer is safe at the top of the agent loop — every call has
+        // its result, so the transcript is tool-pair-complete.
+        if compact_if_needed(
+            provider.as_ref(),
+            &mut messages,
+            last_prompt_tokens,
+            compaction,
+            &mut compact_attempts,
+            &mut total_usage,
+            &cancel,
+            &on_event,
+        )
+        .await
+        {
+            let _ = on_event.send(StreamEvent::Checkpoint {
+                sequence: round + 1,
+                transcript: history::storage_snapshot_with(&messages, compaction.budget()),
+            });
         }
         let client_tools = if round < MAX_CLIENT_TOOL_ROUNDS {
             available_tools.clone()
@@ -248,7 +351,10 @@ pub async fn chat_start(
                 let _ = on_event.send(StreamEvent::Cancelled);
                 ai_state.finish(&request_id);
                 mcp_approvals.drain_for_request(&request_id);
-                return Ok(history::storage_snapshot(&messages));
+                return Ok(history::storage_snapshot_with(
+                    &messages,
+                    compaction.budget(),
+                ));
             }
             Err(error) => {
                 let message = error.to_string();
@@ -265,6 +371,9 @@ pub async fn chat_start(
         } = output;
         total_usage.0 = total_usage.0.saturating_add(usage.0);
         total_usage.1 = total_usage.1.saturating_add(usage.1);
+        // Overwritten, not accumulated: the compaction check at the top of the
+        // next iteration asks how full the window is, not what the turn has cost.
+        last_prompt_tokens = usage.0;
         let mut assistant = ChatMessage::assistant(text);
         if !calls.is_empty() {
             assistant.tool_calls = Some(calls.clone());
@@ -273,7 +382,7 @@ pub async fn chat_start(
             messages.push(assistant);
         }
         if calls.is_empty() {
-            let snapshot = history::storage_snapshot(&messages);
+            let snapshot = history::storage_snapshot_with(&messages, compaction.budget());
             let _ = on_event.send(StreamEvent::Checkpoint {
                 sequence: round + 1,
                 transcript: snapshot.clone(),
@@ -316,7 +425,7 @@ pub async fn chat_start(
             result.structured_tool_result = dispatched.structured_tool_result;
             messages.push(result);
         }
-        let snapshot = history::storage_snapshot(&messages);
+        let snapshot = history::storage_snapshot_with(&messages, compaction.budget());
         let _ = on_event.send(StreamEvent::Checkpoint {
             sequence: round + 1,
             transcript: snapshot,

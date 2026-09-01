@@ -359,6 +359,18 @@ export type StreamEvent =
    *  tool-call ids/results needed for continuation, but no system prompt or
    *  image bytes. Opaque for the same reason as ChatMessage below. */
   | { type: "Checkpoint"; sequence: number; transcript: ChatMessage[] }
+  /** The oldest part of the conversation was replaced by a summary of itself, and
+   *  the run continues. Informational, always followed by a Checkpoint carrying
+   *  the compacted history. It exists so the swap is VISIBLE: a model that
+   *  silently forgot the first half of a conversation answers as though it
+   *  remembers, and the user cannot tell that from a wrong answer. */
+  | {
+      type: "Compacted";
+      removed_messages: number;
+      /** Estimates, not billed numbers — see the Rust doc comment. */
+      before_tokens: number;
+      after_tokens: number;
+    }
   | { type: "Done"; prompt_tokens: number; completion_tokens: number }
   /** The loop stopped at a guard rail instead of finishing. NOT an error: the
    *  transcript is intact and resumable, so this renders as a calm banner with a
@@ -1199,6 +1211,11 @@ export interface ChatStreamState {
     arguments: unknown;
     schemaHash: string;
   } | null;
+  /** Set when this turn replaced the oldest part of the conversation with a
+   *  summary of it (`StreamEvent::Compacted`). Announced rather than silent: the
+   *  model's memory of the chat was rewritten, and that is something the reader
+   *  of the answer needs to know. Transient — reset with the stream. */
+  compaction: { count: number; removedMessages: number } | null;
   lastError: string | null;
 }
 
@@ -1246,6 +1263,13 @@ export interface Settings {
   ai_panel_ratio: number | null;
   /** LEGACY, read-only. Never sent back; only the migration above reads it. */
   ai_panel_width: number;
+  /** Summarize the oldest part of a long conversation instead of letting it fall
+   *  off the end. ON by default: what it replaces is a silent deletion of the
+   *  oldest turns, or an agent pause the user has no move against. */
+  auto_compact_enabled: boolean;
+  /** Percent of the model's context window at which that happens. Clamped to
+   *  50..=95 by Rust, on write AND on read. */
+  auto_compact_threshold_percent: number;
   agent_max_iterations: number;
   agent_command_timeout_secs: number;
   agent_command_policy_rules?: CommandPolicyRule[];
@@ -1692,6 +1716,8 @@ export interface SettingsPatch {
   /** Empty string clears the remembered chat. */
   active_chat_id: string;
   ai_panel_ratio: number;
+  auto_compact_enabled: boolean;
+  auto_compact_threshold_percent: number;
   agent_max_iterations: number;
   agent_command_timeout_secs: number;
   agent_command_policy_rules: CommandPolicyRule[];

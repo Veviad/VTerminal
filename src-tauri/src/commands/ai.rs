@@ -8,7 +8,11 @@ use crate::provider::{ChatMessage, ChatParams, Provider, ToolChoiceMode};
 
 // One-shot streamed chats plus the agent loop, both over the `Provider` seam.
 
-/// The context window `agent::run`'s pause guard may trust, or 0 to disable it.
+/// The context window a guard may trust, or 0 to disable it.
+///
+/// Two callers now: `agent::run`'s pause guard and `agent::compact`'s threshold.
+/// Both need the same number for the same reason, and both must degrade to
+/// "no opinion" rather than to a guess.
 ///
 /// Deliberately NOT `model.context_tokens` verbatim, for two unrelated reasons:
 ///
@@ -27,7 +31,7 @@ use crate::provider::{ChatMessage, ChatParams, Provider, ToolChoiceMode};
 ///   off for remote servers and the step cap is the only limit there, preserving
 ///   the promise in `models::remote` that a wrong value costs a wrong tooltip and
 ///   never a failed request.
-pub fn agent_context_window(app: &tauri::AppHandle<Wry>, model: &CatalogModel) -> u32 {
+pub fn trusted_context_window(app: &tauri::AppHandle<Wry>, model: &CatalogModel) -> u32 {
     context_window_for(
         model.provider,
         model.context_tokens,
@@ -36,13 +40,37 @@ pub fn agent_context_window(app: &tauri::AppHandle<Wry>, model: &CatalogModel) -
     )
 }
 
-/// The pure half of `agent_context_window`, split out so the three arms can be
+/// The pure half of `trusted_context_window`, split out so the three arms can be
 /// pinned without an `AppHandle`.
 fn context_window_for(provider: ProviderId, catalog_tokens: u32, local_setting: u32) -> u32 {
     match provider {
         ProviderId::Remote => 0,
         ProviderId::Local => local_setting.min(catalog_tokens),
         _ => catalog_tokens,
+    }
+}
+
+/// The auto-compaction knobs for one request, against one model.
+///
+/// Read once per request, never per round: the settings store is a file, and a
+/// value that changed mid-run would move the trigger point under a transcript
+/// already measured against the old one.
+pub fn compaction_settings(
+    app: &tauri::AppHandle<Wry>,
+    model: &CatalogModel,
+) -> crate::agent::compact::Settings {
+    use crate::agent::compact;
+
+    crate::agent::compact::Settings {
+        enabled: crate::commands::settings::read_bool(app, "auto_compact_enabled", true),
+        window_tokens: trusted_context_window(app, model),
+        // Clamped on read as well as on write: a hand-edited settings.json
+        // reaches `read_u32` unfiltered, exactly as `agent_max_iterations` does.
+        threshold_percent: compact::clamp_threshold(crate::commands::settings::read_u32(
+            app,
+            "auto_compact_threshold_percent",
+            compact::DEFAULT_THRESHOLD_PERCENT,
+        )),
     }
 }
 
@@ -865,6 +893,7 @@ pub async fn agent_start(
             )
         };
 
+    let agent_compaction = compaction_settings(&app, resolved.model);
     let config = crate::agent::run::AgentConfig {
         request_id: request_id.clone(),
         shell,
@@ -877,7 +906,11 @@ pub async fn agent_start(
         // to the user.
         max_iterations: crate::commands::settings::read_u32(&app, "agent_max_iterations", 10)
             .clamp(1, 100),
-        context_tokens: agent_context_window(&app, resolved.model),
+        // All three from ONE read, so the guard and the compactor can never
+        // disagree about how big the window is.
+        context_tokens: agent_compaction.window_tokens,
+        auto_compact: agent_compaction.enabled,
+        compact_threshold_percent: agent_compaction.threshold_percent,
         command_timeout_secs: u64::from(crate::commands::settings::read_u32(
             &app,
             "agent_command_timeout_secs",

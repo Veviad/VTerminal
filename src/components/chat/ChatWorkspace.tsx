@@ -24,6 +24,9 @@ import { refreshKnowledgeBuckets } from "../../lib/docsIndex";
 import { knowledgeBucketKey, sameKnowledgeBucket } from "../../lib/knowledge";
 import { sanitizeExternalWebUrl } from "../../lib/externalUrl";
 import * as api from "../../lib/tauri";
+// One string for both surfaces: the Chat workspace and the AI panel report the
+// same event, and two wordings would be two promises about what was kept.
+import { S } from "../../lib/strings";
 import type {
   ChatDisplayMessage,
   ChatSummary,
@@ -167,6 +170,14 @@ export function ChatWorkspace() {
                 args={stream.pendingMcpProposal.arguments}
                 onRespond={(decision) => void useChatStore.getState().respondToMcpProposal(decision)}
               />
+            )}
+            {/* Neither an error nor a warning: the turn succeeded. It is shown
+                because the model's memory of this chat was rewritten, which is
+                something the reader of the answer above needs to know. */}
+            {stream.compaction && (
+              <p className="rounded-md border border-border-subtle px-3 py-2 text-xs text-text-muted">
+                {S.aiPanel.compacted(stream.compaction.removedMessages, stream.compaction.count)}
+              </p>
             )}
             {stream.lastError && <p className="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">{stream.lastError}</p>}
             {knowledgeWarning && <p className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">{knowledgeWarning}</p>}

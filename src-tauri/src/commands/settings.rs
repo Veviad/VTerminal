@@ -107,6 +107,17 @@ pub fn get_settings(app: tauri::AppHandle<Wry>) -> Result<Value, String> {
         // LEGACY, read-only — no longer written. Kept as the migration source for
         // anyone whose settings.json predates `ai_panel_ratio`.
         "ai_panel_width": get("ai_panel_width", json!(420)),
+        // Summarize the oldest part of a long conversation instead of letting it
+        // fall off the end. ON by default: the alternative it replaces is a
+        // SILENT deletion (`history::trim_to_budget`) or a pause the user cannot
+        // act on, and neither is a state anyone would choose deliberately.
+        "auto_compact_enabled": get("auto_compact_enabled", json!(true)),
+        // Percent of the model's context window. Clamped to compact's own range
+        // on write AND on read — see `compact::clamp_threshold`.
+        "auto_compact_threshold_percent": get(
+            "auto_compact_threshold_percent",
+            json!(crate::agent::compact::DEFAULT_THRESHOLD_PERCENT)
+        ),
         "agent_max_iterations": get("agent_max_iterations", json!(10)),
         "agent_command_timeout_secs": get("agent_command_timeout_secs", json!(120)),
         "agent_command_policy_rules": get("agent_command_policy_rules", json!([])),
@@ -222,6 +233,8 @@ pub fn save_settings(
     workspace_mode: Option<String>,
     active_chat_id: Option<String>,
     ai_panel_ratio: Option<f64>,
+    auto_compact_enabled: Option<bool>,
+    auto_compact_threshold_percent: Option<u32>,
     agent_max_iterations: Option<u32>,
     agent_command_timeout_secs: Option<u32>,
     agent_command_policy_rules: Option<Vec<crate::agent::policy::CommandPolicyRule>>,
@@ -396,6 +409,18 @@ pub fn save_settings(
         // half; the 320px floor below which the composer is unusable is a pixel
         // rule and therefore lives in the CSS clamp, not here.
         store.set("ai_panel_ratio", json!(v.clamp(0.1, 0.5)));
+    }
+    if let Some(v) = auto_compact_enabled {
+        store.set("auto_compact_enabled", json!(v));
+    }
+    if let Some(v) = auto_compact_threshold_percent {
+        // Clamped rather than rejected, on write and again on read: the value is
+        // one number with no meaning outside its range, so the worst a bad one
+        // can cost is a trigger point a few percent from what was asked for.
+        store.set(
+            "auto_compact_threshold_percent",
+            json!(crate::agent::compact::clamp_threshold(v)),
+        );
     }
     if let Some(v) = agent_max_iterations {
         // The real ceiling is the model's context window, not this number: every

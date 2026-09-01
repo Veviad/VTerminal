@@ -131,6 +131,13 @@ export const S = {
     pausedContextLimit: (steps: number) =>
       `Paused after ${steps} steps — the conversation is close to filling the model's context window.`,
     pausedHint: "Nothing was lost. Continue picks up where it stopped, or type to redirect it.",
+    // Says what was lost, plainly. "Summarized" rather than "compacted" because
+    // the second word explains a mechanism and the first explains a consequence,
+    // and the consequence is what changes how much to trust the answer above it.
+    compacted: (removed: number, times: number) =>
+      times > 1
+        ? `The conversation was summarized ${times} times to stay inside the model's context window — the earliest turns are now a summary, not the original text.`
+        : `The earliest ${removed} message${removed === 1 ? "" : "s"} of this conversation were replaced by a summary to stay inside the model's context window.`,
     pausedContinue: "Continue",
     /** Sent to the MODEL verbatim as the resumed turn's goal, and shown in the
      *  transcript as the user turn it is. Editing this changes what the agent is
@@ -617,6 +624,20 @@ export const S = {
       // an earlier step, or through an alias in your own dotfiles.
       webAccessHint:
         "Off: the agent's commands may not reach the network (curl, wget, git fetch/pull/clone, package installs, ssh), and models with a built-in web tool stop being offered one. Chat and models keep working. Command blocking is best-effort — a script the agent wrote earlier can still reach out.",
+      contextTitle: "Conversation context",
+      // Names what the OFF state does, because that is the state this feature
+      // replaced and it is not a neutral one: the oldest turns were deleted with
+      // no notice, and an agent run stopped at the window with a Continue button
+      // that would stop again.
+      contextIntro:
+        "Every model has a limit on how much conversation it can hold. These settings decide what happens when a long conversation reaches it — in Chat, in Ask and in an agent run.",
+      autoCompact: "Summarize instead of forgetting",
+      autoCompactHint:
+        "On: the oldest turns are replaced by a model-written summary of them, and the conversation continues. The app tells you each time this happens. Off: the oldest turns are dropped with no summary, and an agent run pauses instead of continuing.",
+      compactThreshold: "Summarize at",
+      compactThresholdHint:
+        "Percent of the model's context window. Has no effect on a model whose window the app cannot know — a configured remote server reports its context length as a hint at best, so nothing acts on that number.",
+      compactThresholdValue: (percent: number) => `${percent}% full`,
     },
     instructions: {
       title: "Custom instructions",

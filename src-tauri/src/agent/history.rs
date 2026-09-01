@@ -25,6 +25,55 @@ const MAX_HISTORY_CHARS: usize = 24_000;
 /// every round's `messages.clone()` more expensive.
 const MAX_HISTORY_MESSAGES: usize = 60;
 
+/// Where the trim starts deleting turns.
+///
+/// It exists as a type because the two surfaces need very different numbers, and
+/// the difference is not a preference. `AGENT` is sized for a transcript the run
+/// then grows on top of, and its cost when it fires is bounded: the agent's own
+/// pause guard and `compact` handle the live window, so what this budget bounds
+/// is a REOPENED transcript. `for_window` is for the Chat workspace, where the
+/// same 24k characters meant a conversation with a 200k-token model forgot
+/// everything past its last ~6k tokens, silently, while the user watched.
+///
+/// A trim is always a silent deletion, so under `for_window` it is a BACKSTOP and
+/// nothing else: `compact` runs first, at 85% of the window, and only if that
+/// cannot help (or its provider round fails) does the transcript grow far enough
+/// for this to bite. Placed at the window rather than under it deliberately —
+/// anywhere below the compaction threshold and the trim would delete the turns
+/// compaction was about to summarize.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Budget {
+    pub chars: usize,
+    pub messages: usize,
+}
+
+impl Budget {
+    pub const AGENT: Self = Self {
+        chars: MAX_HISTORY_CHARS,
+        messages: MAX_HISTORY_MESSAGES,
+    };
+
+    /// The backstop for a conversation whose size is managed by compaction.
+    ///
+    /// `window_tokens` of 0 means the window is unknown — a configured remote
+    /// server, whose reported context length is advisory (see `models::remote`).
+    /// There the conservative agent budget is kept: a wrong guess must cost a
+    /// forgotten turn, never a failed request.
+    pub fn for_window(window_tokens: u32) -> Self {
+        if window_tokens == 0 {
+            return Self::AGENT;
+        }
+        Self {
+            // ~4 chars per token, the same rough conversion `compact` documents.
+            chars: (window_tokens as usize).saturating_mul(4),
+            // Generous, because this is not the mechanism that bounds a long
+            // chat any more; it only stops an unbounded `messages.clone()` per
+            // round when hundreds of tiny turns accumulate.
+            messages: 400,
+        }
+    }
+}
+
 /// Normalize `[system] + history + [user goal]` in place.
 ///
 /// Post-conditions, all asserted by tests:
@@ -35,6 +84,11 @@ const MAX_HISTORY_MESSAGES: usize = 60;
 /// * no `images` on any history turn (see `HISTORY_IMAGE_TURNS`) — the goal turn
 ///   the caller appends afterwards is the only one that may carry them
 pub fn normalize(messages: &mut Vec<ChatMessage>) {
+    normalize_with(messages, Budget::AGENT);
+}
+
+/// `normalize` against an explicit budget. See `Budget`.
+pub fn normalize_with(messages: &mut Vec<ChatMessage>, budget: Budget) {
     if messages.is_empty() {
         return;
     }
@@ -61,7 +115,7 @@ pub fn normalize(messages: &mut Vec<ChatMessage>) {
     // assistant turn and leaves its result behind), so it goes first. Then
     // orphaned results are rescued as prose, which in turn strands the calls that
     // pointed at them — so unanswered calls are pruned last.
-    trim_to_budget(&mut history);
+    trim_to_budget(&mut history, budget);
     rescue_orphaned_tool_results(&mut history);
     drop_unanswered_tool_calls(&mut history);
     // After the trim, so the budget above still SEES the images it is deciding
@@ -84,13 +138,24 @@ pub fn normalize(messages: &mut Vec<ChatMessage>) {
 /// by notes. Treating the whole copy as history also applies the same trimming and
 /// tool-pair repair that a reopened transcript receives before it is sent again.
 pub fn storage_snapshot(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    storage_snapshot_with(messages, Budget::AGENT)
+}
+
+/// `storage_snapshot` against an explicit budget.
+///
+/// The budget must match the one the same surface passes to `normalize_with`, or
+/// the transcript is bounded by whichever of the two is smaller — and for the
+/// Chat workspace that was the whole bug: the live transcript would have kept the
+/// conversation, and the copy that reached disk (and came back as the next turn's
+/// `history`) was cut to 24k characters anyway.
+pub fn storage_snapshot_with(messages: &[ChatMessage], budget: Budget) -> Vec<ChatMessage> {
     let mut snapshot: Vec<ChatMessage> = messages
         .iter()
         .filter(|message| message.role != Role::System)
         .cloned()
         .collect();
 
-    trim_to_budget(&mut snapshot);
+    trim_to_budget(&mut snapshot, budget);
     rescue_orphaned_tool_results(&mut snapshot);
     drop_unanswered_tool_calls(&mut snapshot);
     strip_stale_images(&mut snapshot);
@@ -171,7 +236,7 @@ fn drop_unanswered_tool_calls(history: &mut Vec<ChatMessage>) {
 }
 
 /// Trim from the OLDEST end until both budgets are met.
-fn trim_to_budget(history: &mut Vec<ChatMessage>) {
+fn trim_to_budget(history: &mut Vec<ChatMessage>, budget: Budget) {
     let cost = |m: &ChatMessage| {
         m.content.len()
             + m.tool_calls
@@ -187,7 +252,7 @@ fn trim_to_budget(history: &mut Vec<ChatMessage>) {
     let mut total: usize = history.iter().map(cost).sum();
     let mut drop_from_front = 0usize;
     while drop_from_front < history.len()
-        && (total > MAX_HISTORY_CHARS || history.len() - drop_from_front > MAX_HISTORY_MESSAGES)
+        && (total > budget.chars || history.len() - drop_from_front > budget.messages)
     {
         total = total.saturating_sub(cost(&history[drop_from_front]));
         drop_from_front += 1;
@@ -202,7 +267,7 @@ fn trim_to_budget(history: &mut Vec<ChatMessage>) {
 /// each tool result carries its own `tool_call_id` and merging would lose one —
 /// Anthropic's builder already coalesces adjacent results into a single user
 /// message on its own.
-fn merge_adjacent_same_role(messages: &mut Vec<ChatMessage>) {
+pub(crate) fn merge_adjacent_same_role(messages: &mut Vec<ChatMessage>) {
     let mut i = 1;
     while i < messages.len() {
         let mergeable = matches!(messages[i].role, Role::User | Role::Assistant)
@@ -448,7 +513,7 @@ mod tests {
             ChatMessage::assistant("noted"),
         ];
         let before = history.len();
-        trim_to_budget(&mut history);
+        trim_to_budget(&mut history, Budget::AGENT);
 
         assert!(
             history.len() < before,
@@ -468,7 +533,7 @@ mod tests {
             ChatMessage::user("look at this"),
             ChatMessage::assistant("noted"),
         ];
-        trim_to_budget(&mut history);
+        trim_to_budget(&mut history, Budget::AGENT);
         assert_eq!(history.len(), 2);
     }
 
@@ -881,6 +946,71 @@ mod tests {
                 .iter()
                 .map(|m| (m.role, m.content.clone()))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    fn chatty_history(turns: usize) -> Vec<ChatMessage> {
+        (0..turns)
+            .map(|i| {
+                if i % 2 == 0 {
+                    ChatMessage::user(format!("q{i} {}", "x".repeat(500)))
+                } else {
+                    ChatMessage::assistant(format!("a{i} {}", "y".repeat(500)))
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_chat_budget_follows_the_model_window() {
+        // An unknown window keeps the conservative number, because a wrong guess
+        // must cost a forgotten turn and never a failed request.
+        assert_eq!(Budget::for_window(0), Budget::AGENT);
+        assert_eq!(Budget::for_window(32_768).chars, 131_072);
+        assert!(Budget::for_window(200_000).chars > Budget::AGENT.chars * 30);
+        assert!(Budget::for_window(32_768).messages > Budget::AGENT.messages);
+    }
+
+    /// The Chat workspace bug in one test: the same conversation, cut by the agent
+    /// budget and kept by the window budget. 24k characters is ~6k tokens, so a
+    /// chat with a 200k-token model used to forget everything else — silently,
+    /// while the user could still read the turn on screen.
+    #[test]
+    fn a_long_chat_is_cut_by_the_agent_budget_and_kept_by_the_window_budget() {
+        let mut agent = seed(chatty_history(80));
+        normalize(&mut agent);
+        assert_wire_valid(&agent);
+        assert!(
+            !agent.iter().any(|m| m.content.contains("q0 ")),
+            "the agent budget deletes the oldest turns"
+        );
+
+        let mut chat = seed(chatty_history(80));
+        normalize_with(&mut chat, Budget::for_window(200_000));
+        assert_wire_valid(&chat);
+        assert!(
+            chat.iter().any(|m| m.content.contains("q0 ")),
+            "the window budget keeps them for compaction to summarize"
+        );
+    }
+
+    /// Both halves have to agree. The stored copy becomes the NEXT turn's history,
+    /// so a live transcript that keeps the conversation and a snapshot that cuts it
+    /// forgets exactly as much as before, one turn later.
+    #[test]
+    fn the_storage_snapshot_honours_the_same_budget_as_the_wire_copy() {
+        let mut chat = seed(chatty_history(80));
+        let budget = Budget::for_window(200_000);
+        normalize_with(&mut chat, budget);
+
+        let kept = storage_snapshot_with(&chat, budget);
+        assert!(kept.iter().any(|m| m.content.contains("q0 ")));
+        assert!(kept.iter().all(|m| m.role != Role::System));
+
+        let cut = storage_snapshot(&chat);
+        assert!(
+            !cut.iter().any(|m| m.content.contains("q0 ")),
+            "the agent budget is still the default"
         );
     }
 }

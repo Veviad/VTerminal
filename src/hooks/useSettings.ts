@@ -52,6 +52,8 @@ export function useSettings() {
       // window reproduces exactly what the user (or a first launch, at 420px) had.
       // Clamped here because `hydrateSettings` applies its patch verbatim.
       aiPanelRatio: clampPanelRatio(s.ai_panel_ratio ?? s.ai_panel_width / window.innerWidth),
+      autoCompactEnabled: s.auto_compact_enabled,
+      autoCompactThresholdPercent: s.auto_compact_threshold_percent,
       agentMaxIterations: s.agent_max_iterations,
       agentCommandTimeoutSecs: s.agent_command_timeout_secs,
       agentCommandPolicyRules: s.agent_command_policy_rules ?? [],
@@ -188,6 +190,15 @@ export function useSettings() {
       useAppStore.setState({ visionPrompt: patch.vision_prompt || null });
     if (patch.vision_auto_load_on_start !== undefined)
       useAppStore.setState({ visionAutoLoadOnStart: patch.vision_auto_load_on_start });
+    if (patch.auto_compact_enabled !== undefined)
+      useAppStore.setState({ autoCompactEnabled: patch.auto_compact_enabled });
+    if (patch.auto_compact_threshold_percent !== undefined)
+      // Mirrored with the sent value: Rust clamps to 50..=95, so the two can
+      // differ at the edges until the next `loadSettings` settles it — the same
+      // trade the instruction fields make.
+      useAppStore.setState({
+        autoCompactThresholdPercent: patch.auto_compact_threshold_percent,
+      });
     if (patch.agent_max_iterations !== undefined)
       useAppStore.setState({ agentMaxIterations: patch.agent_max_iterations });
     if (patch.agent_command_timeout_secs !== undefined)
