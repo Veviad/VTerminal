@@ -239,7 +239,7 @@ jobs:
           "VULKAN_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append
           "VULKAN_PACKAGE_VERSION=$env:VULKAN_PACKAGE_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
           "VULKAN_SDK_VERSION=$env:VULKAN_SDK_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "WINDOWS_PACKAGE_CACHE_REV=windows-x64-cpu-vulkan-package-v2" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "WINDOWS_PACKAGE_CACHE_REV=windows-x64-cpu-vulkan-package-v3" | Out-File -FilePath $env:GITHUB_ENV -Append
           "CARGO_PROFILE_DEV_DEBUG=0" | Out-File -FilePath $env:GITHUB_ENV -Append
           "CARGO_PROFILE_TEST_DEBUG=0" | Out-File -FilePath $env:GITHUB_ENV -Append
           "CARGO_INCREMENTAL=0" | Out-File -FilePath $env:GITHUB_ENV -Append

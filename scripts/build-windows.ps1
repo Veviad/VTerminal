@@ -4,6 +4,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "windows-import-audit.ps1")
 $repo = Split-Path -Parent $PSScriptRoot
 $target = "x86_64-pc-windows-msvc"
 $manifest = Join-Path $repo "src-tauri\Cargo.toml"
@@ -181,9 +182,28 @@ try {
     throw "The staged backend payload must contain Vulkan and at least one CPU implementation."
   }
 
+  # Every DLL the loader must resolve at process start has to be shipped or
+  # guaranteed by Windows. v0.6.0 failed here: llama-common.dll imported
+  # libssl-3-x64.dll because llama.cpp's cpp-httplib found OpenSSL on the build
+  # machine, and vterminal.exe never started on a machine without it.
+  #
+  # This reads import tables rather than starting a process, because neither
+  # property a process start has is the one we need: vterminal-docs.exe does not
+  # import llama-common.dll at all, and the build machine's own PATH resolves
+  # dependencies that user machines do not have.
+  $stagedApplication = @(
+    Join-Path $release "vterminal.exe"
+    Join-Path $release "vterminal-docs.exe"
+  ) + @(Get-ChildItem -LiteralPath $runtimeDestination -Filter "*.dll" -File | ForEach-Object FullName)
+  $stagedBackendFiles = @(
+    Get-ChildItem -LiteralPath $backendDestination -Filter "*.dll" -File | ForEach-Object FullName
+  )
+  Assert-WindowsImportClosure -ApplicationFile $stagedApplication -BackendFile $stagedBackendFiles -Label "staged Windows"
+
   # Run from an isolated directory containing only the files that will be
-  # packaged. This catches normal PE imports such as llama-common.dll before an
-  # installer can be produced; Cargo's profile directory must not mask them.
+  # packaged. Complements the audit above by proving the sidecar's own runtime
+  # resolves from the packaged layout; Cargo's profile directory must not mask
+  # a missing file.
   Test-StagedLocalRuntime (Join-Path $release "vterminal-docs.exe") $runtimeDestination $backendDestination
 
   if ($RequireAuthenticode) {

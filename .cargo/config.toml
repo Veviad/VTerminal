@@ -5,3 +5,26 @@
 [env]
 MISTRALRS_METAL_PRECOMPILE = "0"
 MISTRALRS_METAL_PLATFORMS = "macos"
+# Keep OpenSSL out of llama.cpp's `common` target. Its vendored cpp-httplib
+# defaults to `LLAMA_OPENSSL=ON` and links OpenSSL::SSL/Crypto whenever
+# `find_package(OpenSSL)` succeeds; llama-cpp-sys-2 only sets `LLAMA_CURL=OFF`,
+# and forwards nothing but `CMAKE_*`/`GGML_*` from the environment, so this
+# standard CMake switch is the only seam that reaches it.
+#
+# On macOS `common` is a static library, so the linker never pulls in the
+# unreferenced HTTP objects and the dependency stays invisible. Windows builds
+# llama.cpp as SHARED libraries (`dynamic-backends` needs runtime-loadable
+# modules), which links every object unconditionally: llama-common.dll acquired
+# hard imports on libssl-3-x64.dll/libcrypto-3-x64.dll, vterminal.exe imports
+# llama-common.dll, and the app died in the Windows loader before main() on
+# every machine without OpenSSL 3 installed. Build runners have it on PATH,
+# which is why nothing failed in CI.
+#
+# VTerminal never calls llama.cpp's downloader — models come from
+# `models::download` over reqwest/rustls — so the only thing lost is HTTPS
+# support in code we do not compile a call to.
+#
+# llama-cpp-sys-2 emits `rerun-if-env-changed` for GGML_* only, so an existing
+# build directory will NOT pick this up: `cargo clean -p llama-cpp-sys-2` after
+# changing it, or bump the Windows CI cache revisions.
+CMAKE_DISABLE_FIND_PACKAGE_OpenSSL = "ON"

@@ -9,6 +9,8 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+. (Join-Path $PSScriptRoot "windows-import-audit.ps1")
+
 $repo = Split-Path -Parent $PSScriptRoot
 $installerPath = [IO.Path]::GetFullPath($Installer)
 $installDirectory = [IO.Path]::GetFullPath($InstallRoot)
@@ -57,6 +59,24 @@ function Assert-MirroredFiles([IO.FileInfo[]]$Sources, [string]$Destination) {
       throw "The installed $($source.Name) does not match the staged runtime."
     }
   }
+}
+
+# The installed tree is what users actually load, so audit it here rather than
+# trusting the staged copy: an unshipped import is a process that never starts.
+# NSIS's generated uninstaller is excluded — it is not built from this repo and
+# imports nothing but Win32.
+function Assert-InstalledImportClosure([string]$Directory) {
+  $application = @(
+    Get-ChildItem -LiteralPath $Directory -File |
+      Where-Object { $_.Extension -in @(".exe", ".dll") } |
+      Where-Object { $_.Name -notlike "uninstall*" } |
+      ForEach-Object FullName
+  )
+  $backendDirectory = Join-Path $Directory "llama-backends"
+  $backends = @(
+    Get-ChildItem -LiteralPath $backendDirectory -Filter "*.dll" -File | ForEach-Object FullName
+  )
+  Assert-WindowsImportClosure -ApplicationFile $application -BackendFile $backends -Label "installed Windows"
 }
 
 function Invoke-HelpSmoke([string]$Executable) {
@@ -256,6 +276,8 @@ try {
   Assert-MirroredFiles $runtime $managedBin
   Assert-MirroredFiles $backends (Join-Path $managedBin "llama-backends")
 
+  Assert-InstalledImportClosure $installDirectory
+
   $bundledCli = Join-Path $installDirectory "vterminal-docs.exe"
   $managedCli = Join-Path $managedBin "vterminal-docs.exe"
   if (-not (Test-Path -LiteralPath $bundledCli -PathType Leaf)) {
@@ -331,4 +353,4 @@ if ($null -ne $cleanupFailure) {
   throw $cleanupFailure
 }
 
-Write-Host "Windows installer payload, loader, repair copy, and uninstall checks passed"
+Write-Host "Windows installer payload, imports, loader, repair copy, and uninstall checks passed"
