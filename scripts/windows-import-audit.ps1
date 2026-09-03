@@ -107,20 +107,22 @@ function Get-PeImportedModule {
       return @()
     }
 
+    # Every section, because a descriptor's Name RVA routinely points into a
+    # different section than the descriptor array itself.
     $sections = @()
     for ($index = 0; $index -lt $sectionCount; $index++) {
-      $stream.Position = $optionalHeader + $optionalHeaderSize + (40 * $index) + 8
+      $stream.Position = $optionalHeader + $optionalHeaderSize + (40 * $index)
+      $sectionName = [Text.Encoding]::ASCII.GetString($reader.ReadBytes(8)).TrimEnd([char]0)
       $virtualSize = [int64]$reader.ReadUInt32()
       $virtualAddress = [int64]$reader.ReadUInt32()
       $rawSize = [int64]$reader.ReadUInt32()
       $rawAddress = [int64]$reader.ReadUInt32()
       $sections += [PSCustomObject]@{
+        Name           = $sectionName
         VirtualAddress = $virtualAddress
-        # A section's virtual size can exceed its raw size (BSS-style padding)
-        # and vice versa (raw data is file-alignment padded). Accept the larger
-        # span so an import table near either edge still maps.
-        Span           = [Math]::Max($virtualSize, $rawSize)
+        VirtualSize    = $virtualSize
         RawAddress     = $rawAddress
+        RawSize        = $rawSize
       }
     }
 
@@ -165,9 +167,21 @@ function ConvertTo-PeFileOffset {
   )
 
   foreach ($section in $Sections) {
-    if ($Rva -ge $section.VirtualAddress -and $Rva -lt $section.VirtualAddress + $section.Span) {
-      return $section.RawAddress + ($Rva - $section.VirtualAddress)
+    # A section's virtual size can exceed its raw size (it may declare space the
+    # file has no bytes for) and vice versa (raw data is file-alignment padded).
+    # Contain against the larger span so an RVA near either edge finds its
+    # section, then decide whether the file actually holds those bytes.
+    $span = [Math]::Max($section.VirtualSize, $section.RawSize)
+    if ($Rva -lt $section.VirtualAddress -or $Rva -ge $section.VirtualAddress + $span) {
+      continue
     }
+    $offset = $Rva - $section.VirtualAddress
+    if ($section.RawAddress -eq 0 -or $offset -ge $section.RawSize) {
+      # Uninitialized space. An import table never lives here, and reading on
+      # would silently return whatever follows the section's raw bytes.
+      throw "$Path maps RVA $Rva into section '$($section.Name)', which has no file bytes at that offset."
+    }
+    return $section.RawAddress + $offset
   }
   throw "$Path has an import table RVA ($Rva) outside every section."
 }

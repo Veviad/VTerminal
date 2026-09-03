@@ -8,8 +8,9 @@ New-Item -ItemType Directory -Path $root | Out-Null
 
 # A hand-built PE is the only fixture that tests the RVA arithmetic without
 # depending on a binary this repo does not control. The layout is the minimum
-# the loader format requires: one section holding the import descriptors
-# followed by the module-name strings they point at.
+# the loader format requires: an import-descriptor array plus the module-name
+# strings the descriptors point at — optionally in a SECOND section, which is
+# what a real linker produces and what makes the per-RVA section lookup matter.
 function New-TestPeImage {
   param(
     [Parameter(Mandatory = $true)]
@@ -21,28 +22,59 @@ function New-TestPeImage {
 
     [switch]$Pe32,
 
-    [switch]$WithoutImports
+    [switch]$WithoutImports,
+
+    # Put the name strings in their own section, at an RVA the descriptor
+    # section does not cover.
+    [switch]$SplitSections,
+
+    # Declare virtual space the file has no bytes for, so the import directory
+    # RVA resolves into a section whose SizeOfRawData is zero.
+    [switch]$WithoutRawData
   )
 
-  $sectionRva = 0x1000
-  $sectionOffset = 0x400
   $optionalHeaderSize = if ($Pe32) { 224 } else { 240 }
   $sectionHeaderOffset = 0x98 + $optionalHeaderSize
 
+  $descriptorRva = 0x1000
+  $descriptorOffset = 0x400
   $descriptorBytes = 20 * ($Module.Count + 1)
+  $nameRva = if ($SplitSections) { 0x2000 } else { $descriptorRva + $descriptorBytes }
+  $nameOffset = if ($SplitSections) { 0x600 } else { $descriptorOffset + $descriptorBytes }
+
   $names = [Collections.Generic.List[byte]]::new()
   $nameRvas = @()
   # NOT `foreach ($module in $Module)`: PowerShell variable names are
   # case-insensitive, so the loop variable would overwrite the parameter and
   # $Module.Count would then be 1 for the descriptor loop below.
   foreach ($moduleName in $Module) {
-    $nameRvas += $sectionRva + $descriptorBytes + $names.Count
+    $nameRvas += $nameRva + $names.Count
     $names.AddRange([Text.Encoding]::ASCII.GetBytes($moduleName))
     $names.Add(0)
   }
 
-  $sectionSize = $descriptorBytes + $names.Count
-  $image = [byte[]]::new($sectionOffset + [Math]::Max($sectionSize, 16))
+  $sections = @(
+    [PSCustomObject]@{
+      Name   = ".idata"
+      Rva    = $descriptorRva
+      Offset = $descriptorOffset
+      Size   = $descriptorBytes
+    }
+  )
+  if ($SplitSections) {
+    $sections += [PSCustomObject]@{
+      Name   = ".rdata"
+      Rva    = $nameRva
+      Offset = $nameOffset
+      Size   = $names.Count
+    }
+  }
+  else {
+    $sections[0].Size = $descriptorBytes + $names.Count
+  }
+
+  $end = [Math]::Max($descriptorOffset + $descriptorBytes, $nameOffset + $names.Count)
+  $image = [byte[]]::new($end + 16)
 
   function Set-UInt16([byte[]]$Buffer, [int]$Offset, [int]$Value) {
     [BitConverter]::GetBytes([uint16]$Value).CopyTo($Buffer, $Offset)
@@ -56,27 +88,30 @@ function New-TestPeImage {
   [Text.Encoding]::ASCII.GetBytes("PE").CopyTo($image, 0x80)
 
   Set-UInt16 $image 0x84 0x8664            # Machine
-  Set-UInt16 $image 0x86 1                 # NumberOfSections
+  Set-UInt16 $image 0x86 $sections.Count   # NumberOfSections
   Set-UInt16 $image 0x94 $optionalHeaderSize
   Set-UInt16 $image 0x98 $(if ($Pe32) { 0x10B } else { 0x20B })
 
   $dataDirectory = 0x98 + $(if ($Pe32) { 96 } else { 112 })
   if (-not $WithoutImports) {
-    Set-UInt32 $image ($dataDirectory + 8) $sectionRva
+    Set-UInt32 $image ($dataDirectory + 8) $descriptorRva
     Set-UInt32 $image ($dataDirectory + 12) $descriptorBytes
   }
 
-  [Text.Encoding]::ASCII.GetBytes(".rdata").CopyTo($image, $sectionHeaderOffset)
-  Set-UInt32 $image ($sectionHeaderOffset + 8) $sectionSize
-  Set-UInt32 $image ($sectionHeaderOffset + 12) $sectionRva
-  Set-UInt32 $image ($sectionHeaderOffset + 16) $sectionSize
-  Set-UInt32 $image ($sectionHeaderOffset + 20) $sectionOffset
+  for ($index = 0; $index -lt $sections.Count; $index++) {
+    $header = $sectionHeaderOffset + (40 * $index)
+    [Text.Encoding]::ASCII.GetBytes($sections[$index].Name).CopyTo($image, $header)
+    Set-UInt32 $image ($header + 8) $sections[$index].Size
+    Set-UInt32 $image ($header + 12) $sections[$index].Rva
+    Set-UInt32 $image ($header + 16) $(if ($WithoutRawData) { 0 } else { $sections[$index].Size })
+    Set-UInt32 $image ($header + 20) $(if ($WithoutRawData) { 0 } else { $sections[$index].Offset })
+  }
 
   for ($index = 0; $index -lt $Module.Count; $index++) {
-    Set-UInt32 $image ($sectionOffset + (20 * $index) + 12) $nameRvas[$index]
+    Set-UInt32 $image ($descriptorOffset + (20 * $index) + 12) $nameRvas[$index]
   }
   if ($names.Count -ne 0) {
-    $names.ToArray().CopyTo($image, $sectionOffset + $descriptorBytes)
+    $names.ToArray().CopyTo($image, $nameOffset)
   }
 
   [IO.File]::WriteAllBytes($Path, $image)
@@ -113,6 +148,14 @@ try {
   $pe32 = New-TestPeImage -Path (Join-Path $root "pe32.dll") -Module @("kernel32.dll") -Pe32
   Assert-Equal "kernel32.dll" ((Get-PeImportedModule -Path $pe32) -join ",") `
     "PE32 places its data directories 16 bytes earlier and must still parse."
+
+  $split = New-TestPeImage -Path (Join-Path $root "split.dll") -Module $modules -SplitSections
+  Assert-Equal ($modules -join ",") ((Get-PeImportedModule -Path $split) -join ",") `
+    "A Name RVA in a different section than the descriptor array must resolve; every section is searched per RVA."
+
+  $unmapped = New-TestPeImage -Path (Join-Path $root "unmapped.dll") -Module @("kernel32.dll") -WithoutRawData
+  Assert-Throws { Get-PeImportedModule -Path $unmapped } "no file bytes at that offset" `
+    "An RVA in virtual-only space must fail loudly rather than resolve to unrelated bytes."
 
   $noImports = New-TestPeImage -Path (Join-Path $root "bare.dll") -Module @() -WithoutImports
   Assert-Equal "0" ([string]@(Get-PeImportedModule -Path $noImports).Count) `
