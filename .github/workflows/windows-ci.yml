@@ -16,8 +16,12 @@ permissions:
   contents: read
 
 env:
-  WINDOWS_VERIFY_CACHE_REV: windows-x64-cpu-vulkan-verify-v2
-  WINDOWS_PACKAGE_CACHE_REV: windows-x64-cpu-vulkan-package-v2
+  # Bump both revisions whenever a CMAKE_* switch in .cargo/config.toml changes:
+  # llama-cpp-sys-2 emits rerun-if-env-changed for GGML_* only, so a restored
+  # cache keeps the old llama.cpp link line. v3 drops the OpenSSL imports that
+  # kept v0.6.0 from starting on Windows at all.
+  WINDOWS_VERIFY_CACHE_REV: windows-x64-cpu-vulkan-verify-v3
+  WINDOWS_PACKAGE_CACHE_REV: windows-x64-cpu-vulkan-package-v3
   VULKAN_PACKAGE_VERSION: 1.4.350
   VULKAN_SDK_VERSION: 1.4.350.0
   VULKAN_SDK: C:\VulkanSDK\1.4.350.0
@@ -72,6 +76,9 @@ jobs:
 
       - name: Managed CLI PATH script
         run: ./scripts/windows-cli-path.tests.ps1
+
+      - name: PE import audit
+        run: ./scripts/windows-import-audit.tests.ps1
 
       - name: Stub frontend assets
         run: |
