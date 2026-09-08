@@ -10,6 +10,7 @@ import {
   type RemoteContext,
 } from "./types";
 import { protectPrivateTerminal } from "./runbookTerminalPrivacy";
+import { expectPtyEcho } from "./ptyEcho";
 import {
   canSentinel,
   dialectFromProbe,
@@ -736,9 +737,11 @@ async function runReservedInTerminal({
      *  shell — leaves a terminal nothing here can vouch for, so the next remote
      *  command re-probes rather than inheriting this one's proof. */
     let completionProved = false;
+    let cancelEcho = () => {};
     job.finish = (outcome) => {
       if (job.settled) return;
       job.settled = true;
+      cancelEcho();
       if (remoteAtStart && mode === "sentinel" && !completionProved) {
         forgetShellProof(sessionId);
       }
@@ -1116,6 +1119,7 @@ async function runReservedInTerminal({
     if (hardened.applied.length || Object.keys(opts.environment ?? {}).length > 0) {
       useAppStore.getState().setCommandTyped(sessionId, approvalId, typed);
     }
+    if (mode === "sentinel") cancelEcho = expectPtyEcho(entry.term, line, typed);
     void api.ptyWrite(sessionId, `${line}\r`).catch(() => {
       job.finish(closedOutcome(job.startedAt, mode));
     });
@@ -1268,11 +1272,8 @@ function remoteIdentityMatches(
 /**
  * A remote shell capability proof, and the epoch it describes.
  *
- * The probe is not free: it is a whole extra command line in the user's
- * terminal, echoed by the remote shell like anything else typed there. Paying
- * it per command meant three agent steps over ssh printed three
- * `printf '\033]6973;RP;…'` lines nobody asked for, interleaved with the
- * commands the user actually approved.
+ * The probe is a separate shell round trip. Its input echo is hidden by the
+ * PTY display filter, but repeating it for every command still adds latency.
  *
  * What it buys is a fact about the TERMINAL, not about the command: a
  * POSIX-ish shell rather than a pager, an editor or a REPL is reading this
@@ -1302,7 +1303,7 @@ const shellProofs = new Map<string, ShellProof>();
  * between two commands. A link that announces itself is already covered —
  * the local shell prints its prompt, the nested block ends, and
  * `forgetShellProof` fires from `useSessions`. Re-probing after a quiet
- * stretch costs one line the user will not see twice in a run.
+ * stretch costs one additional shell round trip.
  */
 const PROOF_TTL_MS = 5 * 60_000;
 
@@ -1456,9 +1457,11 @@ function sendAndAwait<T>(
 ): Promise<T | null> {
   return new Promise((resolve) => {
     let done = false;
+    let cancelEcho = () => {};
     const settle = (value: T | null) => {
       if (done) return;
       done = true;
+      cancelEcho();
       clearTimeout(timer);
       unsubscribe();
       resolve(value);
@@ -1472,6 +1475,8 @@ function sendAndAwait<T>(
       if (hit) settle(hit);
     });
     const timer = setTimeout(() => settle(null), timeoutMs);
+    const entry = getTerm(sessionId);
+    if (entry) cancelEcho = expectPtyEcho(entry.term, line, null);
     void api.ptyWrite(sessionId, `${line}\r`).catch(() => settle(null));
   });
 }

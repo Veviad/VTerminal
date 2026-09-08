@@ -46,6 +46,10 @@ const ptyKillMock = vi.fn(async (_sessionId: string) => {});
 const aiCancelMock = vi.fn(async (_requestId: string) => {});
 const mcpDisconnectMock = vi.fn(async (_conversationId: string) => {});
 
+vi.mock("../lib/terminalClear", () => ({
+  clearTerminalBuffer: async (_term: unknown, onCleared?: () => void) => onCleared?.(),
+}));
+
 vi.mock("../lib/tauri", async () => {
   const tracker = await vi.importActual<typeof import("../lib/archiveWriteTracker")>(
     "../lib/archiveWriteTracker",
@@ -79,6 +83,7 @@ const termEntry = {
     return this.streaming ? Date.now() : 0;
   },
   term: { cols: 120, rows: 40 },
+  blockMarkers: new Map(),
   container: {},
 };
 
@@ -96,6 +101,7 @@ import {
   __waitForQuitForTests,
   flushAll,
   markScrollbackDirty,
+  persistClearedScrollback,
   markTranscriptCheckpoint,
   markTranscriptDirty,
   preparePersistenceForExit,
@@ -202,12 +208,100 @@ beforeEach(() => {
   __resetPersistenceForTests();
   resetRunbookTerminalPrivacyForTests();
   seed([makeSession("a")], "a");
+  useAppStore.setState({ clearTerminalOnNewChat: false });
 });
 
 afterEach(() => {
   __resetPersistenceForTests();
   resetRunbookTerminalPrivacyForTests();
   vi.useRealTimers();
+});
+
+describe("cleared terminal snapshots", () => {
+  it("replaces old scrollback even while an SSH block is still running", async () => {
+    startPersistence();
+    termEntry.streaming = true;
+    useAppStore.getState().updateSessionUi("a", {
+      runningBlockId: "ssh-running",
+      nestedBlockId: "ssh-running",
+      remote: { kind: "ssh", target: "prod" },
+    });
+    await persistClearedScrollback(["a"]);
+    expect(lastSnapshot().sessions[0].scrollback).toBe("");
+    expect(lastSnapshot().sessions[0].scrollback_lines).toBe(0);
+    expect(serializeMock).not.toHaveBeenCalled();
+    expect(useAppStore.getState().sessionUi.a.remote?.target).toBe("prod");
+    expect(useAppStore.getState().sessionUi.a.runningBlockId).toBe("ssh-running");
+  });
+
+  it("orders a clear after an older snapshot that is still in flight", async () => {
+    const oldWrite = deferred<void>();
+    snapshotMock.mockReturnValueOnce(oldWrite.promise);
+    startPersistence();
+    const savingOldScreen = flushAll();
+    expect(lastSnapshot().sessions[0].scrollback).toBe("PAYLOAD");
+    termEntry.streaming = true;
+    const clearing = persistClearedScrollback(["a"]);
+    expect(snapshotMock).toHaveBeenCalledOnce();
+    oldWrite.resolve();
+    await Promise.all([savingOldScreen, clearing]);
+    expect(snapshotMock).toHaveBeenCalledTimes(2);
+    expect(lastSnapshot().sessions[0].scrollback).toBe("");
+  });
+
+  it("retries a refused clear without waiting for the shell to become idle", async () => {
+    startPersistence();
+    termEntry.streaming = true;
+    snapshotMock.mockRejectedValueOnce(new Error("disk busy"));
+    await persistClearedScrollback(["a"]);
+    await flushAll();
+    expect(snapshotMock).toHaveBeenCalledTimes(2);
+    expect(lastSnapshot().sessions[0].scrollback).toBe("");
+  });
+
+  it("new chat clears both archived and restored live screen copies", async () => {
+    useAppStore.setState({
+      clearTerminalOnNewChat: true,
+      aiStreams: { a: {
+        ...emptyAiStream(),
+        messages: [{ id: "m1", role: "user", content: "old chat", createdAt: "2026-09-08T12:00:00.000Z" }],
+        modelTranscript: [{ role: "user", content: "old chat" }],
+      } },
+    });
+    startPersistence();
+    await expect(startNewChat("a")).resolves.toBe(true);
+    const rows = archivePutManyMock.mock.calls[0][0];
+    expect(rows.find((row) => row.session_id.includes("#"))?.scrollback).toBe("PAYLOAD");
+    expect(rows.find((row) => row.session_id === "a")?.scrollback).toBe("");
+    expect(lastSnapshot().sessions[0].scrollback).toBe("");
+    expect(ptyKillMock).not.toHaveBeenCalled();
+  });
+
+  it("cannot rearchive the old chat while MCP cleanup delays a fresh terminal", async () => {
+    const disconnect = deferred<void>();
+    mcpDisconnectMock.mockReturnValueOnce(disconnect.promise);
+    useAppStore.setState({
+      clearTerminalOnNewChat: true,
+      aiStreams: { a: {
+        ...emptyAiStream(),
+        messages: [{ id: "m1", role: "user", content: "old chat", createdAt: "2026-09-08T12:00:00.000Z" }],
+        modelTranscript: [{ role: "user", content: "old chat" }],
+      } },
+    });
+    startPersistence();
+    const newChat = startNewChat("a");
+    for (let i = 0; i < 10 && !mcpDisconnectMock.mock.calls.length; i++) await Promise.resolve();
+    expect(mcpDisconnectMock).toHaveBeenCalledOnce();
+    expect(archivePutManyMock).toHaveBeenCalledOnce();
+    markTranscriptCheckpoint("a");
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(archivePutMock).not.toHaveBeenCalled();
+    disconnect.resolve();
+    await newChat;
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(archivePutMock).not.toHaveBeenCalled();
+    expect(useAppStore.getState().aiStreams.a.messages).toEqual([]);
+  });
 });
 
 describe("metadata snapshots", () => {

@@ -12,6 +12,7 @@ import {
 import { detectNesting } from "../lib/nesting";
 import { abortSession, forgetShellProof } from "../lib/ptyExec";
 import { sanitizeCommand } from "../lib/ptyExecShell";
+import { cancelPtyEcho, writePtyOutput } from "../lib/ptyEcho";
 import {
   clearPendingConnect,
   observeSshPasswordPrompt,
@@ -412,7 +413,10 @@ export function useSessions() {
           (buf) => {
             const bytes = new Uint8Array(buf);
             observeSshPasswordPrompt(sessionId, bytes);
-            entry.term.write(bytes, () => {
+            // Echo filtering may briefly hold a partial input line. Incoming
+            // bytes still break quiescence while xterm waits for that line.
+            entry.lastDataAt = Date.now();
+            writePtyOutput(entry.term, bytes, () => {
               entry.unackedBytes += bytes.byteLength;
               if (entry.unackedBytes >= 262_144) {
                 const n = entry.unackedBytes;
@@ -423,6 +427,7 @@ export function useSessions() {
           },
           (event) => {
             if (event.type === "Exit") {
+              cancelPtyEcho(entry.term);
               // Cancel the SHARED owner before marking either target unavailable.
               // updateSession below then degrades (or removes) the binding.
               void cancelLinkedSessionWork(sessionId, "closed");
