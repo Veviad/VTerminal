@@ -224,9 +224,10 @@ describe("PTY command echo filtering", () => {
     expectPtyEcho(term, line, visible);
     const split = 23;
     writePtyOutput(term, encoder.encode(line.slice(0, split)), firstAck);
-    expect(firstAck).toHaveBeenCalledOnce();
+    expect(firstAck).not.toHaveBeenCalled();
     expect(term.chunks).toHaveLength(0);
     writePtyOutput(term, encoder.encode(`${line.slice(split)}\r\n${completion}`), finalAck);
+    expect(firstAck).not.toHaveBeenCalled();
     expect(finalAck).not.toHaveBeenCalled();
     expect(term.callbacks).toHaveLength(1);
     term.callbacks[0]();
@@ -234,6 +235,62 @@ describe("PTY command echo filtering", () => {
     expect(firstAck).toHaveBeenCalledOnce();
     vi.advanceTimersByTime(2_000);
     expect(term.output).toBe(`${visible}\r\n${completion}`);
+  });
+
+  it.each([
+    ["mismatched line", "unexpected\r\n"],
+    ["terminal query", "\x1b[6n"],
+    ["oversized echo", "x".repeat(65_536)],
+  ])("acknowledges held bytes only after parsing a %s fallback", (_reason, suffix) => {
+    const term = new RecordingTerminal();
+    const firstAck = vi.fn();
+    const finalAck = vi.fn();
+    expectPtyEcho(term, line, visible);
+    writePtyOutput(term, encoder.encode("partial"), firstAck);
+    writePtyOutput(term, encoder.encode(suffix), finalAck);
+    expect(firstAck).not.toHaveBeenCalled();
+    expect(finalAck).not.toHaveBeenCalled();
+    expect(term.output).toBe("partial" + suffix);
+    expect(term.callbacks).toHaveLength(1);
+    term.callbacks[0]();
+    expect(firstAck).toHaveBeenCalledOnce();
+    expect(finalAck).toHaveBeenCalledOnce();
+    vi.advanceTimersByTime(2_000);
+    expect(term.callbacks).toHaveLength(1);
+  });
+
+  it.each(["timeout", "cancel", "rearm"])(
+    "waits for parsing before acknowledging bytes released by %s",
+    (reason) => {
+      const term = new RecordingTerminal();
+      const acknowledge = vi.fn();
+      const cancel = expectPtyEcho(term, line, visible);
+      writePtyOutput(term, encoder.encode("partial"), acknowledge);
+      if (reason === "timeout") vi.advanceTimersByTime(2_000);
+      else if (reason === "cancel") cancel();
+      else expectPtyEcho(term, "next line", null);
+      expect(acknowledge).not.toHaveBeenCalled();
+      expect(term.output).toBe("partial");
+      expect(term.callbacks).toHaveLength(1);
+      term.callbacks[0]();
+      expect(acknowledge).toHaveBeenCalledOnce();
+      cancel();
+      vi.advanceTimersByTime(2_000);
+      expect(term.callbacks).toHaveLength(1);
+    },
+  );
+
+  it("acknowledges discarded data once without writing into a closing terminal", () => {
+    const term = new RecordingTerminal();
+    const acknowledge = vi.fn();
+    expectPtyEcho(term, line, visible);
+    writePtyOutput(term, encoder.encode("partial"), acknowledge);
+    expect(acknowledge).not.toHaveBeenCalled();
+    cancelPtyEcho(term, true);
+    cancelPtyEcho(term, true);
+    vi.advanceTimersByTime(2_000);
+    expect(acknowledge).toHaveBeenCalledOnce();
+    expect(term.chunks).toHaveLength(0);
   });
 });
 

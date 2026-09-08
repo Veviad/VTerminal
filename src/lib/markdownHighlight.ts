@@ -46,8 +46,10 @@ const QUOTE_PREFIX = /^(?:>\s?)+/;
 /** A marker needs its trailing space, or `*bold*` would read as a bullet. */
 const BULLET = /^(?:[-*+]|\d{1,9}[.)])\s+/;
 const TASK_BOX = /^\[[ xX]\]\s+/;
+/** Sticky patterns start at the scanner's current index without slicing a suffix. */
+const INLINE_LINK = /(!?)\[([^\]\n]*)\]\(([^)\n]*)\)/y;
 /** Everything that cannot start a construct, consumed in one run. */
-const PLAIN_RUN = /^[^\\`[*_~!]+/;
+const PLAIN_RUN = /[^\\`[*_~!]+/y;
 
 const EMPHASIS: { marker: string; kind: MarkdownTokenKind }[] = [
   // Longest first: `**` must not be read as an empty `*` pair.
@@ -90,11 +92,11 @@ function combine(outer: MarkdownTokenKind, inner: MarkdownTokenKind): MarkdownTo
 /** The index of the backtick run that closes a span opened by `n` backticks.
  *  CommonMark requires the closing run to be exactly as long, which is what lets
  *  ``` `` a ` b `` ``` hold a literal backtick. */
-function closingTicks(rest: string, n: number): number {
-  for (let j = n; j < rest.length; j++) {
-    if (rest[j] !== "`") continue;
+function closingTicks(source: string, start: number, n: number): number {
+  for (let j = start + n; j < source.length; j++) {
+    if (source[j] !== "`") continue;
     let k = j;
-    while (k < rest.length && rest[k] === "`") k++;
+    while (k < source.length && source[k] === "`") k++;
     if (k - j === n) return j;
     j = k - 1;
   }
@@ -102,15 +104,15 @@ function closingTicks(rest: string, n: number): number {
 }
 
 /** The index of the delimiter that closes an emphasis span, or -1. */
-function closingDelimiter(rest: string, marker: string): number {
-  const from = marker.length;
+function closingDelimiter(source: string, start: number, marker: string): number {
+  const from = start + marker.length;
   // `* ` is a bullet and `_ ` is prose; emphasis never opens on whitespace.
-  if (from >= rest.length || /\s/.test(rest[from])) return -1;
-  for (let j = rest.indexOf(marker, from + 1); j !== -1; j = rest.indexOf(marker, j + 1)) {
-    if (/\s/.test(rest[j - 1])) continue;
+  if (from >= source.length || /\s/.test(source[from])) return -1;
+  for (let j = source.indexOf(marker, from + 1); j !== -1; j = source.indexOf(marker, j + 1)) {
+    if (/\s/.test(source[j - 1])) continue;
     // The closer of an underscore span may not sit inside a word either, or
     // `_a_b_` would leave `b` emphasised and the trailing `_` orphaned.
-    if (marker[0] === "_" && /\w/.test(rest[j + marker.length] ?? "")) continue;
+    if (marker[0] === "_" && /\w/.test(source[j + marker.length] ?? "")) continue;
     return j;
   }
   return -1;
@@ -119,24 +121,24 @@ function closingDelimiter(rest: string, marker: string): number {
 function scanInline(source: string, base: MarkdownTokenKind, out: Sink): void {
   let i = 0;
   while (i < source.length) {
-    const rest = source.slice(i);
-
     // A backslash escape is one unit — without it `\*` would open emphasis.
-    if (rest[0] === "\\" && rest.length > 1) {
+    if (source[i] === "\\" && i + 1 < source.length) {
       out.push("\\", "syntax");
-      out.push(rest[1], base);
+      out.push(source[i + 1], base);
       i += 2;
       continue;
     }
 
-    if (rest[0] === "`") {
-      const run = /^`+/.exec(rest)![0];
-      const close = closingTicks(rest, run.length);
+    if (source[i] === "`") {
+      let end = i + 1;
+      while (source[end] === "`") end++;
+      const run = source.slice(i, end);
+      const close = closingTicks(source, i, run.length);
       if (close !== -1) {
         out.push(run, "syntax");
-        out.push(rest.slice(run.length, close), "code");
-        out.push(rest.slice(close, close + run.length), "syntax");
-        i += close + run.length;
+        out.push(source.slice(end, close), "code");
+        out.push(run, "syntax");
+        i = close + run.length;
         continue;
       }
       out.push(run, base);
@@ -146,7 +148,8 @@ function scanInline(source: string, base: MarkdownTokenKind, out: Sink): void {
 
     // Inline links and images. A nested `[` in the label is not supported; it
     // falls through and costs a colour, never a character.
-    const link = /^(!?)\[([^\]\n]*)\]\(([^)\n]*)\)/.exec(rest);
+    INLINE_LINK.lastIndex = i;
+    const link = INLINE_LINK.exec(source);
     if (link) {
       out.push(`${link[1]}[`, "syntax");
       scanInline(link[2], "link", out);
@@ -160,29 +163,30 @@ function scanInline(source: string, base: MarkdownTokenKind, out: Sink): void {
     const prev = i > 0 ? source[i - 1] : "";
     let matched = false;
     for (const { marker, kind } of EMPHASIS) {
-      if (!rest.startsWith(marker)) continue;
+      if (!source.startsWith(marker, i)) continue;
       // Underscores must not fire inside a word: `max_tokens` and
       // `--no-pager --snake_case` are ordinary prose in a prompt about shells.
       if (marker[0] === "_" && /\w/.test(prev)) continue;
-      const close = closingDelimiter(rest, marker);
+      const close = closingDelimiter(source, i, marker);
       if (close === -1) continue;
       out.push(marker, "syntax");
-      scanInline(rest.slice(marker.length, close), combine(base, kind), out);
+      scanInline(source.slice(i + marker.length, close), combine(base, kind), out);
       out.push(marker, "syntax");
-      i += close + marker.length;
+      i = close + marker.length;
       matched = true;
       break;
     }
     if (matched) continue;
 
-    const run = PLAIN_RUN.exec(rest);
+    PLAIN_RUN.lastIndex = i;
+    const run = PLAIN_RUN.exec(source);
     if (run) {
       out.push(run[0], base);
       i += run[0].length;
       continue;
     }
     // A construct character that opened nothing: emit it and move on.
-    out.push(rest[0], base);
+    out.push(source[i], base);
     i += 1;
   }
 }

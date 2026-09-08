@@ -35,6 +35,9 @@ const FIXTURES = [
   "*",
   "**",
   "text with ! and [ and ~ alone",
+  "before [*label*](first) between [label](second) after",
+  "lead ``one ` two`` gap `three` tail",
+  "lead _one_ **two _three_** end~~four~~",
 ];
 
 describe("tokenizeMarkdown", () => {
@@ -88,6 +91,34 @@ describe("tokenizeMarkdown", () => {
     expect(of("[docs](https://example.com)", "link")).toBe("docs");
     expect(of("[docs](https://example.com)", "url")).toBe("https://example.com");
     expect(of("![alt](a.png)", "syntax")).toBe("![](" + ")");
+  });
+
+  it("resumes at the correct index after scanning a nested link label", () => {
+    const source = "before [*label*](first) between [label](second) after";
+    // Repeated calls also ensure sticky pattern positions do not leak between
+    // separate editor values or the recursive scan of the first link label.
+    for (let pass = 0; pass < 2; pass++) {
+      expect(of(source, "text")).toBe("before  between  after");
+      expect(of(source, "em")).toBe("label");
+      expect(of(source, "link")).toBe("label");
+      expect(of(source, "url")).toBe("firstsecond");
+    }
+  });
+
+  it("finds delimiters relative to a construct after preceding prose", () => {
+    const source = "lead _one_ **two _three_** end~~four~~";
+    expect(of(source, "em")).toBe("one");
+    expect(of(source, "strong")).toBe("two ");
+    expect(of(source, "strongEm")).toBe("three");
+    expect(of(source, "strike")).toBe("four");
+    expect(of(source, "text")).toBe("lead   end");
+  });
+
+  it("finds exact-length backtick closers after preceding constructs", () => {
+    const source = "lead ``one ` two`` gap `three` tail";
+    expect(of(source, "code")).toBe("one ` twothree");
+    expect(of(source, "text")).toBe("lead  gap  tail");
+    expect(of(source, "syntax")).toBe("``````");
   });
 
   it("holds inline code together, backticks and all", () => {

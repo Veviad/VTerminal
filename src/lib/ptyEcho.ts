@@ -6,6 +6,7 @@ interface PendingEcho {
   line: string;
   visible: string | null;
   bytes: Uint8Array;
+  acknowledgments: Array<() => void>;
   timer: ReturnType<typeof setTimeout>;
 }
 
@@ -27,6 +28,7 @@ export function expectPtyEcho(
     line,
     visible,
     bytes: new Uint8Array(),
+    acknowledgments: [],
     timer: setTimeout(() => cancelPtyEcho(term), ECHO_WAIT_MS),
   };
   pending.set(term, echo);
@@ -42,12 +44,18 @@ export function cancelPtyEcho(term: EchoTerminal, discard = false): void {
   if (!echo) return;
   pending.delete(term);
   clearTimeout(echo.timer);
-  if (!discard && echo.bytes.length) term.write(echo.bytes);
+  if (discard) {
+    // Discarded data is consumed without a parser when the terminal closes.
+    for (const acknowledge of echo.acknowledgments.splice(0)) acknowledge();
+  } else if (echo.bytes.length || echo.acknowledgments.length) {
+    writeEcho(term, echo, echo.bytes);
+  }
 }
 
 /** Feed live PTY bytes into xterm, replacing only a proven command-line echo.
  * Keep the original-byte acknowledgment callback even when the echo shrinks.
- * Held chunks are acknowledged immediately; storage is strictly bounded. */
+ * Held chunks remain outstanding until xterm parses their eventual write.
+ * The 64 KiB echo cap stays below the backend's 256 KiB resume watermark. */
 export function writePtyOutput(
   term: EchoTerminal,
   bytes: Uint8Array,
@@ -58,6 +66,7 @@ export function writePtyOutput(
     term.write(bytes, onParsed);
     return;
   }
+  if (onParsed) echo.acknowledgments.push(onParsed);
   const held = new Uint8Array(echo.bytes.length + bytes.length);
   held.set(echo.bytes);
   held.set(bytes, echo.bytes.length);
@@ -72,13 +81,10 @@ export function writePtyOutput(
       echoLength > MAX_ECHO_BYTES) {
     pending.delete(term);
     clearTimeout(echo.timer);
-    term.write(held, onParsed);
+    writeEcho(term, echo, held);
     return;
   }
-  if (newline < 0) {
-    onParsed?.();
-    return;
-  }
+  if (newline < 0) return;
 
   pending.delete(term);
   clearTimeout(echo.timer);
@@ -87,7 +93,7 @@ export function writePtyOutput(
   if (!normalized || normalized.text !== echo.line) {
     // A concurrent message, an unfamiliar line editor, or no command echo.
     // Preserve every byte rather than risk eating real output.
-    term.write(held, onParsed);
+    writeEcho(term, echo, held);
     return;
   }
 
@@ -103,7 +109,14 @@ export function writePtyOutput(
   const output = new Uint8Array(replacement.length + held.length - newline - 1);
   output.set(replacement);
   output.set(held.subarray(newline + 1), replacement.length);
-  term.write(output, onParsed);
+  writeEcho(term, echo, output);
+}
+
+function writeEcho(term: EchoTerminal, echo: PendingEcho, bytes: Uint8Array): void {
+  const acknowledgments = echo.acknowledgments.splice(0);
+  term.write(bytes, () => {
+    for (const acknowledge of acknowledgments) acknowledge();
+  });
 }
 
 function echoCsiKind(sequence: string): "mode" | "decoration" | null {
