@@ -1,14 +1,30 @@
 import { useState } from "react";
-import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { MarkdownEditor } from "../components/ui/MarkdownEditor";
 
 // The editor is a textarea with the markdown painted in a layer behind it, so
 // these tests are about the two staying in step: what the layer renders, what
 // the keys do to the value, and which shortcuts are allowed past it.
 //
-// jsdom implements neither `execCommand` verb, so every case here takes the
-// controlled fallback — which is the path that has to work anyway.
+// jsdom implements neither `execCommand` verb, so the default environment takes
+// the controlled fallback. Native-path cases install a compatible command stub.
+
+const restoreCapabilities: (() => void)[] = [];
+
+function stubDocumentCapability(key: "fonts" | "execCommand", value: unknown) {
+  const descriptor = Object.getOwnPropertyDescriptor(document, key);
+  Object.defineProperty(document, key, { configurable: true, value });
+  restoreCapabilities.push(() => {
+    if (descriptor) Object.defineProperty(document, key, descriptor);
+    else Reflect.deleteProperty(document, key);
+  });
+}
+
+afterEach(() => {
+  for (const restore of restoreCapabilities.splice(0).reverse()) restore();
+  vi.restoreAllMocks();
+});
 
 function Harness({ initial = "" }: { initial?: string }) {
   const [value, setValue] = useState(initial);
@@ -57,6 +73,75 @@ describe("MarkdownEditor", () => {
     type(box, "be terse", 3, 8);
     fireEvent.keyDown(box, { key: "b", metaKey: true });
     expect(box).toHaveValue("be **terse**");
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["unsupported", () => false],
+    ["throwing", () => { throw new Error("Unsupported command"); }],
+  ])("keeps formatting usable when execCommand is %s", (_description, command) => {
+    stubDocumentCapability("execCommand", command);
+    const { box } = editor("be terse");
+    box.setSelectionRange(3, 8);
+
+    fireEvent.keyDown(box, { key: "b", metaKey: true });
+
+    expect(box).toHaveValue("be **terse**");
+    expect([box.selectionStart, box.selectionEnd]).toEqual([5, 10]);
+  });
+
+  it.each([
+    { initial: "terse", key: "b", command: "insertText", insert: "**terse**", expected: "**terse**" },
+    { initial: "- first\n- ", key: "Enter", command: "delete", insert: "", expected: "- first\n" },
+  ])("uses native $command when available", ({ initial, key, command, insert, expected }) => {
+    const { box } = editor(initial);
+    box.focus();
+    box.setSelectionRange(key === "b" ? 0 : initial.length, initial.length);
+    const execCommand = vi.fn(function (this: Document, _command: string, _showUI?: boolean, text = "") {
+      expect(this).toBe(document);
+      fireEvent.input(box, {
+        target: {
+          value: box.value.slice(0, box.selectionStart) + text + box.value.slice(box.selectionEnd),
+        },
+      });
+      return true;
+    });
+    stubDocumentCapability("execCommand", execCommand);
+
+    fireEvent.keyDown(box, { key, metaKey: key === "b" });
+
+    expect(execCommand.mock.calls).toEqual([command === "delete" ? [command] : [command, false, insert]]);
+    expect(box).toHaveValue(expected);
+  });
+
+  it("remeasures after fonts become ready", async () => {
+    let ready!: () => void;
+    stubDocumentCapability("fonts", { ready: new Promise<void>((resolve) => { ready = resolve; }) });
+    let height = 160;
+    vi.spyOn(HTMLTextAreaElement.prototype, "scrollHeight", "get").mockImplementation(() => height);
+    const { box } = editor("text");
+    expect(box.style.height).toBe("160px");
+
+    height = 220;
+    await act(async () => { ready(); });
+
+    expect(box.style.height).toBe("220px");
+  });
+
+  it("preserves a manual resize when fonts become ready", async () => {
+    let ready!: () => void;
+    stubDocumentCapability("fonts", { ready: new Promise<void>((resolve) => { ready = resolve; }) });
+    vi.spyOn(HTMLTextAreaElement.prototype, "scrollHeight", "get").mockReturnValue(160);
+    let renderedHeight = 160;
+    vi.spyOn(HTMLTextAreaElement.prototype, "offsetHeight", "get").mockImplementation(() => renderedHeight);
+    const { box } = editor("text");
+    renderedHeight = 300;
+    box.style.height = "300px";
+    fireEvent.mouseUp(box);
+
+    await act(async () => { ready(); });
+
+    expect(box.style.height).toBe("300px");
   });
 
   it("wraps the word under the caret when nothing is selected", () => {

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { fitTextarea } from "../../hooks/useAutoGrow";
 import { continueBlock, insertLink, toggleWrap, type TextEdit } from "../../lib/markdownEditing";
@@ -119,7 +119,9 @@ export function MarkdownEditor({
   // fallback family and is wrong — same reason the terminal re-fits here.
   useEffect(() => {
     let cancelled = false;
-    void document.fonts?.ready.then(() => {
+    // DOM typings require this API, but embedded and test DOMs may omit it.
+    const { fonts } = document as Partial<Pick<Document, "fonts">>;
+    void fonts?.ready.then(() => {
       const el = ref.current;
       if (cancelled || !el || dragged) return;
       fitTextarea(el, maxPx);
@@ -133,10 +135,10 @@ export function MarkdownEditor({
   /** A height nobody here applied came from the user dragging the resize corner.
    *  Auto-grow then steps aside for good: snapping the box back to fit on the
    *  next keystroke reads as the drag having failed. */
-  const noteHeight = () => {
+  const noteHeight = useCallback(() => {
     const el = ref.current;
     if (el && Math.abs(el.offsetHeight - applied.current) > 2) setDragged(true);
-  };
+  }, []);
 
   // The resize gesture ends with a mouseup on the textarea itself, which is the
   // one signal that does not depend on the page rendering. ResizeObserver is the
@@ -151,8 +153,7 @@ export function MarkdownEditor({
     return () => {
       observer.disconnect();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [noteHeight]);
 
   // Both halves of an edit have to land after the re-render, or the browser
   // clamps the selection to the length of the text it is replacing.
@@ -175,13 +176,14 @@ export function MarkdownEditor({
     if (!change || !el) return;
     el.setSelectionRange(change.from, change.to);
     // execCommand keeps the native undo stack, which a controlled re-render
-    // does not. jsdom implements neither verb, so tests take the fallback.
+    // does not. An absent API, an unsupported verb, or a thrown error all take
+    // the controlled fallback below.
     let spliced = false;
     try {
       spliced =
         change.insert === ""
-          ? (document.execCommand?.("delete") ?? false)
-          : (document.execCommand?.("insertText", false, change.insert) ?? false);
+          ? document.execCommand("delete")
+          : document.execCommand("insertText", false, change.insert);
     } catch {
       spliced = false;
     }

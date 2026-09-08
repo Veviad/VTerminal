@@ -2,11 +2,11 @@ import { describe, expect, it } from "vitest";
 import { continueBlock, insertLink, toggleWrap } from "../lib/markdownEditing";
 
 /** `a|b` marks a collapsed caret, `a[bc]d` a selection. Keeps the fixtures
- *  readable — the alternative is a pair of magic offsets per case. */
+ *  readable without a pair of magic offsets per case. */
 function parse(marked: string): { value: string; start: number; end: number } {
   if (marked.includes("|")) {
     const start = marked.indexOf("|");
-    return { value: marked.replace("|", ""), start, end: start };
+    return { value: marked.slice(0, start) + marked.slice(start + 1), start, end: start };
   }
   const start = marked.indexOf("[");
   const end = marked.indexOf("]") - 1;
@@ -36,6 +36,10 @@ describe("toggleWrap", () => {
   /** Nobody selects a word before pressing ⌘B. */
   it("wraps the word under the caret when nothing is selected", () => {
     expect(show("say th|is plainly", bold)).toBe("say **[this]** plainly");
+  });
+
+  it("preserves literal pipes after the caret marker", () => {
+    expect(show("say th|is | plainly", bold)).toBe("say **[this]** | plainly");
   });
 
   it("inserts an empty pair when the caret is not in a word", () => {
@@ -128,7 +132,7 @@ describe("continueBlock", () => {
   });
 
   it("does not read a dash inside a word as a bullet", () => {
-    expect(continueBlock("--no-pager|".replace("|", ""), 10, 10)).toBeNull();
+    expect(continueBlock("--no-pager", 10, 10)).toBeNull();
   });
 });
 
