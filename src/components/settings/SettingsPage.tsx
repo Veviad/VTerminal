@@ -18,6 +18,14 @@ import { S } from "../../lib/strings";
 
 const GPL_V3_URL = "https://www.gnu.org/licenses/gpl-3.0.html";
 
+// Most tabs are rows of labelled controls and read best in a narrow column.
+// These two hold content the column was starving: a table of per-model token
+// counts, and three prompt editors whose whole complaint was room to write.
+const WIDE_TABS: Partial<Record<SettingsTab, string>> = {
+  statistics: "max-w-4xl",
+  instructions: "max-w-3xl",
+};
+
 // The Docs tab is listed even while the feature is off: its own toggle is the first
 // thing inside it, and a tab that only appears once the feature is enabled leaves the
 // switch nowhere to be found.
@@ -70,11 +78,7 @@ export function SettingsPage() {
           ))}
         </nav>
         <div className="min-w-0 flex-1 overflow-y-auto">
-          <div
-            className={`mx-auto w-full px-6 py-6 ${
-              tab === "statistics" ? "max-w-4xl" : "max-w-lg"
-            }`}
-          >
+          <div className={`mx-auto w-full px-6 py-6 ${WIDE_TABS[tab] ?? "max-w-lg"}`}>
             {tab === "models" && <ModelsSettings />}
             {tab === "statistics" && <StatisticsSection />}
             {tab === "agent" && <AgentSection />}

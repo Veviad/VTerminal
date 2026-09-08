@@ -118,6 +118,20 @@ describe("InstructionsSection", () => {
     expect(screen.queryByText(S.settings.instructions.saved)).toBeNull();
   });
 
+  /** The three fields are markdown editors now, so what a formatting key writes
+   *  has to reach the same store key an ordinary keystroke does. */
+  it("stores what the markdown keys wrote", async () => {
+    render(<InstructionsSection />);
+    const box = screen.getByLabelText(S.settings.instructions.global) as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "prefer pnpm" } });
+    box.setSelectionRange(7, 11);
+    fireEvent.keyDown(box, { key: "b", metaKey: true });
+    fireEvent.blur(box);
+    await waitFor(() =>
+      expect(saveSettings).toHaveBeenCalledWith({ custom_instructions: "prefer **pnpm**" }),
+    );
+  });
+
   it("reverts the draft on Escape without saving", () => {
     useAppStore.setState({ customInstructions: "original" });
     render(<InstructionsSection />);

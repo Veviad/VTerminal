@@ -12,6 +12,8 @@ import { sanitizeExternalWebUrl } from "./externalUrl";
 import { matchesReserved } from "./keymap";
 import { isWindows } from "./platform";
 import { resolveXtermTheme } from "./xtermTheme";
+import { cancelPtyEcho } from "./ptyEcho";
+import { cancelTerminalClear, hasPendingTerminalClear } from "./terminalClear";
 import "@xterm/xterm/css/xterm.css";
 
 // Terminals live OUTSIDE React state on purpose: xterm instances are stateful
@@ -227,6 +229,7 @@ export function getOrCreateTerm(
       emitTerm(sessionId, { type: "data" });
     }),
     term.onData(() => {
+      cancelPtyEcho(term);
       entry.lastUserInputAt = Date.now();
       emitTerm(sessionId, { type: "userInput" });
     }),
@@ -261,7 +264,7 @@ export function serializeSession(
   maxLines: number,
 ): { data: string; lines: number } | null {
   const entry = entries.get(sessionId);
-  if (!entry || entry.disposed || maxLines <= 0) return null;
+  if (!entry || entry.disposed || maxLines <= 0 || hasPendingTerminalClear(entry.term)) return null;
 
   const attempt = (n: number) =>
     entry.serialize.serialize({
@@ -343,6 +346,8 @@ export function disposeTerm(sessionId: string): void {
   const entry = entries.get(sessionId);
   if (!entry) return;
   entry.disposed = true;
+  cancelPtyEcho(entry.term, true);
+  cancelTerminalClear(entry.term);
   // Tell subscribers BEFORE tearing down, so a pending agent command resolves
   // with "terminal closed" instead of waiting out its full timeout.
   emitTerm(sessionId, { type: "disposed" });

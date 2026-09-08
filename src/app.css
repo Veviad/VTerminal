@@ -92,6 +92,36 @@ body,
   display: none;
 }
 
+/* The markdown prompt editor paints its highlighting in a layer BEHIND a
+   transparent textarea, so both layers have to wrap at exactly the same column.
+   Three of the rules that hold that together cannot be Tailwind utilities:
+
+   `textarea` further down this file sets the sans family and `resize: none`,
+   and an UNLAYERED rule beats everything in @layer utilities — so `font-mono`
+   and `resize-y` written as classes on the element are dead on arrival, with
+   nothing to show for it but a proportional font in one layer and a monospace
+   one in the other. A class selector here outranks that element selector.
+
+   The family being monospace is load-bearing rather than a style choice, and
+   it is set once for BOTH layers: see MarkdownEditor.tsx.
+
+   And the box scrolls without a visible scrollbar, because the 6px custom
+   scrollbar below narrows the textarea's content box while nothing narrows the
+   layer behind it. The caret still scrolls itself into view. */
+.md-editor,
+.md-editor-layer {
+  font-family: var(--font-mono);
+}
+
+.md-editor {
+  resize: vertical;
+  scrollbar-width: none;
+}
+
+.md-editor::-webkit-scrollbar {
+  display: none;
+}
+
 /* Selection */
 ::selection {
   background: var(--color-selection);

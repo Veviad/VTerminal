@@ -1,0 +1,200 @@
+[
+  {
+    "shell": "bash",
+    "cols": 40,
+    "prompt": "PROMPT> ",
+    "rprompt": "",
+    "kind": "probe",
+    "line": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"",
+    "initial": "\u001b[?1034hPROMPT> ",
+    "rawEcho": "printf '\\033]6973;RP;0123456789a \rbcdef0123456789abcdef;%s;%s;%s\\007' \"z$Z \rSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VER \rSION\"\r\n",
+    "rawOutput": "printf '\\033]6973;RP;0123456789a \rbcdef0123456789abcdef;%s;%s;%s\\007' \"z$Z \rSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VER \rSION\"\r\n\u001b]6973;RP;0123456789abcdef0123456789abcdef;z;b3.2.57(1)-release;f\u0007PROMPT> "
+  },
+  {
+    "shell": "bash",
+    "cols": 40,
+    "prompt": "PROMPT> ",
+    "rprompt": "",
+    "kind": "sentinel",
+    "line": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
+    "initial": "\u001b[?1034hPROMPT> ",
+    "rawEcho": "printf 'hello world\\n'; printf ' \r\\033]6973;RD;%s;0123456789abcdef01234567 \r89abcdef\\007' $?\r\n",
+    "rawOutput": "printf 'hello world\\n'; printf ' \r\\033]6973;RD;%s;0123456789abcdef01234567 \r89abcdef\\007' $?\r\nhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007PROMPT> "
+  },
+  {
+    "shell": "bash",
+    "cols": 80,
+    "prompt": "PROMPT> ",
+    "rprompt": "",
+    "kind": "probe",
+    "line": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"",
+    "initial": "\u001b[?1034hPROMPT> ",
+    "rawEcho": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$Z \rSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"\r\n",
+    "rawOutput": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$Z \rSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"\r\n\u001b]6973;RP;0123456789abcdef0123456789abcdef;z;b3.2.57(1)-release;f\u0007PROMPT> "
+  },
+  {
+    "shell": "bash",
+    "cols": 80,
+    "prompt": "PROMPT> ",
+    "rprompt": "",
+    "kind": "sentinel",
+    "line": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
+    "initial": "\u001b[?1034hPROMPT> ",
+    "rawEcho": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef01234567 \r89abcdef\\007' $?\r\n",
+    "rawOutput": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef01234567 \r89abcdef\\007' $?\r\nhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007PROMPT> "
+  },
+  {
+    "shell": "bash",
+    "cols": 240,
+    "prompt": "PROMPT> ",
+    "rprompt": "",
+    "kind": "probe",
+    "line": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"",
+    "initial": "\u001b[?1034hPROMPT> ",
+    "rawEcho": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"\r\n",
+    "rawOutput": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"\r\n\u001b]6973;RP;0123456789abcdef0123456789abcdef;z;b3.2.57(1)-release;f\u0007PROMPT> "
+  },
+  {
+    "shell": "bash",
+    "cols": 240,
+    "prompt": "PROMPT> ",
+    "rprompt": "",
+    "kind": "sentinel",
+    "line": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
+    "initial": "\u001b[?1034hPROMPT> ",
+    "rawEcho": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?\r\n",
+    "rawOutput": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?\r\nhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007PROMPT> "
+  },
+  {
+    "shell": "zsh",
+    "cols": 40,
+    "prompt": "PROMPT> ",
+    "rprompt": "",
+    "kind": "probe",
+    "line": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"",
+    "initial": "\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                       \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[?2004h",
+    "rawEcho": "p\bprintf '\\033]6973;RP;0123456789a \r\u001b[Kb\rbcdef0123456789abcdef;%s;%s;%s\\007' \"z$Z \r\u001b[KS\rSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VER \r\u001b[KS\rSION\"\u001b[?2004l\r\r\n",
+    "rawOutput": "p\bprintf '\\033]6973;RP;0123456789a \r\u001b[Kb\rbcdef0123456789abcdef;%s;%s;%s\\007' \"z$Z \r\u001b[KS\rSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VER \r\u001b[KS\rSION\"\u001b[?2004l\r\r\n\u001b]6973;RP;0123456789abcdef0123456789abcdef;z5.9;b;f\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                       \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[?2004h"
+  },
+  {
+    "shell": "zsh",
+    "cols": 40,
+    "prompt": "PROMPT> ",
+    "rprompt": "",
+    "kind": "sentinel",
+    "line": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
+    "initial": "\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                       \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[?2004h",
+    "rawEcho": "p\bprintf 'hello world\\n'; printf ' \r\u001b[K\\\r\\033]6973;RD;%s;0123456789abcdef01234567 \r\u001b[K8\r89abcdef\\007' $?\u001b[?2004l\r\r\n",
+    "rawOutput": "p\bprintf 'hello world\\n'; printf ' \r\u001b[K\\\r\\033]6973;RD;%s;0123456789abcdef01234567 \r\u001b[K8\r89abcdef\\007' $?\u001b[?2004l\r\r\nhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                       \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[?2004h"
+  },
+  {
+    "shell": "zsh",
+    "cols": 40,
+    "prompt": "PROMPT> ",
+    "rprompt": "RIGHT",
+    "kind": "probe",
+    "line": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"",
+    "initial": "\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                       \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[26CRIGHT\u001b[31D\u001b[?2004h",
+    "rawEcho": "p\bprintf '\\033]6973;RP;01234\u001b[K56789a \r\u001b[Kb\rbcdef0123456789abcdef;%s;%s;%s\\007' \"z$Z \r\u001b[KS\rSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VER \r\u001b[KS\rSION\"\u001b[?2004l\r\r\n",
+    "rawOutput": "p\bprintf '\\033]6973;RP;01234\u001b[K56789a \r\u001b[Kb\rbcdef0123456789abcdef;%s;%s;%s\\007' \"z$Z \r\u001b[KS\rSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VER \r\u001b[KS\rSION\"\u001b[?2004l\r\r\n\u001b]6973;RP;0123456789abcdef0123456789abcdef;z5.9;b;f\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                       \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[26CRIGHT\u001b[31D\u001b[?2004h"
+  },
+  {
+    "shell": "zsh",
+    "cols": 40,
+    "prompt": "PROMPT> ",
+    "rprompt": "RIGHT",
+    "kind": "sentinel",
+    "line": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
+    "initial": "\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                       \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[26CRIGHT\u001b[31D\u001b[?2004h",
+    "rawEcho": "p\bprintf 'hello world\\n'; pr\u001b[Kintf ' \r\u001b[K\\\r\\033]6973;RD;%s;0123456789abcdef01234567 \r\u001b[K8\r89abcdef\\007' $?\u001b[?2004l\r\r\n",
+    "rawOutput": "p\bprintf 'hello world\\n'; pr\u001b[Kintf ' \r\u001b[K\\\r\\033]6973;RD;%s;0123456789abcdef01234567 \r\u001b[K8\r89abcdef\\007' $?\u001b[?2004l\r\r\nhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                       \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[26CRIGHT\u001b[31D\u001b[?2004h"
+  },
+  {
+    "shell": "zsh",
+    "cols": 80,
+    "prompt": "PROMPT> ",
+    "rprompt": "",
+    "kind": "probe",
+    "line": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"",
+    "initial": "\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[?2004h",
+    "rawEcho": "p\bprintf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$Z \r\u001b[KS\rSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"\u001b[?2004l\r\r\n",
+    "rawOutput": "p\bprintf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$Z \r\u001b[KS\rSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"\u001b[?2004l\r\r\n\u001b]6973;RP;0123456789abcdef0123456789abcdef;z5.9;b;f\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[?2004h"
+  },
+  {
+    "shell": "zsh",
+    "cols": 80,
+    "prompt": "PROMPT> ",
+    "rprompt": "",
+    "kind": "sentinel",
+    "line": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
+    "initial": "\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[?2004h",
+    "rawEcho": "p\bprintf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef01234567 \r\u001b[K8\r89abcdef\\007' $?\u001b[?2004l\r\r\n",
+    "rawOutput": "p\bprintf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef01234567 \r\u001b[K8\r89abcdef\\007' $?\u001b[?2004l\r\r\nhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[?2004h"
+  },
+  {
+    "shell": "zsh",
+    "cols": 80,
+    "prompt": "PROMPT> ",
+    "rprompt": "RIGHT",
+    "kind": "probe",
+    "line": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"",
+    "initial": "\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[66CRIGHT\u001b[71D\u001b[?2004h",
+    "rawEcho": "p\bprintf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007\u001b[K' \"z$Z \r\u001b[KS\rSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"\u001b[?2004l\r\r\n",
+    "rawOutput": "p\bprintf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007\u001b[K' \"z$Z \r\u001b[KS\rSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"\u001b[?2004l\r\r\n\u001b]6973;RP;0123456789abcdef0123456789abcdef;z5.9;b;f\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[66CRIGHT\u001b[71D\u001b[?2004h"
+  },
+  {
+    "shell": "zsh",
+    "cols": 80,
+    "prompt": "PROMPT> ",
+    "rprompt": "RIGHT",
+    "kind": "sentinel",
+    "line": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
+    "initial": "\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[66CRIGHT\u001b[71D\u001b[?2004h",
+    "rawEcho": "p\bprintf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef01\u001b[K234567 \r\u001b[K8\r89abcdef\\007' $?\u001b[?2004l\r\r\n",
+    "rawOutput": "p\bprintf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef01\u001b[K234567 \r\u001b[K8\r89abcdef\\007' $?\u001b[?2004l\r\r\nhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[66CRIGHT\u001b[71D\u001b[?2004h"
+  },
+  {
+    "shell": "zsh",
+    "cols": 240,
+    "prompt": "PROMPT> ",
+    "rprompt": "",
+    "kind": "probe",
+    "line": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"",
+    "initial": "\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                                                                                                                                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[?2004h",
+    "rawEcho": "p\bprintf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"\u001b[?2004l\r\r\n",
+    "rawOutput": "p\bprintf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"\u001b[?2004l\r\r\n\u001b]6973;RP;0123456789abcdef0123456789abcdef;z5.9;b;f\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                                                                                                                                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[?2004h"
+  },
+  {
+    "shell": "zsh",
+    "cols": 240,
+    "prompt": "PROMPT> ",
+    "rprompt": "",
+    "kind": "sentinel",
+    "line": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
+    "initial": "\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                                                                                                                                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[?2004h",
+    "rawEcho": "p\bprintf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?\u001b[?2004l\r\r\n",
+    "rawOutput": "p\bprintf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?\u001b[?2004l\r\r\nhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                                                                                                                                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[?2004h"
+  },
+  {
+    "shell": "zsh",
+    "cols": 240,
+    "prompt": "PROMPT> ",
+    "rprompt": "RIGHT",
+    "kind": "probe",
+    "line": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"",
+    "initial": "\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                                                                                                                                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[226CRIGHT\u001b[231D\u001b[?2004h",
+    "rawEcho": "p\bprintf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"\u001b[?2004l\r\r\n",
+    "rawOutput": "p\bprintf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"\u001b[?2004l\r\r\n\u001b]6973;RP;0123456789abcdef0123456789abcdef;z5.9;b;f\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                                                                                                                                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[226CRIGHT\u001b[231D\u001b[?2004h"
+  },
+  {
+    "shell": "zsh",
+    "cols": 240,
+    "prompt": "PROMPT> ",
+    "rprompt": "RIGHT",
+    "kind": "sentinel",
+    "line": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
+    "initial": "\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                                                                                                                                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[226CRIGHT\u001b[231D\u001b[?2004h",
+    "rawEcho": "p\bprintf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?\u001b[?2004l\r\r\n",
+    "rawOutput": "p\bprintf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?\u001b[?2004l\r\r\nhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                                                                                                                                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[226CRIGHT\u001b[231D\u001b[?2004h"
+  }
+]

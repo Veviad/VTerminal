@@ -72,6 +72,12 @@ export function TerminalSection() {
           checked={s.copyOnSelect}
           onChange={(v) => void save({ copy_on_select: v })}
         />
+        <Toggle
+          label={S.settings.terminal.clearOnNewChat}
+          hint={S.settings.terminal.clearOnNewChatHint}
+          checked={s.clearTerminalOnNewChat}
+          onChange={(v) => void save({ clear_terminal_on_new_chat: v })}
+        />
 
         <Row
           label={S.settings.terminal.shellPath}
