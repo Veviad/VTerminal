@@ -1451,6 +1451,7 @@ fn generate(
     let mut chain = Vec::new();
     if (p.sampling.penalty_repeat - 1.0).abs() > f32::EPSILON {
         chain.push(LlamaSampler::penalties(
+            model.n_vocab(),
             64,
             p.sampling.penalty_repeat,
             0.0,

@@ -5,6 +5,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "windows-import-audit.ps1")
+. (Join-Path $PSScriptRoot "windows-cargo.ps1")
 $repo = Split-Path -Parent $PSScriptRoot
 $target = "x86_64-pc-windows-msvc"
 $manifest = Join-Path $repo "src-tauri\Cargo.toml"
@@ -94,40 +95,15 @@ try {
   # a placeholder for validation and replace it with the linked sidecar below.
   New-Item -ItemType Directory -Force -Path (Split-Path $sidecarDestination) | Out-Null
   New-Item -ItemType File -Force -Path $sidecarDestination | Out-Null
-  cargo build --manifest-path $manifest --release --locked --features local-llm --target $target --bin vterminal --bin vterminal-docs
+  $selectedBuild = Invoke-LlamaCargo -CargoArguments @(
+    'build', '--manifest-path', $manifest, '--release', '--locked', '--features', 'local-llm',
+    '--target', $target, '--bin', 'vterminal', '--bin', 'vterminal-docs'
+  )
 
   Copy-Item -Force (Join-Path $release "vterminal-docs.exe") $sidecarDestination
 
   New-Item -ItemType Directory -Force -Path $backendDestination | Out-Null
   Get-ChildItem -Path $backendDestination -Filter "*.dll" -File | Remove-Item -Force
-  $buildRoot = Join-Path $release "build"
-  $backendCandidates = @(
-    Get-ChildItem -LiteralPath $buildRoot -Directory -Filter "llama-cpp-sys-2-*" | ForEach-Object {
-      $candidate = Join-Path $_.FullName "out"
-      $candidateRuntime = Join-Path $candidate "bin"
-      $candidateBackends = Join-Path $candidate "backends"
-      if ((Test-Path -LiteralPath $candidateRuntime -PathType Container) -and
-          (Test-Path -LiteralPath $candidateBackends -PathType Container)) {
-        $candidateDlls = @(Get-ChildItem -LiteralPath $candidateBackends -Filter "*.dll" -File)
-        $hasVulkan = $null -ne ($candidateDlls | Where-Object Name -EQ "ggml-vulkan.dll")
-        $hasCpu = $null -ne ($candidateDlls | Where-Object Name -Match '^ggml-cpu(?:-.+)?\.dll$')
-        $hasRuntime = 0 -eq @(
-          $requiredRuntimeDlls | Where-Object {
-            -not (Test-Path -LiteralPath (Join-Path $candidateRuntime $_) -PathType Leaf)
-          }
-        ).Count
-        if ($hasVulkan -and $hasCpu -and $hasRuntime) {
-          $candidate
-        }
-      }
-    }
-  )
-  if ($backendCandidates.Count -ne 1) {
-    $found = if ($backendCandidates.Count -eq 0) { "none" } else { $backendCandidates -join ", " }
-    throw "Expected exactly one complete llama.cpp CPU/Vulkan backend set; found $found. Remove stale Windows llama-cpp build outputs and rebuild."
-  }
-  $selectedBuild = $backendCandidates[0]
-
   # `dynamic-backends` makes the llama/GGML core a normal PE dependency. Source
   # core and modules from this SAME build output so stale hard links in Cargo's
   # profile directory can never mix ABIs. Core DLLs must be beside each EXE;

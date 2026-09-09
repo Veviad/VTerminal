@@ -445,9 +445,9 @@ fn initialize_vision_runtime(
 ///
 /// The repeat penalty stays as a loop guard — a VLM can still cycle on repeated
 /// table rows — with `MAX_TRANSCRIPT_TOKENS` as the hard backstop.
-fn transcription_sampler() -> LlamaSampler {
+fn transcription_sampler(n_vocab: i32) -> LlamaSampler {
     LlamaSampler::chain_simple(vec![
-        LlamaSampler::penalties(64, 1.1, 0.0, 0.0),
+        LlamaSampler::penalties(n_vocab, 64, 1.1, 0.0, 0.0),
         LlamaSampler::greedy(),
     ])
 }
@@ -552,7 +552,7 @@ fn run(t: Job<'_>) -> Result<String, String> {
         return Err("cancelled".into());
     }
 
-    let mut sampler = transcription_sampler();
+    let mut sampler = transcription_sampler(t.model.n_vocab());
 
     let mut decoder = encoding_rs::UTF_8.new_decoder();
     let mut batch = LlamaBatch::new(n_batch as usize, 1);
@@ -608,6 +608,36 @@ fn run(t: Job<'_>) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use llama_cpp_2::token::{data::LlamaTokenData, data_array::LlamaTokenDataArray, LlamaToken};
+
+    #[test]
+    fn transcription_penalties_use_the_vocabulary_and_a_64_token_window() {
+        let mut sampler = transcription_sampler(128);
+        let candidates = || {
+            LlamaTokenDataArray::from_iter(
+                [
+                    LlamaTokenData::new(LlamaToken(100), 1.05, 0.0),
+                    LlamaTokenData::new(LlamaToken(101), 1.0, 0.0),
+                ],
+                false,
+            )
+        };
+
+        let mut fresh = candidates();
+        sampler.apply(&mut fresh);
+        assert_eq!(fresh.selected_token(), Some(LlamaToken(100)));
+
+        // A token ID above the history-window size still receives its penalty.
+        sampler.accept(LlamaToken(100));
+        let mut repeated = candidates();
+        sampler.apply(&mut repeated);
+        assert_eq!(repeated.selected_token(), Some(LlamaToken(101)));
+
+        sampler.accept_many(std::iter::repeat_n(LlamaToken(0), 64));
+        let mut expired = candidates();
+        sampler.apply(&mut expired);
+        assert_eq!(expired.selected_token(), Some(LlamaToken(100)));
+    }
 
     fn fixture(name: &str) -> ChatTemplate {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
