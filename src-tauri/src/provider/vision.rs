@@ -612,6 +612,9 @@ mod tests {
 
     #[test]
     fn transcription_penalties_use_the_vocabulary_and_a_64_token_window() {
+        // Sampler chains record timings even without a model. Initialize the
+        // shared runtime so GGML's Windows performance-counter frequency is set.
+        let _backend = backend().expect("initialize llama runtime for sampler test");
         let mut sampler = transcription_sampler(128);
         let candidates = || {
             LlamaTokenDataArray::from_iter(
