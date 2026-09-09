@@ -97,13 +97,13 @@ try {
   Remove-Item -LiteralPath (Join-Path $current 'backends/ggml-cpu-avx2.dll')
   Assert-Throws { Invoke-LlamaCargo -CargoArguments @('build') } 'missing CPU or Vulkan backend DLLs'
 
-  $profile = Join-Path $fixtureRoot 'debug'
+  $testProfileDirectory = Join-Path $fixtureRoot 'debug'
   $selectedLlama = Join-Path $current 'bin/llama.dll'
   $staleGgml = Join-Path $stale 'bin/ggml.dll'
   Set-Content -LiteralPath $selectedLlama -Value 'current llama'
   Set-Content -LiteralPath (Join-Path $current 'bin/ggml.dll') -Value 'current ggml'
   Set-Content -LiteralPath $staleGgml -Value 'old ggml'
-  foreach ($directory in @($profile, (Join-Path $profile 'deps'))) {
+  foreach ($directory in @($testProfileDirectory, (Join-Path $testProfileDirectory 'deps'))) {
     New-Item -ItemType Directory -Force -Path $directory | Out-Null
     # Cover both hard links already pointing at the selected output and links
     # into the old cache, whose source must never be overwritten.
@@ -112,8 +112,8 @@ try {
     Set-Content -LiteralPath (Join-Path $directory 'ggml-obsolete.dll') -Value 'obsolete'
     Set-Content -LiteralPath (Join-Path $directory 'unrelated.dll') -Value 'leave alone'
   }
-  Copy-LlamaTestRuntime -Output $current -ProfileDirectory $profile
-  foreach ($directory in @($profile, (Join-Path $profile 'deps'))) {
+  Copy-LlamaTestRuntime -Output $current -ProfileDirectory $testProfileDirectory
+  foreach ($directory in @($testProfileDirectory, (Join-Path $testProfileDirectory 'deps'))) {
     if ((Get-Content -LiteralPath (Join-Path $directory 'llama.dll')) -ne 'current llama' -or
         (Get-Content -LiteralPath (Join-Path $directory 'ggml.dll')) -ne 'current ggml' -or
         (Test-Path -LiteralPath (Join-Path $directory 'ggml-obsolete.dll')) -or
@@ -134,7 +134,7 @@ try {
   $script:passed++
 
   New-Item -ItemType File -Path (Join-Path $current 'bin/unsupported.dll') | Out-Null
-  Assert-Throws { Copy-LlamaTestRuntime -Output $current -ProfileDirectory $profile } 'Unexpected runtime DLLs'
+  Assert-Throws { Copy-LlamaTestRuntime -Output $current -ProfileDirectory $testProfileDirectory } 'Unexpected runtime DLLs'
 
   Write-Host "Passed $script:passed Cargo runtime selection tests."
 }
