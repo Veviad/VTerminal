@@ -124,7 +124,7 @@ jobs:
       # which the runners now force onto Node 24 and warn about on every run.
       # v5's changelog is that bump and nothing else.
       - id: deployment
-        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5
 
       # A successful deploy-pages result is not enough: release-event
       # deployments can be marked successful while the old artifact remains
