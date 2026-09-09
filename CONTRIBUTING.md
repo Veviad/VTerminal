@@ -13,8 +13,9 @@ Small fixes and documentation improvements can go directly to a pull request.
 
 ## Development
 
-VTerminal requires macOS on Apple Silicon, Node.js 20 or newer, the Rust toolchain
-pinned by `rust-toolchain.toml`, and the Xcode command-line tools. Install `cmake`
+VTerminal requires macOS on Apple Silicon, Node.js 22.22.2 or newer in the Node 22
+LTS line (`.nvmrc`), the Rust toolchain pinned by `rust-toolchain.toml`, and the
+Xcode command-line tools. Install `cmake`
 when building with the `local-llm` feature.
 
 ```sh

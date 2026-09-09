@@ -66,7 +66,7 @@ Modern AI terminals tend to be Electron apps that phone home for every completio
 | | |
 |---|---|
 | **OS** | macOS on Apple Silicon, or Windows 11 x64 with WSL2, a default distribution, and Bash |
-| **Node** | 20 or newer |
+| **Node** | 22.22.2 or newer in the Node 22 LTS line (see `.nvmrc`) |
 | **Rust** | pinned by `rust-toolchain.toml` |
 | **Go** | 1.24 or newer for Windows source builds (bundled WSL MCP relay) |
 | **Native tools** | macOS: Xcode CLT; Windows: Visual Studio Build Tools with MSVC and Windows SDK |
