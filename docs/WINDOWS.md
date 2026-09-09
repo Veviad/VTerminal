@@ -59,7 +59,8 @@ remove WSL, distributions, models, or unrelated PATH entries.
 
 ## Build from source
 
-Install Node.js, the pinned Rust toolchain, Visual Studio Build Tools with the
+Install Node.js 22.22.2 or newer in the Node 22 LTS line (`.nvmrc`), the pinned
+Rust toolchain, Visual Studio Build Tools with the
 MSVC/Windows SDK workload, CMake, and the Vulkan SDK. Then run:
 
 ```powershell

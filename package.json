@@ -20,7 +20,6 @@
     "test:windows-installer": "node --test scripts/windows-installer.node-test.mjs"
   },
   "dependencies": {
-    "@tailwindcss/typography": "^0.5.19",
     "@tauri-apps/api": "^2.2.0",
     "@tauri-apps/plugin-dialog": "^2.7.3",
     "@tauri-apps/plugin-log": "^2.9.1",
@@ -43,6 +42,7 @@
     "zustand": "^5.0.15"
   },
   "devDependencies": {
+    "@tailwindcss/typography": "^0.5.19",
     "@tailwindcss/vite": "^4.2.4",
     "@tauri-apps/cli": "^2.11.4",
     "@testing-library/jest-dom": "^7.0.1",
