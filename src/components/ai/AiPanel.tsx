@@ -197,6 +197,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
     cancel,
   } = useAiStream();
   const chatIsKept = useAppStore(selectArchiveWillKeepChats);
+  const clearTerminalOnNewChat = useAppStore((s) => s.clearTerminalOnNewChat);
   const [confirmClear, setConfirmClear] = useState(false);
   const [sidecarMenuOpen, setSidecarMenuOpen] = useState(false);
   const [replacingTarget, setReplacingTarget] = useState(false);
@@ -569,10 +570,10 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             } ${!sessionId || !hasChat ? "opacity-50" : ""}`}
             title={
               confirmClear
-                ? S.aiPanel.newChatDiscard
+                ? clearTerminalOnNewChat ? S.aiPanel.newChatClearDiscard : S.aiPanel.newChatDiscard
                 : chatIsKept
-                  ? S.aiPanel.newChatHint
-                  : S.aiPanel.newChat
+                  ? clearTerminalOnNewChat ? S.aiPanel.newChatClearHint : S.aiPanel.newChatHint
+                  : clearTerminalOnNewChat ? S.aiPanel.newChatClear : S.aiPanel.newChat
             }
             aria-label={S.aiPanel.newChat}
           >

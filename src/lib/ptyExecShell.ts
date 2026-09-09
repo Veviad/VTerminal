@@ -48,9 +48,9 @@ export function probeFor(nonce: string): string {
 }
 
 /**
- * Completion suffix for a remote shell. It is appended to the command itself,
- * so it is visible on the command line. `$?` expands before printf runs, so it
- * is the command's status, not printf's.
+ * Completion suffix for a remote shell. It is appended to the shell input;
+ * the PTY display filter removes its echo from the visible command. `$?`
+ * expands before printf runs, so it is the command's status, not printf's.
  */
 export function sentinelSuffix(kind: "posix" | "fish", nonce: string): string {
   assertNonce(nonce);

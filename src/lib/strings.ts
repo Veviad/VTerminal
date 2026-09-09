@@ -117,8 +117,11 @@ export const S = {
     attachedBlock: "Attached block",
     restoredTranscript: "Reopened transcript from",
     newChat: "New chat",
-    newChatHint: "New chat — this one is saved to Past sessions",
-    newChatDiscard: "Archiving is off — click again to discard this chat",
+    newChatHint: "New chat. This one is saved to Past sessions",
+    newChatDiscard: "Archiving is off. Click again to discard this chat",
+    newChatClearHint: "New chat. Save this chat to Past sessions and clear terminal history",
+    newChatClear: "New chat and clear terminal history",
+    newChatClearDiscard: "Archiving is off. Click again to discard this chat and clear terminal history",
     newChatFailed: "Could not archive this chat, so it was left in place",
     errorPrefix: "Error",
     // A run that stopped at a guard rail. Both numbers are shown because the
@@ -593,6 +596,9 @@ export const S = {
       cursorStyle: "Cursor style",
       cursorBlink: "Cursor blink",
       copyOnSelect: "Copy on select",
+      clearOnNewChat: "Clear terminal on new chat",
+      clearOnNewChatHint:
+        "Clear the screen and scrollback when starting a new terminal chat. Keep the shell and SSH connection open.",
       shellPath: "Shell",
       shellPathHint: isWindows()
         ? "Fixed to Bash in the default WSL2 distribution"
@@ -666,6 +672,11 @@ export const S = {
       // Saving is on blur rather than per keystroke: every save is a Rust store
       // write, and a 4000-character field would make one per character.
       saveHint: "Saved when you click away.",
+      // The formatting keys are worth naming: the editor claims ⌘I and ⌘K back
+      // from the AI composer and the command palette while it has focus, and a
+      // shortcut that only works in one field has to be written down somewhere.
+      markdownHint: (mod: string) =>
+        `Markdown is highlighted as you type: ${mod}B bold, ${mod}I italic, ${mod}E code, ${mod}K link. Lists and quotes continue on Enter. Drag the corner for a taller box.`,
       saved: "Saved",
       charCount: (used: number, max: number) => `${used.toLocaleString()} / ${max.toLocaleString()}`,
       tooLong: (max: number) => `Too long — the limit is ${max.toLocaleString()} characters.`,

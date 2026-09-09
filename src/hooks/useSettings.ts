@@ -27,6 +27,7 @@ export function useSettings() {
       cursorStyle: s.cursor_style,
       cursorBlink: s.cursor_blink,
       copyOnSelect: s.copy_on_select,
+      clearTerminalOnNewChat: s.clear_terminal_on_new_chat,
       shellPath: s.shell_path,
       shellIntegrationEnabled: s.shell_integration_enabled,
       temperature: s.temperature,
@@ -143,6 +144,8 @@ export function useSettings() {
       updateAllTermOptions({ cursorBlink: patch.cursor_blink });
     }
     if (patch.copy_on_select !== undefined) useAppStore.setState({ copyOnSelect: patch.copy_on_select });
+    if (patch.clear_terminal_on_new_chat !== undefined)
+      useAppStore.setState({ clearTerminalOnNewChat: patch.clear_terminal_on_new_chat });
     if (patch.shell_path !== undefined) useAppStore.setState({ shellPath: patch.shell_path || null });
     if (patch.shell_integration_enabled !== undefined)
       useAppStore.setState({ shellIntegrationEnabled: patch.shell_integration_enabled });

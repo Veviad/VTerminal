@@ -43,6 +43,32 @@ const CLOSE_BUDGET_MS = 500;
 /** What the model saw, per card, matching MODEL_TAIL in ptyExec.ts. */
 const CARD_OUTPUT_TAIL = 8_192;
 
+const transcriptWrites = new Map<string, Set<Promise<void>>>();
+const transcriptPauses = new Map<string, number>();
+
+/** Hold this owner's periodic transcript writes across a conversation boundary.
+ * Existing writes drain before the caller replaces its archive row. New writes
+ * return false while paused so checkpoint callers can retry after release. */
+export function pauseTranscriptArchiving(sessionId: string): {
+  drained: Promise<void>;
+  release(): void;
+} {
+  transcriptPauses.set(sessionId, (transcriptPauses.get(sessionId) ?? 0) + 1);
+  const drained = Promise.allSettled([...(transcriptWrites.get(sessionId) ?? [])])
+    .then(() => {});
+  let released = false;
+  return {
+    drained,
+    release() {
+      if (released) return;
+      released = true;
+      const remaining = (transcriptPauses.get(sessionId) ?? 1) - 1;
+      if (remaining > 0) transcriptPauses.set(sessionId, remaining);
+      else transcriptPauses.delete(sessionId);
+    },
+  };
+}
+
 function hasUntrustedCompletion(message: NonNullable<AiMessage["command"]>): boolean {
   return (
     message.status === "running" ||
@@ -287,6 +313,7 @@ export async function archiveOnClose(sessionId: string): Promise<void> {
 export async function archiveTranscriptOnly(
   sessionId: string,
 ): Promise<boolean> {
+  if (transcriptPauses.has(sessionId)) return false;
   const stream = useAppStore.getState().aiStreams[sessionId];
   // Nothing said yet: writing an empty open row would put a live tab in the
   // archive with nothing to show for it.
@@ -298,11 +325,20 @@ export async function archiveTranscriptOnly(
     withTranscript: true,
   });
   if (!row) return true;
+  let settle!: () => void;
+  const pending = new Promise<void>((resolve) => { settle = resolve; });
+  const writes = transcriptWrites.get(sessionId) ?? new Set<Promise<void>>();
+  writes.add(pending);
+  transcriptWrites.set(sessionId, writes);
   try {
     await api.archivePut(row);
     return true;
   } catch (err) {
     console.warn(`archiving the transcript of ${sessionId} failed:`, err);
     return false;
+  } finally {
+    writes.delete(pending);
+    if (writes.size === 0) transcriptWrites.delete(sessionId);
+    settle();
   }
 }

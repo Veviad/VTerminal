@@ -598,6 +598,7 @@ export interface AppState {
   cursorStyle: "block" | "bar" | "underline";
   cursorBlink: boolean;
   copyOnSelect: boolean;
+  clearTerminalOnNewChat: boolean;
   shellPath: string | null;
   shellIntegrationEnabled: boolean;
   temperature: number;
@@ -2069,6 +2070,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   cursorStyle: "block",
   cursorBlink: true,
   copyOnSelect: false,
+  clearTerminalOnNewChat: true,
   shellPath: null,
   shellIntegrationEnabled: true,
   temperature: 0.7,

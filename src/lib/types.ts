@@ -1228,6 +1228,7 @@ export interface Settings {
   cursor_style: "block" | "bar" | "underline";
   cursor_blink: boolean;
   copy_on_select: boolean;
+  clear_terminal_on_new_chat: boolean;
   shell_path: string | null;
   shell_integration_enabled: boolean;
   active_model_id: string;
@@ -1685,6 +1686,7 @@ export interface SettingsPatch {
   cursor_style: string;
   cursor_blink: boolean;
   copy_on_select: boolean;
+  clear_terminal_on_new_chat: boolean;
   /** Clearable strings: send "" to clear (JSON null is indistinguishable from
    *  "not provided" on the Rust side). */
   shell_path: string;

@@ -43,6 +43,8 @@ Modern AI terminals tend to be Electron apps that phone home for every completio
 - **Command suggestion** (⌘I on macOS, Ctrl+Shift+I on Windows, or `#` at an empty prompt) — describe the goal, get a command inserted into your prompt
 - **Explain & fix** — one click on a failed block streams a diagnosis and a corrected command
 - **Ask** — a chat panel with your blocks, output, and files as context
+- **Fresh terminal chats**: New chat clears the screen, scrollback, and old command context while keeping the shell and SSH connection open. **Settings → Terminal → Clear terminal on new chat** is enabled by default; turn it off to keep terminal history. Clearing waits while a screen-based program controls the display. The outgoing chat and terminal output are saved to Past sessions when archiving is enabled.
+- **Custom instructions**: **Settings → Instructions** provides Markdown highlighting, formatting shortcuts, and resizable editors for shared, Agent-only, and Chat/Ask instructions. Changes save when you leave a field or press Command+Enter or Ctrl+Enter.
 - **Agent mode** — multi-step runs that propose commands, execute them in your *visible* terminal, and read the real output
 - **Chat workspace** — a terminal-free, full-width conversation workspace with durable threads, files and images, Knowledge, supported native web search/fetch with sources, generated titles, and archive controls
 - **Resumable Agent runs** — bounded checkpoints preserve the latest safe transcript after completed model/tool rounds, including when a run pauses or a provider fails after commands have run
