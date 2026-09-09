@@ -289,6 +289,106 @@ describe("runInTerminal — integrated session", () => {
     expect(outcome.exitCode).toBeNull();
   });
 
+  it("preserves terminal evidence when the start signal is missing without retrying", async () => {
+    vi.useFakeTimers();
+    const lines = ["$ "];
+    entry = makeEntry(lines);
+    const promise = runInTerminal("s1", "ap1", "printf finished", { timeoutMs: 60_000 });
+    await vi.advanceTimersByTimeAsync(1);
+    lines.push("finished", "$ ");
+    entry.term.buffer.active.cursorY = 2;
+    entry.term.buffer.active.length = lines.length;
+    await vi.advanceTimersByTimeAsync(6000);
+
+    const outcome = await promise;
+    expect(outcome.error).toBe("command_not_observed");
+    expect(outcome.exitCode).toBeNull();
+    expect(outcome.output).toContain("finished");
+    expect(outcome.outputCapturedBytes).toBe(new TextEncoder().encode(outcome.output).length);
+    expect(outcome.note).toContain("not confirmed output from this command");
+    expect(outcome.note).toContain("Do not automatically re-run it");
+    expect(ptyWrite).toHaveBeenCalledTimes(1);
+
+    // A delayed signal must not turn the settled unknown result into success.
+    emit({ type: "blockStart", blockId: "late", command: typed("printf finished") });
+    emit({ type: "blockEnd", blockId: "late", exitCode: 0, endLine: 2 });
+    expect((await promise).exitCode).toBeNull();
+    expect(ptyWrite).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not bind different command text or discard its observed terminal activity", async () => {
+    entry = makeEntry(["$ "]);
+    const promise = runInTerminal("s1", "ap1", "printf 'a  b'", { timeoutMs: 5000 });
+    await flush();
+    const lines = ["$ ", "a b", "other output", "$ "];
+    entry.term.buffer.active.getLine = (y) => lines[y] === undefined
+      ? undefined
+      : { translateToString: () => lines[y], isWrapped: false };
+    entry.term.buffer.active.cursorY = 3;
+    entry.term.buffer.active.length = lines.length;
+    emit({ type: "blockStart", blockId: "different", command: typed("printf 'a b'") });
+    emit({ type: "blockEnd", blockId: "different", exitCode: 0, endLine: 2 });
+    emit({ type: "blockStart", blockId: "other", command: "echo other output" });
+
+    const outcome = await promise;
+    expect(outcome.error).toBe("command_not_observed");
+    expect(outcome.exitCode).toBeNull();
+    expect(outcome.output).toContain("other output");
+    expect(ptyWrite).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps unbound private output suppressed", async () => {
+    vi.useFakeTimers();
+    const lines = ["$ "];
+    entry = makeEntry(lines);
+    const promise = runInTerminal("s1", "ap1", "printf secret", {
+      timeoutMs: 60_000,
+      outputPolicy: "private",
+    });
+    await vi.advanceTimersByTimeAsync(1);
+    lines.push("secret");
+    entry.term.buffer.active.cursorY = 1;
+    entry.term.buffer.active.length = lines.length;
+    await vi.advanceTimersByTimeAsync(6000);
+
+    const outcome = await promise;
+    expect(outcome.error).toBe("command_not_observed");
+    expect(outcome.output).toBe("");
+    expect(outcome.outputObservedBytes).toBe(0);
+    expect(outcome.outputCapturedBytes).toBe(0);
+    expect(outcome.note).not.toContain("secret");
+  });
+
+  it.each([false, true])("tracks unbound output through scrollback changes (anchor lost: %s)", async (lost) => {
+    vi.useFakeTimers();
+    const lines = ["old history", "$ "];
+    entry = makeEntry(lines);
+    const promise = runInTerminal("s1", "ap1", "printf kept", { timeoutMs: 60_000 });
+    await vi.advanceTimersByTimeAsync(1);
+    const marker = entry.registeredMarkers[0];
+    expect(marker.line).toBe(1);
+
+    if (lost) {
+      lines.splice(0, lines.length, "kept");
+      marker.dispose();
+    } else {
+      lines.splice(0, lines.length, "$ ", "kept");
+      marker.line = 0;
+    }
+    entry.term.buffer.active.cursorY = lines.length - 1;
+    entry.term.buffer.active.length = lines.length;
+    await vi.advanceTimersByTimeAsync(6000);
+
+    const outcome = await promise;
+    expect(outcome.error).toBe("command_not_observed");
+    expect(outcome.exitCode).toBeNull();
+    expect(outcome.output).toBe("kept");
+    expect(outcome.outputTruncated).toBe(lost);
+    expect(outcome.outputObservedBytes).toBe(4);
+    expect(outcome.outputCapturedBytes).toBe(4);
+    expect(marker.isDisposed).toBe(true);
+  });
+
   it("uses a fresh nonce when deterministic callers reject forgeable shell markers", async () => {
     entry = makeEntry(["$ ", "hostile output", "$ "]);
     const promise = runInTerminal("s1", "runbook-attempt", "cat hostile.bin", {

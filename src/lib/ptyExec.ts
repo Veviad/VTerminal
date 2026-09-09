@@ -105,7 +105,7 @@ interface Job {
   nonce: string;
   startedAt: number;
   startLine: number;
-  /** Live anchor for sentinel output. Its disposal proves scrollback loss. */
+  /** Live dispatch anchor until a block binds, and for sentinel output. */
   startMarker: IMarker | null;
   startMarkerListener: IDisposable | null;
   boundBlockId: string | null;
@@ -773,8 +773,8 @@ async function runReservedInTerminal({
     };
     jobs.set(sessionId, job);
 
-    // Non-integrated modes anchor on the row we typed into, so skip it: it
-    // holds the prompt plus the echoed command, not output.
+    // Before a block binds (or in sentinel mode), anchor on the dispatch row
+    // and skip it: it holds the prompt plus echoed command, not output.
     const captureStartLine = (): number =>
       job.startMarker && !job.startMarker.isDisposed ? job.startMarker.line : job.startLine;
 
@@ -1004,6 +1004,24 @@ async function runReservedInTerminal({
       });
     };
 
+    const settleUnobservedCommand = () => {
+      // Losing the start binding does not prove that the command never ran.
+      // Keep the available terminal evidence, just as for a completion timeout,
+      // so settling the card does not erase output the user already saw.
+      const captured = harvest(cursorRow(), tailLimit);
+      job.finish({
+        exitCode: null,
+        output: captured.text,
+        outputTruncated: captured.truncated,
+        outputObservedBytes: captured.observedBytes,
+        outputCapturedBytes: captured.capturedBytes,
+        durationMs: Date.now() - job.startedAt,
+        mode,
+        error: "command_not_observed",
+        note: "VTerminal could not match the submitted command to a shell start signal. The command may have run, but its completion and exit status are unknown. Any output below is terminal activity observed after submission, not confirmed output from this command. Check the terminal and current command state before trying again. Do not automatically re-run it.",
+      });
+    };
+
     unsubscribe = subscribeTerm(sessionId, (e: TermEvent) => {
       if (job.settled || !job.injected) return;
       switch (e.type) {
@@ -1018,9 +1036,16 @@ async function runReservedInTerminal({
           // `command` — see the field's comment.
           if (e.command.trim() === job.typed.trim()) {
             job.boundBlockId = e.blockId;
+            // The block now has its own output marker. Retire the dispatch
+            // anchor so trimming just the prompt does not claim lost output.
+            job.startLine = captureStartLine();
+            job.startMarkerListener?.dispose();
+            job.startMarkerListener = null;
+            job.startMarker?.dispose();
+            job.startMarker = null;
             useAppStore.getState().markBlockOrigin(sessionId, e.blockId, "agent");
           } else if (++job.foreignBlocks >= 2) {
-            job.finish(notObservedOutcome(job.startedAt, mode));
+            settleUnobservedCommand();
           }
           break;
         case "blockEnd":
@@ -1089,10 +1114,10 @@ async function runReservedInTerminal({
       });
       return;
     }
-    // Sentinel jobs do not receive an authoritative OSC block marker.
-    // Anchor their prompt row directly in xterm so ordinary line shifts remain
-    // accurate and disposal tells us when low scrollback dropped early output.
-    if (mode !== "integrated") {
+    // Anchor every dispatch before writing. Integrated commands need this too
+    // while their start signal is missing; a fixed row becomes stale when
+    // scrollback shifts. A matching block takes over its own output anchor.
+    {
       const marker = entry.term.registerMarker(0) ?? null;
       if (marker) {
         job.startMarker = marker;
@@ -1124,12 +1149,13 @@ async function runReservedInTerminal({
       job.finish(closedOutcome(job.startedAt, mode));
     });
 
-    // A block that never appears means the line did not reach a shell prompt.
+    // Missing or mismatched shell metadata leaves the command unbound, even
+    // when it executed. Keep its result unknown and never retry the PTY write.
     if (mode === "integrated") {
       timers.push(
         setTimeout(() => {
           if (!job.boundBlockId && !job.interruptedBy) {
-            job.finish(notObservedOutcome(job.startedAt, mode));
+            settleUnobservedCommand();
           }
         }, BLOCK_BIND_MS),
       );
@@ -1570,16 +1596,5 @@ function closedOutcome(startedAt: number, mode: ExecMode | null): PtyExecOutcome
     mode,
     error: "terminal_closed",
     note: "Nothing was executed: the terminal was closed or its shell exited.",
-  };
-}
-
-function notObservedOutcome(startedAt: number, mode: ExecMode | null): PtyExecOutcome {
-  return {
-    exitCode: null,
-    output: "",
-    durationMs: Date.now() - startedAt,
-    mode,
-    error: "command_not_observed",
-    note: "The command was typed into the terminal but the shell never reported starting it, so its result is unknown. Do not assume it ran.",
   };
 }
