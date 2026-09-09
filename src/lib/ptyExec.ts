@@ -778,10 +778,23 @@ async function runReservedInTerminal({
     const captureStartLine = (): number =>
       job.startMarker && !job.startMarker.isDisposed ? job.startMarker.line : job.startLine;
 
+    const captureOutputStartLine = (): number => {
+      if (job.boundBlockId) {
+        const marker = getTerm(sessionId)?.blockMarkers.get(job.boundBlockId)?.start;
+        // A block marker points at its first output row, unlike the dispatch
+        // marker, which points at the prompt and must be skipped.
+        if (marker && !marker.isDisposed) return marker.line;
+        if (marker?.isDisposed) {
+          job.outputLost = true;
+          return 0;
+        }
+      }
+      return captureStartLine() + 1;
+    };
+
     const harvest = (
       toInclusive: number,
       limit: number,
-      from = captureStartLine() + 1,
     ): ReadRangeResult => {
       if (privateOutput) {
         return {
@@ -791,6 +804,7 @@ async function runReservedInTerminal({
           capturedBytes: 0,
         };
       }
+      const from = captureOutputStartLine();
       const captured = readLineRangeResult(sessionId, from, toInclusive, { limit });
       const text = captured.text.trimEnd();
       const capturedBytes = new TextEncoder().encode(text).length;
@@ -802,6 +816,19 @@ async function runReservedInTerminal({
           captured.truncated || job.outputLost || capturedBytes < captured.capturedBytes,
       };
     };
+
+    const capturedOutcome = (
+      captured: ReadRangeResult,
+      details: Pick<PtyExecOutcome, "exitCode" | "error" | "note">,
+    ): PtyExecOutcome => ({
+      ...details,
+      output: captured.text,
+      outputTruncated: captured.truncated,
+      outputObservedBytes: captured.observedBytes,
+      outputCapturedBytes: captured.capturedBytes,
+      durationMs: Date.now() - job.startedAt,
+      mode,
+    });
 
     const cursorRow = (): number => {
       const e = getTerm(sessionId);
@@ -836,17 +863,11 @@ async function runReservedInTerminal({
     const settleInterruptFailed = () => {
       if (job.settled) return;
       const captured = harvest(cursorRow(), tailLimit);
-      job.finish({
+      job.finish(capturedOutcome(captured, {
         exitCode: null,
-        output: captured.text,
-        outputTruncated: captured.truncated,
-        outputObservedBytes: captured.observedBytes,
-        outputCapturedBytes: captured.capturedBytes,
-        durationMs: Date.now() - job.startedAt,
-        mode,
         error: "interrupt_failed",
         note: "VTerminal could not confirm that SIGINT was written to the terminal. The command may still control it. Do not re-run it. Ask the user to verify the terminal state.",
-      });
+      }));
     };
 
     const armUserInterruptDeliveryDeadline = () => {
@@ -863,17 +884,11 @@ async function runReservedInTerminal({
       const interruptAction = job.interruptedBy === "user"
         ? "The user requested an interrupt, and VTerminal sent SIGINT"
         : "VTerminal sent interrupt input to the full-screen program";
-      job.finish({
+      job.finish(capturedOutcome(captured, {
         exitCode: null,
-        output: captured.text,
-        outputTruncated: captured.truncated,
-        outputObservedBytes: captured.observedBytes,
-        outputCapturedBytes: captured.capturedBytes,
-        durationMs: Date.now() - job.startedAt,
-        mode,
         error: "interrupted",
         note: `${interruptAction}, but no completion signal arrived within one second. The command may have stopped, or terminal integration may have been lost while it was finishing. Its exit code is unknown. Do not re-run it unchanged. Ask the user to verify the prompt and command state.`,
-      });
+      }));
     };
 
     const armInterruptedGrace = () => {
@@ -987,21 +1002,13 @@ async function runReservedInTerminal({
       // The block's own markers are authoritative: xterm registered the start
       // at OSC 133;C (the first output row) and they track scrollback trimming.
       // The end marker sits on the NEXT prompt's row, so it is exclusive.
-      const from =
-        markers && !markers.start.isDisposed ? markers.start.line : job.startLine + 1;
       const end = markers?.end && !markers.end.isDisposed ? markers.end.line - 1 : cursorRow();
-      const captured = harvest(end, tailLimit, from);
-      settleAuthoritativeCompletion({
+      const captured = harvest(end, tailLimit);
+      settleAuthoritativeCompletion(capturedOutcome(captured, {
         exitCode,
-        output: captured.text,
-        outputTruncated: captured.truncated,
-        outputObservedBytes: captured.observedBytes,
-        outputCapturedBytes: captured.capturedBytes,
-        durationMs: Date.now() - job.startedAt,
-        mode,
         error: completionError(),
         note: interruptNote(),
-      });
+      }));
     };
 
     const settleUnobservedCommand = () => {
@@ -1009,17 +1016,11 @@ async function runReservedInTerminal({
       // Keep the available terminal evidence, just as for a completion timeout,
       // so settling the card does not erase output the user already saw.
       const captured = harvest(cursorRow(), tailLimit);
-      job.finish({
+      job.finish(capturedOutcome(captured, {
         exitCode: null,
-        output: captured.text,
-        outputTruncated: captured.truncated,
-        outputObservedBytes: captured.observedBytes,
-        outputCapturedBytes: captured.capturedBytes,
-        durationMs: Date.now() - job.startedAt,
-        mode,
         error: "command_not_observed",
         note: "VTerminal could not match the submitted command to a shell start signal. The command may have run, but its completion and exit status are unknown. Any output below is terminal activity observed after submission, not confirmed output from this command. Check the terminal and current command state before trying again. Do not automatically re-run it.",
-      });
+      }));
     };
 
     unsubscribe = subscribeTerm(sessionId, (e: TermEvent) => {
@@ -1073,17 +1074,11 @@ async function runReservedInTerminal({
           completionProved = true;
           if (remoteAtStart) renewShellProof(sessionId);
           const captured = harvest(cursorRow(), tailLimit);
-          settleAuthoritativeCompletion({
+          settleAuthoritativeCompletion(capturedOutcome(captured, {
             exitCode: token.exit,
-            output: captured.text,
-            outputTruncated: captured.truncated,
-            outputObservedBytes: captured.observedBytes,
-            outputCapturedBytes: captured.capturedBytes,
-            durationMs: Date.now() - job.startedAt,
-            mode,
             error: completionError(),
             note: interruptNote(),
-          });
+          }));
           break;
         }
         case "bufferChange":
@@ -1197,19 +1192,13 @@ async function runReservedInTerminal({
     const settleTimeout = () => {
       if (job.settled) return;
       const captured = harvest(cursorRow(), tailLimit);
-      job.finish({
+      job.finish(capturedOutcome(captured, {
         exitCode: null,
-        output: captured.text,
-        outputTruncated: captured.truncated,
-        outputObservedBytes: captured.observedBytes,
-        outputCapturedBytes: captured.capturedBytes,
-        durationMs: Date.now() - job.startedAt,
-        mode,
         error: "timeout",
         note: `No completion signal arrived within ${Math.round(
           timeoutMs / 1000,
         )}s. The command may still be running, or it may have finished after terminal integration was lost. Its exit code is unknown. VTerminal did not interrupt it. Do not re-run it or assume it succeeded or failed. Ask the user to verify the terminal state.`,
-      });
+      }));
     };
 
     // Re-armed rather than fixed, so a password prompt does not immediately
@@ -1247,17 +1236,11 @@ async function runReservedInTerminal({
         }
         if (job.interruptedBy === "tui") {
           const captured = harvest(cursorRow(), tailLimit);
-          job.finish({
+          job.finish(capturedOutcome(captured, {
             exitCode: null,
-            output: captured.text,
-            outputTruncated: captured.truncated,
-            outputObservedBytes: captured.observedBytes,
-            outputCapturedBytes: captured.capturedBytes,
-            durationMs: Date.now() - job.startedAt,
-            mode,
             error: "interrupt_failed",
             note: "VTerminal could not settle its full-screen interrupt before the frontend reporting deadline. The program may still control the terminal. Ask the user to verify the terminal state.",
-          });
+          }));
           return;
         }
         settleTimeout();
