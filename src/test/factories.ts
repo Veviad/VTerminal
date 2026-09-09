@@ -33,6 +33,7 @@ export function makeSettings(overrides: Partial<Settings> = {}): Settings {
     cursor_style: "block",
     cursor_blink: true,
     copy_on_select: false,
+    clear_terminal_on_new_chat: true,
     shell_path: null,
     shell_integration_enabled: true,
     active_model_id: "local/qwen3.5-9b",

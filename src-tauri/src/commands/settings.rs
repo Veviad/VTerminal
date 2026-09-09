@@ -54,6 +54,7 @@ pub fn get_settings(app: tauri::AppHandle<Wry>) -> Result<Value, String> {
         "cursor_style": get("cursor_style", json!("block")),
         "cursor_blink": get("cursor_blink", json!(true)),
         "copy_on_select": get("copy_on_select", json!(false)),
+        "clear_terminal_on_new_chat": get("clear_terminal_on_new_chat", json!(true)),
         "shell_path": get("shell_path", Value::Null),
         "shell_integration_enabled": get("shell_integration_enabled", json!(true)),
         "active_model_id": json!(active_model_id(&store)),
@@ -204,6 +205,7 @@ pub fn save_settings(
     cursor_style: Option<String>,
     cursor_blink: Option<bool>,
     copy_on_select: Option<bool>,
+    clear_terminal_on_new_chat: Option<bool>,
     // Clearable strings: JSON null is indistinguishable from "missing" once
     // serde sees Option, so an EMPTY STRING clears the stored value.
     shell_path: Option<String>,
@@ -298,6 +300,9 @@ pub fn save_settings(
     }
     if let Some(v) = copy_on_select {
         store.set("copy_on_select", json!(v));
+    }
+    if let Some(v) = clear_terminal_on_new_chat {
+        store.set("clear_terminal_on_new_chat", json!(v));
     }
     let clearable = |v: String| {
         if v.trim().is_empty() {
