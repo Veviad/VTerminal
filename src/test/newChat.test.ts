@@ -7,6 +7,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const archivePutManyMock = vi.fn(async (_rows: ArchiveSessionInput[]) => {});
 const aiCancelMock = vi.fn(async (_requestId: string) => {});
 const mcpDisconnectMock = vi.fn(async (_conversationId: string) => {});
+const clearTerminalMock = vi.fn(async (_term: unknown, onCleared?: () => void) => onCleared?.());
+const persistClearedMock = vi.fn(async (_ids: string[]) => {});
+const entries = new Map<string, {
+  disposed: boolean;
+  term: { cols: number; rows: number };
+  blockMarkers: Map<string, { start: { dispose(): void }; end: { dispose(): void } | null }>;
+}>();
 
 vi.mock("../lib/tauri", () => ({
   archivePutMany: (rows: unknown) => archivePutManyMock(rows as ArchiveSessionInput[]),
@@ -15,8 +22,25 @@ vi.mock("../lib/tauri", () => ({
 }));
 
 vi.mock("../lib/termRegistry", () => ({
-  getTerm: () => ({ term: { cols: 120, rows: 40 } }),
+  getTerm: (id: string) => {
+    if (!entries.has(id)) entries.set(id, {
+      disposed: false,
+      term: { cols: 120, rows: 40 },
+      blockMarkers: new Map(),
+    });
+    return entries.get(id);
+  },
   serializeSession: (_id: string, lines: number) => ({ data: "SCREEN", lines }),
+}));
+
+vi.mock("../lib/terminalClear", () => ({
+  clearTerminalBuffer: (term: unknown, onCleared?: () => void) => clearTerminalMock(term, onCleared),
+}));
+
+vi.mock("../lib/sessionPersistence", () => ({
+  markScrollbackDirty: vi.fn(),
+  markTranscriptDirty: vi.fn(),
+  persistClearedScrollback: (ids: string[]) => persistClearedMock(ids),
 }));
 
 const abortSessionMock = vi.fn();
@@ -82,6 +106,7 @@ function seed(session: Session, over: Partial<ReturnType<typeof emptyAiStream>> 
     scrollbackLines: 10000,
     restoreSessionsOnStart: true,
     archiveEnabled: true,
+    clearTerminalOnNewChat: true,
   });
 }
 
@@ -124,6 +149,9 @@ beforeEach(() => {
   aiCancelMock.mockClear();
   mcpDisconnectMock.mockClear();
   abortSessionMock.mockClear();
+  clearTerminalMock.mockClear();
+  persistClearedMock.mockClear();
+  entries.clear();
   seed(makeSession("sess-1-0"));
 });
 
@@ -186,7 +214,8 @@ describe("startNewChat", () => {
     expect(blanked().is_open).toBe(true);
     expect(blanked().messages).toEqual([]);
     expect(blanked().model_transcript).toEqual([]);
-    expect(blanked().scrollback).toBeNull();
+    expect(blanked().scrollback).toBe("");
+    expect(blanked().scrollback_lines).toBe(0);
     expect(blanked().supersedes).toBeNull();
   });
 
@@ -196,6 +225,34 @@ describe("startNewChat", () => {
     expect(stream.messages).toEqual([]);
     expect(stream.modelTranscript).toEqual([]);
     expect(useAppStore.getState().sessions.map((s) => s.id)).toEqual(["sess-1-0"]);
+    expect(clearTerminalMock).toHaveBeenCalledOnce();
+    expect(persistClearedMock).toHaveBeenCalledWith(["sess-1-0"]);
+  });
+
+  it("keeps terminal history when clearing on new chat is disabled", async () => {
+    useAppStore.setState({ clearTerminalOnNewChat: false });
+    await expect(startNewChat("sess-1-0")).resolves.toBe(true);
+    expect(clearTerminalMock).not.toHaveBeenCalled();
+    expect(persistClearedMock).not.toHaveBeenCalled();
+    expect(blanked().scrollback).toBeNull();
+    expect(blanked().scrollback_lines).toBeNull();
+    expect(useAppStore.getState().aiStreams["sess-1-0"].messages).toEqual([]);
+  });
+
+  it("waits for the outgoing archive before clearing and coalesces duplicate clicks", async () => {
+    let finishArchive!: () => void;
+    archivePutManyMock.mockImplementationOnce(() => new Promise<void>((resolve) => { finishArchive = resolve; }));
+    const first = startNewChat("sess-1-0");
+    const second = startNewChat("sess-1-0");
+    expect(second).toBe(first);
+    expect(clearTerminalMock).not.toHaveBeenCalled();
+    expect(useAppStore.getState().aiStreams["sess-1-0"].messages).toHaveLength(2);
+    for (let i = 0; i < 5 && !finishArchive; i++) await Promise.resolve();
+    finishArchive();
+    await expect(first).resolves.toBe(true);
+    expect(archivePutManyMock).toHaveBeenCalledOnce();
+    expect(clearTerminalMock).toHaveBeenCalledOnce();
+    expect(archivePutManyMock.mock.invocationCallOrder[0]).toBeLessThan(clearTerminalMock.mock.invocationCallOrder[0]);
   });
 
   it("hands the reopened row's supersede to the chat, not to the tab", async () => {
@@ -242,6 +299,13 @@ describe("startNewChat", () => {
     ]);
     expect(useAppStore.getState().aiStreams[ownerId].messages).toEqual([]);
     expect(useAppStore.getState().aiStreams[remoteId].messages).toEqual([]);
+    expect(clearTerminalMock).toHaveBeenCalledTimes(2);
+    expect(persistClearedMock).toHaveBeenCalledWith([ownerId, remoteId]);
+    expect(useAppStore.getState().sessionUi[remoteId].remote?.target).toBe("deploy@prod");
+    expect(useAppStore.getState().sessionUi[remoteId].nestedBlockId).toBe("ssh-prod");
+    const remoteArchive = rowsOf(0).find((row) => row.session_id.startsWith(`${remoteId}#`));
+    expect(remoteArchive?.scrollback).toBe("SCREEN");
+    expect(remoteArchive?.messages).toBeNull();
   });
 
   it("fences the Done-to-agent-result gap for a linked conversation", async () => {
@@ -295,6 +359,8 @@ describe("startNewChat", () => {
     expect(stream.messages).toHaveLength(2);
     expect(stream.modelTranscript).toEqual(TRANSCRIPT);
     expect(stream.lastError).toBeTruthy();
+    expect(clearTerminalMock).not.toHaveBeenCalled();
+    expect(persistClearedMock).not.toHaveBeenCalled();
   });
 
   it("does nothing for an empty panel or an unknown session", async () => {

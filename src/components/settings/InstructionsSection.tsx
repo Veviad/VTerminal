@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useAppStore } from "../../stores/appStore";
 import { useSettings } from "../../hooks/useSettings";
-import { useAutoGrow } from "../../hooks/useAutoGrow";
+import { MarkdownEditor, formattingModifier } from "../ui/MarkdownEditor";
 import { S } from "../../lib/strings";
 import type { SettingsPatch } from "../../lib/types";
 
@@ -9,11 +9,6 @@ import type { SettingsPatch } from "../../lib/types";
  *  save over the cap rather than truncating — so this copy exists to show the
  *  counter and stop the doomed request, never as the check itself. */
 export const MAX_INSTRUCTION_CHARS = 4000;
-
-/** Roughly twelve lines before the box starts scrolling. Standing instructions
- *  are read back far more often than they are written, and a field that grows
- *  to 4000 characters would push the other two off the screen. */
-const MAX_TEXTAREA_PX = 260;
 
 /** The three fields, in the order the section shows them: shared text first,
  *  because that is the order they are concatenated in on the Rust side. */
@@ -64,8 +59,6 @@ function InstructionsEditor({
   const [draft, setDraft] = useState(value);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
-  const ref = useRef<HTMLTextAreaElement>(null);
-  useAutoGrow(ref, MAX_TEXTAREA_PX, [draft]);
 
   // Re-sync when the store changes underneath — a `loadSettings` after a failed
   // save, or the Clear button below. Keyed on `value` so a save that Rust
@@ -114,20 +107,20 @@ function InstructionsEditor({
           {S.settings.instructions.charCount(used, MAX_INSTRUCTION_CHARS)}
         </span>
       </div>
-      <textarea
-        ref={ref}
+      <MarkdownEditor
         value={draft}
-        aria-label={label}
+        ariaLabel={label}
         placeholder={placeholder}
-        spellCheck={false}
-        onChange={(e) => {
-          setDraft(e.target.value);
+        invalid={tooLong}
+        onChange={(next) => {
+          setDraft(next);
           setSaved(false);
         }}
         onBlur={() => void commit(draft)}
         onKeyDown={(e) => {
-          // Enter inserts a newline — these are paragraphs, not a one-line
-          // field. ⌘/Ctrl+Enter is the explicit commit, and Escape reverts.
+          // Enter inserts a newline (and continues a list) — these are
+          // paragraphs, not a one-line field. ⌘/Ctrl+Enter is the explicit
+          // commit, and Escape reverts.
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
             e.preventDefault();
             e.currentTarget.blur();
@@ -136,10 +129,6 @@ function InstructionsEditor({
             setError(null);
           }
         }}
-        rows={3}
-        className={`w-full resize-none rounded-md border bg-bg-card px-2 py-1.5 text-[12px] leading-relaxed text-text-primary placeholder:text-text-muted focus:outline-none ${
-          tooLong ? "border-error" : "border-border-subtle focus:border-accent"
-        }`}
       />
       <div className="flex items-start justify-between gap-3">
         {/* An error REPLACES the hint rather than stacking under it, matching
@@ -198,7 +187,10 @@ export function InstructionsSection() {
             onSave={save}
           />
         ))}
-        <p className="text-[10px] text-text-muted">{S.settings.instructions.saveHint}</p>
+        <p className="text-[10px] leading-relaxed text-text-muted">
+          {S.settings.instructions.saveHint}{" "}
+          {S.settings.instructions.markdownHint(formattingModifier())}
+        </p>
       </section>
     </div>
   );

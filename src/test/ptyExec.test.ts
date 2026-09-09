@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TermEvent } from "../lib/termRegistry";
+import { writePtyOutput } from "../lib/ptyEcho";
 
 // The repo's first Tauri IPC mock. It stays trivial because ptyExec reaches the
 // outside world through exactly two seams: ptyWrite and the term registry.
@@ -60,6 +61,7 @@ interface FakeEntry {
   };
   term: {
     rows: number;
+    write: (data: string | Uint8Array, callback?: () => void) => void;
     focus: () => void;
     registerMarker: (offset?: number) => FakeMarker;
     buffer: {
@@ -130,6 +132,7 @@ function makeEntry(lines: string[], opts: Partial<{ atPrompt: boolean; bufferTyp
     },
     term: {
       rows: 24,
+      write: vi.fn((_data: string | Uint8Array, callback?: () => void) => callback?.()),
       // A password prompt brings the tab forward so the user can just type.
       focus: () => {},
       registerMarker: (offset = 0) => {
@@ -295,6 +298,9 @@ describe("runInTerminal — integrated session", () => {
     await flush();
 
     const written = ptyWrite.mock.calls[0][1];
+    writePtyOutput(entry.term, new TextEncoder().encode(`${written}\n`));
+    const displayed = vi.mocked(entry.term.write).mock.calls[0][0] as Uint8Array;
+    expect(new TextDecoder().decode(displayed)).toBe(`${typed("cat hostile.bin")}\r\n`);
     const nonce = /;([a-z0-9]+)\\007/.exec(written)?.[1];
     expect(nonce).toBeTruthy();
     // Both ordinary integrated markers and a replayed private token are
@@ -987,6 +993,30 @@ describe("runInTerminal — remote session", () => {
     useAppStore.getState().updateSessionUi("s1", {
       remote: { kind: "ssh", target: "prod-01" },
     });
+  });
+
+  it("hides the probe and completion suffix while preserving command output and tokens", async () => {
+    entry = makeEntry(["remote$ "]);
+    const promise = runInTerminal("s1", "ap1", "echo hello", { timeoutMs: 5_000 });
+    await flush();
+
+    const probeLine = ptyWrite.mock.calls[0][1];
+    const probe = probeNonce(probeLine);
+    const probeToken = `\x1b]6973;RP;${probe};z;b5.2;f\x07`;
+    writePtyOutput(entry.term, new TextEncoder().encode(`${probeLine}\n${probeToken}remote$ `));
+    const displayedProbe = vi.mocked(entry.term.write).mock.calls[0][0] as Uint8Array;
+    expect(new TextDecoder().decode(displayedProbe)).toBe(`\r\x1b[2K${probeToken}remote$ `);
+
+    emit({ type: "osc", payload: `RP;${probe};z;b5.2;f` });
+    await flush();
+    const commandLine = ptyWrite.mock.calls[1][1];
+    const nonce = commandNonce(commandLine);
+    const completion = `\x1b]6973;RD;0;${nonce}\x07`;
+    writePtyOutput(entry.term, new TextEncoder().encode(`${commandLine}\nhello\r\n${completion}`));
+    const displayedCommand = vi.mocked(entry.term.write).mock.calls[1][0] as Uint8Array;
+    expect(new TextDecoder().decode(displayedCommand)).toBe(`${typed("echo hello")}\r\nhello\r\n${completion}`);
+    emit({ type: "osc", payload: `RD;0;${nonce}` });
+    expect((await promise).exitCode).toBe(0);
   });
 
   it("reserves the terminal while remote preflight is still probing", async () => {

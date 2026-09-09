@@ -70,6 +70,10 @@ let onBlur: (() => void) | null = null;
 
 /** Sessions whose scrollback has changed since it was last written. */
 const dirtyScrollback = new Set<string>();
+/** Explicit clears bypass the idle gate, including an SSH connection whose
+ * enclosing shell block remains running. Keep failed clears queued for retry. */
+const clearedScrollback = new Map<string, number>();
+let nextScrollbackClear = 0;
 /** Sessions whose AI transcript has changed since it was last archived. */
 const dirtyTranscript = new Set<string>();
 /** Agent checkpoints are sparse (one per completed round), so they bypass the
@@ -159,6 +163,18 @@ export function markScrollbackDirty(sessionId: string): void {
   scheduleBlob();
 }
 
+/** Retire stored screen data after a new chat clears its live terminal. Older
+ * captures must finish first so a late snapshot cannot restore the old screen. */
+export async function persistClearedScrollback(sessionIds: string[]): Promise<void> {
+  if (!started) return;
+  for (const id of sessionIds) clearedScrollback.set(id, ++nextScrollbackClear);
+  await Promise.allSettled([...inFlightWrites]);
+  // A concurrent snapshot may already have acknowledged the first clear.
+  for (const id of sessionIds) clearedScrollback.set(id, ++nextScrollbackClear);
+  await trackWrite(write(new Set()));
+  for (const id of sessionIds) markScrollbackDirty(id);
+}
+
 /**
  * An AI turn ended — archive the transcript so a hard quit does not lose it.
  *
@@ -231,7 +247,7 @@ function buildSnapshot(withScrollback: Set<string>): {
     // what lets the cheap metadata tick run constantly without shipping bytes.
     let scrollback: string | null = null;
     let scrollbackLines: number | null = null;
-    if (isRunbookTerminalProtected(session.id)) {
+    if (clearedScrollback.has(session.id) || isRunbookTerminalProtected(session.id)) {
       // Empty, rather than null, actively clears an older raw snapshot.
       scrollback = "";
       scrollbackLines = 0;
@@ -278,15 +294,20 @@ async function write(withScrollback: Set<string>, strict = false): Promise<void>
   // set. Keep the pre-write set so a rejected IPC cannot silently discard the
   // only signal that those bytes still need a durable retry.
   const dirtyBeforeWrite = new Set(dirtyScrollback);
+  const clearsBeforeWrite = new Map(clearedScrollback);
   try {
     const snapshot = buildSnapshot(withScrollback);
     await api.workspaceSnapshot(snapshot);
+    for (const [id, generation] of clearsBeforeWrite) {
+      if (clearedScrollback.get(id) === generation) clearedScrollback.delete(id);
+    }
   } catch (err) {
     const liveSessions = new Set(useAppStore.getState().sessions.map((session) => session.id));
     for (const sessionId of dirtyBeforeWrite) {
       if (liveSessions.has(sessionId)) dirtyScrollback.add(sessionId);
     }
     if (persistenceActive() && dirtyBeforeWrite.size > 0) scheduleBlob();
+    if (persistenceActive() && clearedScrollback.size > 0) scheduleMeta();
     console.warn("session snapshot failed:", err);
     if (strict) throw err;
   }
@@ -837,6 +858,7 @@ export function stopPersistence(): void {
   unlistenQuit?.();
   unlistenQuit = null;
   dirtyScrollback.clear();
+  clearedScrollback.clear();
   dirtyTranscript.clear();
   dirtyAgentCheckpoints.clear();
   pausedForExit = false;
