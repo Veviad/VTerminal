@@ -185,7 +185,12 @@ produces the production-shaped NSIS smoke containing both backends. Verification
 and release artifacts use separate immutable caches, each written by exactly one
 job on trusted `main` pushes; pull requests only restore them. A monthly
 scheduled workflow runs all three jobs without restoring or saving a cache to
-preserve clean-build coverage. Windows CI also disables incremental compilation
+preserve clean-build coverage. Local-model packaging and verification select the
+runtime directory reported by the current Cargo invocation, so an older cached
+llama.cpp build cannot replace or conflict with the dependency being compiled.
+Verification also refreshes the runtime DLLs beside test executables, where the
+Windows loader would otherwise prefer stale files over the selected PATH entry.
+Windows CI also disables incremental compilation
 and development/test debug information because hosted runners do not retain a
 debugging session and those artifacts substantially increase MSVC work and cache
 size. Package and release jobs silently install the generated NSIS artifact into

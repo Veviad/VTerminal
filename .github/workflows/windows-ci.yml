@@ -80,6 +80,9 @@ jobs:
       - name: PE import audit
         run: ./scripts/windows-import-audit.tests.ps1
 
+      - name: Cargo runtime selection
+        run: ./scripts/windows-cargo.tests.ps1
+
       - name: Stub frontend assets
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
@@ -193,44 +196,17 @@ jobs:
 
       - name: Clippy (local-llm, Vulkan and CPU backends)
         working-directory: src-tauri
-        run: cargo clippy --all-targets --locked --features local-llm -- -D warnings
-
-      # llama-cpp's core DLLs are normal PE imports. A clean native build can
-      # leave copies beside the test binary, but rust-cache deliberately does
-      # not guarantee those profile-root copies on an exact hit. Resolve the
-      # one complete ABI-matched CMake output and expose it to the Windows
-      # loader before starting any cached test executable.
-      - name: Expose local-model runtime DLLs to tests
         run: |
-          $requiredRuntime = @('llama.dll', 'llama-common.dll', 'ggml.dll', 'ggml-base.dll')
-          $buildRoot = Join-Path $env:CARGO_TARGET_DIR 'debug\build'
-          $candidates = @(
-            Get-ChildItem -LiteralPath $buildRoot -Directory -Filter 'llama-cpp-sys-2-*' | ForEach-Object {
-              $output = Join-Path $_.FullName 'out'
-              $runtime = Join-Path $output 'bin'
-              $backends = Join-Path $output 'backends'
-              if ((Test-Path -LiteralPath $runtime -PathType Container) -and
-                  (Test-Path -LiteralPath $backends -PathType Container)) {
-                $missingRuntime = @(
-                  $requiredRuntime | Where-Object {
-                    -not (Test-Path -LiteralPath (Join-Path $runtime $_) -PathType Leaf)
-                  }
-                )
-                $backendDlls = @(Get-ChildItem -LiteralPath $backends -Filter '*.dll' -File)
-                $hasCpu = $null -ne ($backendDlls | Where-Object Name -Match '^ggml-cpu(?:-.+)?\.dll$')
-                $hasVulkan = $null -ne ($backendDlls | Where-Object Name -EQ 'ggml-vulkan.dll')
-                if ($missingRuntime.Count -eq 0 -and $hasCpu -and $hasVulkan) {
-                  [PSCustomObject]@{ Runtime = $runtime; Backends = $backends }
-                }
-              }
-            }
+          . ../scripts/windows-cargo.ps1
+          $output = Invoke-LlamaCargo -CargoArguments @(
+            'clippy', '--all-targets', '--locked', '--features', 'local-llm', '--', '-D', 'warnings'
           )
-          if ($candidates.Count -ne 1) {
-            $found = if ($candidates.Count -eq 0) { 'none' } else { $candidates.Runtime -join ', ' }
-            throw "Expected exactly one complete cached llama.cpp runtime for tests; found $found."
-          }
-          $candidates[0].Runtime | Out-File -FilePath $env:GITHUB_PATH -Append
-          $candidates[0].Backends | Out-File -FilePath $env:GITHUB_PATH -Append
+          # Cached test executables still need their matching core and backend
+          # DLLs on PATH. Cargo identifies this invocation's output even when
+          # an older dependency's complete runtime also remains in the cache.
+          Copy-LlamaTestRuntime -Output $output -ProfileDirectory (Join-Path $env:CARGO_TARGET_DIR 'debug')
+          (Join-Path $output 'bin') | Out-File -FilePath $env:GITHUB_PATH -Append
+          (Join-Path $output 'backends') | Out-File -FilePath $env:GITHUB_PATH -Append
 
       - name: Test (local-llm)
         working-directory: src-tauri
