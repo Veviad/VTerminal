@@ -260,6 +260,127 @@ describe("runInTerminal — integrated session", () => {
     expect((await promise).outputTruncated).toBe(true);
   });
 
+  it.each(["completion", "timeout", "interrupt"] as const)(
+    "tracks bound output through scrollback shifts for the preview and %s",
+    async (settlement) => {
+      vi.useFakeTimers();
+      const lines = ["old history", "$ "];
+      entry = makeEntry(lines);
+      useAppStore.getState().beginCommand("s1", "ap1", "printf output");
+      const promise = runInTerminal("s1", "ap1", "printf output", { timeoutMs: 5000 });
+      await vi.advanceTimersByTimeAsync(0);
+      const start = makeMarker(2);
+      const markers = { start, end: null as FakeMarker | null };
+      entry.blockMarkers.set("b1", markers);
+      emit({ type: "blockStart", blockId: "b1", command: typed("printf output") });
+      expect(entry.registeredMarkers[0].isDisposed).toBe(true);
+
+      // Only the old history and prompt are trimmed. The block's first output
+      // row is still present, now at zero, so no output has been lost.
+      lines.splice(0, lines.length, "first output", "second output");
+      start.line = 0;
+      entry.term.buffer.active.cursorY = 1;
+      entry.term.buffer.active.length = lines.length;
+      await vi.advanceTimersByTimeAsync(750);
+      const card = useAppStore.getState().aiStreams.s1?.messages
+        .find((message) => message.id === "cmd-ap1")?.command;
+      expect(card?.output).toBe("first output\nsecond output");
+
+      if (settlement === "completion") {
+        lines.push("$ ");
+        entry.term.buffer.active.cursorY = 2;
+        entry.term.buffer.active.length = lines.length;
+        markers.end = makeMarker(2);
+        emit({ type: "blockEnd", blockId: "b1", exitCode: 0, endLine: 2 });
+      } else if (settlement === "interrupt") {
+        expect(interruptJob("s1", "ap1")).toBe(true);
+        await vi.advanceTimersByTimeAsync(1100);
+      } else {
+        await vi.advanceTimersByTimeAsync(5000);
+      }
+
+      const outcome = await promise;
+      expect(outcome.output).toBe("first output\nsecond output");
+      expect(outcome.outputTruncated).toBe(false);
+      expect(outcome.outputObservedBytes).toBe(26);
+      expect(outcome.outputCapturedBytes).toBe(26);
+      expect(outcome.exitCode).toBe(settlement === "completion" ? 0 : null);
+      expect(outcome.error).toBe(
+        settlement === "completion" ? undefined : settlement === "interrupt" ? "interrupted" : "timeout",
+      );
+    },
+  );
+
+  it.each([false, true])(
+    "retains the available tail after a bound anchor is lost (trim event: %s)",
+    async (trimEvent) => {
+      vi.useFakeTimers();
+      const lines = ["old history", "$ "];
+      entry = makeEntry(lines);
+      useAppStore.getState().beginCommand("s1", "ap1", "printf output");
+      const promise = runInTerminal("s1", "ap1", "printf output", { timeoutMs: 5000 });
+      await vi.advanceTimersByTimeAsync(0);
+      const start = makeMarker(2);
+      entry.blockMarkers.set("b1", { start, end: null });
+      emit({ type: "blockStart", blockId: "b1", command: typed("printf output") });
+      lines.splice(0, lines.length, "retained tail");
+      start.dispose();
+      if (trimEvent) {
+        entry.blockMarkers.delete("b1");
+        emit({ type: "blockTrimmed", blockId: "b1" });
+      }
+      entry.term.buffer.active.cursorY = 0;
+      entry.term.buffer.active.length = lines.length;
+      await vi.advanceTimersByTimeAsync(750);
+      const card = useAppStore.getState().aiStreams.s1?.messages
+        .find((message) => message.id === "cmd-ap1")?.command;
+      expect(card?.output).toBe("retained tail");
+      await vi.advanceTimersByTimeAsync(5000);
+
+      const outcome = await promise;
+      expect(outcome.output).toBe("retained tail");
+      expect(outcome.outputTruncated).toBe(true);
+      expect(outcome.outputObservedBytes).toBe(13);
+      expect(outcome.outputCapturedBytes).toBe(13);
+      expect(outcome.error).toBe("timeout");
+    },
+  );
+
+  it("keeps shifted bound output private during preview and timeout", async () => {
+    vi.useFakeTimers();
+    const lines = ["old history", "$ "];
+    entry = makeEntry(lines);
+    useAppStore.getState().beginCommand("s1", "ap1", "printf secret");
+    const promise = runInTerminal("s1", "ap1", "printf secret", {
+      timeoutMs: 5000,
+      outputPolicy: "private",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    const start = makeMarker(2);
+    entry.blockMarkers.set("b1", { start, end: null });
+    emit({
+      type: "blockStart",
+      blockId: "b1",
+      command: suppressPrivateOutput(typed("printf secret"), "posix"),
+    });
+    lines.splice(0, lines.length, "secret");
+    start.line = 0;
+    entry.term.buffer.active.cursorY = 0;
+    entry.term.buffer.active.length = lines.length;
+    await vi.advanceTimersByTimeAsync(750);
+    const card = useAppStore.getState().aiStreams.s1?.messages
+      .find((message) => message.id === "cmd-ap1")?.command;
+    expect(card?.output).toBe("");
+    await vi.advanceTimersByTimeAsync(5000);
+
+    const outcome = await promise;
+    expect(outcome.error).toBe("timeout");
+    expect(outcome.output).toBe("");
+    expect(outcome.outputTruncated).toBe(false);
+    expect(outcome.outputObservedBytes).toBe(0);
+    expect(outcome.outputCapturedBytes).toBe(0);
+  });
+
   // The user may hit Enter at the same instant; OSC 6973 gives us the exact
   // command they ran, so the two are always distinguishable.
   it("ignores a block the user started and binds to its own", async () => {
@@ -287,6 +408,106 @@ describe("runInTerminal — integrated session", () => {
     const outcome = await promise;
     expect(outcome.error).toBe("command_not_observed");
     expect(outcome.exitCode).toBeNull();
+  });
+
+  it("preserves terminal evidence when the start signal is missing without retrying", async () => {
+    vi.useFakeTimers();
+    const lines = ["$ "];
+    entry = makeEntry(lines);
+    const promise = runInTerminal("s1", "ap1", "printf finished", { timeoutMs: 60_000 });
+    await vi.advanceTimersByTimeAsync(1);
+    lines.push("finished", "$ ");
+    entry.term.buffer.active.cursorY = 2;
+    entry.term.buffer.active.length = lines.length;
+    await vi.advanceTimersByTimeAsync(6000);
+
+    const outcome = await promise;
+    expect(outcome.error).toBe("command_not_observed");
+    expect(outcome.exitCode).toBeNull();
+    expect(outcome.output).toContain("finished");
+    expect(outcome.outputCapturedBytes).toBe(new TextEncoder().encode(outcome.output).length);
+    expect(outcome.note).toContain("not confirmed output from this command");
+    expect(outcome.note).toContain("Do not automatically re-run it");
+    expect(ptyWrite).toHaveBeenCalledTimes(1);
+
+    // A delayed signal must not turn the settled unknown result into success.
+    emit({ type: "blockStart", blockId: "late", command: typed("printf finished") });
+    emit({ type: "blockEnd", blockId: "late", exitCode: 0, endLine: 2 });
+    expect((await promise).exitCode).toBeNull();
+    expect(ptyWrite).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not bind different command text or discard its observed terminal activity", async () => {
+    entry = makeEntry(["$ "]);
+    const promise = runInTerminal("s1", "ap1", "printf 'a  b'", { timeoutMs: 5000 });
+    await flush();
+    const lines = ["$ ", "a b", "other output", "$ "];
+    entry.term.buffer.active.getLine = (y) => lines[y] === undefined
+      ? undefined
+      : { translateToString: () => lines[y], isWrapped: false };
+    entry.term.buffer.active.cursorY = 3;
+    entry.term.buffer.active.length = lines.length;
+    emit({ type: "blockStart", blockId: "different", command: typed("printf 'a b'") });
+    emit({ type: "blockEnd", blockId: "different", exitCode: 0, endLine: 2 });
+    emit({ type: "blockStart", blockId: "other", command: "echo other output" });
+
+    const outcome = await promise;
+    expect(outcome.error).toBe("command_not_observed");
+    expect(outcome.exitCode).toBeNull();
+    expect(outcome.output).toContain("other output");
+    expect(ptyWrite).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps unbound private output suppressed", async () => {
+    vi.useFakeTimers();
+    const lines = ["$ "];
+    entry = makeEntry(lines);
+    const promise = runInTerminal("s1", "ap1", "printf secret", {
+      timeoutMs: 60_000,
+      outputPolicy: "private",
+    });
+    await vi.advanceTimersByTimeAsync(1);
+    lines.push("secret");
+    entry.term.buffer.active.cursorY = 1;
+    entry.term.buffer.active.length = lines.length;
+    await vi.advanceTimersByTimeAsync(6000);
+
+    const outcome = await promise;
+    expect(outcome.error).toBe("command_not_observed");
+    expect(outcome.output).toBe("");
+    expect(outcome.outputObservedBytes).toBe(0);
+    expect(outcome.outputCapturedBytes).toBe(0);
+    expect(outcome.note).not.toContain("secret");
+  });
+
+  it.each([false, true])("tracks unbound output through scrollback changes (anchor lost: %s)", async (lost) => {
+    vi.useFakeTimers();
+    const lines = ["old history", "$ "];
+    entry = makeEntry(lines);
+    const promise = runInTerminal("s1", "ap1", "printf kept", { timeoutMs: 60_000 });
+    await vi.advanceTimersByTimeAsync(1);
+    const marker = entry.registeredMarkers[0];
+    expect(marker.line).toBe(1);
+
+    if (lost) {
+      lines.splice(0, lines.length, "kept");
+      marker.dispose();
+    } else {
+      lines.splice(0, lines.length, "$ ", "kept");
+      marker.line = 0;
+    }
+    entry.term.buffer.active.cursorY = lines.length - 1;
+    entry.term.buffer.active.length = lines.length;
+    await vi.advanceTimersByTimeAsync(6000);
+
+    const outcome = await promise;
+    expect(outcome.error).toBe("command_not_observed");
+    expect(outcome.exitCode).toBeNull();
+    expect(outcome.output).toBe("kept");
+    expect(outcome.outputTruncated).toBe(lost);
+    expect(outcome.outputObservedBytes).toBe(4);
+    expect(outcome.outputCapturedBytes).toBe(4);
+    expect(marker.isDisposed).toBe(true);
   });
 
   it("uses a fresh nonce when deterministic callers reject forgeable shell markers", async () => {

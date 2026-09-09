@@ -13,7 +13,7 @@ use tauri::Wry;
 
 /// Bump when any generated file changes — the zdotdir is rewritten whenever
 /// the version marker in the existing vterminal.zsh differs.
-const SCRIPT_VERSION: &str = "7";
+const SCRIPT_VERSION: &str = "8";
 
 #[derive(Serialize)]
 pub struct ShellIntegrationInfo {
@@ -132,14 +132,14 @@ unset __vterminal_debug_command __vterminal_prior_debug_spec
 
 #[cfg(any(target_os = "windows", test))]
 const WSL_BASH_WRAPPER: &str = r#"#!/bin/sh
-exec /bin/bash --noprofile --rcfile "$HOME/.local/share/vterminal/bashrc-v7" -i
+exec /bin/bash --noprofile --rcfile "$HOME/.local/share/vterminal/bashrc-v8" -i
 "#;
 
 #[cfg(target_os = "windows")]
-pub const WSL_INTEGRATION_PATH: &str = "~/.local/share/vterminal/bashrc-v7";
+pub const WSL_INTEGRATION_PATH: &str = "~/.local/share/vterminal/bashrc-v8";
 
 #[cfg(any(target_os = "windows", test))]
-const WSL_WRITE_BASHRC: &str = "umask 077; dir=\"$HOME/.local/share/vterminal\"; mkdir -p \"$dir\" || exit; tmp=\"$dir/.bashrc-v7.$$\"; trap 'rm -f \"$tmp\"' EXIT HUP INT TERM; cat > \"$tmp\" && chmod 600 \"$tmp\" && mv -f \"$tmp\" \"$dir/bashrc-v7\"";
+const WSL_WRITE_BASHRC: &str = "umask 077; dir=\"$HOME/.local/share/vterminal\"; mkdir -p \"$dir\" || exit; tmp=\"$dir/.bashrc-v8.$$\"; trap 'rm -f \"$tmp\"' EXIT HUP INT TERM; cat > \"$tmp\" && chmod 600 \"$tmp\" && mv -f \"$tmp\" \"$dir/bashrc-v8\"";
 
 #[cfg(any(target_os = "windows", test))]
 const WSL_WRITE_WRAPPER: &str = "umask 077; dir=\"$HOME/.local/share/vterminal\"; mkdir -p \"$dir\" || exit; tmp=\"$dir/.vterminal-bash.$$\"; trap 'rm -f \"$tmp\"' EXIT HUP INT TERM; cat > \"$tmp\" && chmod 700 \"$tmp\" && mv -f \"$tmp\" \"$dir/vterminal-bash\"";
@@ -173,6 +173,8 @@ __vterminal_osc7() {
 
 __vterminal_precmd() {
   local exit_code=$?
+  # A cancelled input line never reaches preexec. Do not reuse its capture.
+  unset __vterminal_pending_command
   if [[ -n "$__vterminal_cmd_started" ]]; then
     printf '\e]133;D;%s\e\\' "$exit_code"
     unset __vterminal_cmd_started
@@ -187,14 +189,27 @@ __vterminal_precmd() {
   fi
 }
 
+# This hook sees the accepted line before history options such as
+# HIST_REDUCE_BLANKS rewrite it. preexec's $1 comes from that rewritten history
+# and can differ from the command VTerminal typed, preventing block binding.
+# Only remove the final history newline; quoted and repeated spaces matter.
+__vterminal_zshaddhistory() {
+  __vterminal_pending_command="${1%$'\n'}"
+  return 0
+}
+
 __vterminal_preexec() {
   __vterminal_cmd_started=1
-  # Ship the exact typed command out-of-band; buffer scraping picks up
-  # RPROMPT/PS2 decorations.
-  printf '\e]6973;CMD;%s\e\\' "$(printf '%s' "$1" | base64 | tr -d '\n')"
+  local command="${__vterminal_pending_command-$1}"
+  unset __vterminal_pending_command
+  # Ship the accepted command out-of-band; buffer scraping picks up
+  # RPROMPT/PS2 decorations. Keep preexec's argument as a fallback when another
+  # integration invokes this hook without an interactive history event.
+  printf '\e]6973;CMD;%s\e\\' "$(printf '%s' "$command" | base64 | tr -d '\n')"
   printf '\e]133;C\e\\'
 }
 
+add-zsh-hook zshaddhistory __vterminal_zshaddhistory
 add-zsh-hook precmd __vterminal_precmd
 add-zsh-hook preexec __vterminal_preexec
 "#;
@@ -396,6 +411,182 @@ pub fn shell_integration_status(
     })
 }
 
+#[cfg(all(test, target_os = "macos"))]
+mod zsh_tests {
+    use super::{wait_for_child_bounded, SCRIPT_VERSION, VTERMINAL_ZSH};
+    use base64::Engine;
+    use std::io::{Read, Write};
+    use std::time::Duration;
+
+    fn run_zsh(setup: &str, commands: &str) -> (String, String) {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join(".zshrc"),
+            format!(
+                "HISTFILE=\"$ZDOTDIR/history\"\nHISTSIZE=100\nSAVEHIST=100\n{setup}\n{}",
+                VTERMINAL_ZSH.replace("__VERSION__", SCRIPT_VERSION)
+            ),
+        )
+        .unwrap();
+        // Interactive stdin exercises real history/preexec ordering. Isolate
+        // startup files so tests never source or modify the developer's rc.
+        let mut child = std::process::Command::new("/bin/zsh")
+            .arg("-di")
+            .env("HOME", home.path())
+            .env("ZDOTDIR", home.path())
+            .env_remove("VTERMINAL_INTEGRATION")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(commands.as_bytes())
+            .unwrap();
+        let (status, stderr) = wait_for_child_bounded(&mut child, Duration::from_secs(5)).unwrap();
+        assert!(status.success(), "zsh failed: {stderr}");
+        let mut stdout = String::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut stdout)
+            .unwrap();
+        let history = std::fs::read_to_string(home.path().join("history")).unwrap_or_default();
+        (stdout, history)
+    }
+
+    fn lifecycle(stdout: &str) -> Vec<String> {
+        stdout
+            .split("\x1b]")
+            .filter_map(|part| part.split_once("\x1b\\").map(|(payload, _)| payload))
+            .filter_map(|payload| {
+                if let Some(command) = payload.strip_prefix("6973;CMD;") {
+                    Some(format!(
+                        "CMD:{}",
+                        String::from_utf8(
+                            base64::engine::general_purpose::STANDARD
+                                .decode(command)
+                                .unwrap()
+                        )
+                        .unwrap()
+                    ))
+                } else if payload == "133;C" || payload.starts_with("133;D;") {
+                    Some(payload.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn zsh_reports_exact_commands_before_history_options_rewrite_them() {
+        let commands = [
+            "printf  'first  value\\n' < /dev/null",
+            "printf  'first  value\\n' < /dev/null",
+            " printf  ignored < /dev/null",
+            "false  < /dev/null",
+            "true < /dev/null",
+        ];
+        let (stdout, _) = run_zsh(
+            "setopt HIST_REDUCE_BLANKS HIST_IGNORE_SPACE HIST_IGNORE_ALL_DUPS HIST_NO_STORE",
+            &format!("{}\n", commands.join("\n")),
+        );
+        let expected: Vec<String> = commands
+            .iter()
+            .enumerate()
+            .flat_map(|(index, command)| {
+                [
+                    format!("CMD:{command}"),
+                    "133;C".into(),
+                    format!("133;D;{}", u8::from(index == 3)),
+                ]
+            })
+            .collect();
+        assert_eq!(lifecycle(&stdout), expected);
+    }
+
+    #[test]
+    fn zsh_reports_a_hardened_command_after_previous_completion() {
+        // The shell function only prints text. No Docker binary is invoked.
+        let (stdout, _) = run_zsh(
+            "setopt HIST_REDUCE_BLANKS\ndocker() { printf 'stub output\\n'; }",
+            "printf first < /dev/null\ndocker container prune -f < /dev/null\n",
+        );
+        assert_eq!(
+            lifecycle(&stdout),
+            [
+                "CMD:printf first < /dev/null",
+                "133;C",
+                "133;D;0",
+                "CMD:docker container prune -f < /dev/null",
+                "133;C",
+                "133;D;0",
+            ]
+        );
+    }
+
+    #[test]
+    fn zsh_reports_commands_even_when_user_history_hook_rejects_saving() {
+        let command = "printf  'quoted  spaces' < /dev/null";
+        for status in [1, 2] {
+            let (stdout, history) = run_zsh(
+                &format!("setopt HIST_REDUCE_BLANKS\nzshaddhistory() {{ return {status}; }}"),
+                &format!("{command}\n{command}\n"),
+            );
+            assert_eq!(
+                lifecycle(&stdout),
+                [
+                    format!("CMD:{command}"),
+                    "133;C".into(),
+                    "133;D;0".into(),
+                    format!("CMD:{command}"),
+                    "133;C".into(),
+                    "133;D;0".into(),
+                ]
+            );
+            assert!(history.is_empty(), "user's history policy was overridden");
+        }
+    }
+
+    #[test]
+    fn zsh_discards_a_cancelled_capture_before_preexec_fallback() {
+        let (stdout, _) = run_zsh(
+            "",
+            "__vterminal_zshaddhistory 'cancelled'; __vterminal_precmd; __vterminal_preexec 'fallback'\n",
+        );
+        assert!(lifecycle(&stdout).ends_with(&[
+            "CMD:fallback".into(),
+            "133;C".into(),
+            "133;D;0".into(),
+        ]));
+        assert!(!lifecycle(&stdout).contains(&"CMD:cancelled".into()));
+    }
+
+    #[test]
+    fn zsh_does_not_reuse_comments_or_blank_input_as_commands() {
+        let (stdout, _) = run_zsh(
+            "setopt INTERACTIVE_COMMENTS HIST_REDUCE_BLANKS",
+            "printf  first < /dev/null\n# comment-only input\n\nprintf  second < /dev/null\n",
+        );
+        assert_eq!(
+            lifecycle(&stdout),
+            [
+                "CMD:printf  first < /dev/null",
+                "133;C",
+                "133;D;0",
+                "CMD:printf  second < /dev/null",
+                "133;C",
+                "133;D;0",
+            ]
+        );
+    }
+}
+
 #[cfg(test)]
 mod windows_tests {
     #[cfg(unix)]
@@ -408,18 +599,10 @@ mod windows_tests {
     fn run_bash(script: &str) -> std::process::Output {
         use std::io::Write;
 
-        let home = std::env::temp_dir().join(format!(
-            "vterminal-bash-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir(&home).unwrap();
+        let home = tempfile::tempdir().unwrap();
         let mut child = std::process::Command::new("/bin/bash")
             .args(["--noprofile", "--norc", "-s"])
-            .env("HOME", &home)
+            .env("HOME", home.path())
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -431,9 +614,7 @@ mod windows_tests {
             .unwrap()
             .write_all(script.as_bytes())
             .unwrap();
-        let output = child.wait_with_output().unwrap();
-        std::fs::remove_dir_all(home).ok();
-        output
+        child.wait_with_output().unwrap()
     }
 
     #[test]
@@ -451,7 +632,7 @@ mod windows_tests {
             assert!(VTERMINAL_BASH.contains(required), "missing {required}");
         }
         assert!(WSL_BASH_WRAPPER.contains("--noprofile --rcfile"));
-        assert!(WSL_BASH_WRAPPER.contains("bashrc-v7"));
+        assert!(WSL_BASH_WRAPPER.contains("bashrc-v8"));
     }
 
     #[cfg(unix)]

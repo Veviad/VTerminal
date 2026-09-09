@@ -1660,6 +1660,8 @@ function CommandMessage({
   // `exit ?`, even before persistence normalization has had a chance to run.
   const status =
     cmd.status === "done" && cmd.exitCode === null ? "timeout" : cmd.status;
+  const executionConfirmed =
+    (status === "done" || status === "interrupted") && cmd.exitCode !== null;
   const failed = status === "done" && (cmd.exitCode ?? 0) !== 0;
   const stall =
     status === "running" && cmd.stall ? STALL_UI[cmd.stall] : null;
@@ -1761,7 +1763,8 @@ function CommandMessage({
           terminal echoes an env prefix and a redirect they never saw. */}
       {cmd.typed && (
         <p className="truncate bg-bg-elevated px-2.5 py-1 font-mono text-[10px] text-text-secondary">
-          {S.aiPanel.ranAs} {cmd.typed}
+          {executionConfirmed ? S.aiPanel.ranAs : S.aiPanel.submittedAs}{" "}
+          {cmd.typed}
         </p>
       )}
       {stall && (

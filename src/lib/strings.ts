@@ -207,6 +207,7 @@ export const S = {
     runsIn: "runs in",
     localShell: "this terminal",
     ranAs: "ran as",
+    submittedAs: "submitted as",
     // A stalled command. Only `tui` is handled without asking — see ptyExec.
     stallTui: "A full-screen program took the terminal — closing it",
     stallPassword: "Waiting for your password — type it in the terminal",
@@ -221,9 +222,9 @@ export const S = {
     resultSubmitFailed:
       "VTerminal could not report this terminal outcome to the agent. The run was stopped before another command could start.",
     completionUnknownRun:
-      "Terminal completion could not be confirmed. The agent run was stopped before another command could start.",
+      "Terminal completion could not be confirmed, so the agent stopped. Check the command's state and output in the terminal before trying again.",
     completionUnknownNote:
-      "Completion unknown: the terminal did not report a completion pulse or confirm an interrupt.",
+      "Completion unknown: the terminal did not confirm completion. The command may still be running or may have finished without reporting its result.",
     interruptedCommand: "The command was interrupted before completion.",
     interruptUnknownNote:
       "The interrupt was sent, but no completion signal was observed. The exit status is unknown.",

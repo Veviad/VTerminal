@@ -385,6 +385,7 @@ describe("AiPanel renders", () => {
           createdAt: "2026-08-22T00:00:00.000Z",
           command: {
             command: "sleep 60",
+            typed: "sleep 60 < /dev/null",
             output: "",
             exitCode: 130,
             status: "interrupted",
@@ -398,6 +399,7 @@ describe("AiPanel renders", () => {
           createdAt: "2026-08-22T00:01:00.000Z",
           command: {
             command: "apt list --upgradable",
+            typed: "apt list --upgradable < /dev/null",
             output: "",
             exitCode: null,
             status: "timeout",
@@ -413,6 +415,15 @@ describe("AiPanel renders", () => {
     expect(interrupted).toBeInTheDocument();
     expect(screen.getByText(/exit 130/)).toBeInTheDocument();
     expect(unknown).toBeInTheDocument();
+    expect(
+      screen.getByText(`${S.aiPanel.ranAs} sleep 60 < /dev/null`),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(`${S.aiPanel.submittedAs} apt list --upgradable < /dev/null`),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(`${S.aiPanel.ranAs} apt list --upgradable < /dev/null`),
+    ).not.toBeInTheDocument();
     expect(screen.queryByText(S.aiPanel.running)).not.toBeInTheDocument();
     expect(screen.queryByText(`${S.blocks.exit} ?`)).not.toBeInTheDocument();
     expect(interrupted.querySelector(".animate-pulse")).toBeNull();
@@ -431,6 +442,7 @@ describe("AiPanel renders", () => {
           createdAt: "2026-08-22T00:00:00.000Z",
           command: {
             command: "apt list --upgradable",
+            typed: "apt list --upgradable < /dev/null",
             output: "packages",
             exitCode: null,
             status: "done",
@@ -442,8 +454,46 @@ describe("AiPanel renders", () => {
     render(<AiPanel sessionId="s1" />);
 
     expect(screen.getByText(S.aiPanel.completionUnknown)).toBeInTheDocument();
+    expect(
+      screen.getByText(`${S.aiPanel.submittedAs} apt list --upgradable < /dev/null`),
+    ).toBeInTheDocument();
     expect(screen.queryByText(`${S.blocks.exit} ?`)).not.toBeInTheDocument();
   });
+
+  it.each(["running", "interrupted"] as const)(
+    "describes a %s command without confirmed completion as submitted",
+    (status) => {
+      seedReadyPanel({
+        mode: "agent",
+        messages: [
+          {
+            id: "cmd-submitted",
+            role: "assistant",
+            kind: "command",
+            content: "",
+            createdAt: "2026-08-22T00:00:00.000Z",
+            command: {
+              command: "sleep 60",
+              typed: "sleep 60 < /dev/null",
+              output: "",
+              exitCode: null,
+              status,
+            },
+          },
+        ],
+      });
+
+      render(<AiPanel sessionId="s1" />);
+
+      expect(
+        screen.getByText(`${S.aiPanel.submittedAs} sleep 60 < /dev/null`),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByText(`${S.aiPanel.ranAs} sleep 60 < /dev/null`),
+      ).not.toBeInTheDocument();
+      expect(screen.getByText(S.aiPanel[status])).toBeInTheDocument();
+    },
+  );
 
   it("binds Interrupt to the exact live command approval id", () => {
     const interrupt = vi.spyOn(ptyExec, "interruptJob").mockReturnValue(true);
