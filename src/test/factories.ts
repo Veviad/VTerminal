@@ -1,4 +1,5 @@
 import type { Session, Settings } from "../lib/types";
+import type { SidecarBinding } from "../lib/sidecar";
 
 export function makeSession(overrides: Partial<Session> = {}): Session {
   return {
@@ -13,6 +14,27 @@ export function makeSession(overrides: Partial<Session> = {}): Session {
     userTitle: null,
     aiTitle: null,
     ordinal: 1,
+    ...overrides,
+  };
+}
+
+export function makeSidecarBinding(overrides: Partial<SidecarBinding> = {}): SidecarBinding {
+  return {
+    ownerSessionId: "s1",
+    localSessionId: "s1",
+    remoteSessionId: "s2",
+    remoteIdentity: {
+      kind: "ssh",
+      target: "deploy@example.com",
+      hostId: "example-host",
+      label: "Example",
+    },
+    permissions: { local: "ask", remote: "ask" },
+    paneOrder: ["local", "remote"],
+    splitRatio: 0.5,
+    splitOrientation: "horizontal",
+    focusedSessionId: "s1",
+    degraded: null,
     ...overrides,
   };
 }
@@ -34,6 +56,8 @@ export function makeSettings(overrides: Partial<Settings> = {}): Settings {
     cursor_blink: true,
     copy_on_select: false,
     clear_terminal_on_new_chat: true,
+    default_ai_mode: "ask",
+    last_ai_mode: "ask",
     shell_path: null,
     shell_integration_enabled: true,
     active_model_id: "local/qwen3.5-9b",

@@ -88,6 +88,7 @@ import {
   type SidecarBinding,
 } from "../../lib/sidecar";
 import { getTerm } from "../../lib/termRegistry";
+import { selectAiMode } from "../../lib/aiModePreference";
 import { collapseHome, resolveSessionTitle } from "../../lib/sessionTitle";
 import {
   SidecarPairingPopover,
@@ -176,7 +177,8 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const detachBucketFromAi = useAppStore((s) => s.detachBucketFromAi);
   const knowledgeBuckets = useAppStore((s) => s.knowledgeBuckets);
   const detachFileFromAi = useAppStore((s) => s.detachFileFromAi);
-  const setAiMode = useAppStore((s) => s.setAiMode);
+  const [modeSaveError, setModeSaveError] = useState(false);
+  const modeSelectionId = useRef(0);
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
   const setSettingsTab = useAppStore((s) => s.setSettingsTab);
   const startSidecar = useAppStore((s) => s.startSidecar);
@@ -522,13 +524,16 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
               key={m}
               onClick={() => {
                 if (!sessionId) return;
+                let targetSessionId = sessionId;
                 if (m === "ask" && sidecar) {
-                  const focusedSessionId = sidecar.focusedSessionId;
+                  targetSessionId = sidecar.focusedSessionId;
                   endSidecar(sidecar.ownerSessionId);
-                  setAiMode(focusedSessionId, m);
-                  return;
                 }
-                setAiMode(sessionId, m);
+                const selectionId = ++modeSelectionId.current;
+                setModeSaveError(false);
+                void selectAiMode(targetSessionId, m).catch(() => {
+                  if (selectionId === modeSelectionId.current) setModeSaveError(true);
+                });
               }}
               disabled={busy}
               className={`flex items-center gap-1 rounded-md px-2.5 py-0.5 text-[11px] font-medium transition-all duration-150 ${
@@ -830,6 +835,12 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
         <div className="shrink-0 border-b border-border-subtle bg-warning/10 px-3 py-1 text-[10px] text-warning">
           {S.aiPanel.sidecar.remoteFull(sidecar.remoteIdentity.label)}
         </div>
+      )}
+
+      {modeSaveError && (
+        <p role="alert" className="px-3 py-2 text-[11px] text-error">
+          {S.settings.agent.lastModeSaveError}
+        </p>
       )}
 
       {/* Messages */}

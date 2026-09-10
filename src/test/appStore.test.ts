@@ -41,6 +41,8 @@ beforeEach(() => {
     sessionUi: {},
     aiStreams: {},
     mcpServers: [],
+    defaultAiMode: "ask",
+    lastAiMode: "ask",
   });
 });
 
@@ -176,7 +178,8 @@ describe("ai stream lifecycle", () => {
     expect(stream.messages[0].content).toBe("partial");
   });
 
-  it("newAiConversation wipes the conversation but keeps the mode", () => {
+  it("newAiConversation wipes the conversation and applies the configured mode", () => {
+    useAppStore.setState({ defaultAiMode: "agent" });
     const s = useAppStore.getState();
     s.addSession(makeSession("a"));
     useAppStore.getState().setAiMode("a", "agent");
@@ -204,7 +207,7 @@ describe("ai stream lifecycle", () => {
     expect(stream.attachedBlockIds).toEqual([]);
     // Per-session, never inherited — the same stance restoreAiTranscript takes.
     expect(stream.permissionMode).toBe("ask");
-    // The one thing that carries over.
+    // The configured mode applies without inheriting command permissions.
     expect(stream.mode).toBe("agent");
   });
 

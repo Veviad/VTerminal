@@ -8,6 +8,7 @@ import type {
   SettledCommandStatus,
   CommandStall,
   DocBucket,
+  DefaultAiMode,
   Effort,
   KnowledgeBucketDescriptor,
   KnowledgeBucketRef,
@@ -20,6 +21,7 @@ import type {
   OutputPolicy,
   RemoteContext,
   Session,
+  SelectableAiMode,
   VisionCatalogEntry,
 } from "../lib/types";
 import { PRIVATE_OUTPUT_NOTICE } from "../lib/types";
@@ -297,9 +299,9 @@ export function emptySessionUi(): SessionUiState {
   };
 }
 
-export function emptyAiStream(): AiStreamState {
+export function emptyAiStream(mode: AiMode = "ask"): AiStreamState {
   return {
-    mode: "ask",
+    mode,
     status: "idle",
     requestId: null,
     generationId: null,
@@ -592,6 +594,8 @@ export interface AppState {
 
   // Settings mirror (persisted via Rust; no localStorage)
   settingsLoaded: boolean;
+  defaultAiMode: DefaultAiMode;
+  lastAiMode: SelectableAiMode;
   theme: string;
   fontSize: number;
   scrollbackLines: number;
@@ -810,7 +814,7 @@ function withAiStream(
   updater: (s: AiStreamState) => AiStreamState,
 ): Partial<Pick<AppState, "aiStreams">> {
   if (!state.sessions.some((s) => s.id === sessionId)) return {};
-  const current = state.aiStreams[sessionId] ?? emptyAiStream();
+  const current = ownRecordValue(state.aiStreams, sessionId) ?? emptyAiStream(defaultAiModeFor(state));
   return { aiStreams: { ...state.aiStreams, [sessionId]: updater(current) } };
 }
 
@@ -921,6 +925,12 @@ function defaultMcpSelection(servers: McpServerView[]): McpChatSelection {
       .map((server) => server.id),
     disabled_tools: {},
   };
+}
+
+export function defaultAiModeFor(
+  state: Pick<AppState, "defaultAiMode" | "lastAiMode">,
+): SelectableAiMode {
+  return state.defaultAiMode === "remember" ? state.lastAiMode : state.defaultAiMode;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -1180,7 +1190,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   addSession: (s, activate = true) =>
     set((state) => {
-      const stream = emptyAiStream();
+      const stream = emptyAiStream(defaultAiModeFor(state));
       if (!s.archivedFrom)
         stream.mcpSelection = defaultMcpSelection(state.mcpServers);
       return {
@@ -1420,9 +1430,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((state) => ({
       ...withAiStream(state, sessionId, (s) => ({
         ...s,
-        // Always "ask", never the archived mode: coming back to a tab silently
-        // armed in agent mode is a surprise, and one click undoes it.
-        mode: "ask",
+        // Use the current preference, never an archived execution mode.
+        mode: defaultAiModeFor(state),
         status: "idle",
         requestId: null,
         generationId: null,
@@ -1455,14 +1464,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((state) => {
       const ownerSessionId = resolveSidecarAiOwner(state.sidecars, sessionId);
       return {
-        ...withAiStream(state, ownerSessionId, (s) => ({
+        ...withAiStream(state, ownerSessionId, () => ({
           // Spread the zero value rather than listing fields: a field added to
           // AiStreamState later would otherwise silently survive the wipe.
-          ...emptyAiStream(),
-          // The only thing a new chat inherits is the mode you were working in.
-          // Attached blocks, permissionMode and restoredAt deliberately do not
-          // carry over — the same stance restoreAiTranscript takes.
-          mode: s.mode,
+          ...emptyAiStream(defaultAiModeFor(state)),
           mcpSelection: defaultMcpSelection(state.mcpServers),
         })),
         // New Chat is the explicit conversation boundary for a sidecar.
@@ -2064,6 +2069,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   setTermDims: (cols, rows) => set({ termDims: { cols, rows } }),
 
   settingsLoaded: false,
+  defaultAiMode: "ask",
+  lastAiMode: "ask",
   theme: DEFAULT_THEME_ID,
   fontSize: 13,
   scrollbackLines: 10000,
