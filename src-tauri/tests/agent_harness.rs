@@ -21,7 +21,7 @@ use vterminal_lib::agent::{
 };
 use vterminal_lib::provider::{
     ChatMessage, ChatParams, FinishReason, Provider, ProviderError, ProviderEvent, Role, ToolCall,
-    ToolDef,
+    ToolDef, WebToolPolicy,
 };
 
 enum ScriptedRound {
@@ -37,6 +37,7 @@ enum ScriptedRound {
 struct ScriptedProvider {
     rounds: Mutex<VecDeque<ScriptedRound>>,
     inputs: Mutex<Vec<Vec<ChatMessage>>>,
+    params: Mutex<Vec<ChatParams>>,
 }
 
 impl ScriptedProvider {
@@ -44,6 +45,7 @@ impl ScriptedProvider {
         Self {
             rounds: Mutex::new(rounds.into_iter().collect()),
             inputs: Mutex::new(Vec::new()),
+            params: Mutex::new(Vec::new()),
         }
     }
 
@@ -66,11 +68,12 @@ impl Provider for ScriptedProvider {
         &self,
         messages: Vec<ChatMessage>,
         _tools: Vec<ToolDef>,
-        _params: ChatParams,
+        params: ChatParams,
         _cancel: tokio::sync::watch::Receiver<bool>,
         tx: tokio::sync::mpsc::Sender<ProviderEvent>,
     ) -> Result<(), ProviderError> {
         self.inputs.lock().unwrap().push(messages);
+        self.params.lock().unwrap().push(params);
         let round = self.rounds.lock().unwrap().pop_front();
         match round {
             Some(ScriptedRound::Reply {
@@ -308,6 +311,29 @@ fn private_posix_groups_preserve_an_opaque_export_for_later_consumption() {
         .unwrap();
 
     assert!(status.success());
+}
+
+#[tokio::test]
+async fn native_web_search_policy_survives_command_rounds_and_respects_internet_off() {
+    for (web_access, expected) in [
+        (true, WebToolPolicy::SearchAndFetch),
+        (false, WebToolPolicy::Disabled),
+    ] {
+        let provider = ScriptedProvider::new([
+            reply(vec![call(
+                "command-1",
+                "run_command",
+                json!({"command":"printf harness-ok", "explanation":"emit deterministic output", "output_policy":"normal"}),
+            )]),
+            finish("finish-1"),
+        ]);
+        let result = run_scenario(&provider, vec![], web_access, 5, vec![]).await;
+
+        assert_eq!(result.outcome.termination, AgentTermination::Completed);
+        let params = provider.params.lock().unwrap();
+        assert_eq!(params.len(), 2);
+        assert!(params.iter().all(|params| params.web == expected));
+    }
 }
 
 #[tokio::test]

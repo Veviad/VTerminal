@@ -415,12 +415,17 @@ pub async fn ai_ask(
     let native_web =
         crate::commands::settings::read_bool(&app, "ai_web_access", true) && model.native_web_fetch;
     let mut system_prompt = format!(
-        "{}{}{}\n\nCurrent terminal context:\n{}",
+        "{}{}{}{}\n\nCurrent terminal context:\n{}",
         prompts::ASK,
         if native_web {
             prompts::ASK_WEB_NATIVE
         } else {
             prompts::ASK_WEB_NONE
+        },
+        if native_web && model.native_web_search {
+            prompts::NATIVE_WEB_SEARCH
+        } else {
+            ""
         },
         // Appended only when passages are actually present. Ask mode is deliberately
         // uncached, so a system prompt that varies per turn costs nothing here — unlike
@@ -834,6 +839,7 @@ pub async fn agent_start(
     // intersects it again with its own catalog entry, so this is a ceiling.
     let web_access = crate::commands::settings::read_bool(&app, "ai_web_access", true);
     let native_web = web_access && resolved.model.native_web_fetch;
+    let native_search = native_web && resolved.model.native_web_search;
     // Gate before the provider box is moved out of `resolved`.
     let (goal_images, gate_note) = gate_images(resolved.model, images.unwrap_or_default());
     let conversation_id = context.session_id.clone();
@@ -945,10 +951,7 @@ pub async fn agent_start(
     } else {
         prompts::AGENT.to_string()
     };
-    // The curl tier is appended separately rather than living in AGENT because a
-    // model that holds a real fetch tool must not be told to shell out for the
-    // same job. Today no model has one, so every run gets it; the native tier
-    // turns this into a branch.
+    // Keep the web instructions aligned with the selected model's native tools.
     let mut system_prompt = match (web_access, native_web) {
         // A model with a real fetch tool must not be told to shell out for the
         // same job; a model with neither must not be told it can reach the web.
@@ -973,6 +976,9 @@ pub async fn agent_start(
             rendered_context
         ),
     };
+    if native_search {
+        system_prompt.push_str(prompts::NATIVE_WEB_SEARCH);
+    }
     // Paired with the tool: appended exactly when `tools()` adds `search_docs`, so the
     // prompt can never describe a tool the model was not given (or stay silent about
     // one it was). There is no "no documents" tier — see `prompts::AGENT_DOCS`.
@@ -1197,7 +1203,7 @@ async fn run_chat(
             && web_model
             && crate::commands::settings::read_bool(app, "ai_web_access", true)
         {
-            crate::provider::WebToolPolicy::FetchOnly
+            crate::provider::WebToolPolicy::SearchAndFetch
         } else {
             crate::provider::WebToolPolicy::Disabled
         },
@@ -1291,7 +1297,7 @@ async fn run_chat_with_mcp(
                 && model.native_web_fetch
                 && crate::commands::settings::read_bool(app, "ai_web_access", true)
             {
-                crate::provider::WebToolPolicy::FetchOnly
+                crate::provider::WebToolPolicy::SearchAndFetch
             } else {
                 crate::provider::WebToolPolicy::Disabled
             },
