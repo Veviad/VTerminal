@@ -6,6 +6,7 @@ import { S } from "../lib/strings";
 import * as api from "../lib/tauri";
 import * as ptyExec from "../lib/ptyExec";
 import type { CatalogEntry, Session } from "../lib/types";
+import { makeSidecarBinding } from "./factories";
 
 // The AI panel is unmounted entirely when `settingsLoaded` is false, so a bug in
 // the readiness selectors presents as "the chat window doesn't open" rather than
@@ -204,23 +205,7 @@ describe("AiPanel renders", () => {
         s2: { ...emptyAiStream(), mode: "agent" },
       },
       sidecars: {
-        s1: {
-          ownerSessionId: "s1",
-          localSessionId: "s1",
-          remoteSessionId: "s2",
-          remoteIdentity: {
-            kind: "ssh",
-            target: "deploy@example.com",
-            hostId: "example-host",
-            label: "Example",
-          },
-          permissions: { local: "ask", remote: "ask" },
-          paneOrder: ["local", "remote"],
-          splitRatio: 0.5,
-          splitOrientation: "horizontal",
-          focusedSessionId: "s2",
-          degraded: null,
-        },
+        s1: makeSidecarBinding({ focusedSessionId: "s2" }),
       },
     });
     render(<AiPanel sessionId="s1" />);
@@ -951,23 +936,9 @@ describe("AiPanel renders", () => {
     useAppStore.setState({
       sessions: [session("s1"), session("s2")],
       sidecars: {
-        s1: {
-          ownerSessionId: "s1",
-          localSessionId: "s1",
-          remoteSessionId: "s2",
-          remoteIdentity: {
-            kind: "ssh",
-            target: "deploy@example.com",
-            hostId: "example-host",
-            label: "Example",
-          },
-          permissions: { local: "ask", remote: "ask" },
-          paneOrder: ["local", "remote"],
-          splitRatio: 0.5,
-          splitOrientation: "horizontal",
-          focusedSessionId: "s1",
+        s1: makeSidecarBinding({
           degraded: { role: "remote", reason: "remote_disconnected" },
-        },
+        }),
       },
     });
 

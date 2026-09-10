@@ -1,4 +1,5 @@
 import type { Session, Settings } from "../lib/types";
+import type { SidecarBinding } from "../lib/sidecar";
 
 export function makeSession(overrides: Partial<Session> = {}): Session {
   return {
@@ -13,6 +14,27 @@ export function makeSession(overrides: Partial<Session> = {}): Session {
     userTitle: null,
     aiTitle: null,
     ordinal: 1,
+    ...overrides,
+  };
+}
+
+export function makeSidecarBinding(overrides: Partial<SidecarBinding> = {}): SidecarBinding {
+  return {
+    ownerSessionId: "s1",
+    localSessionId: "s1",
+    remoteSessionId: "s2",
+    remoteIdentity: {
+      kind: "ssh",
+      target: "deploy@example.com",
+      hostId: "example-host",
+      label: "Example",
+    },
+    permissions: { local: "ask", remote: "ask" },
+    paneOrder: ["local", "remote"],
+    splitRatio: 0.5,
+    splitOrientation: "horizontal",
+    focusedSessionId: "s1",
+    degraded: null,
     ...overrides,
   };
 }
