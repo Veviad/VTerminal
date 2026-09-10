@@ -3,7 +3,7 @@ import { useAppStore } from "../../stores/appStore";
 import { useSettings } from "../../hooks/useSettings";
 import { S } from "../../lib/strings";
 import { Row, Stepper, Toggle } from "../ui/Row";
-import type { CommandPolicyRule } from "../../lib/types";
+import type { CommandPolicyRule, DefaultAiMode } from "../../lib/types";
 import { tokenizeCommand } from "../../lib/nesting";
 
 // Agents wait far longer than an interactive user does: a cold `cargo build` or
@@ -76,6 +76,19 @@ function RuleArgvInput({
 export function AgentSection() {
   const s = useAppStore();
   const { save } = useSettings();
+  const [savingMode, setSavingMode] = useState(false);
+  const [modeSaveError, setModeSaveError] = useState(false);
+  const saveDefaultMode = async (mode: DefaultAiMode) => {
+    setSavingMode(true);
+    setModeSaveError(false);
+    try {
+      await save({ default_ai_mode: mode });
+    } catch {
+      setModeSaveError(true);
+    } finally {
+      setSavingMode(false);
+    }
+  };
   const persistRules = (rules: CommandPolicyRule[]) => {
     void save({ agent_command_policy_rules: rules });
   };
@@ -92,6 +105,23 @@ export function AgentSection() {
         <p className="text-[11px] leading-relaxed text-text-secondary">
           {S.settings.agent.intro}
         </p>
+
+        <Row label={S.settings.agent.defaultMode} hint={S.settings.agent.defaultModeHint}>
+          <select
+            value={s.defaultAiMode}
+            aria-label={S.settings.agent.defaultMode}
+            disabled={savingMode}
+            onChange={(e) => void saveDefaultMode(e.target.value as DefaultAiMode)}
+            className="rounded-md border border-border-subtle bg-bg-card px-2 py-1 text-[12px] text-text-primary disabled:opacity-60"
+          >
+            <option value="ask">{S.settings.agent.defaultModeAsk}</option>
+            <option value="agent">{S.settings.agent.defaultModeAgent}</option>
+            <option value="remember">{S.settings.agent.defaultModeRemember}</option>
+          </select>
+        </Row>
+        {modeSaveError && (
+          <p role="alert" className="text-[11px] text-error">{S.settings.agent.defaultModeSaveError}</p>
+        )}
 
         <Row label={S.settings.agent.maxIterations} hint={S.settings.agent.maxIterationsHint}>
           <Stepper

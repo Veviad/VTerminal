@@ -117,6 +117,8 @@ describe("AiPanel renders", () => {
       sessionUi: {},
       aiStreams: {},
       sidecars: {},
+      defaultAiMode: "ask",
+      lastAiMode: "ask",
     });
   });
 
@@ -140,6 +142,96 @@ describe("AiPanel renders", () => {
     for (const rung of [S.effort.off, S.effort.medium, S.effort.max]) {
       expect(screen.getByRole("option", { name: new RegExp(rung) })).toBeTruthy();
     }
+  });
+
+  it("remembers selector choices and applies them to the next terminal", async () => {
+    const saveSettings = vi.spyOn(api, "saveSettings").mockResolvedValue(undefined);
+    seedReadyPanel();
+    useAppStore.setState({ defaultAiMode: "remember" });
+    render(<AiPanel sessionId="s1" />);
+
+    fireEvent.click(screen.getByRole("button", { name: S.aiPanel.titleAgent }));
+
+    expect(useAppStore.getState().aiStreams.s1.mode).toBe("agent");
+    expect(useAppStore.getState().lastAiMode).toBe("agent");
+    await waitFor(() => expect(saveSettings).toHaveBeenCalledWith({ last_ai_mode: "agent" }));
+    act(() => { useAppStore.getState().addSession(session("s2")); });
+    expect(useAppStore.getState().aiStreams.s2).toMatchObject({
+      mode: "agent",
+      permissionMode: "ask",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: S.aiPanel.titleAsk }));
+
+    expect(useAppStore.getState().aiStreams.s1.mode).toBe("ask");
+    expect(useAppStore.getState().lastAiMode).toBe("ask");
+    await waitFor(() => expect(saveSettings).toHaveBeenLastCalledWith({ last_ai_mode: "ask" }));
+    act(() => { useAppStore.getState().addSession(session("s3")); });
+    expect(useAppStore.getState().aiStreams.s3.mode).toBe("ask");
+    expect(useAppStore.getState().aiStreams.s2.mode).toBe("agent");
+  });
+
+  it("announces a failed mode save and retries when the choice is selected again", async () => {
+    const saveSettings = vi.spyOn(api, "saveSettings")
+      .mockRejectedValueOnce(new Error("settings disk unavailable"))
+      .mockResolvedValue(undefined);
+    seedReadyPanel();
+    render(<AiPanel sessionId="s1" />);
+    const agent = screen.getByRole("button", { name: S.aiPanel.titleAgent });
+
+    fireEvent.click(agent);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(S.settings.agent.lastModeSaveError);
+    expect(useAppStore.getState().aiStreams.s1.mode).toBe("agent");
+    expect(useAppStore.getState().lastAiMode).toBe("agent");
+
+    fireEvent.click(agent);
+
+    await waitFor(() => expect(saveSettings).toHaveBeenCalledTimes(2));
+    expect(saveSettings).toHaveBeenLastCalledWith({ last_ai_mode: "agent" });
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("remembers Ask on the focused sidecar terminal when unpairing", async () => {
+    const saveSettings = vi.spyOn(api, "saveSettings").mockResolvedValue(undefined);
+    seedReadyPanel({ mode: "agent" });
+    useAppStore.setState({
+      defaultAiMode: "remember",
+      lastAiMode: "agent",
+      sessions: [session("s1"), session("s2")],
+      aiStreams: {
+        ...useAppStore.getState().aiStreams,
+        s2: { ...emptyAiStream(), mode: "agent" },
+      },
+      sidecars: {
+        s1: {
+          ownerSessionId: "s1",
+          localSessionId: "s1",
+          remoteSessionId: "s2",
+          remoteIdentity: {
+            kind: "ssh",
+            target: "deploy@example.com",
+            hostId: "example-host",
+            label: "Example",
+          },
+          permissions: { local: "ask", remote: "ask" },
+          paneOrder: ["local", "remote"],
+          splitRatio: 0.5,
+          splitOrientation: "horizontal",
+          focusedSessionId: "s2",
+          degraded: null,
+        },
+      },
+    });
+    render(<AiPanel sessionId="s1" />);
+
+    fireEvent.click(screen.getByRole("button", { name: S.aiPanel.titleAsk }));
+
+    expect(useAppStore.getState().sidecars).toEqual({});
+    expect(useAppStore.getState().aiStreams.s2.mode).toBe("ask");
+    expect(useAppStore.getState().aiStreams.s1.mode).toBe("agent");
+    expect(useAppStore.getState().lastAiMode).toBe("ask");
+    await waitFor(() => expect(saveSettings).toHaveBeenCalledWith({ last_ai_mode: "ask" }));
   });
 
   /** The permission control is agent-only: in ask mode there is nothing to

@@ -5,6 +5,32 @@ use tauri_plugin_store::StoreExt;
 
 pub const STORE_NAME: &str = "settings.json";
 
+const DEFAULT_AI_MODES: &[&str] = &["ask", "agent", "remember"];
+const LAST_AI_MODES: &[&str] = &["ask", "agent"];
+
+fn read_ai_mode_setting(value: Option<Value>, allowed: &[&str]) -> Value {
+    value
+        .filter(|value| value.as_str().is_some_and(|mode| allowed.contains(&mode)))
+        .unwrap_or_else(|| json!("ask"))
+}
+
+fn validate_ai_mode_settings(
+    default_ai_mode: Option<&str>,
+    last_ai_mode: Option<&str>,
+) -> Result<(), String> {
+    for (key, value, allowed) in [
+        ("default_ai_mode", default_ai_mode, DEFAULT_AI_MODES),
+        ("last_ai_mode", last_ai_mode, LAST_AI_MODES),
+    ] {
+        if let Some(value) = value {
+            if !allowed.contains(&value) {
+                return Err(format!("invalid {key}: {value}"));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 struct SettingsCredentialPresence {
     hugging_face: bool,
@@ -88,6 +114,10 @@ pub fn get_settings(app: tauri::AppHandle<Wry>) -> Result<Value, String> {
         "history_capture_output": get("history_capture_output", json!(true)),
         "send_context_to_ai": get("send_context_to_ai", json!(true)),
         "ai_session_naming": get("ai_session_naming", json!(true)),
+        // Preserve Ask for existing installations until the user chooses a
+        // different default. Invalid stored values use the same fallback.
+        "default_ai_mode": read_ai_mode_setting(store.get("default_ai_mode"), DEFAULT_AI_MODES),
+        "last_ai_mode": read_ai_mode_setting(store.get("last_ai_mode"), LAST_AI_MODES),
         "restore_sessions_on_start": get("restore_sessions_on_start", json!(true)),
         "restore_scrollback_lines": get("restore_scrollback_lines", json!(1000)),
         "archive_enabled": get("archive_enabled", json!(true)),
@@ -226,6 +256,8 @@ pub fn save_settings(
     history_capture_output: Option<bool>,
     send_context_to_ai: Option<bool>,
     ai_session_naming: Option<bool>,
+    default_ai_mode: Option<String>,
+    last_ai_mode: Option<String>,
     restore_sessions_on_start: Option<bool>,
     restore_scrollback_lines: Option<u32>,
     archive_enabled: Option<bool>,
@@ -253,6 +285,8 @@ pub fn save_settings(
     scheduled_tab_execution_enabled: Option<bool>,
     log_level: Option<String>,
 ) -> Result<(), String> {
+    // Reject invalid modes before changing any settings or credentials.
+    validate_ai_mode_settings(default_ai_mode.as_deref(), last_ai_mode.as_deref())?;
     let store = app.store(STORE_NAME).map_err(|e| e.to_string())?;
     let runbooks_gate_change = runbooks_enabled;
     let scheduled_gate_change = scheduled_actions_enabled;
@@ -374,6 +408,12 @@ pub fn save_settings(
     }
     if let Some(v) = ai_session_naming {
         store.set("ai_session_naming", json!(v));
+    }
+    if let Some(v) = default_ai_mode {
+        store.set("default_ai_mode", json!(v));
+    }
+    if let Some(v) = last_ai_mode {
+        store.set("last_ai_mode", json!(v));
     }
     if let Some(v) = restore_sessions_on_start {
         store.set("restore_sessions_on_start", json!(v));
@@ -1147,6 +1187,90 @@ fn validate_command_policy_rules(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod ai_mode_tests {
+    use super::{read_ai_mode_setting, validate_ai_mode_settings, DEFAULT_AI_MODES, LAST_AI_MODES};
+    use serde_json::{json, Value};
+
+    #[test]
+    fn existing_installations_without_mode_settings_keep_ask() {
+        assert_eq!(read_ai_mode_setting(None, DEFAULT_AI_MODES), json!("ask"));
+        assert_eq!(read_ai_mode_setting(None, LAST_AI_MODES), json!("ask"));
+        assert!(validate_ai_mode_settings(None, None).is_ok());
+    }
+
+    #[test]
+    fn saved_mode_preferences_round_trip_without_losing_the_last_mode() {
+        for default_mode in DEFAULT_AI_MODES {
+            for last_mode in LAST_AI_MODES {
+                validate_ai_mode_settings(Some(default_mode), Some(last_mode)).unwrap();
+                let serialized = serde_json::to_string(&json!({
+                    "default_ai_mode": default_mode,
+                    "last_ai_mode": last_mode,
+                }))
+                .unwrap();
+                let persisted: Value = serde_json::from_str(&serialized).unwrap();
+                assert_eq!(
+                    read_ai_mode_setting(
+                        persisted.get("default_ai_mode").cloned(),
+                        DEFAULT_AI_MODES
+                    ),
+                    json!(default_mode)
+                );
+                assert_eq!(
+                    read_ai_mode_setting(persisted.get("last_ai_mode").cloned(), LAST_AI_MODES),
+                    json!(last_mode)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_stored_modes_fall_back_to_ask() {
+        for value in [
+            json!(null),
+            json!(false),
+            json!(42),
+            json!({}),
+            json!(""),
+            json!("Agent"),
+        ] {
+            assert_eq!(
+                read_ai_mode_setting(Some(value.clone()), DEFAULT_AI_MODES),
+                json!("ask")
+            );
+            assert_eq!(
+                read_ai_mode_setting(Some(value), LAST_AI_MODES),
+                json!("ask")
+            );
+        }
+        assert_eq!(
+            read_ai_mode_setting(Some(json!("remember")), LAST_AI_MODES),
+            json!("ask")
+        );
+    }
+
+    #[test]
+    fn save_rejects_unknown_modes_and_remember_as_a_last_mode() {
+        for mode in ["", "Agent", "invalid", " ask "] {
+            assert_eq!(
+                validate_ai_mode_settings(Some(mode), Some("agent")).unwrap_err(),
+                format!("invalid default_ai_mode: {mode}")
+            );
+            assert_eq!(
+                validate_ai_mode_settings(Some("remember"), Some(mode)).unwrap_err(),
+                format!("invalid last_ai_mode: {mode}")
+            );
+        }
+        assert_eq!(
+            validate_ai_mode_settings(None, Some("remember")).unwrap_err(),
+            "invalid last_ai_mode: remember"
+        );
+        assert!(validate_ai_mode_settings(Some("remember"), None).is_ok());
+        assert!(validate_ai_mode_settings(None, Some("agent")).is_ok());
+    }
 }
 
 #[cfg(test)]

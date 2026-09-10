@@ -1221,7 +1221,12 @@ export interface ChatStreamState {
 
 // ---------- Settings ----------
 
+export type SelectableAiMode = "ask" | "agent";
+export type DefaultAiMode = SelectableAiMode | "remember";
+
 export interface Settings {
+  default_ai_mode: DefaultAiMode;
+  last_ai_mode: SelectableAiMode;
   theme: string;
   font_size: number;
   scrollback_lines: number;
@@ -1680,6 +1685,8 @@ export interface DocPutPage {
 }
 
 export interface SettingsPatch {
+  default_ai_mode: DefaultAiMode;
+  last_ai_mode: SelectableAiMode;
   theme: string;
   font_size: number;
   scrollback_lines: number;

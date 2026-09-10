@@ -614,6 +614,14 @@ export const S = {
     },
     agent: {
       title: "Agent",
+      defaultMode: "Default mode",
+      defaultModeHint:
+        "Choose the mode for new terminals, new terminal chats, and restored sessions. Remember last used keeps your most recent Ask or Agent selection across app restarts. Command approval starts at Ask each time.",
+      defaultModeAsk: "Always Ask",
+      defaultModeAgent: "Always Agent",
+      defaultModeRemember: "Remember last used",
+      defaultModeSaveError: "Could not save the default mode. Please try again.",
+      lastModeSaveError: "This mode is selected, but could not be saved for app restarts. Select it again to retry.",
       intro:
         "Agent commands run in your visible terminal, in whatever shell the selected tab is currently in — including a remote host you are SSH'd into.",
       maxIterations: "Max steps per run",

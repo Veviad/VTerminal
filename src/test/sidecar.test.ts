@@ -275,7 +275,7 @@ describe("sidecar store", () => {
 
     expect(useAppStore.getState().sidecars).toEqual({});
     expect(useAppStore.getState().aiStreams.local.messages).toEqual([]);
-    expect(useAppStore.getState().aiStreams.local.mode).toBe("agent");
+    expect(useAppStore.getState().aiStreams.local.mode).toBe("ask");
     expect(useAppStore.getState().aiStreams.remote.messages).toEqual([companionMessage]);
   });
 

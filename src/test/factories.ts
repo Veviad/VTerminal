@@ -34,6 +34,8 @@ export function makeSettings(overrides: Partial<Settings> = {}): Settings {
     cursor_blink: true,
     copy_on_select: false,
     clear_terminal_on_new_chat: true,
+    default_ai_mode: "ask",
+    last_ai_mode: "ask",
     shell_path: null,
     shell_integration_enabled: true,
     active_model_id: "local/qwen3.5-9b",

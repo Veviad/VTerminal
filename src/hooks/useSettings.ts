@@ -21,6 +21,8 @@ export function useSettings() {
   const loadSettings = useCallback(async () => {
     const s = await api.getSettings();
     hydrateSettings({
+      defaultAiMode: s.default_ai_mode ?? "ask",
+      lastAiMode: s.last_ai_mode ?? "ask",
       theme: s.theme,
       fontSize: s.font_size,
       scrollbackLines: s.scrollback_lines,
@@ -126,6 +128,10 @@ export function useSettings() {
       throw error;
     }
     const store = useAppStore.getState();
+    if (patch.default_ai_mode !== undefined)
+      useAppStore.setState({ defaultAiMode: patch.default_ai_mode });
+    if (patch.last_ai_mode !== undefined)
+      useAppStore.setState({ lastAiMode: patch.last_ai_mode });
     if (patch.theme !== undefined) store.setTheme(patch.theme);
     if (patch.font_size !== undefined) {
       store.setFontSize(patch.font_size);
