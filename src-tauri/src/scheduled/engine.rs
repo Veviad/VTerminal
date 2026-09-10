@@ -454,6 +454,7 @@ async fn run_prompt_step(
     let web_access =
         action.input.web_access && crate::commands::settings::read_bool(app, "ai_web_access", true);
     let native_web = web_access && resolved.model.native_web_fetch;
+    let native_search = native_web && resolved.model.native_web_search;
 
     // Same `&&` ordering as `agent_start`: an empty vector means `tools()` never
     // adds `search_docs`, so the capability is ABSENT rather than discouraged, and
@@ -589,6 +590,9 @@ async fn run_prompt_step(
         web_tier,
         context.render()
     );
+    if native_search {
+        system_prompt.push_str(crate::agent::prompts::NATIVE_WEB_SEARCH);
+    }
     if docs_attached {
         system_prompt.push_str(&format!("\n\n{}", crate::agent::prompts::AGENT_DOCS));
     }

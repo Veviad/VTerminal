@@ -1450,7 +1450,7 @@ pub async fn run_agent(
             tool_choice: ToolChoiceMode::Auto,
             effort: config.effort,
             web: if config.web_access {
-                crate::provider::WebToolPolicy::FetchOnly
+                crate::provider::WebToolPolicy::SearchAndFetch
             } else {
                 crate::provider::WebToolPolicy::Disabled
             },

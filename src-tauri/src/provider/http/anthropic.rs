@@ -75,7 +75,7 @@ fn web_fetch_tool() -> Value {
     })
 }
 
-/// Anthropic's direct/basic query search. Chat deliberately pairs this with
+/// Anthropic's direct/basic query search. Chat and agent mode pair this with
 /// basic fetch so results can be followed without enabling code execution.
 fn web_search_tool() -> Value {
     json!({
@@ -591,6 +591,79 @@ mod tests {
             .any(|tool| tool["type"] == "web_search_20250305"));
         assert!(wire.iter().any(|tool| tool["type"] == "web_fetch_20250910"));
         assert_eq!(choice, None);
+    }
+
+    #[test]
+    fn agents_get_serial_search_fetch_and_client_tools_on_every_claude() {
+        let mut p = params(true, ToolChoiceMode::Auto);
+        p.web = crate::provider::WebToolPolicy::SearchAndFetch;
+        let models: Vec<_> = catalog::CATALOG
+            .iter()
+            .filter(|model| model.provider == catalog::ProviderId::Anthropic)
+            .collect();
+        assert!(!models.is_empty());
+
+        for model in models {
+            let (wire, choice) =
+                build_tools(&[client_tool()], &p, model).expect("agent tools present");
+            assert_eq!(wire.len(), 3, "{} must offer both web tools", model.id);
+            assert_eq!(wire[0]["name"], "run_command");
+            assert_eq!(wire[1]["type"], "web_search_20250305");
+            assert_eq!(wire[2]["type"], "web_fetch_20250910");
+            assert_eq!(
+                choice,
+                Some(json!({"type": "auto", "disable_parallel_tool_use": true})),
+                "{} must keep server and client tool calls serial",
+                model.id
+            );
+        }
+    }
+
+    #[test]
+    fn agent_search_respects_disabled_web_and_unsupported_capabilities() {
+        let (wire, choice) = build_tools(
+            &[client_tool()],
+            &params(false, ToolChoiceMode::Auto),
+            opus(),
+        )
+        .expect("client tool remains available");
+        assert_eq!(wire.len(), 1);
+        assert_eq!(wire[0]["name"], "run_command");
+        assert_eq!(choice, None);
+
+        let mut p = params(true, ToolChoiceMode::Auto);
+        p.web = crate::provider::WebToolPolicy::SearchAndFetch;
+        for (native_web_search, native_web_fetch, expected_web_tools) in
+            [(false, true, 1), (true, false, 0), (false, false, 0)]
+        {
+            let model = CatalogModel {
+                native_web_search,
+                native_web_fetch,
+                ..*opus()
+            };
+            let (wire, _) =
+                build_tools(&[client_tool()], &p, &model).expect("client tool remains available");
+            assert_eq!(wire.len(), 1 + expected_web_tools);
+            assert_eq!(wire[0]["name"], "run_command");
+            assert!(!wire.iter().any(|tool| tool["name"] == "web_search"));
+            if native_web_fetch {
+                assert_eq!(wire[1]["type"], "web_fetch_20250910");
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_fetch_only_does_not_enable_search_for_an_agent() {
+        let (wire, _) = build_tools(
+            &[client_tool()],
+            &params(true, ToolChoiceMode::Auto),
+            opus(),
+        )
+        .expect("client and fetch tools present");
+        assert_eq!(wire.len(), 2);
+        assert_eq!(wire[0]["name"], "run_command");
+        assert_eq!(wire[1]["type"], "web_fetch_20250910");
+        assert!(!wire.iter().any(|tool| tool["name"] == "web_search"));
     }
 
     #[test]

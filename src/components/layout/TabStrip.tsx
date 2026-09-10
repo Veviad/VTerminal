@@ -136,8 +136,6 @@ export function TabStrip() {
     if (viewport.scrollLeft !== before) event.preventDefault();
   };
 
-  if (sessions.length === 0) return null;
-
   const activeBinding = activeSessionId
     ? sidecarForSession(sidecars, activeSessionId)
     : null;
