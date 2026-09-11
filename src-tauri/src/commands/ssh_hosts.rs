@@ -486,7 +486,7 @@ struct WslSshContext {
 
 #[cfg(target_os = "windows")]
 fn wsl_ssh_context() -> Result<WslSshContext, String> {
-    let mut command = std::process::Command::new("wsl.exe");
+    let mut command = crate::windows_process::background_command("wsl.exe");
     command
         .args(["--exec", "/usr/bin/env", "-0"])
         .stdin(std::process::Stdio::null())
@@ -591,7 +591,7 @@ pub fn ssh_wsl_path_from_host(path: String) -> Result<String, String> {
             return Err("the selected WSL identity path is invalid".into());
         }
         let linux_path = format!("/{}", relative.replace('\\', "/"));
-        let mut probe = std::process::Command::new("wsl.exe");
+        let mut probe = crate::windows_process::background_command("wsl.exe");
         probe
             .args(wsl_regular_file_probe_args(&linux_path))
             .stdin(std::process::Stdio::null())

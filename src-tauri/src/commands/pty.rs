@@ -1,7 +1,8 @@
 use tauri::ipc::{Channel, InvokeResponseBody};
-use tauri::{State, Wry};
+use tauri::{Manager, State, Wry};
 
 use crate::commands::settings;
+#[cfg(not(target_os = "windows"))]
 use crate::commands::shell_integration;
 use crate::pty::{session, PtyEvent, PtyManager};
 
@@ -9,9 +10,8 @@ use crate::pty::{session, PtyEvent, PtyManager};
 /// Windows the backend is fixed to the default WSL2 distro and Bash; cwd is a
 /// Linux path passed as a separate `wsl.exe --cd` argument.
 #[tauri::command]
-pub fn pty_spawn(
+pub async fn pty_spawn(
     app: tauri::AppHandle<Wry>,
-    state: State<'_, PtyManager>,
     session_id: String,
     cols: u16,
     rows: u16,
@@ -24,40 +24,56 @@ pub fn pty_spawn(
         .filter(|s| !s.trim().is_empty())
         .or_else(|| settings::read_string(&app, "shell_path"));
     let integration_enabled = settings::read_bool(&app, "shell_integration_enabled", true);
-    #[cfg(not(target_os = "windows"))]
-    let zdotdir = if integration_enabled {
-        Some(shell_integration::ensure_zdotdir(&app)?)
-    } else {
-        None
-    };
+    // Reserve the ID before any await or worker queue. Closing a pending tab
+    // cancels this owned permit, so delayed preparation cannot create an orphan.
+    let permit = app.state::<PtyManager>().begin_spawn(session_id.clone())?;
     #[cfg(target_os = "windows")]
-    let zdotdir = {
-        if integration_enabled {
-            shell_integration::ensure_wsl_bash_integration()?;
+    {
+        let prepared =
+            crate::windows_terminal::prepare_for_integration(&app, integration_enabled, false)
+                .await;
+        if prepared.wsl_status != settings::WslStatus::Ready {
+            return Err(prepared
+                .message
+                .unwrap_or_else(|| "WSL terminal preparation is unavailable".into()));
         }
-        None
-    };
+    }
 
-    // Hold an admission permit across OS process creation. Verified shutdown
-    // closes this gate and waits for every racing spawn before killing PTYs.
-    let permit = state.begin_spawn(session_id.clone())?;
-    let spawned = session::spawn(
-        session::SpawnParams {
-            session_id: session_id.clone(),
-            cols,
-            rows,
-            cwd,
-            shell_path,
-            zdotdir,
-            integration_enabled,
-        },
-        on_data,
-        on_event.clone(),
-    )?;
-
-    let pid = permit.insert(spawned)?;
-    let _ = on_event.send(PtyEvent::Spawned { pid });
-    Ok(pid)
+    // All filesystem, WSL and ConPTY work stays off the IPC/event-loop thread.
+    // The closure retains the app and the owned admission permit, which covers
+    // preparation and OS creation through insertion even
+    // if the invoking frontend stops waiting for this command.
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<PtyManager>();
+        permit.check_active()?;
+        #[cfg(not(target_os = "windows"))]
+        let zdotdir = if integration_enabled {
+            Some(shell_integration::ensure_zdotdir(&app)?)
+        } else {
+            None
+        };
+        #[cfg(target_os = "windows")]
+        let zdotdir = None;
+        permit.check_active()?;
+        let spawned = session::spawn(
+            session::SpawnParams {
+                session_id,
+                cols,
+                rows,
+                cwd,
+                shell_path,
+                zdotdir,
+                integration_enabled,
+            },
+            on_data,
+            on_event.clone(),
+        )?;
+        let pid = permit.insert(&state, spawned)?;
+        let _ = on_event.send(PtyEvent::Spawned { pid });
+        Ok(pid)
+    })
+    .await
+    .map_err(|error| format!("terminal creation stopped: {error}"))?
 }
 
 #[tauri::command]

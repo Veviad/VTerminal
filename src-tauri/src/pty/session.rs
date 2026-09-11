@@ -141,24 +141,8 @@ fn command_succeeds_bounded(
     command: &mut std::process::Command,
     timeout: std::time::Duration,
 ) -> bool {
-    let Ok(mut child) = command.spawn() else {
-        return false;
-    };
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return false;
-            }
-            Err(_) => return false,
-        }
-    }
+    crate::windows_process::command_output_until(command, std::time::Instant::now() + timeout)
+        .is_ok_and(|output| output.status.success())
 }
 
 #[cfg(target_os = "windows")]
@@ -166,7 +150,7 @@ fn resolve_wsl_cwd(requested: Option<&str>) -> (String, bool) {
     let Some(path) = requested.filter(|path| !path.trim().is_empty()) else {
         return ("~".into(), false);
     };
-    let mut probe = std::process::Command::new("wsl.exe");
+    let mut probe = crate::windows_process::background_command("wsl.exe");
     probe
         .args(["--cd", path, "--exec", "/bin/true"])
         .stdin(std::process::Stdio::null())
@@ -279,7 +263,7 @@ fn wsl_cleanup_args(session_tag: &str) -> Vec<String> {
 
 #[cfg(target_os = "windows")]
 pub(crate) fn cleanup_wsl_session(session_tag: &str) -> bool {
-    let mut cleanup = std::process::Command::new("wsl.exe");
+    let mut cleanup = crate::windows_process::background_command("wsl.exe");
     cleanup
         .args(wsl_cleanup_args(session_tag))
         .stdin(std::process::Stdio::null())
@@ -585,7 +569,7 @@ impl PtySession {
                 // tree. A bounded WSL helper normally TERM/KILLs and verifies
                 // the tagged Linux session first; taskkill is the fallback for
                 // a damaged or unavailable distro helper.
-                let mut taskkill = std::process::Command::new("taskkill.exe");
+                let mut taskkill = crate::windows_process::background_command("taskkill.exe");
                 taskkill
                     .args(["/PID", &self.pid.to_string(), "/T", "/F"])
                     .stdin(std::process::Stdio::null())

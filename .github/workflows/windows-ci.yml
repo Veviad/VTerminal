@@ -83,6 +83,9 @@ jobs:
       - name: Cargo runtime selection
         run: ./scripts/windows-cargo.tests.ps1
 
+      - name: Native inference evidence validation
+        run: ./scripts/windows-inference-smoke.tests.ps1
+
       - name: Stub frontend assets
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
@@ -273,11 +276,16 @@ jobs:
       - name: NSIS smoke bundle (local-llm, Vulkan + CPU fallback)
         run: |
           ./scripts/build-windows.ps1
+          cargo build --manifest-path src-tauri/Cargo.toml --release --locked --target x86_64-pc-windows-msvc --features local-llm --example local_inference_smoke
+          if ($LASTEXITCODE -ne 0) { throw 'Could not build the native inference smoke executable.' }
+          $model = Join-Path $env:RUNNER_TEMP 'Qwen3.5-2B-MTP-Q4_K_M.gguf'
+          ./scripts/download-inference-smoke-model.ps1 -Destination $model
           $bundle = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc/release/bundle/nsis'
           $installer = @(Get-ChildItem $bundle -Filter '*setup.exe' -File)
           if ($installer.Count -ne 1) { throw "Expected one NSIS installer, found $($installer.Count)." }
           $installRoot = Join-Path $env:RUNNER_TEMP 'vterminal-installer-smoke'
-          ./scripts/verify-windows-installer.ps1 -Installer $installer[0].FullName -InstallRoot $installRoot
+          $smoke = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc/release/examples/local_inference_smoke.exe'
+          ./scripts/verify-windows-installer.ps1 -Installer $installer[0].FullName -InstallRoot $installRoot -InferenceSmokeExecutable $smoke -InferenceModel $model
 
       - name: Cache summary
         if: always()

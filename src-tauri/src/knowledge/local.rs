@@ -410,6 +410,7 @@ mod runtime {
             &self,
             installed: &InstalledEmbeddingArtifact,
             _profile: &EmbeddingProfile,
+            permit: crate::provider::InferencePermit,
         ) -> Result<ReadyEmbedding, EmbeddingError> {
             {
                 let slot = self.inner.lock().await;
@@ -440,28 +441,32 @@ mod runtime {
             let path = installed.path.clone();
             #[cfg(target_os = "windows")]
             let profile = _profile.clone();
-            let (model, acceleration) = tokio::task::spawn_blocking(move || {
-                let (model, acceleration) =
-                    crate::provider::local::load_model_with_fallback(&path, "embedding model")?;
-                #[cfg(target_os = "windows")]
-                let (model, acceleration) = {
-                    let (model, acceleration, ()) =
-                        crate::provider::local::validate_or_retry_on_cpu(
-                            &path,
-                            "embedding model",
-                            model,
-                            acceleration,
-                            |model, _| validate_embedding_context(model, &profile),
-                        )?;
-                    (model, acceleration)
-                };
-                Ok::<_, String>((Arc::new(model), acceleration))
-            })
-            .await
-            .map_err(|error| {
-                EmbeddingError::Transport(format!("embedding load task failed: {error}"))
-            })?
-            .map_err(EmbeddingError::Transport)?;
+            let (model, acceleration) =
+                crate::provider::spawn_inference_worker(permit, move || {
+                    let (model, acceleration) =
+                        crate::provider::local::load_model_with_fallback(&path, "embedding model")?;
+                    #[cfg(target_os = "windows")]
+                    let (model, acceleration) = {
+                        let (model, acceleration, ()) =
+                            crate::provider::local::validate_or_retry_on_cpu(
+                                &path,
+                                "embedding model",
+                                model,
+                                acceleration,
+                                false,
+                                |model, use_gpu| {
+                                    validate_embedding_context(model, &profile, use_gpu)
+                                },
+                            )?;
+                        (model, acceleration)
+                    };
+                    Ok::<_, String>((Arc::new(model), acceleration))
+                })
+                .await
+                .map_err(|error| {
+                    EmbeddingError::Transport(format!("embedding load task failed: {error}"))
+                })?
+                .map_err(EmbeddingError::Transport)?;
 
             let mut slot = self.inner.lock().await;
             if self.generation.load(Ordering::SeqCst) != my_generation {
@@ -491,6 +496,7 @@ mod runtime {
             installed: &InstalledEmbeddingArtifact,
             ready: ReadyEmbedding,
             failure: &EmbeddingError,
+            permit: crate::provider::InferencePermit,
         ) -> Result<ReadyEmbedding, EmbeddingError> {
             let my_generation = self.generation.load(Ordering::SeqCst);
             let slot_model = {
@@ -533,33 +539,36 @@ mod runtime {
             })?;
             let path = installed.path.clone();
             let runtime_error = failure.to_string();
-            let (model, acceleration) = tokio::task::spawn_blocking(move || {
-                let (model, acceleration, ()) = crate::provider::local::validate_or_retry_on_cpu(
-                    &path,
-                    "embedding model",
-                    model,
-                    ready.acceleration,
-                    |_model, accelerated| {
-                        if accelerated {
-                            Err(runtime_error.clone())
-                        } else {
-                            Ok(())
-                        }
-                    },
-                )?;
-                Ok::<_, String>((Arc::new(model), acceleration))
-            })
-            .await
-            .map_err(|error| {
-                EmbeddingError::Transport(format!(
-                    "embedding CPU fallback task failed after {failure}: {error}"
-                ))
-            })?
-            .map_err(|error| {
-                EmbeddingError::Transport(format!(
-                    "embedding CPU fallback failed after {failure}: {error}"
-                ))
-            })?;
+            let (model, acceleration) =
+                crate::provider::spawn_inference_worker(permit, move || {
+                    let (model, acceleration, ()) =
+                        crate::provider::local::validate_or_retry_on_cpu(
+                            &path,
+                            "embedding model",
+                            model,
+                            ready.acceleration,
+                            false,
+                            |_model, accelerated| {
+                                if accelerated {
+                                    Err(runtime_error.clone())
+                                } else {
+                                    Ok(())
+                                }
+                            },
+                        )?;
+                    Ok::<_, String>((Arc::new(model), acceleration))
+                })
+                .await
+                .map_err(|error| {
+                    EmbeddingError::Transport(format!(
+                        "embedding CPU fallback task failed after {failure}: {error}"
+                    ))
+                })?
+                .map_err(|error| {
+                    EmbeddingError::Transport(format!(
+                        "embedding CPU fallback failed after {failure}: {error}"
+                    ))
+                })?;
 
             let mut slot = self.inner.lock().await;
             if self.generation.load(Ordering::SeqCst) != my_generation {
@@ -606,11 +615,13 @@ mod runtime {
             // Acquire before cloning the resident model. This makes the
             // Vulkan-to-CPU transition exclusive: no queued embedding request
             // can retain and later execute against the discarded GPU model.
-            let _permit =
-                self.gate.acquire().await.map_err(|_| {
+            let permit =
+                Arc::new(Arc::clone(&self.gate).acquire_owned().await.map_err(|_| {
                     EmbeddingError::Transport("local inference gate is closed".into())
-                })?;
-            let ready = self.ready_model(installed, profile).await?;
+                })?);
+            let ready = self
+                .ready_model(installed, profile, Arc::clone(&permit))
+                .await?;
             if usize::try_from(ready.model.n_embd_out()).unwrap_or(0) < profile.dimensions() {
                 return Err(EmbeddingError::Profile(format!(
                     "GGUF emits {} dimensions, fewer than profile's {}",
@@ -623,8 +634,9 @@ mod runtime {
             let first_model = Arc::clone(&ready.model);
             let first_profile = Arc::clone(&profile);
             let first_inputs = Arc::clone(&transformed);
-            let first = tokio::task::spawn_blocking(move || {
-                embed_blocking(&first_model, &first_profile, &first_inputs)
+            let use_gpu = ready.acceleration.uses_gpu();
+            let first = crate::provider::spawn_inference_worker(Arc::clone(&permit), move || {
+                embed_blocking(&first_model, &first_profile, &first_inputs, use_gpu)
             })
             .await
             .map_err(|error| {
@@ -642,11 +654,17 @@ mod runtime {
                         if should_retry_on_cpu(&ready.acceleration, &failure) {
                             let original = failure.into_error();
                             let cpu = self
-                                .reload_on_cpu_after_runtime_failure(installed, ready, &original)
+                                .reload_on_cpu_after_runtime_failure(
+                                    installed,
+                                    ready,
+                                    &original,
+                                    Arc::clone(&permit),
+                                )
                                 .await?;
-                            let retry = tokio::task::spawn_blocking(move || {
-                                embed_blocking(&cpu.model, &profile, &transformed)
-                            })
+                            let retry = crate::provider::spawn_inference_worker(
+                                Arc::clone(&permit),
+                                move || embed_blocking(&cpu.model, &profile, &transformed, false),
+                            )
                             .await
                             .map_err(|error| {
                                 EmbeddingError::Transport(format!(
@@ -677,18 +695,20 @@ mod runtime {
     fn validate_embedding_context(
         model: &LlamaModel,
         profile: &EmbeddingProfile,
+        use_gpu: bool,
     ) -> Result<(), String> {
         let threads = crate::provider::local::perf_cores();
-        let params = LlamaContextParams::default()
-            .with_n_ctx(NonZeroU32::new(512.min(model.n_ctx_train()).max(1)))
-            .with_n_batch(512)
-            .with_n_ubatch(512)
-            .with_n_threads(threads)
-            .with_n_threads_batch(threads)
-            .with_embeddings(true)
-            .with_pooling_type(
-                pooling(profile.semantic().pooling).map_err(|error| error.to_string())?,
-            );
+        let params =
+            crate::provider::local::context_offload(LlamaContextParams::default(), use_gpu)
+                .with_n_ctx(NonZeroU32::new(512.min(model.n_ctx_train()).max(1)))
+                .with_n_batch(512)
+                .with_n_ubatch(512)
+                .with_n_threads(threads)
+                .with_n_threads_batch(threads)
+                .with_embeddings(true)
+                .with_pooling_type(
+                    pooling(profile.semantic().pooling).map_err(|error| error.to_string())?,
+                );
         let context = model
             .new_context(
                 crate::provider::local::backend().map_err(|error| error.to_string())?,
@@ -703,6 +723,7 @@ mod runtime {
         model: &LlamaModel,
         profile: &EmbeddingProfile,
         inputs: &[String],
+        use_gpu: bool,
     ) -> Result<EmbeddedBatch, EmbedAttemptError> {
         let backend = crate::provider::local::backend()
             .map_err(EmbeddingError::Transport)
@@ -747,16 +768,18 @@ mod runtime {
             }
             let n_batch = u32::try_from(tokens.len()).unwrap_or(u32::MAX).max(512);
             let threads = crate::provider::local::perf_cores();
-            let params = LlamaContextParams::default()
-                .with_n_ctx(NonZeroU32::new(n_ctx))
-                .with_n_batch(n_batch)
-                .with_n_ubatch(n_batch.min(512))
-                .with_n_threads(threads)
-                .with_n_threads_batch(threads)
-                .with_embeddings(true)
-                .with_pooling_type(
-                    pooling(profile.semantic().pooling).map_err(EmbedAttemptError::Permanent)?,
-                );
+            let params =
+                crate::provider::local::context_offload(LlamaContextParams::default(), use_gpu)
+                    .with_n_ctx(NonZeroU32::new(n_ctx))
+                    .with_n_batch(n_batch)
+                    .with_n_ubatch(n_batch.min(512))
+                    .with_n_threads(threads)
+                    .with_n_threads_batch(threads)
+                    .with_embeddings(true)
+                    .with_pooling_type(
+                        pooling(profile.semantic().pooling)
+                            .map_err(EmbedAttemptError::Permanent)?,
+                    );
             let mut context = model.new_context(backend, params).map_err(|error| {
                 EmbedAttemptError::Runtime(EmbeddingError::Transport(format!(
                     "create context for input {index}: {error}"

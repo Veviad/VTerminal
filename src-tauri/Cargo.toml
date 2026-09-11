@@ -1,6 +1,6 @@
 [package]
 name = "vterminal"
-version = "0.6.4"
+version = "0.6.5"
 description = "VTerminal — lean AI-powered terminal"
 authors = ["Shawn Maholick"]
 license = "GPL-3.0-only"
@@ -28,9 +28,12 @@ too_many_arguments = "allow"
 default = []
 # Pulls in llama.cpp + Metal kernel compilation (slow clean build).
 # Terminal-only dev builds stay fast without it.
-local-llm = ["dep:llama-cpp-2", "dep:encoding_rs", "dep:minijinja", "dep:minijinja-contrib"]
+local-llm = ["dep:llama-cpp-2", "dep:llama-cpp-sys-2", "dep:encoding_rs", "dep:minijinja", "dep:minijinja-contrib"]
 
 [dependencies]
+# Keep the native ABI fixed alongside the patched wrapper below. Native logs
+# must reach the application log because Windows release builds have no stderr.
+llama-cpp-sys-2 = { version = "=0.1.156", default-features = false, optional = true }
 tauri = { version = "2", features = [] }
 tauri-plugin-store = "2"
 tauri-plugin-log = "2"
@@ -127,12 +130,12 @@ nix = { version = "0.31", features = ["signal", "process"] }
 #
 # Build cost is bounded and does NOT touch cmake: llama-cpp-sys-2's build.rs
 # compiles tools/mtmd as a standalone cc::Build target.
-llama-cpp-2 = { version = "0.1.156", default-features = false, features = ["common", "metal", "mtmd"], optional = true }
+llama-cpp-2 = { version = "=0.1.156", default-features = false, features = ["common", "metal", "mtmd"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # Windows uses runtime-loaded GGML modules so a single installer can select
 # Vulkan when available and still start on machines that only have a CPU.
-llama-cpp-2 = { version = "0.1.156", default-features = false, features = ["common", "dynamic-backends", "vulkan", "mtmd"], optional = true }
+llama-cpp-2 = { version = "=0.1.156", default-features = false, features = ["common", "dynamic-backends", "vulkan", "mtmd"], optional = true }
 winreg = "0.56"
 windows-sys = { version = "0.61", features = [
     "Wdk_Foundation",
@@ -146,6 +149,11 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_WindowsProgramming",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[patch.crates-io]
+# Upstream 0.1.156 does not expose llama.cpp's new load_mtp switch. Keep the
+# compatibility patch in the safe wrapper, not in application pointer casts.
+llama-cpp-2 = { path = "vendor/llama-cpp-2" }
 
 # Metal kernels are unusably slow at opt-level 0
 [profile.dev.package."*"]

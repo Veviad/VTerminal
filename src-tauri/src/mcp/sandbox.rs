@@ -567,7 +567,7 @@ async fn linux_relay_path(app: &tauri::AppHandle<tauri::Wry>) -> Result<String, 
     if !windows_path.is_file() {
         return Err("the bundled WSL MCP relay is missing; local MCP is disabled".into());
     }
-    let output = Command::new("wsl.exe")
+    let output = crate::windows_process::background_tokio_command("wsl.exe")
         .args(["--exec", "wslpath", "-a", "-u"])
         .arg(&windows_path)
         .stdin(Stdio::null())
@@ -590,7 +590,7 @@ async fn linux_relay_path(app: &tauri::AppHandle<tauri::Wry>) -> Result<String, 
 #[cfg(target_os = "windows")]
 async fn windows_self_test(app: &tauri::AppHandle<tauri::Wry>) -> Result<String, String> {
     let relay = linux_relay_path(app).await?;
-    let success = Command::new("wsl.exe")
+    let success = crate::windows_process::background_tokio_command("wsl.exe")
         .args([
             "--exec",
             "bwrap",
@@ -629,7 +629,7 @@ async fn windows_self_test(app: &tauri::AppHandle<tauri::Wry>) -> Result<String,
 
 #[cfg(target_os = "windows")]
 async fn windows_host_address(relay: &str) -> Result<std::net::Ipv4Addr, String> {
-    let output = Command::new("wsl.exe")
+    let output = crate::windows_process::background_tokio_command("wsl.exe")
         .args(["--exec", relay, "host"])
         .stdin(Stdio::null())
         .output()
@@ -650,7 +650,7 @@ async fn canonical_wsl_path(path: &str, kind: &str) -> Result<String, String> {
     if !path.starts_with('/') || path.contains('\0') {
         return Err(format!("sandbox {kind} paths must be absolute WSL paths"));
     }
-    let output = Command::new("wsl.exe")
+    let output = crate::windows_process::background_tokio_command("wsl.exe")
         .args(["--exec", "realpath", "--canonicalize-existing", "--"])
         .arg(path)
         .stdin(Stdio::null())
@@ -675,7 +675,7 @@ async fn resolve_wsl_executable(executable: &str) -> Result<String, String> {
     let candidate = if executable.contains('/') {
         executable.to_owned()
     } else {
-        let output = Command::new("wsl.exe")
+        let output = crate::windows_process::background_tokio_command("wsl.exe")
             .args(["--exec", "which", "--"])
             .arg(executable)
             .stdin(Stdio::null())
@@ -868,7 +868,7 @@ pub async fn command(
             server.simple(),
             uuid::Uuid::new_v4().simple()
         );
-        let mut bridge = Command::new("wsl.exe");
+        let mut bridge = crate::windows_process::background_tokio_command("wsl.exe");
         bridge
             .args(["--exec"])
             .arg(&relay_path)
@@ -890,7 +890,7 @@ pub async fn command(
             .map_err(|error| format!("could not start the bundled WSL relay: {error}"))?;
         // Enter WSL once and poll there. Repeatedly launching wsl.exe is slow
         // enough to make the fixed startup window unreliable on cold systems.
-        let ready = Command::new("wsl.exe")
+        let ready = crate::windows_process::background_tokio_command("wsl.exe")
             .args([
                 "--exec",
                 "sh",
@@ -1003,7 +1003,7 @@ pub async fn command(
     }
     wsl_args.push(executable);
     wsl_args.extend(args.iter().cloned());
-    let mut child = Command::new("wsl.exe");
+    let mut child = crate::windows_process::background_tokio_command("wsl.exe");
     child.args(wsl_args).env_clear();
     Ok(SandboxLaunch {
         command: child,

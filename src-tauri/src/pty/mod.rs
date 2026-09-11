@@ -2,7 +2,7 @@ pub mod session;
 
 use serde::Serialize;
 use std::collections::HashMap;
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use session::PtySession;
 
@@ -31,23 +31,25 @@ pub enum PtyEvent {
 struct PtyAdmission {
     accepting: bool,
     in_flight_spawns: usize,
+    pending: HashMap<String, bool>,
 }
 
 pub struct PtyManager {
     pub sessions: Mutex<HashMap<String, PtySession>>,
-    admission: Mutex<PtyAdmission>,
-    admission_idle: Condvar,
+    admission: Arc<Mutex<PtyAdmission>>,
+    admission_idle: Arc<Condvar>,
 }
 
 impl Default for PtyManager {
     fn default() -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
-            admission: Mutex::new(PtyAdmission {
+            admission: Arc::new(Mutex::new(PtyAdmission {
                 accepting: true,
                 in_flight_spawns: 0,
-            }),
-            admission_idle: Condvar::new(),
+                pending: HashMap::new(),
+            })),
+            admission_idle: Arc::new(Condvar::new()),
         }
     }
 }
@@ -56,22 +58,40 @@ impl Default for PtyManager {
 /// created outside the sessions mutex. Cleanup closes admission and waits for
 /// every permit; a permit that observes the closed gate kills its new process
 /// before releasing the in-flight count.
-pub struct PtySpawnPermit<'a> {
-    manager: &'a PtyManager,
+pub struct PtySpawnPermit {
+    admission: Arc<Mutex<PtyAdmission>>,
+    admission_idle: Arc<Condvar>,
     session_id: String,
     active: bool,
 }
 
-impl PtySpawnPermit<'_> {
-    pub fn insert(mut self, session: PtySession) -> Result<u32, String> {
+impl PtySpawnPermit {
+    pub fn check_active(&self) -> Result<(), String> {
+        let admission = self
+            .admission
+            .lock()
+            .map_err(|_| "PTY admission state poisoned".to_string())?;
+        if !admission.accepting {
+            return Err("terminal creation is disabled while the application is exiting".into());
+        }
+        if admission.pending.get(&self.session_id) != Some(&false) {
+            return Err("terminal creation was cancelled because its tab was closed".into());
+        }
+        Ok(())
+    }
+
+    pub fn insert(mut self, manager: &PtyManager, session: PtySession) -> Result<u32, String> {
         let pid = session.pid;
         let mut session = Some(session);
-        let insert_result = match self.manager.admission.lock() {
+        let insert_result = match self.admission.lock() {
             Err(_) => Err("PTY admission state poisoned".to_string()),
             Ok(admission) if !admission.accepting => {
                 Err("terminal creation is disabled while the application is exiting".to_string())
             }
-            Ok(_admission) => match self.manager.sessions.lock() {
+            Ok(admission) if admission.pending.get(&self.session_id) != Some(&false) => {
+                Err("terminal creation was cancelled because its tab was closed".to_string())
+            }
+            Ok(_admission) => match manager.sessions.lock() {
                 Err(_) => Err("pty state poisoned".to_string()),
                 Ok(sessions) if sessions.contains_key(&self.session_id) => {
                     Err(format!("session {} already exists", self.session_id))
@@ -99,8 +119,7 @@ impl PtySpawnPermit<'_> {
             error.push_str(&format!(
                 "; additionally could not verify spawned PTY cleanup: {kill_error}"
             ));
-            if let Err(retain_error) = self.manager.retain_failed_spawn(&self.session_id, rejected)
-            {
+            if let Err(retain_error) = manager.retain_failed_spawn(&self.session_id, rejected) {
                 error.push_str(&format!(
                     "; additionally could not retain the PTY cleanup handle: {retain_error}"
                 ));
@@ -116,14 +135,25 @@ impl PtySpawnPermit<'_> {
 
     fn release(&mut self) -> Result<(), String> {
         if self.active {
-            self.manager.finish_spawn()?;
+            let mut admission = self
+                .admission
+                .lock()
+                .map_err(|_| "PTY admission state poisoned".to_string())?;
+            admission.in_flight_spawns = admission
+                .in_flight_spawns
+                .checked_sub(1)
+                .ok_or_else(|| "PTY spawn admission count underflow".to_string())?;
+            admission.pending.remove(&self.session_id);
+            if admission.in_flight_spawns == 0 {
+                self.admission_idle.notify_all();
+            }
             self.active = false;
         }
         Ok(())
     }
 }
 
-impl Drop for PtySpawnPermit<'_> {
+impl Drop for PtySpawnPermit {
     fn drop(&mut self) {
         if let Err(error) = self.release() {
             log::error!("could not release PTY spawn permit: {error}");
@@ -132,13 +162,16 @@ impl Drop for PtySpawnPermit<'_> {
 }
 
 impl PtyManager {
-    pub fn begin_spawn(&self, session_id: String) -> Result<PtySpawnPermit<'_>, String> {
+    pub fn begin_spawn(&self, session_id: String) -> Result<PtySpawnPermit, String> {
         let mut admission = self
             .admission
             .lock()
             .map_err(|_| "PTY admission state poisoned".to_string())?;
         if !admission.accepting {
             return Err("terminal creation is disabled while the application is exiting".into());
+        }
+        if admission.pending.contains_key(&session_id) {
+            return Err(format!("session {session_id} is already being created"));
         }
         if self
             .sessions
@@ -152,26 +185,13 @@ impl PtyManager {
             .in_flight_spawns
             .checked_add(1)
             .ok_or_else(|| "too many in-flight PTY spawns".to_string())?;
+        admission.pending.insert(session_id.clone(), false);
         Ok(PtySpawnPermit {
-            manager: self,
+            admission: Arc::clone(&self.admission),
+            admission_idle: Arc::clone(&self.admission_idle),
             session_id,
             active: true,
         })
-    }
-
-    fn finish_spawn(&self) -> Result<(), String> {
-        let mut admission = self
-            .admission
-            .lock()
-            .map_err(|_| "PTY admission state poisoned".to_string())?;
-        admission.in_flight_spawns = admission
-            .in_flight_spawns
-            .checked_sub(1)
-            .ok_or_else(|| "PTY spawn admission count underflow".to_string())?;
-        if admission.in_flight_spawns == 0 {
-            self.admission_idle.notify_all();
-        }
-        Ok(())
     }
 
     fn retain_failed_spawn(&self, session_id: &str, session: PtySession) -> Result<(), String> {
@@ -225,16 +245,28 @@ impl PtyManager {
     /// failure. Holding the admission lock prevents a same-id spawn from
     /// occupying the map slot before the failed session is restored.
     pub fn kill_session_verified(&self, session_id: &str) -> Result<(), String> {
-        let _admission = self
+        let mut admission = self
             .admission
             .lock()
             .map_err(|_| "PTY admission state poisoned".to_string())?;
-        let mut session = self
+        let pending = if let Some(cancelled) = admission.pending.get_mut(session_id) {
+            *cancelled = true;
+            true
+        } else {
+            false
+        };
+        let session = self
             .sessions
             .lock()
             .map_err(|_| "pty state poisoned".to_string())?
-            .remove(session_id)
-            .ok_or_else(|| format!("no session {session_id}"))?;
+            .remove(session_id);
+        let Some(mut session) = session else {
+            return if pending {
+                Ok(())
+            } else {
+                Err(format!("no session {session_id}"))
+            };
+        };
         match session.kill_verified() {
             Ok(()) => Ok(()),
             Err(kill_error) => {
@@ -311,6 +343,63 @@ mod tests {
     use super::PtyManager;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn closing_a_queued_spawn_cancels_its_owned_permit() {
+        let manager = PtyManager::default();
+        let permit = manager.begin_spawn("queued".into()).unwrap();
+        assert!(manager.begin_spawn("queued".into()).is_err());
+        manager.kill_session_verified("queued").unwrap();
+        let worker = std::thread::spawn(move || permit.check_active());
+        assert!(worker.join().unwrap().unwrap_err().contains("cancelled"));
+        assert!(manager.list().is_empty());
+        assert!(manager.begin_spawn("queued".into()).is_ok());
+        manager.kill_all_verified().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn closing_during_os_creation_reaps_the_late_process() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::Ordering;
+        use tauri::ipc::Channel;
+        let home = tempfile::tempdir().unwrap();
+        let shell = home.path().join("test-shell");
+        std::fs::write(&shell, "#!/bin/sh\nexec /bin/sleep 60\n").unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let manager = PtyManager::default();
+        let permit = manager.begin_spawn("creating".into()).unwrap();
+        permit.check_active().unwrap();
+        let session = super::session::spawn(
+            super::session::SpawnParams {
+                session_id: "creating".into(),
+                cols: 80,
+                rows: 24,
+                cwd: None,
+                shell_path: Some(shell.to_string_lossy().into_owned()),
+                zdotdir: None,
+                integration_enabled: false,
+            },
+            Channel::new(|_| Ok(())),
+            Channel::new(|_| Ok(())),
+        )
+        .unwrap();
+        let exited = Arc::clone(&session.exited);
+        manager.kill_session_verified("creating").unwrap();
+        assert!(permit
+            .insert(&manager, session)
+            .unwrap_err()
+            .contains("cancelled"));
+        assert!(manager.list().is_empty());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !exited.load(Ordering::Relaxed) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            exited.load(Ordering::Relaxed),
+            "cancelled process must be reaped"
+        );
+    }
 
     #[test]
     fn verified_cleanup_closes_admission_until_explicitly_reenabled() {
