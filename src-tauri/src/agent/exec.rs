@@ -43,7 +43,7 @@ pub async fn run_command(
 
     #[cfg(not(target_os = "windows"))]
     let mut cmd = {
-        let mut command_builder = tokio::process::Command::new(shell);
+        let mut command_builder = crate::windows_process::background_tokio_command(shell);
         command_builder.args(["-lc", command]);
         command_builder
     };
@@ -56,7 +56,7 @@ pub async fn run_command(
         // this captured path has no controlling terminal to preserve. The
         // interactive ConPTY path instead keeps the session created by WSL2.
         let session_tag = format!("vt-agent-{}", uuid::Uuid::new_v4());
-        let mut command_builder = tokio::process::Command::new("wsl.exe");
+        let mut command_builder = crate::windows_process::background_tokio_command("wsl.exe");
         command_builder.args([
             "--cd",
             cwd.filter(|dir| !dir.is_empty()).unwrap_or("~"),
@@ -106,7 +106,7 @@ pub async fn run_command(
                 // taskkill can only prove termination of the host-side wsl.exe
                 // tree. It remains a last-resort aid; the post-wait tag check
                 // below is the Linux-side authority.
-                let _ = std::process::Command::new("taskkill")
+                let _ = crate::windows_process::background_command("taskkill.exe")
                     .args(["/PID", &pid.to_string(), "/T", "/F"])
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())

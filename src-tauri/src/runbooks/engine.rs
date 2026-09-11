@@ -1621,7 +1621,7 @@ impl<'a> EngineRunner<'a> {
 
         let timeout = Duration::from_secs(self.context.config.command_timeout_secs);
         let started = Instant::now();
-        let mut command = tokio::process::Command::new(&runner);
+        let mut command = crate::windows_process::background_tokio_command(&runner);
         command
             .current_dir(&package_root)
             .args(&command_args)

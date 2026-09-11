@@ -35,6 +35,27 @@ impl Default for InferenceGate {
     }
 }
 
+/// Keep native work exclusive even if the async caller times out or is dropped.
+/// `spawn_blocking` continues after its JoinHandle is dropped, so the worker
+/// must own the permit for as long as its contexts and allocations exist.
+#[cfg(feature = "local-llm")]
+pub(crate) type InferencePermit = Arc<tokio::sync::OwnedSemaphorePermit>;
+
+#[cfg(feature = "local-llm")]
+pub(crate) fn spawn_inference_worker<F, T>(
+    permit: InferencePermit,
+    work: F,
+) -> tokio::task::JoinHandle<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    })
+}
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

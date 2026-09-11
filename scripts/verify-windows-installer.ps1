@@ -3,13 +3,23 @@ param(
   [string]$Installer,
 
   [Parameter(Mandatory = $true)]
-  [string]$InstallRoot
+  [string]$InstallRoot,
+
+  [string]$InferenceSmokeExecutable,
+  [string]$InferenceModel,
+  [ValidateSet('cpu', 'vulkan')]
+  [string]$InferenceBackend = 'cpu'
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 . (Join-Path $PSScriptRoot "windows-import-audit.ps1")
+. (Join-Path $PSScriptRoot "windows-inference-smoke.ps1")
+
+if ([bool]$InferenceSmokeExecutable -ne [bool]$InferenceModel) {
+  throw 'Provide both InferenceSmokeExecutable and InferenceModel to verify native inference.'
+}
 
 $repo = Split-Path -Parent $PSScriptRoot
 $installerPath = [IO.Path]::GetFullPath($Installer)
@@ -288,6 +298,11 @@ try {
   }
   Invoke-HelpSmoke $bundledCli
   Invoke-HelpSmoke $managedCli
+  if ($InferenceSmokeExecutable) {
+    Invoke-WindowsInferenceSmoke -Executable $InferenceSmokeExecutable `
+      -RuntimeDirectory $installDirectory -BackendDirectory (Join-Path $installDirectory 'llama-backends') `
+      -ModelPath $InferenceModel -ExpectedBackend $InferenceBackend
+  }
 }
 catch {
   $verificationFailure = $_

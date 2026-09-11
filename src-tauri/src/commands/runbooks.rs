@@ -1096,7 +1096,7 @@ fn bounded_program_version_with_timeout(
     program: &Path,
     timeout: Duration,
 ) -> Result<String, String> {
-    let mut child = std::process::Command::new(program)
+    let mut child = crate::windows_process::background_command(program)
         .arg("--version")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

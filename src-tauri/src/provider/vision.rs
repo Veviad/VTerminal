@@ -31,7 +31,8 @@ use tauri::ipc::Channel;
 
 use super::chat_template::ChatTemplate;
 use super::local::{
-    backend, load_template, perf_cores, validate_or_retry_on_cpu, LocalAcceleration,
+    backend, context_offload, load_template, perf_cores, validate_or_retry_on_cpu,
+    LocalAcceleration,
 };
 use super::ChatMessage;
 use crate::models::vision::{VisionArch, VisionModel};
@@ -92,6 +93,7 @@ pub struct ReadyVision {
     template: Arc<ChatTemplate>,
     arch: VisionArch,
     context_len: u32,
+    use_gpu: bool,
     /// The process-wide gate — see `provider::InferenceGate`.
     gate: Arc<tokio::sync::Semaphore>,
 }
@@ -167,28 +169,36 @@ impl VisionHost {
             name: "loading".into(),
         });
 
-        let build = tokio::task::spawn_blocking(move || -> Result<VisionParts, String> {
-            let (model, acceleration) =
-                super::local::load_model_with_fallback(&gguf_path, "vision model")?;
-            let template = load_template(&model)?;
-            let context_len = MAX_SIDECAR_CTX.min(model.n_ctx_train()).max(512);
-            let (model, acceleration, mtmd) = validate_or_retry_on_cpu(
-                &gguf_path,
-                "vision model",
-                model,
-                acceleration,
-                |model, accelerated| {
-                    initialize_vision_runtime(model, &mmproj_path, context_len, accelerated)
-                },
-            )?;
-            Ok((
-                Arc::new(model),
-                Arc::new(mtmd),
-                Arc::new(template),
-                context_len,
-                acceleration,
-            ))
-        })
+        let permit = Arc::clone(&self.gate)
+            .acquire_owned()
+            .await
+            .map_err(|_| "inference gate closed".to_string())?;
+        let build = super::spawn_inference_worker(
+            Arc::new(permit),
+            move || -> Result<VisionParts, String> {
+                let (model, acceleration) =
+                    super::local::load_model_with_fallback(&gguf_path, "vision model")?;
+                let template = load_template(&model)?;
+                let context_len = MAX_SIDECAR_CTX.min(model.n_ctx_train()).max(512);
+                let (model, acceleration, mtmd) = validate_or_retry_on_cpu(
+                    &gguf_path,
+                    "vision model",
+                    model,
+                    acceleration,
+                    false,
+                    |model, accelerated| {
+                        initialize_vision_runtime(model, &mmproj_path, context_len, accelerated)
+                    },
+                )?;
+                Ok((
+                    Arc::new(model),
+                    Arc::new(mtmd),
+                    Arc::new(template),
+                    context_len,
+                    acceleration,
+                ))
+            },
+        )
         .await
         .map_err(|e| format!("vision load task failed: {e}"))?;
 
@@ -235,6 +245,7 @@ impl VisionHost {
                 template: Arc::clone(&m.template),
                 arch: m.arch,
                 context_len: m.context_len,
+                use_gpu: m.acceleration.uses_gpu(),
                 gate: Arc::clone(&self.gate),
             }),
             _ => Err("no vision model loaded — load one in Settings → Models".into()),
@@ -279,11 +290,12 @@ impl ReadyVision {
             super::local::load_model_with_fallback(model_path, "vision model")?;
         let template = load_template(&model)?;
         let context_len = max_context.min(model.n_ctx_train()).max(512);
-        let (model, _acceleration, mtmd) = validate_or_retry_on_cpu(
+        let (model, acceleration, mtmd) = validate_or_retry_on_cpu(
             model_path,
             "vision model",
             model,
             acceleration,
+            false,
             |model, accelerated| {
                 initialize_vision_runtime(model, mmproj_path, context_len, use_gpu && accelerated)
             },
@@ -295,6 +307,7 @@ impl ReadyVision {
             template: Arc::new(template),
             arch,
             context_len,
+            use_gpu: acceleration.uses_gpu(),
             gate: Arc::new(tokio::sync::Semaphore::new(1)),
         })
     }
@@ -307,7 +320,7 @@ impl ReadyVision {
         &self,
         image: Vec<u8>,
         prompt: String,
-        cancel: tokio::sync::watch::Receiver<bool>,
+        mut cancel: tokio::sync::watch::Receiver<bool>,
     ) -> Result<String, String> {
         let rendered = build_vision_prompt(&self.template, &prompt)?;
         let add_bos = self.template.add_bos;
@@ -315,18 +328,24 @@ impl ReadyVision {
         // Held for the whole generation, and shared with the chat host: two models
         // are resident, so two concurrent generations would mean four large
         // allocations. It also covers `eval_chunks` not being thread-safe.
-        let _permit = Arc::clone(&self.gate)
-            .acquire_owned()
-            .await
-            .map_err(|_| "inference gate closed".to_string())?;
+        if *cancel.borrow() || cancel.has_changed().is_err() {
+            return Err("cancelled".into());
+        }
+        let permit = tokio::select! {
+            biased;
+            _ = cancel.changed() => return Err("cancelled".into()),
+            permit = Arc::clone(&self.gate).acquire_owned() => permit
+                .map_err(|_| "inference gate closed".to_string())?,
+        };
 
         let model = Arc::clone(&self.model);
         let mtmd = Arc::clone(&self.mtmd);
         let context_len = self.context_len;
+        let use_gpu = self.use_gpu;
 
         // `LlamaContext` is not Send, so it is built and dropped inside the
         // blocking task — the same shape `chat_stream` uses.
-        tokio::task::spawn_blocking(move || {
+        super::spawn_inference_worker(Arc::new(permit), move || {
             run(Job {
                 model: &model,
                 mtmd: &mtmd,
@@ -334,6 +353,7 @@ impl ReadyVision {
                 image: &image,
                 add_bos,
                 context_len,
+                use_gpu,
                 cancel: &cancel,
                 report: None,
             })
@@ -367,6 +387,7 @@ impl ReadyVision {
             image,
             add_bos: self.template.add_bos,
             context_len: self.context_len,
+            use_gpu: self.use_gpu,
             cancel,
             report,
         })
@@ -392,10 +413,10 @@ fn mtmd_params(use_gpu: bool) -> Result<MtmdContextParams, String> {
     })
 }
 
-fn vision_context_params(n_ctx: u32) -> LlamaContextParams {
+fn vision_context_params(n_ctx: u32, use_gpu: bool) -> LlamaContextParams {
     let threads = perf_cores();
     let n_batch: u32 = 512;
-    LlamaContextParams::default()
+    context_offload(LlamaContextParams::default(), use_gpu)
         .with_n_ctx(NonZeroU32::new(n_ctx.max(512)))
         .with_n_batch(n_batch)
         .with_n_ubatch(n_batch)
@@ -420,7 +441,7 @@ fn initialize_vision_runtime(
     #[cfg(target_os = "windows")]
     {
         let context = model
-            .new_context(backend()?, vision_context_params(context_len))
+            .new_context(backend()?, vision_context_params(context_len, use_gpu))
             .map_err(|error| format!("vision context creation failed: {error}"))?;
         drop(context);
     }
@@ -470,6 +491,7 @@ struct Job<'a> {
     image: &'a [u8],
     add_bos: bool,
     context_len: u32,
+    use_gpu: bool,
     cancel: &'a tokio::sync::watch::Receiver<bool>,
     /// Diagnostics sink for the smoke example. `None` in the app: these numbers
     /// only matter while the M-RoPE arithmetic is being verified.
@@ -532,7 +554,7 @@ fn run(t: Job<'_>) -> Result<String, String> {
     let n_batch: u32 = 512;
     let mut ctx = t
         .model
-        .new_context(backend, vision_context_params(n_ctx))
+        .new_context(backend, vision_context_params(n_ctx, t.use_gpu))
         .map_err(|e| format!("vision context creation failed: {e}"))?;
 
     // One call does the whole prefill: `llama_decode` for the text chunks,
@@ -548,7 +570,7 @@ fn run(t: Job<'_>) -> Result<String, String> {
         })?;
     note(format!("eval_chunks -> n_past={n_past}"));
 
-    if *t.cancel.borrow() {
+    if *t.cancel.borrow() || t.cancel.has_changed().is_err() {
         return Err("cancelled".into());
     }
 
@@ -570,7 +592,7 @@ fn run(t: Job<'_>) -> Result<String, String> {
     let mut n_cur = n_past;
 
     loop {
-        if *t.cancel.borrow() {
+        if *t.cancel.borrow() || t.cancel.has_changed().is_err() {
             return Err("cancelled".into());
         }
         let token = sampler.sample(&ctx, -1);

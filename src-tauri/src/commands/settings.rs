@@ -725,9 +725,7 @@ pub enum WslStatus {
     Ready,
     Missing,
     Wsl1,
-    #[cfg(target_os = "windows")]
     MissingBash,
-    #[cfg(target_os = "windows")]
     MissingTools,
     Error,
     #[cfg(not(target_os = "windows"))]
@@ -735,7 +733,7 @@ pub enum WslStatus {
 }
 
 #[cfg(any(target_os = "windows", test))]
-const WSL_REQUIRED_TOOLS_PROBE: &str = "test -x /bin/sh && test -x /bin/true && test -x /usr/bin/env && test -x /usr/bin/setsid && test -x /usr/bin/printf && for tool in base64 tr grep ps awk sort sleep; do command -v \"$tool\" >/dev/null || exit 1; done";
+pub(crate) const WSL_REQUIRED_TOOLS_PROBE: &str = "test -x /bin/sh && test -x /bin/true && test -x /usr/bin/env && test -x /usr/bin/setsid && test -x /usr/bin/printf && for tool in base64 tr grep ps awk sort sleep; do command -v \"$tool\" >/dev/null || exit 1; done";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalAccelerationInfo {
@@ -850,9 +848,10 @@ pub async fn get_system_info(_app: tauri::AppHandle<Wry>) -> Result<SystemInfo, 
         sysinfo::RefreshKind::nothing().with_memory(sysinfo::MemoryRefreshKind::everything()),
     );
     #[cfg(target_os = "windows")]
-    let (wsl_status, wsl_distribution) = tokio::task::spawn_blocking(detect_default_wsl)
-        .await
-        .unwrap_or((WslStatus::Error, None));
+    let (wsl_status, wsl_distribution) = {
+        let result = crate::windows_terminal::prepare(&_app, false).await;
+        (result.wsl_status, result.wsl_distribution)
+    };
     #[cfg(not(target_os = "windows"))]
     let (wsl_status, wsl_distribution) = (WslStatus::NotApplicable, None);
     #[cfg(feature = "local-llm")]
@@ -904,7 +903,7 @@ pub async fn get_system_info(_app: tauri::AppHandle<Wry>) -> Result<SystemInfo, 
 }
 
 #[cfg(any(target_os = "windows", test))]
-fn decode_windows_command_output(bytes: &[u8]) -> String {
+pub(crate) fn decode_windows_command_output(bytes: &[u8]) -> String {
     // Windows console tools may emit UTF-16LE when stdout is redirected. WSL
     // has done both UTF-8 and UTF-16 across releases, so detect rather than
     // relying on the machine's active code page.
@@ -928,7 +927,7 @@ fn decode_windows_command_output(bytes: &[u8]) -> String {
 }
 
 #[cfg(any(target_os = "windows", test))]
-fn parse_default_wsl_list(output: &str) -> (WslStatus, Option<String>) {
+pub(crate) fn parse_default_wsl_list(output: &str) -> (WslStatus, Option<String>) {
     let rows: Vec<(bool, String, u8)> = output
         .lines()
         .filter_map(|line| {
@@ -967,129 +966,7 @@ pub(crate) fn command_output_bounded(
     command: &mut std::process::Command,
     timeout: std::time::Duration,
 ) -> std::io::Result<std::process::Output> {
-    use std::io::Read;
-
-    let mut child = command.spawn()?;
-    let stdout_reader = child.stdout.take().map(|mut pipe| {
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            pipe.read_to_end(&mut bytes)?;
-            Ok::<_, std::io::Error>(bytes)
-        })
-    });
-    let stderr_reader = child.stderr.take().map(|mut pipe| {
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            pipe.read_to_end(&mut bytes)?;
-            Ok::<_, std::io::Error>(bytes)
-        })
-    });
-    let deadline = std::time::Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "Windows command timed out",
-                ));
-            }
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break Err(error);
-            }
-        }
-    };
-    let status = status?;
-    let join_reader = |reader: Option<std::thread::JoinHandle<std::io::Result<Vec<u8>>>>| {
-        let Some(reader) = reader else {
-            return Ok(Vec::new());
-        };
-        while !reader.is_finished() {
-            if std::time::Instant::now() >= deadline {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "Windows command output did not close before the deadline",
-                ));
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        reader
-            .join()
-            .map_err(|_| std::io::Error::other("Windows command output reader panicked"))?
-    };
-    let stdout = join_reader(stdout_reader)?;
-    let stderr = join_reader(stderr_reader)?;
-    Ok(std::process::Output {
-        status,
-        stdout,
-        stderr,
-    })
-}
-
-#[cfg(target_os = "windows")]
-fn detect_default_wsl() -> (WslStatus, Option<String>) {
-    let mut list = std::process::Command::new("wsl.exe");
-    list.args(["--list", "--verbose"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
-    match command_output_bounded(&mut list, std::time::Duration::from_secs(15)) {
-        Ok(output) if output.status.success() => {
-            let detected = parse_default_wsl_list(&decode_windows_command_output(&output.stdout));
-            if detected.0 == WslStatus::Ready {
-                let mut bash = std::process::Command::new("wsl.exe");
-                bash.args([
-                    "--exec",
-                    "/bin/bash",
-                    "--noprofile",
-                    "--norc",
-                    "-c",
-                    "exit 0",
-                ])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null());
-                let bash_ready =
-                    command_output_bounded(&mut bash, std::time::Duration::from_secs(15))
-                        .map(|output| output.status.success())
-                        .unwrap_or(false);
-                if !bash_ready {
-                    return (WslStatus::MissingBash, detected.1);
-                }
-                let mut tools = std::process::Command::new("wsl.exe");
-                tools
-                    .args([
-                        "--exec",
-                        "/bin/bash",
-                        "--noprofile",
-                        "--norc",
-                        "-c",
-                        WSL_REQUIRED_TOOLS_PROBE,
-                    ])
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null());
-                let tools_ready =
-                    command_output_bounded(&mut tools, std::time::Duration::from_secs(15))
-                        .map(|output| output.status.success())
-                        .unwrap_or(false);
-                if !tools_ready {
-                    return (WslStatus::MissingTools, detected.1);
-                }
-            }
-            detected
-        }
-        Ok(_) => (WslStatus::Missing, None),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (WslStatus::Missing, None),
-        Err(_) => (WslStatus::Error, None),
-    }
+    crate::windows_process::command_output_until(command, std::time::Instant::now() + timeout)
 }
 
 pub fn read_string(app: &tauri::AppHandle<Wry>, key: &str) -> Option<String> {

@@ -843,6 +843,15 @@ export interface SystemInfo {
 
 export const getSystemInfo = () => invoke<SystemInfo>("get_system_info");
 
+export interface WindowsTerminalPreparation {
+  wsl_status: SystemInfo["wsl_status"];
+  wsl_distribution: string | null;
+  message: string | null;
+}
+
+export const windowsTerminalPrepare = (retry = false) =>
+  invoke<WindowsTerminalPreparation>("windows_terminal_prepare", { retry });
+
 // ---------- Application updates ----------
 
 export const updateCheck = () => invoke<UpdateMetadata | null>("update_check");

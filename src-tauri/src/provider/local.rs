@@ -129,6 +129,17 @@ pub fn configure_backend_modules(_path: std::path::PathBuf) {}
 pub(crate) fn backend() -> Result<&'static LlamaBackend, String> {
     BACKEND
         .get_or_init(|| {
+            // Release GUI builds on Windows do not have a useful stderr. Keep
+            // native warnings and fatal assertions in the application's log.
+            // SAFETY: this OnceLock initializer registers process-lifetime
+            // function pointers once, before backend loading can emit logs.
+            // Both callbacks handle null pointers and prevent Rust unwinding
+            // across the C boundary; neither uses the null user-data pointer.
+            unsafe {
+                llama_cpp_sys_2::llama_log_set(Some(native_log), std::ptr::null_mut());
+                llama_cpp_sys_2::ggml_log_set(Some(native_log), std::ptr::null_mut());
+                llama_cpp_sys_2::ggml_set_abort_callback(Some(native_abort));
+            }
             #[cfg(target_os = "windows")]
             {
                 if let Some(path) = BACKEND_MODULES.get().filter(|path| path.is_dir()) {
@@ -138,10 +149,62 @@ pub(crate) fn backend() -> Result<&'static LlamaBackend, String> {
                     llama_cpp_2::llama_backend::load_backends();
                 }
             }
-            LlamaBackend::init().map_err(|e| format!("llama backend init: {e}"))
+            let backend = LlamaBackend::init().map_err(|e| format!("llama backend init: {e}"))?;
+            log::info!(
+                "Native inference initialized: app={}, wrapper=0.1.156, native=0.1.156",
+                env!("CARGO_PKG_VERSION")
+            );
+            Ok(backend)
         })
         .as_ref()
         .map_err(Clone::clone)
+}
+
+unsafe extern "C" fn native_log(
+    level: llama_cpp_sys_2::ggml_log_level,
+    message: *const std::ffi::c_char,
+    _data: *mut std::ffi::c_void,
+) {
+    if message.is_null() {
+        return;
+    }
+    // Do not forward native debug/metadata dumps, which are large and may
+    // contain GGUF templates. Never unwind across the C callback boundary.
+    let _ = std::panic::catch_unwind(|| {
+        // SAFETY: llama.cpp supplies a NUL-terminated message that remains
+        // valid for this callback. Null was checked above, and the borrow is
+        // converted to an owned, bounded string before the callback returns.
+        let message = unsafe { std::ffi::CStr::from_ptr(message) }.to_string_lossy();
+        let message: String = message.trim().chars().take(2048).collect();
+        match level {
+            llama_cpp_sys_2::GGML_LOG_LEVEL_ERROR => {
+                log::error!(target: "local_native", "{message}")
+            }
+            llama_cpp_sys_2::GGML_LOG_LEVEL_WARN => log::warn!(target: "local_native", "{message}"),
+            _ => {}
+        }
+    });
+}
+
+unsafe extern "C" fn native_abort(message: *const std::ffi::c_char) {
+    // SAFETY: GGML's abort callback supplies the same valid, NUL-terminated
+    // message contract as its log callback. native_log also accepts null.
+    unsafe {
+        native_log(
+            llama_cpp_sys_2::GGML_LOG_LEVEL_ERROR,
+            message,
+            std::ptr::null_mut(),
+        )
+    };
+    let _ = std::panic::catch_unwind(|| log::logger().flush());
+}
+
+/// Weight loading must explicitly request embedded MTP tensors. This flag is
+/// independent of context creation and must survive every CPU retry.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ModelLoadOptions {
+    pub load_mtp: bool,
+    pub cpu_only: bool,
 }
 
 /// Load with the best safe accelerator for this machine. Windows Vulkan is a
@@ -151,7 +214,29 @@ pub(crate) fn load_model_with_fallback(
     path: &str,
     label: &str,
 ) -> Result<(LlamaModel, LocalAcceleration), String> {
+    load_model_with_options(path, label, ModelLoadOptions::default())
+}
+
+fn load_model_with_options(
+    path: &str,
+    label: &str,
+    options: ModelLoadOptions,
+) -> Result<(LlamaModel, LocalAcceleration), String> {
     let backend = backend()?;
+    log::info!(
+        "Loading {label}: model={}, embedded_mtp={}, cpu_only={}",
+        model_log_name(path),
+        options.load_mtp,
+        options.cpu_only
+    );
+    if options.cpu_only {
+        return load_model_on_cpu(
+            path,
+            label,
+            "CPU explicitly selected".into(),
+            options.load_mtp,
+        );
+    }
     #[cfg(target_os = "windows")]
     {
         use llama_cpp_2::{list_llama_ggml_backend_devices, LlamaBackendDeviceType};
@@ -194,7 +279,10 @@ pub(crate) fn load_model_with_fallback(
                 ));
                 continue;
             }
-            let params = match LlamaModelParams::default().with_devices(&[device.index]) {
+            let params = match LlamaModelParams::default()
+                .with_load_mtp(options.load_mtp)
+                .with_devices(&[device.index])
+            {
                 Ok(params) => params.with_n_gpu_layers(u32::MAX),
                 Err(error) => {
                     failures.push(format!(
@@ -205,6 +293,10 @@ pub(crate) fn load_model_with_fallback(
             };
             match LlamaModel::load_from_file(backend, path, &params) {
                 Ok(model) => {
+                    log::info!(
+                        "Loaded {label}: model={}, backend=vulkan",
+                        model_log_name(path)
+                    );
                     let acceleration = LocalAcceleration {
                         backend: "vulkan".into(),
                         device_name: Some(device_name),
@@ -226,11 +318,13 @@ pub(crate) fn load_model_with_fallback(
         } else {
             format!("{}; using CPU", failures.join("; "))
         };
-        load_model_on_cpu(path, label, fallback_reason)
+        load_model_on_cpu(path, label, fallback_reason, options.load_mtp)
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let params = LlamaModelParams::default().with_n_gpu_layers(u32::MAX);
+        let params = LlamaModelParams::default()
+            .with_load_mtp(options.load_mtp)
+            .with_n_gpu_layers(u32::MAX);
         let model = LlamaModel::load_from_file(backend, path, &params)
             .map_err(|error| format!("{label} load failed: {error}"))?;
         let acceleration = LocalAcceleration {
@@ -246,17 +340,22 @@ pub(crate) fn load_model_with_fallback(
             generation_fallback_reason: None,
         };
         set_acceleration(acceleration.clone());
+        log::info!(
+            "Loaded {label}: model={}, backend={}",
+            model_log_name(path),
+            acceleration.backend
+        );
         Ok((model, acceleration))
     }
 }
 
-#[cfg(target_os = "windows")]
 fn load_model_on_cpu(
     path: &str,
     label: &str,
     fallback_reason: String,
+    load_mtp: bool,
 ) -> Result<(LlamaModel, LocalAcceleration), String> {
-    let params = LlamaModelParams::default().with_n_gpu_layers(0);
+    let params = cpu_model_params(load_mtp)?;
     let model = LlamaModel::load_from_file(backend()?, path, &params)
         .map_err(|error| format!("{label} CPU load failed: {error}"))?;
     let acceleration = LocalAcceleration {
@@ -268,7 +367,40 @@ fn load_model_on_cpu(
         generation_fallback_reason: None,
     };
     set_acceleration(acceleration.clone());
+    log::info!(
+        "Loaded {label}: model={}, backend=cpu",
+        model_log_name(path)
+    );
     Ok((model, acceleration))
+}
+
+fn model_log_name(value: &str) -> String {
+    let name = if value.starts_with("local/") {
+        std::borrow::Cow::Borrowed(value)
+    } else {
+        std::path::Path::new(value)
+            .file_name()
+            .map(|name| name.to_string_lossy())
+            .unwrap_or_else(|| std::borrow::Cow::Borrowed("unknown"))
+    };
+    name.chars()
+        .filter(|character| !character.is_control())
+        .take(160)
+        .collect()
+}
+
+fn cpu_model_params(load_mtp: bool) -> Result<LlamaModelParams, String> {
+    // A null devices pointer means automatic GPU selection in llama.cpp even
+    // with zero offloaded layers. An explicit empty list excludes GPU backends.
+    LlamaModelParams::default()
+        .with_load_mtp(load_mtp)
+        .with_n_gpu_layers(0)
+        .with_devices(&[])
+        .map_err(|error| format!("CPU device selection failed: {error}"))
+}
+
+pub(crate) fn context_offload(params: LlamaContextParams, use_gpu: bool) -> LlamaContextParams {
+    params.with_offload_kqv(use_gpu).with_op_offload(use_gpu)
 }
 
 /// Validate allocations that happen after weight loading (KV context, vision
@@ -279,6 +411,7 @@ pub(crate) fn validate_or_retry_on_cpu<T, F>(
     label: &str,
     model: LlamaModel,
     acceleration: LocalAcceleration,
+    load_mtp: bool,
     validate: F,
 ) -> Result<(LlamaModel, LocalAcceleration, T), String>
 where
@@ -291,7 +424,8 @@ where
             if acceleration.uses_gpu() {
                 drop(model);
                 let reason = runtime_fallback_reason(label, &error);
-                let (cpu_model, cpu_acceleration) = load_model_on_cpu(path, label, reason)?;
+                let (cpu_model, cpu_acceleration) =
+                    load_model_on_cpu(path, label, reason, load_mtp)?;
                 let value = validate(&cpu_model, false).map_err(|cpu_error| {
                     format!("{label} CPU runtime initialization failed: {cpu_error}")
                 })?;
@@ -299,7 +433,7 @@ where
             }
 
             #[cfg(not(target_os = "windows"))]
-            let _ = (path, label);
+            let _ = (path, label, load_mtp);
             Err(error)
         }
     }
@@ -503,22 +637,70 @@ pub(crate) fn load_template(model: &LlamaModel) -> Result<ChatTemplate, String> 
     ChatTemplate::new(source, bos_token, eos_token, add_bos)
 }
 
+/// Explicit options for headless inference checks. Production model selection
+/// continues to come from the installation registry.
+#[derive(Clone, Debug, Default)]
+pub struct StandaloneLoadOptions {
+    pub mtp: Option<MtpLoadSpec>,
+    pub cpu_only: bool,
+}
+
 impl ReadyModel {
-    /// Load a GGUF straight from a path, with no Tauri app around it.
-    ///
-    /// This is what the headless smoke-test examples use, so they exercise the
-    /// same loader and the same `Provider` implementation the app does rather
-    /// than a parallel one that can quietly drift.
     pub fn load_standalone(
         path: &str,
         family: LocalFamily,
         max_context: u32,
     ) -> Result<Self, String> {
-        let (model, acceleration) = load_model_with_fallback(path, "model")?;
+        Self::load_standalone_configured(
+            path,
+            family,
+            max_context,
+            StandaloneLoadOptions::default(),
+        )
+    }
+
+    pub fn load_standalone_with_mtp(
+        path: &str,
+        draft_path: Option<&str>,
+        family: LocalFamily,
+        max_context: u32,
+        draft_tokens: u32,
+    ) -> Result<Self, String> {
+        Self::load_standalone_configured(
+            path,
+            family,
+            max_context,
+            StandaloneLoadOptions {
+                mtp: Some(MtpLoadSpec {
+                    draft_path: draft_path.map(str::to_owned),
+                    draft_tokens,
+                }),
+                cpu_only: false,
+            },
+        )
+    }
+
+    /// Exercise the same weight-loading options as the application, including
+    /// embedded MTP tensors and an explicit CPU-only backend for Windows CI.
+    pub fn load_standalone_configured(
+        path: &str,
+        family: LocalFamily,
+        max_context: u32,
+        options: StandaloneLoadOptions,
+    ) -> Result<Self, String> {
+        let load_mtp = embedded_mtp_requested(options.mtp.as_ref());
+        let load_options = ModelLoadOptions {
+            load_mtp,
+            cpu_only: options.cpu_only,
+        };
+        let (model, acceleration) = load_model_with_options(path, "model", load_options)?;
         let template = load_template(&model)?;
         let sampling = Sampling::from_metadata(&model);
         let context_len = max_context.min(model.n_ctx_train()).max(512);
-        let (model, acceleration) = prepare_chat_model(path, model, acceleration, context_len)?;
+        let (model, mut acceleration) =
+            prepare_chat_model(path, model, acceleration, context_len, load_mtp)?;
+        let mtp = load_mtp_drafter(options.mtp, &mut acceleration, options.cpu_only);
+        set_acceleration(acceleration.clone());
         Ok(Self {
             model_id: path.to_string(),
             model: Arc::new(model),
@@ -527,55 +709,61 @@ impl ReadyModel {
             context_len,
             sampling,
             acceleration,
-            mtp: None,
+            mtp,
             gate: Arc::new(tokio::sync::Semaphore::new(1)),
         })
     }
+}
 
-    /// Developer benchmark loader. `draft_path = None` selects an embedded
-    /// Qwen MTP head; Gemma supplies its assistant GGUF path.
-    pub fn load_standalone_with_mtp(
-        path: &str,
-        draft_path: Option<&str>,
-        family: LocalFamily,
-        max_context: u32,
-        draft_tokens: u32,
-    ) -> Result<Self, String> {
-        let mut ready = Self::load_standalone(path, family, max_context)?;
-        let drafter = match draft_path {
+fn embedded_mtp_requested(spec: Option<&MtpLoadSpec>) -> bool {
+    spec.is_some_and(|spec| spec.draft_path.is_none())
+}
+
+fn load_mtp_drafter(
+    spec: Option<MtpLoadSpec>,
+    acceleration: &mut LocalAcceleration,
+    cpu_only: bool,
+) -> Option<LoadedMtp> {
+    let mut reason = Some("MTP artifacts are not installed".to_string());
+    let mtp = spec.and_then(|spec| {
+        if !(1..=8).contains(&spec.draft_tokens) {
+            reason = Some("MTP draft token count must be between 1 and 8".into());
+            return None;
+        }
+        let drafter = match spec.draft_path.as_deref() {
             Some(path) => {
-                let (model, draft_acceleration) = load_model_with_fallback(path, "MTP drafter")?;
-                if draft_acceleration.backend != ready.acceleration.backend
-                    || draft_acceleration.device_name != ready.acceleration.device_name
-                {
-                    return Err(format!(
-                        "MTP drafter used {} ({}) while target used {} ({})",
-                        draft_acceleration.backend,
-                        draft_acceleration
-                            .device_name
-                            .as_deref()
-                            .unwrap_or("default"),
-                        ready.acceleration.backend,
-                        ready
-                            .acceleration
-                            .device_name
-                            .as_deref()
-                            .unwrap_or("default")
-                    ));
+                let options = ModelLoadOptions { load_mtp: false, cpu_only: cpu_only || !acceleration.uses_gpu() };
+                match load_model_with_options(path, "MTP drafter", options) {
+                    Ok((model, draft_acceleration))
+                        if draft_acceleration.backend == acceleration.backend
+                            && draft_acceleration.device_name == acceleration.device_name =>
+                    {
+                        LoadedMtpDrafter::Sidecar(Arc::new(model))
+                    }
+                    Ok((_, draft_acceleration)) => {
+                        reason = Some(format!(
+                            "MTP drafter used {} ({}) while the target used {} ({}); using standard decoding",
+                            draft_acceleration.backend,
+                            draft_acceleration.device_name.as_deref().unwrap_or("default"),
+                            acceleration.backend,
+                            acceleration.device_name.as_deref().unwrap_or("default"),
+                        ));
+                        return None;
+                    }
+                    Err(error) => {
+                        reason = Some(format!("MTP drafter could not load ({error})"));
+                        return None;
+                    }
                 }
-                LoadedMtpDrafter::Sidecar(Arc::new(model))
             }
             None => LoadedMtpDrafter::Embedded,
         };
-        ready.mtp = Some(LoadedMtp {
-            drafter,
-            draft_tokens,
-        });
-        ready.acceleration.generation_mode = Some("mtp".into());
-        ready.acceleration.generation_fallback_reason = None;
-        set_acceleration(ready.acceleration.clone());
-        Ok(ready)
-    }
+        reason = None;
+        Some(LoadedMtp { drafter, draft_tokens: spec.draft_tokens })
+    });
+    acceleration.generation_mode = Some(if mtp.is_some() { "mtp" } else { "standard" }.into());
+    acceleration.generation_fallback_reason = reason;
+    mtp
 }
 
 pub struct ModelHost {
@@ -672,62 +860,43 @@ impl ModelHost {
             name: "loading".into(),
         });
 
+        let permit = Arc::clone(&self.gate)
+            .acquire_owned()
+            .await
+            .map_err(|_| "inference gate closed".to_string())?;
         // mmap + accelerator allocation is blocking work. Unlike mistral.rs, an
         // unsupported architecture comes back as an Err rather than a panic, so
         // there is no unwind to catch here.
-        let build = tokio::task::spawn_blocking(move || -> Result<ModelParts, String> {
-            let (model, acceleration) = load_model_with_fallback(&gguf_path, "model")?;
-            let template = load_template(&model)?;
-            let sampling = Sampling::from_metadata(&model);
-            // Never promise more context than the model was trained for.
-            let context_len = max_context.min(model.n_ctx_train()).max(512);
-            let (model, mut acceleration) =
-                prepare_chat_model(&gguf_path, model, acceleration, context_len)?;
-            let mtp = mtp_spec.and_then(|spec| {
-                let drafter = match spec.draft_path.as_deref() {
-                    Some(path) => match load_model_with_fallback(path, "MTP drafter") {
-                        Ok((draft, draft_acceleration))
-                            if draft_acceleration.backend == acceleration.backend =>
-                        {
-                            Some(LoadedMtpDrafter::Sidecar(Arc::new(draft)))
-                        }
-                        Ok((_draft, draft_acceleration)) => {
-                            acceleration.generation_fallback_reason = Some(format!(
-                                "MTP drafter used {} while the target used {}; using standard decoding",
-                                draft_acceleration.backend, acceleration.backend
-                            ));
-                            None
-                        }
-                        Err(error) => {
-                            acceleration.generation_fallback_reason =
-                                Some(format!("MTP drafter could not load ({error})"));
-                            None
-                        }
+        let build = super::spawn_inference_worker(
+            Arc::new(permit),
+            move || -> Result<ModelParts, String> {
+                let load_mtp = embedded_mtp_requested(mtp_spec.as_ref());
+                let (model, acceleration) = load_model_with_options(
+                    &gguf_path,
+                    "model",
+                    ModelLoadOptions {
+                        load_mtp,
+                        cpu_only: false,
                     },
-                    None => Some(LoadedMtpDrafter::Embedded),
-                };
-                let usable = drafter.is_some();
-                acceleration.generation_mode = Some(if usable { "mtp" } else { "standard" }.into());
-                drafter.map(|drafter| LoadedMtp {
-                    drafter,
-                    draft_tokens: spec.draft_tokens,
-                })
-            }).filter(|_| acceleration.generation_mode.as_deref() == Some("mtp"));
-            if mtp.is_none() && acceleration.generation_mode.is_none() {
-                acceleration.generation_mode = Some("standard".into());
-                acceleration.generation_fallback_reason =
-                    Some("MTP artifacts are not installed".into());
-            }
-            set_acceleration(acceleration.clone());
-            Ok((
-                Arc::new(model),
-                Arc::new(template),
-                context_len,
-                sampling,
-                acceleration,
-                mtp,
-            ))
-        })
+                )?;
+                let template = load_template(&model)?;
+                let sampling = Sampling::from_metadata(&model);
+                // Never promise more context than the model was trained for.
+                let context_len = max_context.min(model.n_ctx_train()).max(512);
+                let (model, mut acceleration) =
+                    prepare_chat_model(&gguf_path, model, acceleration, context_len, load_mtp)?;
+                let mtp = load_mtp_drafter(mtp_spec, &mut acceleration, false);
+                set_acceleration(acceleration.clone());
+                Ok((
+                    Arc::new(model),
+                    Arc::new(template),
+                    context_len,
+                    sampling,
+                    acceleration,
+                    mtp,
+                ))
+            },
+        )
         .await
         .map_err(|e| format!("model load task failed: {e}"))?;
 
@@ -1287,7 +1456,10 @@ impl Provider for LocalLlamaCpp {
         // while it templates.
         let acquire = Arc::clone(&self.ready.gate).acquire_owned();
         tokio::pin!(acquire);
-        let _permit = loop {
+        if *cancel.borrow() || cancel.has_changed().is_err() || tx.is_closed() {
+            return Err(ProviderError::Cancelled);
+        }
+        let permit = loop {
             tokio::select! {
                 biased;
                 changed = cancel.changed() => match changed {
@@ -1311,6 +1483,14 @@ impl Provider for LocalLlamaCpp {
         let thinking_prefilled = Markers::for_family(family).opens_thought(&prompt);
         let sampling = self.ready.sampling.with_override(params.temperature);
         let mtp = self.ready.mtp.clone();
+        let use_gpu = self.ready.acceleration.uses_gpu();
+        log::info!(
+            "Local generation: model={}, backend={}, mode={}, context_tokens={}",
+            model_log_name(&self.ready.model_id),
+            self.ready.acceleration.backend,
+            if mtp.is_some() { "mtp" } else { "standard" },
+            context_len,
+        );
         let budget = params
             .max_tokens
             .unwrap_or(2048)
@@ -1318,13 +1498,14 @@ impl Provider for LocalLlamaCpp {
 
         // LlamaContext is not Send and decode is blocking work — the whole
         // generation runs on a blocking thread and streams back over `tx`.
-        tokio::task::spawn_blocking(move || {
+        super::spawn_inference_worker(Arc::new(permit), move || {
             generate(
                 &model,
                 mtp.as_ref(),
                 &prompt,
                 Params {
                     context_len,
+                    use_gpu,
                     sampling,
                     budget,
                     add_bos,
@@ -1342,6 +1523,7 @@ impl Provider for LocalLlamaCpp {
 
 struct Params {
     context_len: u32,
+    use_gpu: bool,
     sampling: Sampling,
     budget: u32,
     add_bos: bool,
@@ -1351,10 +1533,10 @@ struct Params {
     thinking_prefilled: bool,
 }
 
-fn chat_context_params(n_ctx: u32) -> LlamaContextParams {
+fn chat_context_params(n_ctx: u32, use_gpu: bool) -> LlamaContextParams {
     let threads = perf_cores();
     let n_batch: u32 = 512;
-    LlamaContextParams::default()
+    context_offload(LlamaContextParams::default(), use_gpu)
         .with_n_ctx(NonZeroU32::new(n_ctx.max(512)))
         .with_n_batch(n_batch)
         .with_n_ubatch(n_batch)
@@ -1376,26 +1558,31 @@ fn prepare_chat_model(
     model: LlamaModel,
     acceleration: LocalAcceleration,
     context_len: u32,
+    load_mtp: bool,
 ) -> Result<(LlamaModel, LocalAcceleration), String> {
     #[cfg(target_os = "windows")]
     {
-        let (model, acceleration, ()) =
-            validate_or_retry_on_cpu(path, "model", model, acceleration, |model, _| {
-                validate_chat_context(model, context_len)
-            })?;
+        let (model, acceleration, ()) = validate_or_retry_on_cpu(
+            path,
+            "model",
+            model,
+            acceleration,
+            load_mtp,
+            |model, use_gpu| validate_chat_context(model, context_len, use_gpu),
+        )?;
         Ok((model, acceleration))
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (path, context_len);
+        let _ = (path, context_len, load_mtp);
         Ok((model, acceleration))
     }
 }
 
 #[cfg(target_os = "windows")]
-fn validate_chat_context(model: &LlamaModel, n_ctx: u32) -> Result<(), String> {
+fn validate_chat_context(model: &LlamaModel, n_ctx: u32, use_gpu: bool) -> Result<(), String> {
     let context = model
-        .new_context(backend()?, chat_context_params(n_ctx))
+        .new_context(backend()?, chat_context_params(n_ctx, use_gpu))
         .map_err(|error| format!("context creation failed: {error}"))?;
     drop(context);
     Ok(())
@@ -1409,6 +1596,7 @@ fn generate(
     cancel: &tokio::sync::watch::Receiver<bool>,
     tx: &tokio::sync::mpsc::Sender<ProviderEvent>,
 ) -> Result<(), ProviderError> {
+    cancelled(cancel, tx)?;
     let backend = backend().map_err(ProviderError::Inference)?;
 
     // Whether BOS belongs here is a property of the model, read from GGUF
@@ -1475,12 +1663,13 @@ fn generate(
     let mut first_token_ms = None;
 
     if let Some(config) = mtp_config {
-        let target_params = chat_context_params(n_ctx).with_n_rs_seq(config.draft_tokens);
+        let target_params =
+            chat_context_params(n_ctx, p.use_gpu).with_n_rs_seq(config.draft_tokens);
         let mtp_setup = model
             .new_context(backend, target_params)
             .map_err(|error| format!("target context creation failed: {error}"))
             .and_then(|target| {
-                let draft_params = chat_context_params(n_ctx)
+                let draft_params = chat_context_params(n_ctx, p.use_gpu)
                     .with_context_type(LlamaContextType::Mtp)
                     .with_n_rs_seq(0);
                 let draft = match &config.drafter {
@@ -1526,12 +1715,7 @@ fn generate(
                     let mut finish = FinishReason::Stop;
 
                     'generate: loop {
-                        if *cancel.borrow() {
-                            let _ = tx.blocking_send(ProviderEvent::Done {
-                                finish_reason: FinishReason::Cancelled,
-                            });
-                            return Err(ProviderError::Cancelled);
-                        }
+                        cancelled(cancel, tx)?;
                         if produced >= p.budget || n_past as u32 >= n_ctx.saturating_sub(1) {
                             finish = FinishReason::Length;
                             break;
@@ -1615,7 +1799,7 @@ fn generate(
                                 finish = FinishReason::Length;
                                 break 'generate;
                             }
-                            stream_token(model, token, &mut decoder, &mut splitter, tx)?;
+                            stream_token(model, token, &mut decoder, &mut splitter, cancel, tx)?;
                             first_token_ms.get_or_insert_with(|| started.elapsed().as_millis());
                             produced += 1;
                         }
@@ -1699,7 +1883,14 @@ fn generate(
                         elapsed_ms: started.elapsed().as_millis(),
                         backend: acceleration_backend(),
                     });
-                    return finish_generation(tokens.len() as u32, produced, finish, splitter, tx);
+                    return finish_generation(
+                        tokens.len() as u32,
+                        produced,
+                        finish,
+                        splitter,
+                        cancel,
+                        tx,
+                    );
                 }
             }
             Err(error) => update_generation_status(
@@ -1710,7 +1901,7 @@ fn generate(
     }
 
     let mut ctx = model
-        .new_context(backend, chat_context_params(n_ctx))
+        .new_context(backend, chat_context_params(n_ctx, p.use_gpu))
         .map_err(|e| ProviderError::Inference(format!("context creation failed: {e}")))?;
     let mut batch = LlamaBatch::new(512, 1);
     prefill_standard(&mut ctx, &tokens, &mut batch, cancel, tx)?;
@@ -1745,7 +1936,7 @@ fn generate(
         elapsed_ms: started.elapsed().as_millis(),
         backend: acceleration_backend(),
     });
-    finish_generation(tokens.len() as u32, produced, finish, splitter, tx)
+    finish_generation(tokens.len() as u32, produced, finish, splitter, cancel, tx)
 }
 
 fn acceleration_backend() -> String {
@@ -1790,8 +1981,8 @@ fn cancelled(
     cancel: &tokio::sync::watch::Receiver<bool>,
     tx: &tokio::sync::mpsc::Sender<ProviderEvent>,
 ) -> Result<(), ProviderError> {
-    if *cancel.borrow() {
-        let _ = tx.blocking_send(ProviderEvent::Done {
+    if *cancel.borrow() || cancel.has_changed().is_err() || tx.is_closed() {
+        let _ = tx.try_send(ProviderEvent::Done {
             finish_reason: FinishReason::Cancelled,
         });
         Err(ProviderError::Cancelled)
@@ -1888,7 +2079,7 @@ fn standard_decode(
         if *produced >= budget || n_cur as u32 >= n_ctx {
             return Ok(FinishReason::Length);
         }
-        stream_token(model, token, decoder, splitter, tx)?;
+        stream_token(model, token, decoder, splitter, cancel, tx)?;
         first_token_ms.get_or_insert_with(|| started.elapsed().as_millis());
         batch.clear();
         batch
@@ -1906,16 +2097,38 @@ fn stream_token(
     token: llama_cpp_2::token::LlamaToken,
     decoder: &mut encoding_rs::Decoder,
     splitter: &mut OutputSplitter,
+    cancel: &tokio::sync::watch::Receiver<bool>,
     tx: &tokio::sync::mpsc::Sender<ProviderEvent>,
 ) -> Result<(), ProviderError> {
     let piece = model
         .token_to_piece(token, decoder, true, None)
         .map_err(|error| ProviderError::Inference(format!("detokenize failed: {error}")))?;
     for event in splitter.push(&piece) {
-        tx.blocking_send(event)
-            .map_err(|_| ProviderError::Cancelled)?;
+        send_event(tx, cancel, event)?;
     }
     Ok(())
+}
+
+/// A full event channel must not prevent cancellation from releasing the
+/// native context and the shared inference permit.
+fn send_event(
+    tx: &tokio::sync::mpsc::Sender<ProviderEvent>,
+    cancel: &tokio::sync::watch::Receiver<bool>,
+    mut event: ProviderEvent,
+) -> Result<(), ProviderError> {
+    loop {
+        cancelled(cancel, tx)?;
+        match tx.try_send(event) {
+            Ok(()) => return Ok(()),
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                return Err(ProviderError::Cancelled)
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Full(returned)) => {
+                event = returned;
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+    }
 }
 
 fn finish_generation(
@@ -1923,31 +2136,114 @@ fn finish_generation(
     completion_tokens: u32,
     mut finish: FinishReason,
     mut splitter: OutputSplitter,
+    cancel: &tokio::sync::watch::Receiver<bool>,
     tx: &tokio::sync::mpsc::Sender<ProviderEvent>,
 ) -> Result<(), ProviderError> {
     for event in splitter.finish() {
-        let _ = tx.blocking_send(event);
+        send_event(tx, cancel, event)?;
     }
     if !splitter.calls.is_empty() {
         finish = FinishReason::ToolCalls;
-        tx.blocking_send(ProviderEvent::ToolCalls(std::mem::take(
-            &mut splitter.calls,
-        )))
-        .map_err(|_| ProviderError::Cancelled)?;
+        send_event(
+            tx,
+            cancel,
+            ProviderEvent::ToolCalls(std::mem::take(&mut splitter.calls)),
+        )?;
     }
-    let _ = tx.blocking_send(ProviderEvent::Usage {
-        prompt_tokens,
-        completion_tokens,
-    });
-    let _ = tx.blocking_send(ProviderEvent::Done {
-        finish_reason: finish,
-    });
-    Ok(())
+    send_event(
+        tx,
+        cancel,
+        ProviderEvent::Usage {
+            prompt_tokens,
+            completion_tokens,
+        },
+    )?;
+    send_event(
+        tx,
+        cancel,
+        ProviderEvent::Done {
+            finish_reason: finish,
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedded_mtp_intent_preserves_tensors_on_cpu_fallback() {
+        let embedded = MtpLoadSpec {
+            draft_path: None,
+            draft_tokens: 6,
+        };
+        let sidecar = MtpLoadSpec {
+            draft_path: Some("assistant.gguf".into()),
+            draft_tokens: 3,
+        };
+        assert!(embedded_mtp_requested(Some(&embedded)));
+        assert!(!embedded_mtp_requested(Some(&sidecar)));
+        assert!(!embedded_mtp_requested(None));
+        let params = cpu_model_params(embedded_mtp_requested(Some(&embedded))).unwrap();
+        assert!(params.load_mtp());
+        assert_eq!(params.n_gpu_layers(), 0);
+        assert!(!cpu_model_params(false).unwrap().load_mtp());
+    }
+
+    #[test]
+    fn cpu_contexts_disable_both_gpu_offload_paths() {
+        let params = chat_context_params(4096, false);
+        assert!(!params.offload_kqv());
+        assert!(!params.op_offload());
+        let params = chat_context_params(4096, true);
+        assert!(params.offload_kqv());
+        assert!(params.op_offload());
+    }
+
+    #[tokio::test]
+    async fn cancelling_with_a_full_output_channel_releases_the_worker() {
+        let (cancel_tx, cancel) = tokio::sync::watch::channel(false);
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        tx.try_send(ProviderEvent::TextDelta("queued".into()))
+            .unwrap();
+        let worker = tokio::task::spawn_blocking(move || {
+            send_event(&tx, &cancel, ProviderEvent::TextDelta("blocked".into()))
+        });
+        cancel_tx.send(true).unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), worker)
+            .await
+            .expect("backpressure must remain cancellable")
+            .unwrap();
+        assert!(matches!(result, Err(ProviderError::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn dropping_the_async_caller_keeps_native_work_exclusive() {
+        let gate = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = Arc::new(Arc::clone(&gate).acquire_owned().await.unwrap());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let caller = tokio::spawn(async move {
+            crate::provider::spawn_inference_worker(permit, move || {
+                started_tx.send(()).unwrap();
+                let _ = release_rx.recv();
+            })
+            .await
+            .unwrap();
+        });
+        started_rx.await.unwrap();
+        caller.abort();
+        let _ = caller.await;
+        assert!(
+            gate.try_acquire().is_err(),
+            "a detached native worker still owns the permit"
+        );
+        release_tx.send(()).unwrap();
+        let _permit = tokio::time::timeout(std::time::Duration::from_secs(1), gate.acquire())
+            .await
+            .expect("worker completion releases the permit")
+            .unwrap();
+    }
 
     #[test]
     fn mtp_acceptance_stops_at_the_first_target_mismatch() {

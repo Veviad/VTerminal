@@ -21,6 +21,7 @@ const APP_QUIT_EVENT = "vterminal-app-quit-requested";
 
 type WslIssue = "missing" | "wsl1" | "missing_bash" | "missing_tools" | "error";
 type WslGateState = "checking" | "ready" | WslIssue;
+type BootSettings = Awaited<ReturnType<typeof api.getSettings>>;
 
 export default function App() {
   const [workspaceReady, setWorkspaceReady] = useState(false);
@@ -30,6 +31,8 @@ export default function App() {
   const [wslGate, setWslGate] = useState<WslGateState>(() =>
     isWindows() ? "checking" : "ready",
   );
+  const [wslMessage, setWslMessage] = useState<string | null>(null);
+  const [preparationAttempt, setPreparationAttempt] = useState(0);
   // Update prompts must wait until every saved tab has been restored and
   // persistence is watching the complete workspace. Otherwise an unusually
   // fast check/install can snapshot a half-restored tab set before restarting.
@@ -39,16 +42,29 @@ export default function App() {
   const { loadSettings } = useSettings();
   const { createSession, restoreSessions } = useSessions();
   const booted = useRef(false);
+  const attemptedPreparation = useRef(-1);
+  const settingsResult = useRef<Promise<PromiseSettledResult<BootSettings>> | null>(null);
 
-  // One-time boot: settings → theme → restore (or one fresh tab) → model status.
+  // Settings and Windows preparation overlap. A retry reuses the settings
+  // result and resumes workspace restoration once, after preparation succeeds.
   useEffect(() => {
-    if (booted.current) return;
-    booted.current = true;
+    if (booted.current || attemptedPreparation.current === preparationAttempt) return;
+    attemptedPreparation.current = preparationAttempt;
+    const loadedSettings = settingsResult.current ??= loadSettings().then(
+      (settings): PromiseFulfilledResult<BootSettings> => {
+        applyTheme(settings.theme);
+        return { status: "fulfilled", value: settings };
+      },
+      // Settle immediately so a settings failure cannot become an unhandled
+      // rejection while a cold WSL distribution is still starting.
+      (reason): PromiseRejectedResult => ({ status: "rejected", reason }),
+    );
     void (async () => {
       if (isWindows()) {
         try {
-          const info = await api.getSystemInfo();
+          const info = await api.windowsTerminalPrepare(preparationAttempt > 0);
           if (info.wsl_status !== "ready") {
+            setWslMessage(info.message);
             setWslGate(
               info.wsl_status === "wsl1"
                 ? "wsl1"
@@ -62,18 +78,21 @@ export default function App() {
             );
             return;
           }
-          setWslGate("ready");
-        } catch {
+        } catch (error) {
+          setWslMessage(String(error));
           setWslGate("error");
           return;
         }
       }
+      const settings = await loadedSettings;
+      booted.current = true;
+      setWslMessage(null);
+      setWslGate("ready");
       // Phase 1 — settings and terminals. Whatever happens, end with a shell
       // AND with persistence running: a boot that half-failed must still save
       // the user's tabs, or one bad launch silently disables restore for good.
       try {
-        const settings = await loadSettings();
-        applyTheme(settings.theme);
+        if (settings.status === "rejected") throw settings.reason;
         // MCP defaults are conversation snapshots. Load the redacted server
         // list before restoring or creating either Chat threads or terminal
         // conversations so every genuinely new conversation sees today's defaults.
@@ -88,7 +107,7 @@ export default function App() {
         try {
           await useChatStore
             .getState()
-            .initialize(settings.workspace_mode, settings.active_chat_id);
+            .initialize(settings.value.workspace_mode, settings.value.active_chat_id);
         } catch (error) {
           console.error("Chat workspace restore failed:", error);
           useChatStore.setState({ initialized: true, workspaceMode: "terminal" });
@@ -149,7 +168,7 @@ export default function App() {
         console.error("Model status failed:", err);
       }
     })();
-  }, [loadSettings, createSession, restoreSessions]);
+  }, [loadSettings, createSession, restoreSessions, preparationAttempt]);
 
   // Theme switches re-style both the DOM and every live terminal.
   useEffect(() => {
@@ -170,11 +189,24 @@ export default function App() {
     return (
       <>
         <PrerequisiteQuitFallback />
-        <WslRequired issue={wslGate} />
+        <WslRequired
+          issue={wslGate}
+          message={wslMessage}
+          onRetry={() => {
+            setWslGate("checking");
+            setWslMessage(null);
+            setPreparationAttempt((attempt) => attempt + 1);
+          }}
+        />
       </>
     );
   }
-  return <AppShell />;
+  return (
+    <>
+      {isWindows() && !workspaceReady && <PrerequisiteQuitFallback />}
+      <AppShell />
+    </>
+  );
 }
 
 /**
@@ -193,7 +225,7 @@ function PrerequisiteQuitFallback() {
       void api
         .appQuitForce(
           event.payload.token,
-          "Windows prerequisites are unavailable",
+          "Windows workspace startup has not completed",
         )
         .catch((error) => {
           console.warn("could not finish prerequisite-screen quit:", error);
@@ -220,14 +252,21 @@ function WslChecking() {
       className="flex h-full items-center justify-center bg-bg-primary p-8 text-text-primary"
       aria-busy="true"
     >
-      <p role="status" className="text-sm text-text-muted">
-        Checking WSL 2 prerequisites…
-      </p>
+      <section className="text-center">
+        <h1 className="text-lg font-semibold">VTerminal</h1>
+        <p role="status" className="mt-2 text-sm text-text-muted">
+          Starting your terminal…
+        </p>
+      </section>
     </main>
   );
 }
 
-function WslRequired({ issue }: { issue: WslIssue }) {
+function WslRequired({ issue, message, onRetry }: {
+  issue: WslIssue;
+  message: string | null;
+  onRetry: () => void;
+}) {
   const detail =
     issue === "wsl1"
       ? "Your default distribution is using WSL 1. VTerminal requires WSL 2."
@@ -237,26 +276,37 @@ function WslRequired({ issue }: { issue: WslIssue }) {
           ? "Your default WSL2 distribution does not provide /bin/bash."
           : issue === "missing_tools"
             ? "Your default WSL2 distribution is missing the standard POSIX tools VTerminal uses for terminal lifecycle and command reporting."
-            : "VTerminal could not verify the default WSL distribution.";
+            : message || "VTerminal could not start the default WSL distribution.";
   return (
     <main className="flex h-full items-center justify-center bg-bg-primary p-8 text-text-primary">
       <section className="max-w-lg rounded-lg border border-border-subtle bg-bg-card p-6 shadow-lg">
-        <h1 className="text-lg font-semibold">WSL 2 and Bash are required</h1>
+        <h1 className="text-lg font-semibold">
+          {issue === "error" ? "Your terminal could not start" : "WSL 2 and Bash are required"}
+        </h1>
         <p className="mt-2 text-sm text-text-secondary">{detail}</p>
         <p className="mt-2 text-sm text-text-muted">
-          Install or upgrade WSL, choose a default distribution, then reopen
-          VTerminal. The app will never make this administrator-level change
-          automatically.
+          {issue === "error"
+            ? "Try again. If the problem continues, check that your default WSL distribution starts normally."
+            : "Install or upgrade WSL and choose a default distribution, then retry."}
         </p>
-        <button
-          type="button"
-          className="mt-4 rounded-md bg-accent px-3 py-2 text-sm font-medium text-bg-primary"
-          onClick={() =>
-            void openUrl("https://learn.microsoft.com/windows/wsl/install")
-          }
-        >
-          Open Microsoft WSL setup
-        </button>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <button
+            type="button"
+            className="rounded-md bg-accent px-3 py-2 text-sm font-medium text-bg-primary"
+            onClick={onRetry}
+          >
+            Retry
+          </button>
+          <button
+            type="button"
+            className="rounded-md border border-border-subtle px-3 py-2 text-sm font-medium"
+            onClick={() =>
+              void openUrl("https://learn.microsoft.com/windows/wsl/install")
+            }
+          >
+            Open Microsoft WSL setup
+          </button>
+        </div>
       </section>
     </main>
   );

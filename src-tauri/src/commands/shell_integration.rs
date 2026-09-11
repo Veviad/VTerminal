@@ -1,11 +1,9 @@
 use serde::Serialize;
-#[cfg(any(target_os = "windows", test))]
+#[cfg(all(test, unix))]
 use std::io::Read;
-#[cfg(target_os = "windows")]
-use std::io::Write;
 #[cfg(not(target_os = "windows"))]
 use std::path::PathBuf;
-#[cfg(any(target_os = "windows", test))]
+#[cfg(all(test, unix))]
 use std::time::{Duration, Instant};
 #[cfg(not(target_os = "windows"))]
 use tauri::Manager;
@@ -13,7 +11,7 @@ use tauri::Wry;
 
 /// Bump when any generated file changes — the zdotdir is rewritten whenever
 /// the version marker in the existing vterminal.zsh differs.
-const SCRIPT_VERSION: &str = "8";
+pub(crate) const SCRIPT_VERSION: &str = "8";
 
 #[derive(Serialize)]
 pub struct ShellIntegrationInfo {
@@ -29,7 +27,7 @@ pub struct ShellIntegrationInfo {
 /// distro and user rc files before adding VTerminal hooks, and it never edits a
 /// user's dotfiles.
 #[cfg(any(target_os = "windows", test))]
-const VTERMINAL_BASH: &str = r#"# vterminal bash integration (version: __VERSION__)
+pub(crate) const VTERMINAL_BASH: &str = r#"# vterminal bash integration (version: __VERSION__)
 # This file is used as --rcfile. Re-sourcing it in one shell is a no-op, while
 # an interactive child shell still installs its own hooks (the function is not
 # exported, unlike the public integration marker).
@@ -131,18 +129,12 @@ unset __vterminal_debug_command __vterminal_prior_debug_spec
 "#;
 
 #[cfg(any(target_os = "windows", test))]
-const WSL_BASH_WRAPPER: &str = r#"#!/bin/sh
+pub(crate) const WSL_BASH_WRAPPER: &str = r#"#!/bin/sh
 exec /bin/bash --noprofile --rcfile "$HOME/.local/share/vterminal/bashrc-v8" -i
 "#;
 
 #[cfg(target_os = "windows")]
 pub const WSL_INTEGRATION_PATH: &str = "~/.local/share/vterminal/bashrc-v8";
-
-#[cfg(any(target_os = "windows", test))]
-const WSL_WRITE_BASHRC: &str = "umask 077; dir=\"$HOME/.local/share/vterminal\"; mkdir -p \"$dir\" || exit; tmp=\"$dir/.bashrc-v8.$$\"; trap 'rm -f \"$tmp\"' EXIT HUP INT TERM; cat > \"$tmp\" && chmod 600 \"$tmp\" && mv -f \"$tmp\" \"$dir/bashrc-v8\"";
-
-#[cfg(any(target_os = "windows", test))]
-const WSL_WRITE_WRAPPER: &str = "umask 077; dir=\"$HOME/.local/share/vterminal\"; mkdir -p \"$dir\" || exit; tmp=\"$dir/.vterminal-bash.$$\"; trap 'rm -f \"$tmp\"' EXIT HUP INT TERM; cat > \"$tmp\" && chmod 700 \"$tmp\" && mv -f \"$tmp\" \"$dir/vterminal-bash\"";
 
 /// The integration script: emits OSC 133 semantic-prompt marks (A/B/C/D;exit),
 /// a percent-encoded OSC 7 cwd report, and the typed command as a base64 OSC
@@ -294,7 +286,7 @@ pub fn ensure_zdotdir(app: &tauri::AppHandle<Wry>) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(all(test, unix))]
 fn wait_for_child_bounded(
     child: &mut std::process::Child,
     timeout: Duration,
@@ -326,69 +318,24 @@ fn wait_for_child_bounded(
     }
 }
 
-#[cfg(target_os = "windows")]
-fn write_wsl_integration_file(command: &str, content: &str) -> Result<(), String> {
-    let mut child = std::process::Command::new("wsl.exe")
-        .args(["--exec", "/bin/sh", "-c", command])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("could not start WSL: {error}"))?;
-    let write_result = (|| {
-        child
-            .stdin
-            .take()
-            .ok_or_else(|| "WSL integration writer has no stdin".to_string())?
-            .write_all(content.as_bytes())
-            .map_err(|error| format!("could not send the Bash integration to WSL: {error}"))
-    })();
-    if let Err(error) = write_result {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(error);
-    }
-    let (status, stderr) = wait_for_child_bounded(&mut child, Duration::from_secs(15))
-        .map_err(|error| format!("WSL integration setup failed: {error}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        let detail = stderr.trim().to_string();
-        Err(if detail.is_empty() {
-            "WSL could not install the Bash integration".into()
-        } else {
-            format!("WSL could not install the Bash integration: {detail}")
-        })
-    }
-}
-
-#[cfg(target_os = "windows")]
-pub fn ensure_wsl_bash_integration() -> Result<(), String> {
-    let bash = VTERMINAL_BASH.replace("__VERSION__", SCRIPT_VERSION);
-    write_wsl_integration_file(WSL_WRITE_BASHRC, &bash)?;
-    write_wsl_integration_file(WSL_WRITE_WRAPPER, WSL_BASH_WRAPPER)
-}
-
+#[cfg(not(target_os = "windows"))]
 pub fn ensure_platform_integration(app: &tauri::AppHandle<Wry>) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        let _ = app;
-        ensure_wsl_bash_integration()
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        ensure_zdotdir(app).map(|_| ())
-    }
+    ensure_zdotdir(app).map(|_| ())
 }
 
 #[tauri::command]
-pub fn shell_integration_status(
+pub async fn shell_integration_status(
     app: tauri::AppHandle<Wry>,
 ) -> Result<ShellIntegrationInfo, String> {
     let enabled = super::settings::read_bool(&app, "shell_integration_enabled", true);
     #[cfg(target_os = "windows")]
     let (zdotdir_path, integration_path, shell_family) = if enabled {
-        ensure_wsl_bash_integration()?;
+        let result = crate::windows_terminal::prepare_for_integration(&app, enabled, false).await;
+        if result.wsl_status != super::settings::WslStatus::Ready {
+            return Err(result
+                .message
+                .unwrap_or_else(|| "WSL terminal preparation is unavailable".into()));
+        }
         (None, Some(WSL_INTEGRATION_PATH.into()), "bash".into())
     } else {
         (None, None, "bash".into())
@@ -590,7 +537,7 @@ mod zsh_tests {
 #[cfg(test)]
 mod windows_tests {
     #[cfg(unix)]
-    use super::{wait_for_child_bounded, WSL_WRITE_BASHRC, WSL_WRITE_WRAPPER};
+    use super::wait_for_child_bounded;
     use super::{VTERMINAL_BASH, WSL_BASH_WRAPPER};
     #[cfg(unix)]
     use std::time::Duration;
@@ -638,15 +585,14 @@ mod windows_tests {
     #[cfg(unix)]
     #[test]
     fn provisioning_commands_are_valid_posix_shell_and_atomic() {
-        for command in [WSL_WRITE_BASHRC, WSL_WRITE_WRAPPER] {
-            let status = std::process::Command::new("/bin/sh")
-                .args(["-n", "-c", command])
-                .status()
-                .unwrap();
-            assert!(status.success());
-            assert!(command.contains("mv -f"));
-            assert!(command.contains("trap 'rm -f"));
-        }
+        let command = crate::windows_terminal::preparation_script(true);
+        let status = std::process::Command::new("/bin/sh")
+            .args(["-n", "-c", &command])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(command.contains("mv -f"));
+        assert!(command.contains("trap 'rm -f"));
     }
 
     #[test]

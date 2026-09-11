@@ -47,8 +47,12 @@ German installer language, and bootstraps WebView2 when the runtime is absent.
 It does not request an administrator-level WSL installation. Setup also blocks
 an older installer from overwriting a newer VTerminal version.
 
-On first launch, VTerminal checks the default WSL distribution and Bash. After
-setup or repair, close and reopen VTerminal. New PowerShell windows also pick up
+On launch, VTerminal prepares the default WSL distribution in the background.
+Its distribution check and combined Bash, tool, and integration preparation are
+shared by restored tabs. The saved theme loads while WSL starts, background
+helpers do not open console windows, and preparation has one 15-second deadline.
+After setup, repair, or a timeout, choose **Retry** on the startup screen.
+New PowerShell windows also pick up
 the managed `vterminal-docs.exe` PATH entry; already-open shells retain their old
 environment.
 
@@ -140,6 +144,37 @@ status. The system summary aggregates only currently loaded hosts, reports
 `mixed` when they use different backends, and returns `unloaded` after the last
 host unloads.
 
+### A local Qwen agent closes the app on its first request
+
+Update to VTerminal 0.6.5 or newer. A dependency change skipped the embedded MTP
+tensors while the application still enabled speculative generation. The model
+could load successfully, then the first generation aborted in native code.
+The fix explicitly loads those tensors and preserves accelerated generation.
+The existing downloaded Qwen MTP model can be reused.
+
+### Native inference acceptance
+
+The Windows package and release jobs download a Qwen3.5 2B MTP GGUF pinned by
+revision, byte length, and SHA256, then run `local_inference_smoke` against copies
+of the installed DLLs in an isolated directory. The test requires generated
+tokens in standard mode and actual drafted tokens in MTP mode. It exercises the
+first tool call, a continuation with that call's result, ordinary chat, and
+cancellation followed by successful inference. Returning a response through
+silent standard fallback does not pass. Hosted CI explicitly selects CPU; it
+does not establish GPU compatibility.
+
+On a Windows laptop with Vulkan, build the same example and run:
+
+```powershell
+cargo build --manifest-path src-tauri/Cargo.toml --release --locked --target x86_64-pc-windows-msvc --features local-llm --example local_inference_smoke
+. ./scripts/windows-inference-smoke.ps1
+Invoke-WindowsInferenceSmoke -Executable "$env:CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/examples/local_inference_smoke.exe" -RuntimeDirectory "$env:LOCALAPPDATA/VTerminal" -BackendDirectory "$env:LOCALAPPDATA/VTerminal/llama-backends" -ModelPath 'C:/path/to/Qwen3.5-2B-Q4_K_M.gguf' -ExpectedBackend vulkan
+```
+
+Use the Cargo target directory reported by the Windows build script and the
+actual installation/model paths. A missing Vulkan device or CPU fallback fails
+this GPU check. Keep the output with the tested Windows build and driver details.
+
 ## Behavior
 
 - Restored working directories are Linux paths and are passed through
@@ -177,7 +212,10 @@ x64 VMs and retain the installer hashes and logs with the release candidate:
    tab's processes are stopped.
 3. Verify missing WSL, WSL1, and a WSL2 distribution without Bash or another
    required integration tool are blocked with guidance rather than an attempted
-   installation.
+   installation. Repeat launches with WSL already running and stopped, including
+   multiple restored tabs and disabled integration. Check for no console flashes,
+   responsive close handling, timeout followed by a successful Retry, and one
+   workspace restoration. Retain startup timings from the application log.
 4. Verify Credential Manager create/read/delete and legacy migration, companion
    CLI status/repair, saved SSH commands, and Runbook rejection of UNC, reparse,
    non-local, and non-NTFS destinations.
@@ -186,7 +224,10 @@ x64 VMs and retain the installer hashes and logs with the release candidate:
    failure and confirm automatic CPU retry plus the visible fallback reason.
    Confirm `llama-common.dll` and the other staged runtime DLLs are present both
    beside `vterminal.exe` and in the managed companion directory, then run
-   `vterminal-docs.exe --help` from that directory.
+   `vterminal-docs.exe --help` from that directory. With Qwen3.5 2B, exercise the
+   first Agent request, an ordinary chat, subsequent tool rounds, cancellation,
+   and model unload/reload. Run the native smoke with `ExpectedBackend vulkan`
+   on a GPU host and `ExpectedBackend cpu` on the no-GPU VM.
 6. Exercise WebView2 installation and an already-installed WebView2 runtime,
    terminal clipboard selection/paste, host file and directory dialogs, PDF text
    extraction, image/vision attachment handling, external links, and display

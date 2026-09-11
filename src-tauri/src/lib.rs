@@ -22,6 +22,8 @@ pub mod scheduled;
 mod ssh_config;
 #[cfg(target_os = "windows")]
 mod windows_fs;
+pub mod windows_process;
+mod windows_terminal;
 
 use tauri::Manager;
 
@@ -109,6 +111,8 @@ pub fn run() {
             app.manage(docs::db::DocsDb::new(app_data.clone()));
             app.manage(knowledge::ingest::KnowledgeJobRunnerState::default());
             app.manage(pty::PtyManager::default());
+            #[cfg(target_os = "windows")]
+            app.manage(windows_terminal::WindowsTerminalState::default());
             app.manage(agent::AiState::default());
             app.manage(agent::ApprovalState::default());
             app.manage(agent::AgentPermissionState::default());
@@ -152,8 +156,9 @@ pub fn run() {
                 log::warn!("resume knowledge ingestion jobs failed: {error}");
             }
 
-            // Regenerate the platform shell integration on every start so script
-            // upgrades take effect (versioned header check inside).
+            // Native integration is cheap and versioned. Windows provisioning
+            // belongs to the shared asynchronous terminal preparation command.
+            #[cfg(not(target_os = "windows"))]
             if let Err(e) = commands::shell_integration::ensure_platform_integration(app.handle()) {
                 log::warn!("shell integration setup failed: {e}");
             }
@@ -201,6 +206,7 @@ pub fn run() {
             commands::settings::get_model_effort,
             commands::settings::set_model_effort,
             commands::settings::get_system_info,
+            windows_terminal::windows_terminal_prepare,
             commands::statistics::token_statistics,
             // application updates
             commands::updates::update_check,
