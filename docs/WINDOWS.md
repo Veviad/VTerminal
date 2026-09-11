@@ -53,7 +53,11 @@ the managed `vterminal-docs.exe` PATH entry; already-open shells retain their ol
 environment.
 
 To upgrade, run the newer preview installer or approve an update in
-**Settings → Updates**. Uninstall through **Settings → Apps → Installed apps**.
+**Settings → Updates**. Automatic checks are off by default. Enabling them checks
+immediately and every 24 hours; installation still requires your approval. The
+updater verifies the signed download, saves your workspace, stops terminal
+processes, and launches the installer, which restarts VTerminal after updating.
+Uninstall through **Settings → Apps → Installed apps**.
 Uninstall removes only VTerminal's exact managed CLI PATH entry and does not
 remove WSL, distributions, models, or unrelated PATH entries.
 
@@ -104,6 +108,14 @@ wsl.exe --exec /bin/bash --noprofile --norc -c "/usr/bin/printf 'Bash is ready\n
 Install Bash and the standard tools listed in **Prerequisites** inside that
 distribution, or choose a distribution that provides them as the WSL default.
 Distro and shell selection are outside this beta.
+
+### A shell exits with a controlling-terminal error
+
+If a new tab prints `setsid: failed to set the controlling terminal: Operation
+not permitted`, update to VTerminal 0.6.4 or newer and open a new terminal tab.
+Earlier versions tried to replace the terminal session that WSL2 had already
+created. This is an application launch bug and does not require reinstalling
+WSL or running VTerminal as administrator.
 
 ### A restored tab falls back to home
 
@@ -158,7 +170,11 @@ x64 VMs and retain the installer hashes and logs with the release candidate:
    1 MB of unacknowledged output, command/cwd/exit OSC reporting, custom Bash
    profiles, spaces and non-ASCII Linux paths, and invalid-cwd fallback. Exercise
    every `Ctrl+Shift` app shortcut plus terminal `Ctrl+Shift+C/V`, while plain
-   `Ctrl+C` continues to interrupt the foreground command.
+   `Ctrl+C` continues to interrupt the foreground command. With shell integration
+   both enabled and disabled, confirm a new tab reaches a prompt without a
+   `setsid` or job-control error. Test `sleep 30`, `Ctrl+Z`, `bg`, `fg`, and
+   `Ctrl+C`; close one of two tabs with background jobs and confirm only that
+   tab's processes are stopped.
 3. Verify missing WSL, WSL1, and a WSL2 distribution without Bash or another
    required integration tool are blocked with guidance rather than an attempted
    installation.

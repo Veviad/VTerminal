@@ -53,8 +53,8 @@ pub async fn run_command(
         // A unique inherited tag lets cancellation and normal completion find
         // descendants which detached from wsl.exe (for example via nohup).
         // `setsid --wait` gives the captured command its own Linux session;
-        // unlike the interactive ConPTY path this command has no controlling
-        // terminal, so `--ctty` is deliberately omitted.
+        // this captured path has no controlling terminal to preserve. The
+        // interactive ConPTY path instead keeps the session created by WSL2.
         let session_tag = format!("vt-agent-{}", uuid::Uuid::new_v4());
         let mut command_builder = tokio::process::Command::new("wsl.exe");
         command_builder.args([

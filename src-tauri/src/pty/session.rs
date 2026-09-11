@@ -182,13 +182,15 @@ fn resolve_wsl_cwd(requested: Option<&str>) -> (String, bool) {
 
 #[cfg(any(target_os = "windows", test))]
 fn wsl_command_args(cwd: &str, integration_enabled: bool, session_tag: &str) -> Vec<String> {
+    // WSL2 starts this command in a fresh session with a controlling terminal.
+    // `setsid --wait --ctty` forks away from that session, then fails to claim
+    // the terminal still owned by its waiting parent (TIOCSCTTY returns EPERM).
+    // Exec env and Bash in WSL's session so job control and Ctrl+C keep working.
+    // The inherited tag still lets cleanup find this session and detached jobs.
     let mut args = vec![
         "--cd".into(),
         cwd.into(),
         "--exec".into(),
-        "/usr/bin/setsid".into(),
-        "--wait".into(),
-        "--ctty".into(),
         "/usr/bin/env".into(),
         "TERM=xterm-256color".into(),
         "COLORTERM=truecolor".into(),
@@ -609,6 +611,10 @@ impl PtySession {
     }
 }
 
+#[cfg(all(test, unix))]
+#[path = "wsl_tests.rs"]
+mod wsl_tests;
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -652,16 +658,8 @@ mod tests {
     fn wsl_launch_uses_structured_linux_environment_and_fixed_shell_source() {
         let args = wsl_command_args("/home/Casey/My Project", true, "vt-test-session");
         assert_eq!(
-            &args[..7],
-            [
-                "--cd",
-                "/home/Casey/My Project",
-                "--exec",
-                "/usr/bin/setsid",
-                "--wait",
-                "--ctty",
-                "/usr/bin/env"
-            ]
+            &args[..4],
+            ["--cd", "/home/Casey/My Project", "--exec", "/usr/bin/env"]
         );
         assert!(args.iter().any(|arg| arg == "TERM=xterm-256color"));
         assert!(args.iter().any(|arg| arg == "COLORTERM=truecolor"));
@@ -682,6 +680,7 @@ mod tests {
     #[test]
     fn wsl_launch_without_integration_is_login_bash() {
         let args = wsl_command_args("~", false, "vt-test-session");
+        assert_eq!(&args[..4], ["--cd", "~", "--exec", "/usr/bin/env"]);
         assert_eq!(&args[args.len() - 2..], ["/bin/bash", "-il"]);
     }
 
