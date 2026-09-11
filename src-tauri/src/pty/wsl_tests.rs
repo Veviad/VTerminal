@@ -4,8 +4,9 @@
 
 use super::wsl_command_args;
 use portable_pty::{native_pty_system, Child, CommandBuilder, PtySize};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 struct TestChild {
@@ -96,63 +97,69 @@ exit 23
         reaped: false,
     };
     drop(pair.slave);
+    let mut reader = pair.master.try_clone_reader().unwrap();
+    let (sender, receiver) = mpsc::sync_channel(8);
+    let reader_thread = std::thread::spawn(move || {
+        let mut buffer = [0u8; 4096];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => {
+                    if sender.send(Ok(buffer[..count].to_vec())).is_err() {
+                        break;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                // Linux reports EIO when the last slave closes; macOS reports EOF.
+                Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
+                Err(error) => {
+                    let _ = sender.send(Err(error));
+                    break;
+                }
+            }
+        }
+    });
     let mut writer = pair.master.take_writer().unwrap();
     writer
         .write_all(b". \"$HOME/probe.bash\"\nVT_TTY_INPUT\n")
         .unwrap();
     writer.flush().unwrap();
 
-    let fd = pair.master.as_raw_fd().unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut output = Vec::new();
-    let mut status = None;
     loop {
         assert!(
             Instant::now() < deadline,
             "shell timed out: {}",
             String::from_utf8_lossy(&output)
         );
-        if status.is_none() {
-            status = child.child.try_wait().unwrap();
-            child.reaped = status.is_some();
-        }
-        let mut poll_fd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        // The master remains alive, and this test is its only reader.
-        let ready = unsafe { libc::poll(&mut poll_fd, 1, 50) };
-        if ready < 0 {
-            let error = std::io::Error::last_os_error();
-            assert_eq!(error.kind(), std::io::ErrorKind::Interrupted, "{error}");
-            continue;
-        }
-        if ready > 0 && poll_fd.revents & libc::POLLIN != 0 {
-            let mut buffer = [0u8; 4096];
-            let count = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
-            if count > 0 {
-                output.extend_from_slice(&buffer[..count as usize]);
-                continue;
-            }
-            // Linux reports EIO when the last slave closes; macOS reports EOF.
-            if count < 0 {
-                let error = std::io::Error::last_os_error();
-                assert!(
-                    error.raw_os_error() == Some(libc::EIO)
-                        || error.kind() == std::io::ErrorKind::Interrupted,
-                    "PTY read failed: {error}"
-                );
+        // A channel deadline bounds the blocking reader without raw PTY FFI.
+        match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(Ok(bytes)) => output.extend_from_slice(&bytes),
+            Ok(Err(error)) => panic!("PTY read failed: {error}"),
+            Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => {
+                panic!("shell timed out: {}", String::from_utf8_lossy(&output));
             }
         }
-        if status.is_some() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
     }
+    reader_thread.join().unwrap();
+
+    let status = loop {
+        if let Some(status) = child.child.try_wait().unwrap() {
+            child.reaped = true;
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "shell timed out: {}",
+            String::from_utf8_lossy(&output)
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    };
 
     let output = String::from_utf8_lossy(&output);
-    assert_eq!(status.unwrap().exit_code(), 23, "{output}");
+    assert_eq!(status.exit_code(), 23, "{output}");
     assert!(output.contains("VT_TTY_READY"), "{output}");
     assert!(output.contains("VT_PTY_OK"), "{output}");
 }
