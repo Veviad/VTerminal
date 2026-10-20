@@ -19,7 +19,7 @@ import {
 } from "@tauri-apps/api/window";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import * as api from "./tauri";
-import { useAppStore, type AppState } from "../stores/appStore";
+import { defaultAiModeFor, useAppStore, type AppState } from "../stores/appStore";
 import { getTerm, serializeSession, subscribeTerm } from "./termRegistry";
 import { archiveTranscriptOnly, buildArchiveRow } from "./sessionArchive";
 import type { SessionSnapshotInput } from "./types";
@@ -145,6 +145,7 @@ function fingerprint(s: AppState): string {
         x.cwd ?? "",
         x.shell,
         x.hostId ?? "",
+        s.aiStreams[x.id]?.selectedMode ?? defaultAiModeFor(s),
       ].join("\u0001"))
     .join("\u0002");
 }
@@ -275,6 +276,7 @@ function buildSnapshot(withScrollback: Set<string>): {
       // path on THIS machine ever reaches here.
       cwd: session.cwd,
       host_id: session.hostId,
+      ai_mode: state.aiStreams[session.id]?.selectedMode ?? defaultAiModeFor(state),
       // Recorded for the restore separator; never replayed as a live connection.
       remote_kind: ui?.remote?.kind ?? null,
       remote_target: ui?.remote?.target ?? null,

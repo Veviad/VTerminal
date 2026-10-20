@@ -76,6 +76,9 @@ pub fn run(conn: &Connection) -> Result<(), String> {
     if version < 20 {
         crate::scheduled::db::migrate_v20(conn)?;
     }
+    if version < 21 {
+        migrate_v21(conn)?;
+    }
     crate::runbooks::db::ensure_v6_runtime_indexes(conn)?;
 
     Ok(())
@@ -699,6 +702,19 @@ fn migrate_v19(conn: &Connection) -> Result<(), String> {
     .map_err(|error| format!("migration v19 failed: {error}"))
 }
 
+fn migrate_v21(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        BEGIN;
+        ALTER TABLE session_snapshots ADD COLUMN ai_mode TEXT
+            CHECK (ai_mode IS NULL OR ai_mode IN ('ask', 'agent'));
+        INSERT INTO schema_version (version) VALUES (21);
+        COMMIT;
+        "#,
+    )
+    .map_err(|error| format!("migration v21 failed: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;
@@ -737,7 +753,8 @@ mod tests {
         conn.execute("DELETE FROM schema_version WHERE version >= 20", [])
             .unwrap();
         conn.execute_batch(
-            "DROP TABLE scheduled_events;
+            "ALTER TABLE session_snapshots DROP COLUMN ai_mode;
+             DROP TABLE scheduled_events;
              DROP TABLE scheduled_step_attempts;
              DROP TABLE scheduled_runs;
              DROP TABLE scheduled_steps;
@@ -748,7 +765,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 20);
+        assert_eq!(version(&conn), 21);
         // Pre-existing rows survive.
         let hosts: i64 = conn
             .query_row("SELECT COUNT(*) FROM ssh_hosts", [], |r| r.get(0))
@@ -780,7 +797,81 @@ mod tests {
         let first = version(&conn);
         super::run(&conn).unwrap();
         assert_eq!(version(&conn), first);
-        assert_eq!(first, 20);
+        assert_eq!(first, 21);
+    }
+
+    #[test]
+    fn v20_to_v21_preserves_snapshots_and_leaves_legacy_modes_null() {
+        let conn = mem();
+        super::run(&conn).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE session_snapshots DROP COLUMN ai_mode;
+             DELETE FROM schema_version WHERE version = 21;
+             INSERT INTO session_snapshots
+                (session_id, generation, tab_index, title, shell, cwd, scrollback,
+                 scrollback_lines, created_at, updated_at)
+             VALUES ('saved', 7, 2, 'Existing tab', '/bin/zsh', '/work',
+                     'retained scrollback', 9, 'created', 'updated');
+             UPDATE workspace_state SET generation = 7, active_session_id = 'saved',
+                 clean_exit = 1, restore_attempts = 0 WHERE id = 'default';",
+        )
+        .unwrap();
+        assert_eq!(version(&conn), 20);
+
+        super::run(&conn).unwrap();
+        super::run(&conn).unwrap();
+
+        assert_eq!(version(&conn), 21);
+        let snapshot: (String, String, i64, Option<String>, String, String) = conn
+            .query_row(
+                "SELECT title, scrollback, scrollback_lines, ai_mode, created_at, updated_at
+                 FROM session_snapshots WHERE session_id = 'saved'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            snapshot,
+            (
+                "Existing tab".into(),
+                "retained scrollback".into(),
+                9,
+                None,
+                "created".into(),
+                "updated".into(),
+            )
+        );
+        let state: (i64, String, i64, i64) = conn
+            .query_row(
+                "SELECT generation, active_session_id, clean_exit, restore_attempts
+                 FROM workspace_state WHERE id = 'default'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(state, (7, "saved".into(), 1, 0));
+        for mode in ["ask", "agent"] {
+            conn.execute(
+                "UPDATE session_snapshots SET ai_mode = ?1 WHERE session_id = 'saved'",
+                [mode],
+            )
+            .unwrap();
+        }
+        assert!(conn
+            .execute(
+                "UPDATE session_snapshots SET ai_mode = 'full' WHERE session_id = 'saved'",
+                [],
+            )
+            .is_err());
     }
 
     #[test]
@@ -971,7 +1062,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 20);
+        assert_eq!(version(&conn), 21);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'chat_%' ORDER BY name")
             .unwrap()
@@ -1008,7 +1099,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 20);
+        assert_eq!(version(&conn), 21);
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(archived_sessions)")
             .unwrap()
@@ -1070,9 +1161,9 @@ mod tests {
         conn.execute("DELETE FROM schema_version WHERE version >= 18", [])
             .unwrap();
         conn.execute_batch(
-            // Rewinding the recorded version rewinds past v20 as well, so its
-            // tables have to go with it or the re-run hits "table already exists".
-            "DROP TABLE scheduled_events;
+            // Remove changes from every rewound version before re-running them.
+            "ALTER TABLE session_snapshots DROP COLUMN ai_mode;
+             DROP TABLE scheduled_events;
              DROP TABLE scheduled_step_attempts;
              DROP TABLE scheduled_runs;
              DROP TABLE scheduled_steps;
@@ -1092,7 +1183,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 20);
+        assert_eq!(version(&conn), 21);
         let imported: (String, String, i64, i64) = conn
             .query_row(
                 "SELECT model_label, provider, input_tokens, output_tokens
@@ -1148,7 +1239,7 @@ mod tests {
         .unwrap();
 
         super::run(&conn).unwrap();
-        assert_eq!(version(&conn), 20);
+        assert_eq!(version(&conn), 21);
         let migrated: (String, Option<String>, Option<String>) = conn
             .query_row(
                 "SELECT cmd_command, cmd_target_role, cmd_target_label
@@ -1261,7 +1352,7 @@ mod tests {
         )
         .unwrap();
         super::run(&conn).unwrap();
-        assert_eq!(version(&conn), 20);
+        assert_eq!(version(&conn), 21);
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM command_history", [], |r| r.get(0))
             .unwrap();
@@ -1294,7 +1385,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 20);
+        assert_eq!(version(&conn), 21);
         let migrated: (String, i64, Option<i64>, String, String) = conn
             .query_row(
                 "SELECT source_kind, hidden, builtin_order, created_at, updated_at
@@ -1335,7 +1426,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 20);
+        assert_eq!(version(&conn), 21);
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(runbook_drafts)")
             .unwrap()
@@ -1369,7 +1460,7 @@ mod tests {
         super::run(&conn).unwrap();
 
         // Upgrades run the whole chain, so this lands on the current head.
-        assert_eq!(version(&conn), 20);
+        assert_eq!(version(&conn), 21);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()
@@ -1415,7 +1506,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 20);
+        assert_eq!(version(&conn), 21);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()
@@ -1531,7 +1622,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 20);
+        assert_eq!(version(&conn), 21);
         let has_password: bool = conn
             .query_row(
                 "SELECT has_password FROM ssh_hosts WHERE id = 'h1'",

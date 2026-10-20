@@ -195,6 +195,9 @@ export function useSessions() {
       // addSession and getOrCreateTerm must stay in the SAME tick: React cannot
       // render between them, so TerminalView's effect always finds the entry.
       store.addSession(session, spec.activate ?? true);
+      if (spec.aiMode === "ask" || spec.aiMode === "agent") {
+        useAppStore.getState().setAiMode(sessionId, spec.aiMode);
+      }
 
       const entry = getOrCreateTerm(
         sessionId,
@@ -579,6 +582,7 @@ export function useSessions() {
         cwd: snap.cwd,
         shell: snap.shell,
         hostId: snap.host_id,
+        aiMode: snap.ai_mode,
         title: snap.host_id ? sticky : null,
         userTitle: snap.host_id ? null : sticky,
         replay,
@@ -593,7 +597,7 @@ export function useSessions() {
           sessionId,
           archived.detail,
           archived.modelTranscript,
-          { openPanel: false },
+          { openPanel: false, preserveMode: true },
         );
       }
       return sessionId;

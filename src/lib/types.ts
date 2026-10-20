@@ -63,6 +63,8 @@ export interface LaunchSpec {
   userTitle?: string | null;
   /** Becomes `Session.archivedFrom`. Set only by reopen. */
   archivedFrom?: string | null;
+  /** Restored tab selection; new tabs use the configured AI-mode default. */
+  aiMode?: SelectableAiMode | null;
   /** Typed at the FIRST prompt, with `\r`. Never model-authored — must pass
    *  `sanitizeCommand`. Deliberately frontend-side rather than in SpawnParams:
    *  Rust writing to the master before zsh's first prompt races shell init. */
@@ -917,6 +919,8 @@ export interface SessionSnapshotMeta {
   shell: string;
   cwd: string | null;
   host_id: string | null;
+  /** Absent on older snapshots, which use the configured AI-mode default. */
+  ai_mode?: SelectableAiMode | null;
   /** Recorded for the restore separator only — never replayed into
    *  `sessionUi.remote`, which would claim a connection that is dead. */
   remote_kind: string | null;
@@ -935,6 +939,7 @@ export interface SessionSnapshotInput {
   shell: string;
   cwd: string | null;
   host_id: string | null;
+  ai_mode?: SelectableAiMode | null;
   remote_kind: string | null;
   remote_target: string | null;
   cols: number;

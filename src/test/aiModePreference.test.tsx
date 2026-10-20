@@ -70,6 +70,7 @@ describe.each(policies)("AI mode policy $defaultAiMode with remembered $lastAiMo
 
     for (const stream of Object.values(useAppStore.getState().aiStreams)) {
       expect(stream.mode).toBe(policy.expected);
+      expect(stream.selectedMode).toBe(policy.expected);
       expect(stream.permissionMode).toBe("ask");
     }
     expect(mocks.saveSettings).not.toHaveBeenCalled();
@@ -85,6 +86,7 @@ describe.each(policies)("AI mode policy $defaultAiMode with remembered $lastAiMo
 
     expect(useAppStore.getState().aiStreams["session-1"]).toMatchObject({
       mode: policy.expected,
+      selectedMode: policy.expected,
       permissionMode: "ask",
       messages: [],
       modelTranscript: [],
@@ -109,6 +111,7 @@ describe.each(policies)("AI mode policy $defaultAiMode with remembered $lastAiMo
 
     expect(useAppStore.getState().aiStreams["session-1"]).toMatchObject({
       mode: policy.expected,
+      selectedMode: policy.expected,
       permissionMode: "ask",
       messages,
       modelTranscript: transcript,
@@ -192,10 +195,78 @@ describe("remembering explicit Ask and Agent choices", () => {
     useAppStore.getState().setAiMode("session-1", "explain");
 
     expect(useAppStore.getState().aiStreams["session-1"].mode).toBe("explain");
+    expect(useAppStore.getState().aiStreams["session-1"].selectedMode).toBe("agent");
     expect(useAppStore.getState().lastAiMode).toBe("agent");
     expect(mocks.saveSettings).not.toHaveBeenCalled();
     useAppStore.getState().newAiConversation("session-1");
     expect(useAppStore.getState().aiStreams["session-1"].mode).toBe("agent");
+  });
+
+  it("keeps a tab's selected Agent mode through Explain after another tab remembers Ask", async () => {
+    await selectAiMode("session-1", "agent");
+    useAppStore.getState().addSession(makeSession({ id: "other-tab" }));
+    await selectAiMode("other-tab", "ask");
+    expect(useAppStore.getState().lastAiMode).toBe("ask");
+
+    useAppStore.getState().setAiMode("session-1", "explain");
+    useAppStore.getState().initAiStream("session-1", "explain", "explain-request");
+    useAppStore.getState().finishAiStream("session-1");
+
+    expect(useAppStore.getState().aiStreams["session-1"]).toMatchObject({
+      mode: "explain",
+      selectedMode: "agent",
+      status: "idle",
+      permissionMode: "ask",
+    });
+    expect(useAppStore.getState().aiStreams["other-tab"].selectedMode).toBe("ask");
+    expect(useAppStore.getState().lastAiMode).toBe("ask");
+  });
+
+  it("keeps Ask/Agent mode and selection synchronized for explicit changes and stream starts", () => {
+    const store = useAppStore.getState();
+    for (const mode of ["agent", "ask"] as const) {
+      store.setAiMode("session-1", mode);
+      expect(useAppStore.getState().aiStreams["session-1"]).toMatchObject({
+        mode,
+        selectedMode: mode,
+      });
+    }
+    for (const mode of ["agent", "ask"] as const) {
+      store.initAiStream("session-1", mode, `request-${mode}`);
+      expect(useAppStore.getState().aiStreams["session-1"]).toMatchObject({
+        mode,
+        selectedMode: mode,
+      });
+      store.finishAiStream("session-1");
+    }
+  });
+
+  it("restores an explicit workspace mode while resetting permissions and preserving the global choice", () => {
+    useAppStore.setState({ defaultAiMode: "ask", lastAiMode: "ask" });
+    const store = useAppStore.getState();
+    store.setPermissionMode("session-1", "auto_all");
+
+    store.restoreAiTranscript("session-1", [], [], "2026-10-20T10:00:00Z", undefined, "agent");
+
+    expect(useAppStore.getState().aiStreams["session-1"]).toMatchObject({
+      mode: "agent",
+      selectedMode: "agent",
+      permissionMode: "ask",
+      status: "idle",
+      requestId: null,
+      pendingProposal: null,
+    });
+    expect(useAppStore.getState().lastAiMode).toBe("ask");
+    expect(mocks.saveSettings).not.toHaveBeenCalled();
+
+    // An explicit New Chat remains a new conversation with the configured
+    // default; preserving a startup tab does not change that policy.
+    store.newAiConversation("session-1");
+    expect(useAppStore.getState().aiStreams["session-1"]).toMatchObject({
+      mode: "ask",
+      selectedMode: "ask",
+      permissionMode: "ask",
+    });
   });
 
   it("ignores selections for a session that no longer exists", async () => {

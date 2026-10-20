@@ -22,6 +22,24 @@ use super::archive;
 /// tried to restore without ever reaching `mark_healthy`.
 const MAX_RESTORE_ATTEMPTS: i64 = 2;
 
+/// The selectable terminal AI mode. Execution permissions are deliberately not
+/// part of this preference and keep their existing restart behavior.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionAiMode {
+    Ask,
+    Agent,
+}
+
+impl SessionAiMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::Agent => "agent",
+        }
+    }
+}
+
 /// Metadata for one tab. Deliberately excludes the scrollback blob — the boot
 /// path fetches those lazily per session so the first IPC stays small.
 #[derive(Debug, Serialize)]
@@ -39,6 +57,8 @@ pub struct SessionSnapshotMeta {
     pub script_version: Option<String>,
     pub scrollback_lines: i64,
     pub updated_at: String,
+    /// Absent for snapshots predating mode persistence; the UI applies its default.
+    pub ai_mode: Option<SessionAiMode>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -57,6 +77,7 @@ pub struct SessionSnapshotInput {
     /// `None` means "leave whatever is stored alone" — see the COALESCE note.
     pub scrollback: Option<String>,
     pub scrollback_lines: Option<i64>,
+    pub ai_mode: Option<SessionAiMode>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,9 +97,21 @@ pub struct WorkspaceRestore {
 }
 
 const SNAPSHOT_COLS: &str = "session_id, tab_index, title, shell, cwd, host_id, remote_kind, \
-     remote_target, cols, rows, script_version, scrollback_lines, updated_at";
+     remote_target, cols, rows, script_version, scrollback_lines, updated_at, ai_mode";
 
 fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionSnapshotMeta> {
+    let ai_mode = row
+        .get::<_, Option<String>>(13)?
+        .map(|value| match value.as_str() {
+            "ask" => Ok(SessionAiMode::Ask),
+            "agent" => Ok(SessionAiMode::Agent),
+            _ => Err(rusqlite::Error::FromSqlConversionFailure(
+                13,
+                rusqlite::types::Type::Text,
+                format!("unsupported saved AI mode: {value}").into(),
+            )),
+        })
+        .transpose()?;
     Ok(SessionSnapshotMeta {
         session_id: row.get(0)?,
         tab_index: row.get(1)?,
@@ -93,6 +126,7 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionSnapshotMeta>
         script_version: row.get(10)?,
         scrollback_lines: row.get(11)?,
         updated_at: row.get(12)?,
+        ai_mode,
     })
 }
 
@@ -228,9 +262,9 @@ pub fn snapshot(conn: &mut Connection, input: &WorkspaceSnapshotInput) -> Result
             "INSERT INTO session_snapshots
                 (session_id, generation, tab_index, title, shell, cwd, host_id, remote_kind,
                  remote_target, cols, rows, script_version, format_version, scrollback,
-                 scrollback_lines, created_at, updated_at)
+                 scrollback_lines, created_at, updated_at, ai_mode)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 1, ?13,
-                     COALESCE(?14, 0), ?15, ?15)
+                     COALESCE(?14, 0), ?15, ?15, ?16)
              ON CONFLICT(session_id) DO UPDATE SET
                 generation = excluded.generation,
                 tab_index = excluded.tab_index,
@@ -246,6 +280,8 @@ pub fn snapshot(conn: &mut Connection, input: &WorkspaceSnapshotInput) -> Result
                 -- NULL means 'metadata-only snapshot' — keep the stored blob.
                 scrollback = COALESCE(?13, session_snapshots.scrollback),
                 scrollback_lines = COALESCE(?14, session_snapshots.scrollback_lines),
+                -- Older IPC callers omit the preference; retain a saved choice.
+                ai_mode = COALESCE(excluded.ai_mode, session_snapshots.ai_mode),
                 updated_at = excluded.updated_at",
             params![
                 s.session_id,
@@ -263,6 +299,7 @@ pub fn snapshot(conn: &mut Connection, input: &WorkspaceSnapshotInput) -> Result
                 s.scrollback,
                 s.scrollback_lines,
                 now,
+                s.ai_mode.map(SessionAiMode::as_str),
             ],
         )
         .map_err(|e| format!("snapshot session {}: {e}", s.session_id))?;
@@ -447,6 +484,7 @@ mod tests {
             script_version: Some("4".into()),
             scrollback: None,
             scrollback_lines: None,
+            ai_mode: None,
         }
     }
 
@@ -459,6 +497,97 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    #[test]
+    fn modes_survive_database_close_reopen_and_subsequent_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("workspace.sqlite");
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            crate::database::migrations::run(&conn).unwrap();
+            healthy_restore(&mut conn);
+            let mut local = tab("local", 0);
+            local.ai_mode = Some(SessionAiMode::Ask);
+            local.scrollback = Some("local output".into());
+            local.scrollback_lines = Some(3);
+            let mut remote = tab("remote", 1);
+            remote.ai_mode = Some(SessionAiMode::Agent);
+            remote.host_id = Some("saved-host".into());
+            remote.remote_kind = Some("ssh".into());
+            remote.remote_target = Some("user@server".into());
+            snap(&mut conn, vec![local, remote, tab("legacy", 2)], "remote");
+            mark_clean_exit(&conn).unwrap();
+        }
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            crate::database::migrations::run(&conn).unwrap();
+            let restored = healthy_restore(&mut conn);
+            assert_eq!(restored.active_session_id.as_deref(), Some("remote"));
+            assert_eq!(restored.sessions[0].ai_mode, Some(SessionAiMode::Ask));
+            assert_eq!(restored.sessions[1].ai_mode, Some(SessionAiMode::Agent));
+            assert_eq!(restored.sessions[2].ai_mode, None);
+            let wire = serde_json::to_value(&restored).unwrap();
+            assert_eq!(wire["sessions"][0]["ai_mode"], "ask");
+            assert_eq!(wire["sessions"][1]["ai_mode"], "agent");
+            assert!(wire["sessions"][2]["ai_mode"].is_null());
+
+            let mut local = tab("local", 1);
+            local.ai_mode = Some(SessionAiMode::Agent);
+            let mut remote = tab("remote", 0);
+            remote.ai_mode = Some(SessionAiMode::Ask);
+            snap(&mut conn, vec![local, remote, tab("legacy", 2)], "local");
+            // Old IPC metadata omits mode and scrollback: neither saved value
+            // should be lost, and a legacy NULL remains available for defaults.
+            snap(
+                &mut conn,
+                vec![tab("local", 1), tab("remote", 0), tab("legacy", 2)],
+                "local",
+            );
+            mark_clean_exit(&conn).unwrap();
+        }
+        let mut conn = Connection::open(&path).unwrap();
+        let restored = healthy_restore(&mut conn);
+        assert_eq!(restored.active_session_id.as_deref(), Some("local"));
+        assert_eq!(restored.sessions[0].session_id, "remote");
+        assert_eq!(restored.sessions[0].ai_mode, Some(SessionAiMode::Ask));
+        assert_eq!(restored.sessions[1].session_id, "local");
+        assert_eq!(restored.sessions[1].ai_mode, Some(SessionAiMode::Agent));
+        assert_eq!(restored.sessions[1].scrollback_lines, 3);
+        assert_eq!(restored.sessions[2].ai_mode, None);
+        assert_eq!(
+            scrollback(&conn, "local").unwrap().as_deref(),
+            Some("local output")
+        );
+    }
+
+    #[test]
+    fn snapshot_ipc_accepts_legacy_and_selectable_modes_but_rejects_others() {
+        let legacy = serde_json::json!({
+            "session_id": "tab", "tab_index": 0, "title": "Shell", "shell": "/bin/zsh",
+            "cols": 80, "rows": 24
+        });
+        let input: SessionSnapshotInput = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(input.ai_mode, None);
+        for (wire, expected) in [("ask", SessionAiMode::Ask), ("agent", SessionAiMode::Agent)] {
+            let mut value = legacy.clone();
+            value["ai_mode"] = wire.into();
+            let input: SessionSnapshotInput = serde_json::from_value(value).unwrap();
+            assert_eq!(input.ai_mode, Some(expected));
+        }
+        let mut null = legacy.clone();
+        null["ai_mode"] = serde_json::Value::Null;
+        assert_eq!(
+            serde_json::from_value::<SessionSnapshotInput>(null)
+                .unwrap()
+                .ai_mode,
+            None
+        );
+        for unsupported in ["full", "chat", "Agent", ""] {
+            let mut value = legacy.clone();
+            value["ai_mode"] = unsupported.into();
+            assert!(serde_json::from_value::<SessionSnapshotInput>(value).is_err());
+        }
     }
 
     #[test]

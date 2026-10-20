@@ -124,6 +124,9 @@ export interface CommandTargetMeta {
 
 export interface AiStreamState {
   mode: AiMode;
+  /** Last Ask/Agent mode for this tab. Explain is a transient request and must
+   * not replace the selector choice saved with the terminal workspace. */
+  selectedMode: SelectableAiMode;
   status:
     | "idle"
     | "streaming"
@@ -302,6 +305,7 @@ export function emptySessionUi(): SessionUiState {
 export function emptyAiStream(mode: AiMode = "ask"): AiStreamState {
   return {
     mode,
+    selectedMode: mode === "agent" ? "agent" : "ask",
     status: "idle",
     requestId: null,
     generationId: null,
@@ -528,6 +532,7 @@ export interface AppState {
     modelTranscript: ChatMessage[],
     capturedAt: string,
     mcpSelection?: McpChatSelection | null,
+    mode?: SelectableAiMode,
   ): void;
   /** Start a fresh conversation in a tab that stays open.
    *
@@ -1360,6 +1365,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       withAiStream(state, sessionId, (s) => ({
         ...s,
         mode,
+        selectedMode: mode === "explain" ? s.selectedMode : mode,
         status: "streaming",
         requestId,
         generationId: requestId,
@@ -1426,12 +1432,15 @@ export const useAppStore = create<AppState>((set, get) => ({
     modelTranscript,
     capturedAt,
     mcpSelection,
+    mode,
   ) =>
     set((state) => ({
       ...withAiStream(state, sessionId, (s) => ({
         ...s,
-        // Use the current preference, never an archived execution mode.
-        mode: defaultAiModeFor(state),
+        // Workspace restore can preserve the live selector choice. History
+        // reopen retains the configured default when no mode is supplied.
+        mode: mode ?? defaultAiModeFor(state),
+        selectedMode: mode ?? defaultAiModeFor(state),
         status: "idle",
         requestId: null,
         generationId: null,
@@ -2051,7 +2060,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     ),
 
   setAiMode: (sessionId, mode) =>
-    set((state) => withAiStream(state, sessionId, (s) => ({ ...s, mode }))),
+    set((state) =>
+      withAiStream(state, sessionId, (s) => ({
+        ...s,
+        mode,
+        selectedMode: mode === "explain" ? s.selectedMode : mode,
+      })),
+    ),
 
   renamingSessionId: null,
   setRenamingSession: (id) => set({ renamingSessionId: id }),

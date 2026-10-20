@@ -260,6 +260,8 @@ beforeEach(() => {
     sessionUi: {},
     aiStreams: {},
     sidecars: {},
+    defaultAiMode: "ask",
+    lastAiMode: "ask",
   });
   useUpdateStore.setState({ ...initialUpdateState });
 });
@@ -298,6 +300,121 @@ describe("session creation update barrier", () => {
 });
 
 describe("restoreSessions", () => {
+  it("restores mixed modes per tab without arming restored Agent or SSH tabs", async () => {
+    useAppStore.setState({ defaultAiMode: "agent", lastAiMode: "agent" });
+    restoreWorkspace([
+      meta("old-c", 2, { ai_mode: "ask" }),
+      meta("old-a", 0, { ai_mode: "ask" }),
+      meta("old-b", 1, { ai_mode: "agent", host_id: "prod", remote_kind: "ssh", remote_target: "prod" }),
+    ], "old-b");
+    const { result } = renderHook(() => useSessions());
+    await expect(result.current.restoreSessions()).resolves.toBe(3);
+
+    const state = useAppStore.getState();
+    expect(state.sessions.map((session) => state.aiStreams[session.id].mode)).toEqual(["ask", "agent", "ask"]);
+    expect(state.activeSessionId).toBe(state.sessions[1].id);
+    expect(state.lastAiMode).toBe("agent");
+    expect(state.sessionUi[state.sessions[1].id].remote).toBeNull();
+    expect(state.sidecars).toEqual({});
+    for (const session of state.sessions) {
+      expect(state.aiStreams[session.id]).toMatchObject({
+        status: "idle", permissionMode: "ask", requestId: null,
+        pause: null, pendingProposal: null, pendingMcpProposal: null,
+      });
+    }
+  });
+
+  it.each(["ask", "agent"] as const)("keeps saved %s mode after restoring a chat transcript", async (mode) => {
+    useAppStore.setState({ defaultAiMode: mode === "ask" ? "agent" : "ask" });
+    mockArchivedChat(archivedDetail("old"), [{ role: "user", content: "diagnose this" }]);
+    restoreWorkspace([meta("old", 0, { ai_mode: mode })]);
+    const { result } = renderHook(() => useSessions());
+    await result.current.restoreSessions();
+
+    const state = useAppStore.getState();
+    expect(state.aiStreams[state.sessions[0].id]).toMatchObject({
+      mode, selectedMode: mode, permissionMode: "ask", status: "idle",
+    });
+  });
+
+  it("keeps the saved mode when the archived chat is unreadable", async () => {
+    archiveListMock.mockRejectedValueOnce(new Error("archive index unavailable"));
+    archiveGetMock.mockRejectedValueOnce(new Error("archive unavailable"));
+    restoreWorkspace([meta("old", 0, { ai_mode: "agent" })]);
+    const { result } = renderHook(() => useSessions());
+    await result.current.restoreSessions();
+
+    const state = useAppStore.getState();
+    expect(state.aiStreams[state.sessions[0].id].mode).toBe("agent");
+  });
+
+  it.each([
+    { defaultAiMode: "ask", lastAiMode: "agent", expected: "ask" },
+    { defaultAiMode: "agent", lastAiMode: "ask", expected: "agent" },
+    { defaultAiMode: "remember", lastAiMode: "agent", expected: "agent" },
+    { defaultAiMode: "remember", lastAiMode: "ask", expected: "ask" },
+  ] as const)("uses $defaultAiMode defaults for legacy tabs with remembered $lastAiMode", async (policy) => {
+    useAppStore.setState({ defaultAiMode: policy.defaultAiMode, lastAiMode: policy.lastAiMode });
+    restoreWorkspace([meta("missing", 0), meta("null", 1, { ai_mode: null })]);
+    const { result } = renderHook(() => useSessions());
+    await result.current.restoreSessions();
+    await result.current.createSession();
+
+    const state = useAppStore.getState();
+    expect(state.sessions.map((session) => state.aiStreams[session.id].mode))
+      .toEqual([policy.expected, policy.expected, policy.expected]);
+    expect(state.lastAiMode).toBe(policy.lastAiMode);
+  });
+
+  it("shows the saved mode during PTY startup and preserves a new selection through chat hydration", async () => {
+    let finishSpawn!: () => void;
+    let spawnStarted!: () => void;
+    const spawning = new Promise<void>((resolve) => { finishSpawn = resolve; });
+    const started = new Promise<void>((resolve) => { spawnStarted = resolve; });
+    spawnMock.mockImplementationOnce(async () => {
+      spawnStarted();
+      await spawning;
+      return 1234;
+    });
+    mockArchivedChat(archivedDetail("old"), []);
+    restoreWorkspace([meta("old", 0, { ai_mode: "agent" })]);
+    const { result } = renderHook(() => useSessions());
+    const restoring = result.current.restoreSessions();
+    await started;
+    const sessionId = useAppStore.getState().activeSessionId!;
+    expect(useAppStore.getState().aiStreams[sessionId].mode).toBe("agent");
+    useAppStore.getState().setAiMode(sessionId, "ask");
+    finishSpawn();
+    await restoring;
+
+    expect(useAppStore.getState().aiStreams[sessionId]).toMatchObject({ mode: "ask", selectedMode: "ask" });
+    expect(useAppStore.getState().aiStreams[sessionId].messages).toHaveLength(2);
+  });
+
+  it("does not overwrite a new selection while the restored transcript is saving", async () => {
+    let finishSave!: () => void;
+    let saveStarted!: () => void;
+    const saving = new Promise<void>((resolve) => { finishSave = resolve; });
+    const started = new Promise<void>((resolve) => { saveStarted = resolve; });
+    archiveTranscriptOnlyMock.mockImplementationOnce(async () => {
+      saveStarted();
+      await saving;
+      return true;
+    });
+    mockArchivedChat(archivedDetail("old"), []);
+    restoreWorkspace([meta("old", 0, { ai_mode: "agent" })]);
+    const { result } = renderHook(() => useSessions());
+    const restoring = result.current.restoreSessions();
+    await started;
+    const sessionId = useAppStore.getState().activeSessionId!;
+    expect(useAppStore.getState().aiStreams[sessionId].mode).toBe("agent");
+    useAppStore.getState().setAiMode(sessionId, "ask");
+    finishSave();
+    await restoring;
+
+    expect(useAppStore.getState().aiStreams[sessionId].mode).toBe("ask");
+  });
+
   it("returns 0 when there is nothing saved, so App opens a fresh tab", async () => {
     restoreWorkspace([]);
     const { result } = renderHook(() => useSessions());

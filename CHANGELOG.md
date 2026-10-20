@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.8
+
+- Remember each terminal tab's Ask or Agent selection across restarts, including tabs with saved conversations, while retaining configured defaults for new tabs and command approval on restored Agent tabs.
+
 ## 0.6.7
 
 - Preserve shell tracking when startup tools replace the local shell, covering saved-host reconnect and local Agent commands without editing user profiles or depending on a particular CLI.

@@ -621,7 +621,7 @@ export const S = {
       title: "Agent",
       defaultMode: "Default mode",
       defaultModeHint:
-        "Choose the mode for new terminals, new terminal chats, and restored sessions. Remember last used keeps your most recent Ask or Agent selection across app restarts. Command approval starts at Ask each time.",
+        "Choose the mode for new terminals, new terminal chats, and sessions reopened from History. Remember last used follows your latest Ask or Agent selection. Tabs restored after restart keep their own mode. Command approval starts at Confirm each time.",
       defaultModeAsk: "Always Ask",
       defaultModeAgent: "Always Agent",
       defaultModeRemember: "Remember last used",

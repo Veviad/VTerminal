@@ -89,7 +89,7 @@ export async function restoreArchivedAiTranscript(
   sessionId: string,
   detail: ArchiveDetail,
   modelTranscript: ChatMessage[],
-  opts: { openPanel?: boolean } = {},
+  opts: { openPanel?: boolean; preserveMode?: boolean } = {},
 ): Promise<boolean> {
   if (detail.messages.length === 0) return false;
 
@@ -101,6 +101,9 @@ export async function restoreArchivedAiTranscript(
       modelTranscript,
       detail.summary.closed_at,
       detail.mcp_selection,
+      opts.preserveMode
+        ? useAppStore.getState().aiStreams[sessionId]?.selectedMode
+        : undefined,
     );
 
   // Persist the live replacement immediately. This keeps restored attachment

@@ -208,13 +208,65 @@ beforeEach(() => {
   __resetPersistenceForTests();
   resetRunbookTerminalPrivacyForTests();
   seed([makeSession("a")], "a");
-  useAppStore.setState({ clearTerminalOnNewChat: false });
+  useAppStore.setState({ clearTerminalOnNewChat: false, defaultAiMode: "ask", lastAiMode: "ask" });
 });
 
 afterEach(() => {
   __resetPersistenceForTests();
   resetRunbookTerminalPrivacyForTests();
   vi.useRealTimers();
+});
+
+describe("per-tab AI mode snapshots", () => {
+  it("saves independent local and saved-host selections", async () => {
+    seed([makeSession("a"), makeSession("b", { hostId: "prod" })], "b");
+    useAppStore.getState().setAiMode("a", "ask");
+    useAppStore.getState().setAiMode("b", "agent");
+    startPersistence();
+    await flushAll();
+
+    expect(lastSnapshot().sessions.map((session) => session.ai_mode)).toEqual(["ask", "agent"]);
+    expect(lastSnapshot().active_session_id).toBe("b");
+  });
+
+  it("persists a mode-only change on the metadata debounce", async () => {
+    startPersistence();
+    await vi.advanceTimersByTimeAsync(800);
+    snapshotMock.mockClear();
+    serializeMock.mockClear();
+
+    useAppStore.getState().setAiMode("a", "agent");
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect(snapshotMock).toHaveBeenCalledTimes(1);
+    expect(lastSnapshot().sessions[0]).toMatchObject({ ai_mode: "agent", scrollback: null });
+    expect(serializeMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps the tab's selection during Explain even if another tab changes the global choice", async () => {
+    seed([makeSession("a"), makeSession("b")], "a");
+    useAppStore.getState().setAiMode("a", "agent");
+    useAppStore.getState().setAiMode("b", "ask");
+    useAppStore.setState({ lastAiMode: "ask" });
+    startPersistence();
+    await vi.advanceTimersByTimeAsync(800);
+    snapshotMock.mockClear();
+
+    useAppStore.getState().setAiMode("a", "explain");
+    await vi.advanceTimersByTimeAsync(800);
+    expect(snapshotMock).not.toHaveBeenCalled();
+    await flushAll();
+
+    expect(lastSnapshot().sessions.map((session) => session.ai_mode)).toEqual(["agent", "ask"]);
+  });
+
+  it("captures the latest mode when quitting before its debounce", async () => {
+    startPersistence();
+    useAppStore.getState().setAiMode("a", "agent");
+    await preparePersistenceForExit();
+
+    expect(lastSnapshot().sessions[0].ai_mode).toBe("agent");
+  });
 });
 
 describe("cleared terminal snapshots", () => {
