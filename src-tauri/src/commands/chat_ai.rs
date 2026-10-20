@@ -71,6 +71,7 @@ fn tool_result(id: &str, content: impl Into<String>) -> ChatMessage {
         tool_call_id: Some(id.to_string()),
         images: None,
         structured_tool_result: None,
+        provider_state: None,
     }
 }
 
@@ -367,7 +368,11 @@ pub async fn chat_start(
             }
         };
         let crate::provider::round::RoundOutput {
-            calls, text, usage, ..
+            calls,
+            text,
+            usage,
+            provider_state,
+            ..
         } = output;
         total_usage.0 = total_usage.0.saturating_add(usage.0);
         total_usage.1 = total_usage.1.saturating_add(usage.1);
@@ -375,6 +380,7 @@ pub async fn chat_start(
         // next iteration asks how full the window is, not what the turn has cost.
         last_prompt_tokens = usage.0;
         let mut assistant = ChatMessage::assistant(text);
+        assistant.provider_state = provider_state;
         if !calls.is_empty() {
             assistant.tool_calls = Some(calls.clone());
         }

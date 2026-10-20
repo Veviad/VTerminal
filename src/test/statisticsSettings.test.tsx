@@ -49,7 +49,7 @@ const DATA: TokenStatistics = {
     },
     {
       id: "openai/gpt-5.6-terra",
-      label: "GPT-5.6 Terra",
+      label: "GPT-6.1 Sol",
       provider: "openai",
       input_tokens: 400,
       output_tokens: 150,
@@ -78,7 +78,7 @@ describe("Statistics settings", () => {
     expect(screen.getByText("56.0%")).toBeInTheDocument();
     expect(screen.getByText("44.0%")).toBeInTheDocument();
     expect(screen.getByText("Qwen3.5 9B")).toBeInTheDocument();
-    expect(screen.getByText("GPT-5.6 Terra")).toBeInTheDocument();
+    expect(screen.getByText("GPT-6.1 Sol")).toBeInTheDocument();
   });
 
   it("appears between SSH hosts and Updates in the settings navigation", () => {

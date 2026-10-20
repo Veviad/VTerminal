@@ -1,13 +1,13 @@
 //! Cloud providers over HTTP + SSE.
 //!
-//! Two modules cover three vendors: OpenAI and Mistral both speak the OpenAI
-//! Chat Completions shape and differ only in base URL and the name of their
-//! reasoning parameter, so they share `openai_compat`. Anthropic's Messages API
-//! is genuinely different (top-level `system`, typed content blocks,
-//! `output_config.effort`) and gets its own module.
+//! OpenAI uses Responses to preserve reasoning across client-tool rounds.
+//! Mistral and configured inference servers use `openai_compat` for Chat
+//! Completions. Anthropic uses Messages with typed content blocks and adaptive
+//! thinking.
 
 pub mod anthropic;
 pub mod openai_compat;
+pub mod openai_responses;
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -205,8 +205,9 @@ where
     F: FnMut(&str, &mut Vec<ProviderEvent>) -> Result<bool, ProviderError>,
 {
     let mut stream = resp.bytes_stream();
-    // SSE frames split across TCP chunks routinely; buffer until a full line.
-    let mut buf = String::new();
+    // Transport chunks may split a UTF-8 character as well as an SSE line.
+    // Decode only complete lines so a partial character keeps its original bytes.
+    let mut buf = Vec::new();
     let mut out: Vec<ProviderEvent> = Vec::new();
 
     loop {
@@ -220,10 +221,15 @@ where
         };
         let Some(chunk) = chunk else { break };
         let bytes = chunk.map_err(|e| ProviderError::Http(format!("stream error: {e}")))?;
-        buf.push_str(&String::from_utf8_lossy(&bytes));
+        buf.extend_from_slice(&bytes);
 
-        while let Some(nl) = buf.find('\n') {
-            let line = buf[..nl].trim_end_matches('\r').to_string();
+        while let Some(nl) = buf.iter().position(|byte| *byte == b'\n') {
+            let line = std::str::from_utf8(&buf[..nl])
+                .map_err(|error| {
+                    ProviderError::Http(format!("invalid UTF-8 in provider stream: {error}"))
+                })?
+                .trim_end_matches('\r')
+                .to_string();
             buf.drain(..nl + 1);
             let Some(data) = line.strip_prefix("data:") else {
                 continue; // `event:` / `id:` / keep-alive comments
@@ -322,6 +328,88 @@ mod tests {
         )
         .to_string();
         assert!(!error.contains("sentinel-provider-secret"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn sse_preserves_utf8_split_across_http_body_chunks() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/chat", listener.local_addr().unwrap());
+        let (first_line_tx, mut first_line_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            // Drain the GET request before closing the response. Closing with
+            // unread request bytes can reset the socket on macOS and Windows.
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert!(read > 0);
+                request.extend_from_slice(&chunk[..read]);
+            }
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+
+            // Split the two bytes of e-acute between distinct HTTP chunks. The
+            // first line lets the reader acknowledge consuming the first chunk
+            // before the server sends the remainder, without timing assumptions.
+            let first =
+                b"data: {\"type\":\"boundary\"}\n\ndata: {\"type\":\"delta\",\"text\":\"caf\xc3";
+            let second = b"\xa9\"}\n\ndata: {\"type\":\"done\",\"text\":\"caf\xc3\xa9\"}\n\n";
+            for (index, chunk) in [first.as_slice(), second.as_slice()]
+                .into_iter()
+                .enumerate()
+            {
+                if index == 1 {
+                    (&mut first_line_rx).await.unwrap();
+                }
+                socket
+                    .write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
+                    .await
+                    .unwrap();
+                socket.write_all(chunk).await.unwrap();
+                socket.write_all(b"\r\n").await.unwrap();
+            }
+            socket.write_all(b"0\r\n\r\n").await.unwrap();
+        });
+
+        let response = client().unwrap().get(url).send().await.unwrap();
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let mut first_line_tx = Some(first_line_tx);
+        let mut streamed_text = String::new();
+        let cancelled = tokio::time::timeout(
+            Duration::from_secs(3),
+            read_sse(response, &mut cancel_rx, &tx, |data, out| {
+                let event: serde_json::Value = serde_json::from_str(data).unwrap();
+                match event["type"].as_str().unwrap() {
+                    "boundary" => first_line_tx.take().unwrap().send(()).unwrap(),
+                    "delta" => {
+                        let text = event["text"].as_str().unwrap();
+                        streamed_text.push_str(text);
+                        out.push(ProviderEvent::TextDelta(text.into()));
+                    }
+                    "done" => {
+                        assert_eq!(streamed_text, event["text"].as_str().unwrap());
+                        assert_eq!(streamed_text, "café");
+                        return Ok(true);
+                    }
+                    other => panic!("unexpected fixture event: {other}"),
+                }
+                Ok(false)
+            }),
+        )
+        .await
+        .expect("split UTF-8 stream must complete")
+        .unwrap();
+        assert!(!cancelled);
+        assert!(matches!(rx.recv().await, Some(ProviderEvent::TextDelta(text)) if text == "café"));
+        server.await.unwrap();
     }
 
     #[tokio::test]

@@ -5,8 +5,8 @@ import type { Effort } from "../lib/types";
 
 // The point of the picker is that it is driven by the MODEL's capabilities, not
 // by a fixed five-way switch. These tests pin that: a rung the model would
-// reject must never be offered, because offering it produces a 400 (Claude
-// Haiku 4.5 errors on the effort param; Mistral has no rung above `high`).
+// reject must never be offered, because offering it produces a 400 (Opus 5.5
+// cannot turn thinking off; Mistral has no rung above `high`).
 describe("EffortPicker", () => {
   const noop = () => {};
 

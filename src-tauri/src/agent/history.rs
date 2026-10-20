@@ -187,6 +187,7 @@ fn rescue_orphaned_tool_results(history: &mut Vec<ChatMessage>) {
             if !paired {
                 m.role = Role::User;
                 m.tool_call_id = None;
+                m.provider_state = None;
                 if !m.content.trim().is_empty() {
                     m.content = format!(
                         "Result of a command from earlier in this session:\n{}",
@@ -219,10 +220,16 @@ fn drop_unanswered_tool_calls(history: &mut Vec<ChatMessage>) {
             return true;
         }
         if let Some(calls) = m.tool_calls.take() {
+            let original_count = calls.len();
             let kept: Vec<_> = calls
                 .into_iter()
                 .filter(|c| answered.iter().any(|id| id == &c.id))
                 .collect();
+            if kept.len() != original_count {
+                // Encrypted reasoning belongs to the complete output group.
+                // Repaired groups fall back to portable text and calls.
+                m.provider_state = None;
+            }
             if !kept.is_empty() {
                 m.tool_calls = Some(kept);
                 return true;
@@ -248,6 +255,7 @@ fn trim_to_budget(history: &mut Vec<ChatMessage>, budget: Budget) {
             // trim. Counting it also makes image-bearing turns the first thing
             // evicted, which is the right eviction order anyway.
             + m.image_bytes()
+            + m.provider_state.as_ref().map_or(0, |state| state.storage_bytes())
     };
     let mut total: usize = history.iter().map(cost).sum();
     let mut drop_from_front = 0usize;
@@ -271,7 +279,9 @@ pub(crate) fn merge_adjacent_same_role(messages: &mut Vec<ChatMessage>) {
     let mut i = 1;
     while i < messages.len() {
         let mergeable = matches!(messages[i].role, Role::User | Role::Assistant)
-            && messages[i].role == messages[i - 1].role;
+            && messages[i].role == messages[i - 1].role
+            && messages[i].provider_state.is_none()
+            && messages[i - 1].provider_state.is_none();
         if !mergeable {
             i += 1;
             continue;
@@ -369,6 +379,7 @@ mod tests {
             tool_calls: Some(vec![call(id)]),
             tool_call_id: None,
             structured_tool_result: None,
+            provider_state: None,
             images: None,
         }
     }
@@ -380,6 +391,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: Some(id.into()),
             structured_tool_result: None,
+            provider_state: None,
             images: None,
         }
     }
@@ -676,6 +688,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: Some(String::new()),
                 structured_tool_result: None,
+                provider_state: None,
                 images: None,
             },
         ]);
@@ -693,6 +706,7 @@ mod tests {
             tool_calls: Some(vec![call("never_answered")]),
             tool_call_id: None,
             structured_tool_result: None,
+            provider_state: None,
             images: None,
         }]);
         normalize(&mut messages);
@@ -708,6 +722,7 @@ mod tests {
             tool_calls: Some(vec![call("never_answered")]),
             tool_call_id: None,
             structured_tool_result: None,
+            provider_state: None,
             images: None,
         }]);
         normalize(&mut messages);
@@ -724,6 +739,7 @@ mod tests {
                 tool_calls: Some(vec![call("c1"), call("c2")]),
                 tool_call_id: None,
                 structured_tool_result: None,
+                provider_state: None,
                 images: None,
             },
             tool_result("c1"),
@@ -785,6 +801,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: Some("gone".into()),
             structured_tool_result: None,
+            provider_state: None,
             images: None,
         }]);
         normalize(&mut messages);
@@ -801,6 +818,7 @@ mod tests {
                 tool_calls: Some(vec![call("c1"), call("c2")]),
                 tool_call_id: None,
                 structured_tool_result: None,
+                provider_state: None,
                 images: None,
             },
             tool_result("c1"),
@@ -898,6 +916,7 @@ mod tests {
                 tool_calls: Some(vec![call("c1"), call("c2")]),
                 tool_call_id: None,
                 structured_tool_result: None,
+                provider_state: None,
                 images: None,
             },
             tool_result("c1"),
@@ -1012,5 +1031,88 @@ mod tests {
             !cut.iter().any(|m| m.content.contains("q0 ")),
             "the agent budget is still the default"
         );
+    }
+
+    fn responses_state(output: Vec<serde_json::Value>) -> crate::provider::ProviderState {
+        crate::provider::ProviderState::OpenAiResponses {
+            model: "gpt-6.1-sol".into(),
+            output,
+            reasoning_tokens: 42,
+        }
+    }
+
+    #[test]
+    fn provider_state_survives_snapshot_json_reopen_and_assistant_boundaries() {
+        let mut assistant = ChatMessage::assistant("first answer");
+        assistant.provider_state = Some(responses_state(vec![serde_json::json!({
+            "type": "reasoning", "id": "rs_1", "summary": [],
+            "encrypted_content": "opaque-sentinel",
+        })]));
+        let mut messages = seed(vec![assistant, ChatMessage::assistant("second answer")]);
+        normalize(&mut messages);
+        let snapshot = storage_snapshot(&messages);
+        let encoded = serde_json::to_string(&snapshot).unwrap();
+        let restored: Vec<ChatMessage> = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            restored
+                .iter()
+                .filter(|message| message.role == Role::Assistant)
+                .count(),
+            2
+        );
+        assert!(restored[0].provider_state.is_some());
+        assert!(serde_json::to_string(&restored)
+            .unwrap()
+            .contains("opaque-sentinel"));
+        let old: ChatMessage =
+            serde_json::from_str(r#"{"role":"assistant","content":"old answer"}"#).unwrap();
+        assert!(old.provider_state.is_none());
+        assert!(!serde_json::to_string(&old)
+            .unwrap()
+            .contains("provider_state"));
+    }
+
+    #[test]
+    fn normalization_invalidates_provider_state_when_pruning_unanswered_calls() {
+        let mut assistant = assistant_with("answered");
+        assistant
+            .tool_calls
+            .as_mut()
+            .unwrap()
+            .push(call("unanswered"));
+        assistant.provider_state = Some(responses_state(vec![
+            serde_json::json!({"type":"reasoning","id":"rs_1","encrypted_content":"opaque"}),
+            serde_json::json!({"type":"function_call","call_id":"answered"}),
+            serde_json::json!({"type":"function_call","call_id":"unanswered"}),
+        ]));
+        let mut messages = seed(vec![assistant, tool_result("answered")]);
+        normalize(&mut messages);
+        assert_wire_valid(&messages);
+        let assistant = messages
+            .iter()
+            .find(|message| message.role == Role::Assistant)
+            .unwrap();
+        assert!(assistant.provider_state.is_none());
+        let calls = assistant.tool_calls.as_ref().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "answered");
+    }
+
+    #[test]
+    fn storage_budget_counts_opaque_provider_state() {
+        let mut assistant = ChatMessage::assistant("tiny answer");
+        assistant.provider_state = Some(responses_state(vec![serde_json::json!({
+            "type":"reasoning", "encrypted_content":"x".repeat(2000),
+        })]));
+        let snapshot = storage_snapshot_with(
+            &[assistant, ChatMessage::user("recent")],
+            Budget {
+                chars: 100,
+                messages: 10,
+            },
+        );
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].content, "recent");
+        assert!(snapshot[0].provider_state.is_none());
     }
 }

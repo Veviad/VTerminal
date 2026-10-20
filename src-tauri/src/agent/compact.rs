@@ -217,7 +217,13 @@ fn message_tokens_usize(message: &ChatMessage) -> usize {
             .flatten()
             .map(|call| call.arguments.len() + call.name.len())
             .sum::<usize>();
-    PER_MESSAGE_TOKENS + text / CHARS_PER_TOKEN + message.image_bytes() / IMAGE_CHARS_PER_TOKEN
+    PER_MESSAGE_TOKENS
+        + text / CHARS_PER_TOKEN
+        + message.image_bytes() / IMAGE_CHARS_PER_TOKEN
+        + message
+            .provider_state
+            .as_ref()
+            .map_or(0, |state| state.reasoning_tokens() as usize)
 }
 
 fn message_tokens(message: &ChatMessage) -> u32 {
@@ -515,6 +521,7 @@ mod tests {
             tool_calls: Some(vec![call(id)]),
             tool_call_id: None,
             structured_tool_result: None,
+            provider_state: None,
             images: None,
         }
     }
@@ -526,6 +533,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: Some(id.into()),
             structured_tool_result: None,
+            provider_state: None,
             images: None,
         }
     }
@@ -668,6 +676,26 @@ mod tests {
     #[tokio::test]
     async fn compaction_replaces_the_old_span_and_keeps_the_tail() {
         let mut messages = long_transcript(12);
+        for (index, message) in messages.iter_mut().enumerate() {
+            if message.role == Role::Assistant {
+                message.provider_state = Some(crate::provider::ProviderState::OpenAiResponses {
+                    model: "gpt-6-luna".into(),
+                    output: vec![serde_json::json!({
+                        "type": "reasoning", "encrypted_content": format!("opaque-{index}"),
+                    })],
+                    reasoning_tokens: 42,
+                });
+            }
+        }
+        let tail_state = serde_json::to_value(
+            &messages
+                .iter()
+                .rev()
+                .find(|message| message.role == Role::Assistant)
+                .unwrap()
+                .provider_state,
+        )
+        .unwrap();
         let before = messages.len();
         let oldest = messages[1].content.clone();
         let newest = messages.last().unwrap().content.clone();
@@ -691,6 +719,22 @@ mod tests {
         assert!(messages[1].content.contains("debugging a pty"));
         assert!(!messages.iter().any(|m| m.content == oldest));
         assert_eq!(messages.last().unwrap().content, newest);
+        assert_eq!(
+            serde_json::to_value(
+                &messages
+                    .iter()
+                    .rev()
+                    .find(|message| message.role == Role::Assistant)
+                    .unwrap()
+                    .provider_state,
+            )
+            .unwrap(),
+            tail_state
+        );
+        assert!(!serde_json::to_string(&messages)
+            .unwrap()
+            .contains("opaque-2\""));
+        assert!(messages[1].provider_state.is_none());
         assert!(
             messages
                 .windows(2)
@@ -908,5 +952,25 @@ mod tests {
             2_048,
             DEFAULT_THRESHOLD_PERCENT
         ));
+    }
+
+    #[test]
+    fn reasoning_tokens_count_toward_context_without_summarizing_ciphertext() {
+        let mut message = assistant("visible answer");
+        let baseline = message_tokens(&message);
+        message.provider_state = Some(crate::provider::ProviderState::OpenAiResponses {
+            model: "gpt-6-astra".into(),
+            output: vec![serde_json::json!({
+                "type":"reasoning", "encrypted_content":"CIPHERTEXT-SENTINEL".repeat(100),
+            })],
+            reasoning_tokens: 1234,
+        });
+        assert_eq!(message_tokens(&message), baseline + 1234);
+        let rendered = render_span(&[message], 10000);
+        assert!(rendered.contains("visible answer"));
+        assert!(!rendered.contains("CIPHERTEXT-SENTINEL"));
+        assert!(summary_message("remember the facts")
+            .provider_state
+            .is_none());
     }
 }

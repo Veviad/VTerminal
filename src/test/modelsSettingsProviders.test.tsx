@@ -35,39 +35,45 @@ const { ModelsSettings } = await import("../components/settings/ModelsSettings")
 const { useAppStore } = await import("../stores/appStore");
 
 /** One cloud row, shaped exactly as `models_catalog` serializes it. */
-function cloudEntry(provider: string, id: string, label: string): CatalogEntry {
+function cloudEntry(provider: string, id: string, label: string, wireModel: string): CatalogEntry {
   return {
     id,
     provider,
-    tier: "balanced",
+    tier: provider === "mistral" ? "fast" : "balanced",
     label,
     description: `${label} description`,
-    wire_model: id.split("/")[1],
-    context_tokens: 400_000,
-    efforts: ["off", "low", "medium", "high", "max"],
-    default_effort: "medium",
-    supports_temperature: false,
-    native_web_fetch: false,
+    wire_model: wireModel,
+    context_tokens: provider === "openai" ? 1_050_000 : provider === "mistral" ? 256_000 : 1_000_000,
+    efforts: provider === "openai"
+      ? ["low", "medium", "high", "max"]
+      : provider === "mistral"
+        ? ["off", "high"]
+        : ["off", "low", "medium", "high", "max"],
+    default_effort: provider === "anthropic" ? "high" : provider === "mistral" ? "off" : "medium",
+    supports_temperature: provider === "mistral",
+    supports_tools: true,
+    native_web_search: provider === "anthropic",
+    native_web_fetch: provider === "anthropic",
     supports_vision: true,
     local: null,
     remote: null,
     fits: true,
     downloaded: false,
     configured: false,
-    effort: "medium",
+    effort: provider === "anthropic" ? "high" : provider === "mistral" ? "off" : "medium",
   } as CatalogEntry;
 }
 
 const CLOUD = [
-  ["anthropic", "anthropic/claude-sonnet-5", "Claude Sonnet 5"],
-  ["openai", "openai/gpt-5.6-terra", "GPT-5.6 Terra"],
-  ["mistral", "mistral/mistral-small-latest", "Mistral Small 4"],
+  ["anthropic", "anthropic/claude-sonnet-5", "Claude Sonnet 5.5", "claude-sonnet-5-5"],
+  ["openai", "openai/gpt-5.6-terra", "GPT-6.1 Sol", "gpt-6.1-sol"],
+  ["mistral", "mistral/mistral-small-latest", "Mistral Small 4", "mistral-small-2603"],
 ] as const;
 
 describe("ModelsSettings provider sections", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    catalog.mockResolvedValue(CLOUD.map(([p, id, label]) => cloudEntry(p, id, label)));
+    catalog.mockResolvedValue(CLOUD.map(([p, id, label, wire]) => cloudEntry(p, id, label, wire)));
     saved.mockResolvedValue(undefined);
     useAppStore.setState({
       activeModelId: "local/qwen3.5-9b",
@@ -94,7 +100,7 @@ describe("ModelsSettings provider sections", () => {
 
   it("shows chat accelerator device memory and fallback state", async () => {
     render(<ModelsSettings />);
-    await screen.findByText("GPT-5.6 Terra");
+    await screen.findByText("GPT-6.1 Sol");
 
     act(() => {
       useAppStore.setState({
@@ -115,7 +121,7 @@ describe("ModelsSettings provider sections", () => {
 
   it("gives OpenAI a reachable API-key field", async () => {
     render(<ModelsSettings />);
-    await screen.findByText("GPT-5.6 Terra");
+    await screen.findByText("GPT-6.1 Sol");
     // Three cloud providers, three key fields. Before the fix OpenAI's row set
     // rendered as null, so the ONLY input that can write `openai_api_key` did not
     // exist — the backend accepted a key nothing could send it.
@@ -132,7 +138,7 @@ describe("ModelsSettings provider sections", () => {
     // with `entry.provider`. A drift here makes a keyed model look unusable.
     useAppStore.setState({ hasApiKey: { openai: true } });
     render(<ModelsSettings />);
-    await screen.findByText("GPT-5.6 Terra");
+    await screen.findByText("GPT-6.1 Sol");
     // Exactly one field says "stored", and it is OpenAI's.
     expect(screen.getAllByPlaceholderText(S.settings.models.apiKeyStored)).toHaveLength(1);
     expect(screen.getAllByPlaceholderText(S.settings.models.apiKey)).toHaveLength(2);

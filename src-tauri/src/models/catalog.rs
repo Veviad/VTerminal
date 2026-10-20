@@ -5,11 +5,10 @@
 //!
 //! 1. Every entry declares the reasoning-effort rungs it *actually* supports
 //!    (`efforts`). A boolean can't express `low|medium|high|xhigh|max`
-//!    (Anthropic Sonnet 5 / Opus 5, OpenAI), a ladder that stops at `high`
-//!    (Mistral), a numeric `budget_tokens` (Claude Haiku 4.5, which *errors* on
-//!    the effort param) and a plain on/off toggle (Qwen and Gemma hybrid
-//!    thinking) at once — so the app carries one normalized ladder and each
-//!    provider maps it onto its own wire parameter. The UI renders exactly
+//!    (Anthropic and OpenAI), an always-on reasoning model without `Off`,
+//!    a ladder that stops at `high` (Mistral), and a budget-based thinking
+//!    toggle (on-device Qwen and Gemma) at once — so the app carries one
+//!    normalized ladder and each provider maps it onto its own wire parameter. The UI renders exactly
 //!    these rungs, so a rung the model would reject is never offered.
 //! 2. Local entries name a concrete GGUF file whose architecture the embedded
 //!    llama.cpp engine can load. Sizes and `min_ram_gb` below were taken from
@@ -23,7 +22,8 @@ use serde::{Deserialize, Serialize};
 
 /// Normalized reasoning-effort ladder.
 ///
-/// `Off` means "do not think at all"; the rest are relative depths. Providers
+/// `Off` disables up-front reasoning where supported; progress updates between
+/// tool calls may still be returned. The rest are relative depths. Providers
 /// clamp a requested rung to what the model declares, then translate. Ordering
 /// is meaningful — `clamp` walks it to find the nearest supported rung.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -230,8 +230,8 @@ pub struct CatalogModel {
     /// and the UI hides the picker entirely.
     pub efforts: &'static [Effort],
     pub default_effort: Effort,
-    /// Claude Opus 5 and Sonnet 5 reject `temperature` with a 400, as do the
-    /// GPT-5.6 reasoning models — the request builder must omit it entirely.
+    /// Current Claude and GPT reasoning models reject non-default sampling
+    /// settings — the request builder must omit temperature entirely.
     pub supports_temperature: bool,
     /// Whether the model/provider path can execute app-owned client tools.
     pub supports_tools: bool,
@@ -301,12 +301,9 @@ const FULL: &[Effort] = &[
 ];
 /// Hybrid-thinking models: on/off plus depth expressed as a token budget.
 const TOGGLE_PLUS: &[Effort] = &[Effort::Off, Effort::Low, Effort::Medium, Effort::High];
-/// No reasoning parameter at all. Not "the model always thinks" and not "it
-/// never thinks" — it means the vendor's effort field is not accepted on this
-/// model and sending it *fails the request*. Mistral Large 3 answers one with
-/// `400 reasoning_effort is not enabled for this model`. Adapters must omit the
-/// field entirely for these, and the UI hides the picker.
-const NO_REASONING: &[Effort] = &[];
+/// Models whose reasoning cannot be turned off. A stored Off preference clamps
+/// to Low so an upgrading user gets the least expensive supported setting.
+const ALWAYS_REASONING: &[Effort] = &[Effort::Low, Effort::Medium, Effort::High, Effort::Max];
 /// Mistral has no depth control at all — its API accepts exactly `none` and
 /// `high`, and rejects anything else with a 400 naming the two legal values.
 /// This is the whole Mistral lineup, not just the reasoning model.
@@ -548,19 +545,19 @@ pub const CATALOG: &[CatalogModel] = &[
         }),
     },
     // ------------------------------------------------------------ anthropic
+    // App ids deliberately keep their shipped spelling: saved selections and
+    // per-model effort settings survive a provider release refresh.
     CatalogModel {
         id: "anthropic/claude-haiku-4-5",
         provider: ProviderId::Anthropic,
         tier: Tier::Fast,
-        label: "Claude Haiku 4.5",
-        description: "Fastest and cheapest Claude. Depth is a thinking budget — it has no effort parameter.",
-        wire_model: "claude-haiku-4-5",
-        context_tokens: 200_000,
-        // Haiku 4.5 ERRORS on output_config.effort; the adapter spends these
-        // rungs as thinking budget_tokens instead.
-        efforts: TOGGLE_PLUS,
+        label: "Claude Haiku 5.5",
+        description: "Fast, cost-efficient Claude with adaptive thinking and a 1M context window.",
+        wire_model: "claude-haiku-5-5",
+        context_tokens: 1_000_000,
+        efforts: FULL,
         default_effort: Effort::Low,
-        supports_temperature: true,
+        supports_temperature: false,
         supports_tools: true,
         native_web_search: true,
         native_web_fetch: true,
@@ -571,13 +568,12 @@ pub const CATALOG: &[CatalogModel] = &[
         id: "anthropic/claude-sonnet-5",
         provider: ProviderId::Anthropic,
         tier: Tier::Balanced,
-        label: "Claude Sonnet 5",
-        description: "Near-Opus quality on coding and agentic work at Sonnet cost. 1M context.",
-        wire_model: "claude-sonnet-5",
+        label: "Claude Sonnet 5.5",
+        description: "Balanced Claude for coding and agentic work. Off disables up-front thinking. 1M context.",
+        wire_model: "claude-sonnet-5-5",
         context_tokens: 1_000_000,
         efforts: FULL,
         default_effort: Effort::High,
-        // Sonnet 5 rejects temperature/top_p/top_k with a 400.
         supports_temperature: false,
         supports_tools: true,
         native_web_search: true,
@@ -589,14 +585,12 @@ pub const CATALOG: &[CatalogModel] = &[
         id: "anthropic/claude-opus-5",
         provider: ProviderId::Anthropic,
         tier: Tier::Max,
-        label: "Claude Opus 5",
-        description: "Strongest Claude for long-horizon agentic work. Thinking is on by default.",
-        wire_model: "claude-opus-5",
+        label: "Claude Opus 5.5",
+        description: "Advanced Claude for long-running agentic work. Adaptive thinking is always on. 1M context.",
+        wire_model: "claude-opus-5-5",
         context_tokens: 1_000_000,
-        efforts: FULL,
+        efforts: ALWAYS_REASONING,
         default_effort: Effort::High,
-        // Same 400 as Sonnet 5. Also: disabling thinking is only legal at
-        // effort <= high, which the adapter enforces.
         supports_temperature: false,
         supports_tools: true,
         native_web_search: true,
@@ -609,10 +603,10 @@ pub const CATALOG: &[CatalogModel] = &[
         id: "openai/gpt-5.6-luna",
         provider: ProviderId::OpenAi,
         tier: Tier::Fast,
-        label: "GPT-5.6 Luna",
-        description: "Most cost-efficient GPT-5.6. Built for high-volume, latency-sensitive work.",
-        wire_model: "gpt-5.6-luna",
-        context_tokens: 400_000,
+        label: "GPT-6 Luna",
+        description: "Fast, cost-efficient GPT-6 for high-volume work. 1.05M context.",
+        wire_model: "gpt-6-luna",
+        context_tokens: 1_050_000,
         efforts: FULL,
         default_effort: Effort::Low,
         supports_temperature: false,
@@ -626,11 +620,11 @@ pub const CATALOG: &[CatalogModel] = &[
         id: "openai/gpt-5.6-terra",
         provider: ProviderId::OpenAi,
         tier: Tier::Balanced,
-        label: "GPT-5.6 Terra",
-        description: "Balance of intelligence and cost across the GPT-5.6 family.",
-        wire_model: "gpt-5.6-terra",
-        context_tokens: 400_000,
-        efforts: FULL,
+        label: "GPT-6.1 Sol",
+        description: "Balanced GPT-6.1 for coding and everyday work. Reasoning is always on. 1.05M context.",
+        wire_model: "gpt-6.1-sol",
+        context_tokens: 1_050_000,
+        efforts: ALWAYS_REASONING,
         default_effort: Effort::Medium,
         supports_temperature: false,
         supports_tools: true,
@@ -643,11 +637,11 @@ pub const CATALOG: &[CatalogModel] = &[
         id: "openai/gpt-5.6-sol",
         provider: ProviderId::OpenAi,
         tier: Tier::Max,
-        label: "GPT-5.6 Sol",
-        description: "Frontier GPT-5.6. Highest capability, highest spend.",
-        wire_model: "gpt-5.6-sol",
-        context_tokens: 400_000,
-        efforts: FULL,
+        label: "GPT-6 Astra",
+        description: "Frontier GPT-6 for the most demanding work. Reasoning is always on. 1.05M context.",
+        wire_model: "gpt-6-astra",
+        context_tokens: 1_050_000,
+        efforts: ALWAYS_REASONING,
         default_effort: Effort::High,
         supports_temperature: false,
         supports_tools: true,
@@ -662,9 +656,9 @@ pub const CATALOG: &[CatalogModel] = &[
         provider: ProviderId::Mistral,
         tier: Tier::Fast,
         label: "Mistral Small 4",
-        description: "Reasoning, vision and agentic coding in one small model. Reasoning is on or off.",
-        wire_model: "mistral-small-latest",
-        context_tokens: 128_000,
+        description: "Reasoning, vision and agentic coding in one small model. 256K context.",
+        wire_model: "mistral-small-2603",
+        context_tokens: 256_000,
         efforts: MISTRAL_TOGGLE,
         default_effort: Effort::Off,
         supports_temperature: true,
@@ -678,12 +672,11 @@ pub const CATALOG: &[CatalogModel] = &[
         id: "mistral/magistral-medium-latest",
         provider: ProviderId::Mistral,
         tier: Tier::Balanced,
-        label: "Magistral Medium",
-        description: "Mistral's dedicated reasoning model with tokenized thinking chunks.",
-        wire_model: "magistral-medium-latest",
-        context_tokens: 128_000,
+        label: "Mistral Medium 3.5",
+        description: "Multimodal Mistral for coding and agentic work with optional reasoning. 256K context.",
+        wire_model: "mistral-medium-3-5",
+        context_tokens: 256_000,
         efforts: MISTRAL_TOGGLE,
-        // A dedicated reasoning model defaults to reasoning.
         default_effort: Effort::High,
         supports_temperature: true,
         supports_tools: true,
@@ -696,22 +689,16 @@ pub const CATALOG: &[CatalogModel] = &[
         id: "mistral/mistral-large-latest",
         provider: ProviderId::Mistral,
         tier: Tier::Max,
-        label: "Mistral Large 3",
-        description: "Mistral's flagship. Best quality in the lineup for complex agentic work.",
-        wire_model: "mistral-large-latest",
-        context_tokens: 128_000,
-        // Not a reasoning model: it rejects the field rather than ignoring it.
-        efforts: NO_REASONING,
+        label: "Mistral Large 4 Preview",
+        description: "Mistral's latest flagship in public preview. Optional reasoning, vision and 1M context; may change during preview.",
+        wire_model: "mistral-large-4-0",
+        context_tokens: 1_000_000,
+        efforts: MISTRAL_TOGGLE,
         default_effort: Effort::Off,
         supports_temperature: true,
         supports_tools: true,
         native_web_search: false,
         native_web_fetch: false,
-        // The one entry in this column not yet confirmed against a real
-        // request. Mistral Large 3 already rejects `reasoning_effort`
-        // outright (see NO_REASONING above), so its capability set is not
-        // predictable from the rest of the lineup — if an image 400s here,
-        // this is the bool to flip.
         supports_vision: true,
         local: None,
     },
@@ -877,9 +864,59 @@ mod tests {
         assert_eq!(small.clamp_effort(Effort::Max), Effort::High);
 
         // A full-ladder model passes everything through untouched.
-        let opus = find("anthropic/claude-opus-5").unwrap();
+        let sonnet = find("anthropic/claude-sonnet-5").unwrap();
         for e in FULL {
-            assert_eq!(opus.clamp_effort(*e), *e);
+            assert_eq!(sonnet.clamp_effort(*e), *e);
+        }
+    }
+
+    #[test]
+    fn cloud_refresh_keeps_persisted_ids_and_uses_current_wire_releases() {
+        let expected = [
+            ("anthropic/claude-haiku-4-5", "claude-haiku-5-5", 1_000_000),
+            ("anthropic/claude-sonnet-5", "claude-sonnet-5-5", 1_000_000),
+            ("anthropic/claude-opus-5", "claude-opus-5-5", 1_000_000),
+            ("openai/gpt-5.6-luna", "gpt-6-luna", 1_050_000),
+            ("openai/gpt-5.6-terra", "gpt-6.1-sol", 1_050_000),
+            ("openai/gpt-5.6-sol", "gpt-6-astra", 1_050_000),
+            (
+                "mistral/mistral-small-latest",
+                "mistral-small-2603",
+                256_000,
+            ),
+            (
+                "mistral/magistral-medium-latest",
+                "mistral-medium-3-5",
+                256_000,
+            ),
+            (
+                "mistral/mistral-large-latest",
+                "mistral-large-4-0",
+                1_000_000,
+            ),
+        ];
+        for (stored_id, wire_model, context_tokens) in expected {
+            let model = find(stored_id).expect("an upgrade must keep saved selections valid");
+            assert_eq!(model.wire_model, wire_model);
+            assert_eq!(model.context_tokens, context_tokens);
+        }
+        assert!(find("mistral/mistral-large-latest")
+            .unwrap()
+            .label
+            .contains("Preview"));
+    }
+
+    #[test]
+    fn always_reasoning_models_hide_off_and_clamp_stored_off_to_low() {
+        for id in [
+            "anthropic/claude-opus-5",
+            "openai/gpt-5.6-terra",
+            "openai/gpt-5.6-sol",
+        ] {
+            let model = find(id).unwrap();
+            assert!(!model.efforts.contains(&Effort::Off), "{id}");
+            assert_eq!(model.effective_effort(Some(Effort::Off)), Effort::Low);
+            assert_eq!(model.efforts, ALWAYS_REASONING);
         }
     }
 

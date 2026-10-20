@@ -600,6 +600,7 @@ mod tests {
                 }]),
                 tool_call_id: None,
                 structured_tool_result: None,
+                provider_state: None,
                 images: None,
             },
             ChatMessage {
@@ -608,6 +609,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: Some("t1".into()),
                 structured_tool_result: None,
+                provider_state: None,
                 images: None,
             },
             ChatMessage::user("actually, check the logs first"),
@@ -732,6 +734,24 @@ mod tests {
     }
 
     #[test]
+    fn switching_to_mistral_or_remote_uses_only_the_portable_transcript() {
+        let mut assistant = ChatMessage::assistant("portable answer");
+        assistant.provider_state = Some(crate::provider::ProviderState::OpenAiResponses {
+            model: "gpt-6-astra".into(),
+            output: vec![json!({"type":"reasoning", "encrypted_content":"private-opaque-state"})],
+            reasoning_tokens: 100,
+        });
+        let body = build_messages(vec![assistant]);
+        assert_eq!(
+            body,
+            vec![json!({"role":"assistant", "content":"portable answer"})]
+        );
+        assert!(!serde_json::to_string(&body)
+            .unwrap()
+            .contains("private-opaque-state"));
+    }
+
+    #[test]
     fn mistral_only_ever_sends_none_or_high() {
         // Mistral 400s on anything else, so no rung may map elsewhere — not
         // even one the catalog should have clamped away first.
@@ -745,6 +765,7 @@ mod tests {
             for id in [
                 "mistral/mistral-small-latest",
                 "mistral/magistral-medium-latest",
+                "mistral/mistral-large-latest",
             ] {
                 let got = effort_body(id, effort)["reasoning_effort"].clone();
                 assert!(
@@ -761,13 +782,17 @@ mod tests {
 
     #[test]
     fn a_model_with_no_rungs_omits_the_field_entirely() {
-        // Mistral Large 3 rejects `reasoning_effort` outright, so even `none`
-        // is a 400 — the key must be absent, not falsy.
+        // Remote servers cannot be assumed to accept vendor reasoning fields.
+        let model = CatalogModel {
+            provider: ProviderId::Remote,
+            efforts: &[],
+            ..*catalog::find("mistral/mistral-large-latest").unwrap()
+        };
         for effort in [Effort::Off, Effort::Medium, Effort::Max] {
+            let mut body = json!({});
+            apply_reasoning(&mut body, &model, effort);
             assert!(
-                effort_body("mistral/mistral-large-latest", effort)
-                    .get("reasoning_effort")
-                    .is_none(),
+                body.get("reasoning_effort").is_none(),
                 "sent reasoning_effort to a model that rejects the field"
             );
         }
@@ -1036,6 +1061,7 @@ mod tests {
             content: "ok".into(),
             tool_call_id: Some("call_1".into()),
             structured_tool_result: None,
+            provider_state: None,
             images: None,
             tool_calls: None,
         }]);

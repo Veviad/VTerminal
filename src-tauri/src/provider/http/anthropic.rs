@@ -22,26 +22,18 @@ pub struct AnthropicProvider {
     pub api_key: crate::credentials::Secret,
 }
 
-/// Claude Haiku 4.5 predates the effort parameter and returns a 400 for it —
-/// depth there is a thinking token budget instead. Every other Claude in the
-/// catalog takes `output_config.effort`.
-fn uses_budget_tokens(model: &CatalogModel) -> bool {
-    model.wire_model.starts_with("claude-haiku")
-}
-
 /// App ladder → Anthropic's levels, by the same name wherever one exists.
 ///
 /// The vendor ladder is `low|medium|high|xhigh|max`, one rung longer than ours,
-/// so exactly one has to go unreached — and it is `xhigh`, not `high`. `high` is
-/// Anthropic's documented default and the level "equivalent to not setting the
-/// parameter"; `xhigh` is documented for long-horizon agentic runs "over 30
-/// minutes" with "token budgets in the millions". Mapping our `High` onto
-/// `xhigh` made the middle of the picker cost far more than its label implies,
-/// and left the vendor's own default unreachable. `Max` still reaches `max`.
+/// so exactly one has to go unreached — and it is `xhigh`, not `high`. `high`
+/// remains useful for complex work; `xhigh` is documented for long-horizon
+/// agentic runs "over 30 minutes" with "token budgets in the millions". Mapping
+/// High onto xhigh would spend more than its label implies; Max still reaches
+/// the vendor's highest level.
 fn wire_effort(effort: Effort) -> &'static str {
     match effort {
-        // Off is expressed by disabling thinking, not by an effort level; the
-        // API rejects disabled thinking above `high`, so pair it with `high`.
+        // Off selects the model's lowest thinking mode separately. Both Haiku
+        // disabled and Sonnet between_tools reject effort above high.
         Effort::Off => "high",
         Effort::Low => "low",
         Effort::Medium => "medium",
@@ -149,14 +141,23 @@ fn build_tools(
     Some((wire, choice))
 }
 
-fn budget_tokens(effort: Effort) -> u32 {
-    match effort {
-        Effort::Off => 0,
-        Effort::Low => 1024,
-        Effort::Medium => 4096,
-        Effort::High => 8192,
-        Effort::Max => 16384,
-    }
+/// Current Claude models use adaptive thinking and effort rather than budgets.
+/// Sonnet's lowest mode still emits progress updates between tool calls; Opus
+/// cannot disable reasoning, so its catalog clamps a saved Off preference to Low.
+fn apply_thinking(body: &mut Value, model: &CatalogModel, requested: Effort) {
+    let effort = model.clamp_effort(requested);
+    body["output_config"] = json!({"effort": wire_effort(effort)});
+    body["thinking"] = if effort == Effort::Off {
+        if model.wire_model == "claude-sonnet-5-5" {
+            // between_tools accepts no display or other extra fields.
+            json!({"type": "between_tools"})
+        } else {
+            json!({"type": "disabled"})
+        }
+    } else {
+        // Omitted display would stream empty thinking text to the reasoning UI.
+        json!({"type": "adaptive", "display": "summarized"})
+    };
 }
 
 /// Flatten our conversation into Anthropic's shape: system text lifted out,
@@ -302,29 +303,12 @@ impl Provider for AnthropicProvider {
                 "cache_control": { "type": "ephemeral" },
             }]);
         }
-        // Opus 5 and Sonnet 5 reject temperature outright — the catalog says so.
+        // All current Claude models reject non-default temperature settings.
         if let (true, Some(t)) = (self.model.supports_temperature, params.temperature) {
             body["temperature"] = json!(t.clamp(0.0, 1.0));
         }
 
-        if uses_budget_tokens(self.model) {
-            if effort != Effort::Off {
-                let budget = budget_tokens(effort);
-                // budget_tokens must stay strictly below max_tokens.
-                let max = params.max_tokens.unwrap_or(4096).max(budget + 1024);
-                body["max_tokens"] = json!(max);
-                body["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
-            }
-        } else {
-            body["output_config"] = json!({"effort": wire_effort(effort)});
-            body["thinking"] = if effort == Effort::Off {
-                json!({"type": "disabled"})
-            } else {
-                // `display` defaults to "omitted", which streams thinking blocks
-                // with empty text — the reasoning panel would sit there blank.
-                json!({"type": "adaptive", "display": "summarized"})
-            };
-        }
+        apply_thinking(&mut body, self.model, effort);
 
         if let Some((wire_tools, choice)) = build_tools(&tools, &params, self.model) {
             body["tools"] = json!(wire_tools);
@@ -523,13 +507,42 @@ mod tests {
     use crate::models::catalog;
 
     #[test]
-    fn haiku_uses_budgets_everything_else_uses_effort() {
-        assert!(uses_budget_tokens(
-            catalog::find("anthropic/claude-haiku-4-5").unwrap()
-        ));
-        assert!(!uses_budget_tokens(
-            catalog::find("anthropic/claude-opus-5").unwrap()
-        ));
+    fn every_claude_effort_builds_a_supported_adaptive_payload() {
+        for model in catalog::CATALOG
+            .iter()
+            .filter(|model| model.provider == catalog::ProviderId::Anthropic)
+        {
+            for effort in model.efforts {
+                let mut body = json!({"max_tokens": 4096});
+                apply_thinking(&mut body, model, *effort);
+                assert_eq!(body["max_tokens"], 4096);
+                assert!(body["thinking"].get("budget_tokens").is_none());
+                if *effort == Effort::Off {
+                    assert_eq!(body["output_config"]["effort"], "high");
+                    let mode = if model.wire_model == "claude-sonnet-5-5" {
+                        "between_tools"
+                    } else {
+                        "disabled"
+                    };
+                    assert_eq!(body["thinking"], json!({"type": mode}));
+                } else {
+                    assert_eq!(body["output_config"]["effort"], wire_effort(*effort));
+                    assert_eq!(
+                        body["thinking"],
+                        json!({"type": "adaptive", "display": "summarized"})
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_old_opus_off_preference_keeps_reasoning_on_at_low_effort() {
+        let model = catalog::find("anthropic/claude-opus-5").unwrap();
+        let mut body = json!({});
+        apply_thinking(&mut body, model, Effort::Off);
+        assert_eq!(body["output_config"]["effort"], "low");
+        assert_eq!(body["thinking"]["type"], "adaptive");
     }
 
     fn params(web_access: bool, tool_choice: ToolChoiceMode) -> ChatParams {
@@ -772,6 +785,7 @@ mod tests {
                 tool_call_id: None,
                 structured_tool_result: None,
                 images: None,
+                provider_state: None,
             },
             ChatMessage {
                 role: Role::Tool,
@@ -780,6 +794,7 @@ mod tests {
                 tool_call_id: Some("t1".into()),
                 structured_tool_result: None,
                 images: None,
+                provider_state: None,
             },
             ChatMessage::user("actually, check the logs first"),
         ]);
@@ -850,6 +865,7 @@ mod tests {
                 tool_call_id: None,
                 structured_tool_result: None,
                 images: None,
+                provider_state: None,
             },
             ChatMessage {
                 role: Role::Tool,
@@ -858,6 +874,7 @@ mod tests {
                 tool_call_id: Some("t1".into()),
                 structured_tool_result: None,
                 images: None,
+                provider_state: None,
             },
             ChatMessage::user_with_images(
                 "look at this instead",
@@ -912,6 +929,7 @@ mod tests {
                 tool_call_id: Some("t1".into()),
                 structured_tool_result: None,
                 images: None,
+                provider_state: None,
             },
             ChatMessage {
                 role: Role::Tool,
@@ -920,6 +938,7 @@ mod tests {
                 tool_call_id: Some("t2".into()),
                 structured_tool_result: None,
                 images: None,
+                provider_state: None,
             },
         ];
         let (_, out) = build_messages(msgs);
@@ -940,6 +959,7 @@ mod tests {
             tool_call_id: None,
             structured_tool_result: None,
             images: None,
+            provider_state: None,
         }];
         let (_, out) = build_messages(msgs);
         assert_eq!(out[0]["content"][0]["type"], "tool_use");
@@ -967,6 +987,7 @@ mod tests {
                 tool_call_id: Some("ghost".into()),
                 structured_tool_result: None,
                 images: None,
+                provider_state: None,
             },
             ChatMessage {
                 role: Role::Assistant,
@@ -979,6 +1000,7 @@ mod tests {
                 tool_call_id: None,
                 structured_tool_result: None,
                 images: None,
+                provider_state: None,
             },
             ChatMessage {
                 role: Role::Assistant,
@@ -991,6 +1013,7 @@ mod tests {
                 tool_call_id: None,
                 structured_tool_result: None,
                 images: None,
+                provider_state: None,
             },
             ChatMessage {
                 role: Role::Tool,
@@ -999,6 +1022,7 @@ mod tests {
                 tool_call_id: Some("good".into()),
                 structured_tool_result: None,
                 images: None,
+                provider_state: None,
             },
             ChatMessage::user("the goal"),
         ];
