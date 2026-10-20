@@ -376,13 +376,17 @@ impl ResponseStream {
             out.push(ProviderEvent::ReasoningDelta(tail.into()));
         }
         let usage = &response["usage"];
-        out.push(ProviderEvent::ProviderState(
-            ProviderState::OpenAiResponses {
-                model: model.wire_model.to_string(),
-                output,
-                reasoning_tokens: token_count(&usage["output_tokens_details"]["reasoning_tokens"]),
-            },
-        ));
+        if !incomplete {
+            out.push(ProviderEvent::ProviderState(
+                ProviderState::OpenAiResponses {
+                    model: model.wire_model.to_string(),
+                    output,
+                    reasoning_tokens: token_count(
+                        &usage["output_tokens_details"]["reasoning_tokens"],
+                    ),
+                },
+            ));
+        }
         out.push(ProviderEvent::Usage {
             prompt_tokens: token_count(&usage["input_tokens"]),
             completion_tokens: token_count(&usage["output_tokens"]),
@@ -894,7 +898,9 @@ mod tests {
         assert!(!events
             .iter()
             .any(|event| matches!(event, ProviderEvent::ToolCalls(_))));
-        assert!(events.iter().any(|event| matches!(event, ProviderEvent::ProviderState(ProviderState::OpenAiResponses { output, .. }) if output.is_empty())));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::ProviderState(_))));
         assert!(matches!(
             events.last(),
             Some(ProviderEvent::Done {

@@ -220,12 +220,15 @@ fn drop_unanswered_tool_calls(history: &mut Vec<ChatMessage>) {
             return true;
         }
         if let Some(calls) = m.tool_calls.take() {
+            let original_count = calls.len();
             let kept: Vec<_> = calls
                 .into_iter()
                 .filter(|c| answered.iter().any(|id| id == &c.id))
                 .collect();
-            if let Some(state) = &mut m.provider_state {
-                state.retain_tool_calls(&kept);
+            if kept.len() != original_count {
+                // Encrypted reasoning belongs to the complete output group.
+                // Repaired groups fall back to portable text and calls.
+                m.provider_state = None;
             }
             if !kept.is_empty() {
                 m.tool_calls = Some(kept);
@@ -1070,7 +1073,7 @@ mod tests {
     }
 
     #[test]
-    fn normalization_prunes_unanswered_calls_from_provider_state_too() {
+    fn normalization_invalidates_provider_state_when_pruning_unanswered_calls() {
         let mut assistant = assistant_with("answered");
         assistant
             .tool_calls
@@ -1089,10 +1092,10 @@ mod tests {
             .iter()
             .find(|message| message.role == Role::Assistant)
             .unwrap();
-        let encoded = serde_json::to_string(&assistant.provider_state).unwrap();
-        assert!(encoded.contains("answered"));
-        assert!(!encoded.contains("unanswered"));
-        assert!(encoded.contains("opaque"));
+        assert!(assistant.provider_state.is_none());
+        let calls = assistant.tool_calls.as_ref().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "answered");
     }
 
     #[test]

@@ -136,18 +136,6 @@ impl ProviderState {
             } => *reasoning_tokens,
         }
     }
-
-    /// History repair must not resurrect calls that have lost their results.
-    pub fn retain_tool_calls(&mut self, calls: &[ToolCall]) {
-        match self {
-            Self::OpenAiResponses { output, .. } => output.retain(|item| {
-                item["type"] != "function_call"
-                    || calls
-                        .iter()
-                        .any(|call| item["call_id"].as_str() == Some(call.id.as_str()))
-            }),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
