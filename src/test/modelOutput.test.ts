@@ -318,6 +318,138 @@ describe("unwrapFinishSummaryEnvelope", () => {
   });
 });
 
+describe("finish invocation envelopes", () => {
+  const invoke = '<invoke name="finish">';
+  const parameter = '<parameter name="summary">';
+  const closingPairs = ["</parameter></invoke>", "</parameter> </invoke>", "</parameter>\n</invoke>"];
+  const openingForms = ['"', "'"].flatMap((outerQuote) =>
+    ['"', "'"].flatMap((bodyQuote) => ["", " ", "\n"].map((separator) =>
+      `<invoke name=${outerQuote}finish${outerQuote}>${separator}<parameter name=${bodyQuote}summary${bodyQuote}>`,
+    )),
+  );
+  const openingPrefixes = openingForms.flatMap((opening) =>
+    Array.from({ length: opening.length }, (_, index) => opening.slice(0, index + 1)),
+  );
+  const closingPrefixes = closingPairs.flatMap((closing) =>
+    Array.from({ length: closing.length }, (_, index) => closing.slice(0, index + 1)),
+  );
+
+  it.each(openingForms)("unwraps exact quote and XML separator variants: %s", (opening) => {
+    const raw = `${opening}\n## Fixed\n\nThe connection is tracked.</parameter></invoke>`;
+    expect(unwrapFinishSummaryEnvelope(raw)).toBe("## Fixed\n\nThe connection is tracked.");
+  });
+
+  it.each(closingPairs)("unwraps attached and standalone closing tags: %s", (closing) => {
+    expect(unwrapFinishSummaryEnvelope(`${invoke} ${parameter} Done${closing}`)).toBe("Done");
+    expect(unwrapFinishSummaryEnvelope(`${invoke}\n${parameter}\nDone\n${closing}\n`)).toBe("Done");
+  });
+
+  it("preserves prior prose and the summary's Markdown indentation", () => {
+    const raw = `The verification completed.\n\n  ${invoke}\n   ${parameter}\r\n    code stays indented\r\n</parameter>\r\n</invoke>`;
+    expect(unwrapFinishSummaryEnvelope(raw)).toBe(
+      "The verification completed.\n\n    code stays indented",
+    );
+  });
+
+  it.each([...new Set(openingPrefixes)])("hides every opening character boundary while streaming: %s", (prefix) => {
+    expect(unwrapFinishSummaryEnvelope(prefix, { streaming: true })).toBe("");
+    expect(unwrapFinishSummaryEnvelope(`Prior prose.\n\n${prefix}`, { streaming: true }))
+      .toBe("Prior prose.\n\n");
+  });
+
+  it.each([...new Set(closingPrefixes)])("hides every recognized closing character boundary: %s", (prefix) => {
+    for (const streaming of [false, true]) {
+      expect(unwrapFinishSummaryEnvelope(`${invoke}${parameter}Done${prefix}`, { streaming }))
+        .toBe("Done");
+      expect(unwrapFinishSummaryEnvelope(`${invoke}\n${parameter}\nDone\n${prefix}`, { streaming }))
+        .toBe("Done");
+    }
+  });
+
+  it("renders the summary as it arrives and keeps truncated recognized openers clean", () => {
+    expect(unwrapFinishSummaryEnvelope(`${invoke}${parameter}Partial summary`, { streaming: true }))
+      .toBe("Partial summary");
+    expect(unwrapFinishSummaryEnvelope(`${invoke}\n<parameter name="summ`)).toBe("");
+  });
+
+  it.each([
+    '<invoke name="finish">',
+    "<invoke name='finish'>",
+    '<invoke name="finish',
+    '<parameter name="summary">',
+    'Prior prose.\n<invoke name="finish">\n',
+  ])("preserves standalone opening examples after streaming ends: %s", (raw) => {
+    expect(unwrapFinishSummaryEnvelope(raw)).toBe(raw);
+  });
+
+  it.each([
+    "Done\n</parameter>\n</invoke>",
+    "Done\n</parameter></invoke>",
+    "Done</parameter> </invoke>",
+    "Done\n</parameter>",
+    "Done\n</invoke>",
+  ])("preserves generic orphan closes without a recognized opening: %s", (raw) => {
+    expect(unwrapFinishSummaryEnvelope(raw)).toBe(raw);
+  });
+
+  it.each([
+    '<invoke name="run_command"><parameter name="summary">Literal</parameter></invoke>',
+    '<invoke name="finish"><parameter name="command">Literal</parameter></invoke>',
+    '<invoke name="Finish"><parameter name="summary">Literal</parameter></invoke>',
+    '<INVOKE name="finish"><parameter name="summary">Literal</parameter></INVOKE>',
+    '<invoke name="finish" id="call-1"><parameter name="summary">Literal</parameter></invoke>',
+    '<invoke name="finish"><parameter name="summary" type="text">Literal</parameter></invoke>',
+    '<invoke name="finish" name="run_command"><parameter name="summary">Literal</parameter></invoke>',
+    '<invoke name=finish><parameter name=summary>Literal</parameter></invoke>',
+    '<antml:invoke name="finish"><parameter name="summary">Literal</parameter></antml:invoke>',
+    'Use <invoke name="finish"><parameter name="summary"> as literal prose.',
+    '    <invoke name="finish"><parameter name="summary">Indented code</parameter></invoke>',
+    '&lt;invoke name="finish"&gt; literal escaped markup',
+  ])("leaves unrecognized or literal invocation markup unchanged: %s", (raw) => {
+    expect(unwrapFinishSummaryEnvelope(raw)).toBe(raw);
+    expect(unwrapFinishSummaryEnvelope(raw, { streaming: true })).toBe(raw);
+  });
+
+  it("preserves inline, multiline, indented and fenced code containing the full invocation", () => {
+    const literal = `${invoke}${parameter}literal</parameter></invoke>`;
+    for (const raw of [
+      `\`${literal}\``,
+      `\`\`multiline code with a \`single-backtick\` example\n${literal}\n\`\``,
+      `\`unfinished multiline code\n${literal}`,
+      `    ${literal}`,
+      `\`\`\`xml\n${literal}\n\`\`\``,
+      `~~~xml\n${literal}\n~~~`,
+      `- \`\`\`\`xml\n  ${literal}\n  \`\`\`\n  \`\`\`\``,
+      `> - \`\`\`xml\n>   ${literal}\n>   \`\`\``,
+    ]) {
+      expect(unwrapFinishSummaryEnvelope(raw)).toBe(raw);
+      expect(unwrapFinishSummaryEnvelope(raw, { streaming: true })).toBe(raw);
+    }
+  });
+
+  it("protects code-like closing tags inside a recognized summary", () => {
+    const fencedBody = "```xml\n</parameter>\n</invoke>\n```";
+    expect(unwrapFinishSummaryEnvelope(`${invoke}${parameter}\n${fencedBody}\n</parameter></invoke>`))
+      .toBe(fencedBody);
+    for (const body of [
+      "`literal</parameter></invoke>`",
+      "``multiline code\n</parameter>\n</invoke>\n``",
+      "`unfinished code\n</parameter>\n</invoke>",
+    ]) {
+      expect(unwrapFinishSummaryEnvelope(`${invoke}${parameter}\n${body}`)).toBe(body);
+    }
+  });
+
+  it("is idempotent and retains citation cleanup without changing its input", () => {
+    const raw = `${invoke}${parameter}A <cite index="1-1">grounded claim</cite>.</parameter></invoke>`;
+    const original = raw;
+    const once = sanitizeModelMarkdown(raw);
+    expect(once).toBe("A grounded claim.");
+    expect(sanitizeModelMarkdown(once)).toBe(once);
+    expect(raw).toBe(original);
+  });
+});
+
 describe("sanitizeModelMarkdown", () => {
   it("retains citation cleanup inside a finish summary", () => {
     const raw = [

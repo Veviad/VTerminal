@@ -118,6 +118,65 @@ describe("AiMessageView origin", () => {
     expect(container).toHaveTextContent("Model answer");
   });
 
+  it("renders the invoke/parameter summary from the screenshot as Markdown", () => {
+    const content = [
+      '<invoke name="finish"> <parameter name="summary">The service is running.',
+      "",
+      "**Done:**",
+      "",
+      "- Saved the configuration to `/tmp/service-backup.tgz`.",
+      "",
+      "**Checked:**",
+      "",
+      "- [Local endpoint](https://example.com/service/) responds.",
+      "",
+      "**Still open:**",
+      "",
+      "- Confirm the sign-in flow.</parameter>",
+      "",
+      "</invoke>",
+    ].join("\n");
+    const { container } = render(<AiMessageView content={content} origin="model" />);
+
+    expect(screen.getByText("The service is running.")).toBeVisible();
+    expect(screen.getAllByRole("listitem")).toHaveLength(3);
+    expect(container.querySelector("code")).toHaveTextContent("/tmp/service-backup.tgz");
+    expect(screen.getByRole("link", { name: "Local endpoint" })).toHaveAttribute("href", "https://example.com/service/");
+    expect(container).not.toHaveTextContent("<invoke");
+    expect(container).not.toHaveTextContent("<parameter");
+    expect(container).not.toHaveTextContent("</parameter>");
+    expect(container).not.toHaveTextContent("</invoke>");
+  });
+
+  it("keeps streaming invocation wrappers hidden as the summary arrives", () => {
+    const view = render(<AiMessageView content="<inv" origin="model" streaming />);
+    expect(view.container.textContent).toBe("");
+    for (const [content, expected] of [
+      ['<invoke name="finish"> <parameter name="sum', ""],
+      ['<invoke name="finish"> <parameter name="summary">The check passed.', "The check passed."],
+      ['<invoke name="finish"> <parameter name="summary">The check passed.</para', "The check passed."],
+      ['<invoke name="finish"> <parameter name="summary">The check passed.</parameter> </inv', "The check passed."],
+    ]) {
+      view.rerender(<AiMessageView content={content} origin="model" streaming />);
+      expect(view.container.textContent).toBe(expected);
+    }
+    view.rerender(<AiMessageView content={'<invoke name="finish"> <parameter name="summary">The check passed.</parameter> </invoke>'} origin="model" />);
+    expect(view.container.textContent).toBe("The check passed.");
+  });
+
+  it("preserves invocation markup in literal messages and model code examples", () => {
+    const content = '<invoke name="finish"> <parameter name="summary">Literal data</parameter> </invoke>';
+    const literal = render(<AiMessageView content={content} origin="literal" />);
+    expect(literal.container).toHaveTextContent('<invoke name="finish">');
+    expect(literal.container).toHaveTextContent('<parameter name="summary">');
+    expect(literal.container).toHaveTextContent("</parameter>");
+    expect(literal.container).toHaveTextContent("</invoke>");
+    literal.unmount();
+
+    const code = render(<AiMessageView content={'```xml\n' + content + '\n```'} origin="model" />);
+    expect(code.container.querySelector("pre code")).toHaveTextContent(content);
+  });
+
   it("does not apply citation cleanup to literal data", () => {
     const content = '<cite index="1-1">tool result</cite>';
     const { container } = render(<AiMessageView content={content} origin="literal" />);

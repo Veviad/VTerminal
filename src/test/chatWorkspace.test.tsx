@@ -80,9 +80,11 @@ describe("Chat workspace autoscroll", () => {
     expect(screen.getByRole("heading", { name: "Start a chat" })).toBeInTheDocument();
   });
 
-  it("cleans live and saved model wrappers while preserving user markup literally", () => {
-    const envelope = (body: string) =>
-      `<finish> <summary> ${body}\n</summary> </finish>`;
+  it.each([
+    { label: "finish/summary", outer: "<finish>", inner: "<summary>", close: "</summary> </finish>" },
+    { label: "invoke/parameter", outer: '<invoke name="finish">', inner: '<parameter name="summary">', close: "</parameter> </invoke>" },
+  ])("cleans live and saved $label wrappers while preserving user markup literally", ({ outer, inner, close }) => {
+    const envelope = (body: string) => `${outer} ${inner} ${body}\n${close}`;
     const withSavedAnswer: ChatDetail = {
       ...detail,
       summary: { ...detail.summary, message_count: 2 },
@@ -113,13 +115,13 @@ describe("Chat workspace autoscroll", () => {
     const { container } = render(<ChatWorkspace />);
     const articles = screen.getAllByRole("article");
 
-    expect(articles[0]).toHaveTextContent("<finish>");
+    expect(articles[0]).toHaveTextContent(outer);
     expect(articles[0]).toHaveTextContent("User literal");
-    expect(articles[1]).not.toHaveTextContent("<finish>");
+    expect(articles[1]).not.toHaveTextContent(outer);
     expect(articles[1]).toHaveTextContent("Saved assistant");
     expect(screen.getByText("Live assistant")).toBeVisible();
-    expect(container.textContent?.match(/<finish>/g)).toHaveLength(1);
-    expect(container.textContent?.match(/<summary>/g)).toHaveLength(1);
+    expect(container.textContent?.split(outer)).toHaveLength(2);
+    expect(container.textContent?.split(inner)).toHaveLength(2);
   });
 
   it("does not pull a reader back to the bottom while tokens stream", () => {

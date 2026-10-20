@@ -5,10 +5,49 @@ import {
   type MarkdownProtection,
 } from "./markdownProtection";
 
-const FINISH_OPEN = "<finish>";
-const SUMMARY_OPEN = "<summary>";
-const SUMMARY_CLOSE = "</summary>";
-const FINISH_CLOSE = "</finish>";
+interface EnvelopeFormat {
+  outerOpen: string;
+  bodyOpen: string;
+  bodyClose: string;
+  outerClose: string;
+  adjacentTags: boolean;
+  completeClosePair: RegExp;
+  partialOuterClose: RegExp;
+}
+
+function envelopeFormat(
+  outerOpen: string,
+  bodyOpen: string,
+  bodyClose: string,
+  outerClose: string,
+  adjacentTags = false,
+): EnvelopeFormat {
+  // These exact protocol close tags contain no regular-expression metacharacters.
+  const separator = adjacentTags ? "\\s*" : "\\s+";
+  return {
+    outerOpen,
+    bodyOpen,
+    bodyClose,
+    outerClose,
+    adjacentTags,
+    completeClosePair: new RegExp(`${bodyClose}${separator}${outerClose}$`, "u"),
+    partialOuterClose: new RegExp(`${bodyClose}${separator}(\\S*)$`, "u"),
+  };
+}
+
+const LEGACY_FORMAT = envelopeFormat("<finish>", "<summary>", "</summary>", "</finish>");
+const ENVELOPE_FORMATS: readonly EnvelopeFormat[] = [
+  LEGACY_FORMAT,
+  ...['"', "'"].flatMap((outerQuote) =>
+    ['"', "'"].map((bodyQuote) => envelopeFormat(
+      `<invoke name=${outerQuote}finish${outerQuote}>`,
+      `<parameter name=${bodyQuote}summary${bodyQuote}>`,
+      "</parameter>",
+      "</invoke>",
+      true,
+    )),
+  ),
+];
 
 type TagMatch = "complete" | "partial" | "none";
 
@@ -62,15 +101,16 @@ function visiblePrefix(content: string, lineStart: number): string {
   return prefix.trim().length === 0 ? "" : prefix;
 }
 
-function isSummaryFinishPair(
+function isClosingPair(
   controlText: string,
   allowPartial: boolean,
+  format: EnvelopeFormat,
 ): boolean {
-  if (!controlText.startsWith(SUMMARY_CLOSE)) return false;
-  const afterSummary = controlText.slice(SUMMARY_CLOSE.length);
-  if (!/^\s/u.test(afterSummary)) return false;
+  if (!controlText.startsWith(format.bodyClose)) return false;
+  const afterSummary = controlText.slice(format.bodyClose.length);
+  if (!format.adjacentTags && !/^\s/u.test(afterSummary)) return false;
   const finish = afterSummary.trimStart();
-  return finish === FINISH_CLOSE || (allowPartial && isProperPrefix(finish, FINISH_CLOSE));
+  return finish === format.outerClose || (allowPartial && isProperPrefix(finish, format.outerClose));
 }
 
 /**
@@ -81,6 +121,7 @@ function isSummaryFinishPair(
 function stripRecognizedTrailingSuffix(
   content: string,
   protection: MarkdownProtection,
+  format: EnvelopeFormat,
 ): string {
   const withoutTrailingWhitespace = content.replace(/[ \t\r\n]+$/u, "");
   const stripAt = (offset: number): string | null => {
@@ -88,32 +129,32 @@ function stripRecognizedTrailingSuffix(
     return withoutTrailingWhitespace.slice(0, offset).replace(/[ \t\r\n]+$/u, "");
   };
 
-  const completePair = /<\/summary>\s+<\/finish>$/u.exec(withoutTrailingWhitespace);
+  const completePair = format.completeClosePair.exec(withoutTrailingWhitespace);
   if (completePair) {
-    const finishOffset = completePair.index + completePair[0].lastIndexOf(FINISH_CLOSE);
+    const finishOffset = completePair.index + completePair[0].lastIndexOf(format.outerClose);
     if (!protection.isProtected(finishOffset)) {
       const stripped = stripAt(completePair.index);
       if (stripped !== null) return stripped;
     }
   }
 
-  const partialFinish = /<\/summary>\s+(\S*)$/u.exec(withoutTrailingWhitespace);
+  const partialFinish = format.partialOuterClose.exec(withoutTrailingWhitespace);
   if (
     partialFinish &&
-    isProperPrefix(partialFinish[1], FINISH_CLOSE)
+    isProperPrefix(partialFinish[1], format.outerClose)
   ) {
     const stripped = stripAt(partialFinish.index);
     if (stripped !== null) return stripped;
   }
 
-  if (withoutTrailingWhitespace.endsWith(SUMMARY_CLOSE)) {
-    const offset = withoutTrailingWhitespace.length - SUMMARY_CLOSE.length;
+  if (withoutTrailingWhitespace.endsWith(format.bodyClose)) {
+    const offset = withoutTrailingWhitespace.length - format.bodyClose.length;
     const stripped = stripAt(offset);
     if (stripped !== null) return stripped;
   }
 
-  for (let width = SUMMARY_CLOSE.length - 1; width > 0; width -= 1) {
-    const partial = SUMMARY_CLOSE.slice(0, width);
+  for (let width = format.bodyClose.length - 1; width > 0; width -= 1) {
+    const partial = format.bodyClose.slice(0, width);
     if (!withoutTrailingWhitespace.endsWith(partial)) continue;
     const offset = withoutTrailingWhitespace.length - partial.length;
     const stripped = stripAt(offset);
@@ -124,15 +165,19 @@ function stripRecognizedTrailingSuffix(
 }
 
 /**
- * Remove only trailing, stand-alone protocol close lines. An exact orphan close
- * pair is cleaned for already archived output whose opening edge is unavailable.
- * Partial or lone closes are hidden only after this buffer proved it began with
- * the known envelope.
+ * Remove trailing protocol close lines. The legacy summary/finish pair is also
+ * recognized without its opening edge; generic parameter/invoke closes require
+ * a positively identified finish/summary opening pair. Partial or lone closes
+ * are hidden only after recognizing an opening pair.
  */
-function stripTrailingControlLines(content: string, openedEnvelope: boolean): string {
+function stripTrailingControlLines(
+  content: string,
+  openedEnvelope: boolean,
+  format: EnvelopeFormat,
+): string {
   const protection = markdownProtection(content);
   if (openedEnvelope) {
-    const strippedSuffix = stripRecognizedTrailingSuffix(content, protection);
+    const strippedSuffix = stripRecognizedTrailingSuffix(content, protection, format);
     if (strippedSuffix !== content) return strippedSuffix;
   }
 
@@ -147,7 +192,7 @@ function stripTrailingControlLines(content: string, openedEnvelope: boolean): st
 
   if (
     controlText !== null &&
-    isSummaryFinishPair(controlText, openedEnvelope)
+    isClosingPair(controlText, openedEnvelope, format)
   ) {
     cutoff = lines[index].start;
     removed = true;
@@ -156,10 +201,10 @@ function stripTrailingControlLines(content: string, openedEnvelope: boolean): st
 
   if (!removed) {
     const finishLike =
-      controlText === FINISH_CLOSE ||
+      controlText === format.outerClose ||
       (openedEnvelope &&
         controlText !== null &&
-        isProperPrefix(controlText, FINISH_CLOSE));
+        isProperPrefix(controlText, format.outerClose));
     if (finishLike) {
       const finishStart = lines[index].start;
       const summaryIndex = previousNonBlankLine(lines, index - 1);
@@ -168,10 +213,10 @@ function stripTrailingControlLines(content: string, openedEnvelope: boolean): st
           ? unprotectedLineControlToken(lines[summaryIndex], protection)
           : null;
       const summaryLike =
-        summaryToken === SUMMARY_CLOSE ||
+        summaryToken === format.bodyClose ||
         (openedEnvelope &&
           summaryToken !== null &&
-          isProperPrefix(summaryToken, SUMMARY_CLOSE));
+          isProperPrefix(summaryToken, format.bodyClose));
 
       if (summaryLike) {
         cutoff = lines[summaryIndex].start;
@@ -182,8 +227,8 @@ function stripTrailingControlLines(content: string, openedEnvelope: boolean): st
       }
     } else if (
       openedEnvelope &&
-      (controlText === SUMMARY_CLOSE ||
-        (controlText !== null && isProperPrefix(controlText, SUMMARY_CLOSE)))
+      (controlText === format.bodyClose ||
+        (controlText !== null && isProperPrefix(controlText, format.bodyClose)))
     ) {
       cutoff = lines[index].start;
       removed = true;
@@ -195,7 +240,7 @@ function stripTrailingControlLines(content: string, openedEnvelope: boolean): st
 }
 
 /**
- * Unwrap the exact pseudo-tool envelope observed in model prose:
+ * Unwrap the exact finish/summary pseudo-tool envelopes observed in model prose:
  *
  *     <finish>
  *     <summary>
@@ -203,12 +248,16 @@ function stripTrailingControlLines(content: string, openedEnvelope: boolean): st
  *     </summary>
  *     </finish>
  *
+ *     <invoke name="finish"><parameter name="summary">
+ *     ...answer...
+ *     </parameter></invoke>
+ *
  * This is deliberately not an HTML sanitizer or a general tag stripper. The
- * opening pair must begin at an unprotected Markdown line boundary, be lowercase
- * and attribute free, and have whitespace between the two tags. The line may come
- * after ordinary prose, which is preserved. After a recognized opening pair, its
- * closing pair may occupy stand-alone lines or attach to the final prose line.
- * Literal prose and Markdown code examples remain intact.
+ * opening pair must begin at an unprotected Markdown line boundary. Names are
+ * lowercase and exact; invocation attributes accept only name="finish" and
+ * name="summary", with either quote style. Invocation tags may be adjacent;
+ * legacy tags retain their whitespace requirement. Prior prose and Markdown
+ * code examples remain intact. This function changes presentation only.
  */
 export function unwrapFinishSummaryEnvelope(
   content: string,
@@ -224,41 +273,37 @@ export function unwrapFinishSummaryEnvelope(
     const indentation = line.text.match(/^ {0,3}/)?.[0].length ?? 0;
     const finishOffset = line.start + indentation;
     if (protection.isProtected(finishOffset)) continue;
-    const finishMatch = matchTagAt(content, finishOffset, FINISH_OPEN);
-    if (finishMatch === "partial") {
-      if (streaming) return visiblePrefix(content, line.start);
-      continue;
-    }
-    if (finishMatch === "none") continue;
+    for (const format of ENVELOPE_FORMATS) {
+      const finishMatch = matchTagAt(content, finishOffset, format.outerOpen);
+      if (finishMatch === "partial") {
+        if (streaming) return visiblePrefix(content, line.start);
+        continue;
+      }
+      if (finishMatch === "none") continue;
 
-    const afterFinish = finishOffset + FINISH_OPEN.length;
-    const summaryOffset = skipWhitespace(content, afterFinish);
-    if (summaryOffset === afterFinish) {
-      if (afterFinish === content.length && streaming) {
+      const afterFinish = finishOffset + format.outerOpen.length;
+      const summaryOffset = skipWhitespace(content, afterFinish);
+      if (summaryOffset === content.length) {
+        if (streaming) return visiblePrefix(content, line.start);
+        continue;
+      }
+      if (!format.adjacentTags && summaryOffset === afterFinish) continue;
+
+      const summaryMatch = matchTagAt(content, summaryOffset, format.bodyOpen);
+      if (summaryMatch === "partial") {
+        // The complete known outer tag followed by a partial summary opener
+        // identifies protocol output even when a transcript was truncated.
         return visiblePrefix(content, line.start);
       }
-      continue;
-    }
-    if (summaryOffset === content.length) {
-      if (streaming) return visiblePrefix(content, line.start);
-      continue;
-    }
+      if (summaryMatch === "none") continue;
 
-    const summaryMatch = matchTagAt(content, summaryOffset, SUMMARY_OPEN);
-    if (summaryMatch === "partial") {
-      // A complete finish tag followed by the beginning of summary is already
-      // specific enough to identify the known envelope, including a transcript
-      // truncated between provider chunks.
-      return visiblePrefix(content, line.start);
+      const bodyOffset = skipOpeningSeparator(content, summaryOffset + format.bodyOpen.length);
+      const body = stripTrailingControlLines(content.slice(bodyOffset), true, format);
+      return visiblePrefix(content, line.start) + body;
     }
-    if (summaryMatch === "none") continue;
-
-    const bodyOffset = skipOpeningSeparator(content, summaryOffset + SUMMARY_OPEN.length);
-    const body = stripTrailingControlLines(content.slice(bodyOffset), true);
-    return visiblePrefix(content, line.start) + body;
   }
 
-  return stripTrailingControlLines(content, false);
+  return stripTrailingControlLines(content, false, LEGACY_FORMAT);
 }
 
 /** Apply presentation-only cleanup to model-origin Markdown. */

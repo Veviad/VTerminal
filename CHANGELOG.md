@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.9
+
+- Render leaked `invoke`/`parameter` finish wrappers as readable Agent summaries in live and saved replies, while preserving literal user messages, tool output, and code examples.
+
 ## 0.6.8
 
 - Remember each terminal tab's Ask or Agent selection across restarts, including tabs with saved conversations, while retaining configured defaults for new tabs and command approval on restored Agent tabs.
