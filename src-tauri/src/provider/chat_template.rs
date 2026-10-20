@@ -204,6 +204,7 @@ mod tests {
                 }]),
                 tool_call_id: None,
                 structured_tool_result: None,
+                provider_state: None,
                 images: None,
             },
             ChatMessage {
@@ -212,6 +213,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: Some("t1".into()),
                 structured_tool_result: None,
+                provider_state: None,
                 images: None,
             },
             ChatMessage::user("STEER_MARKER use ripgrep instead"),
@@ -344,6 +346,7 @@ mod tests {
                 }]),
                 tool_call_id: None,
                 structured_tool_result: None,
+                provider_state: None,
                 images: None,
             },
             ChatMessage {
@@ -352,6 +355,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: Some("call_1".into()),
                 structured_tool_result: None,
+                provider_state: None,
                 images: None,
             },
         ];
