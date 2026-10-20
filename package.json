@@ -20,10 +20,10 @@
     "test:windows-installer": "node --test scripts/windows-installer.node-test.mjs"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.2.0",
-    "@tauri-apps/plugin-dialog": "^2.7.3",
-    "@tauri-apps/plugin-log": "^2.9.2",
-    "@tauri-apps/plugin-opener": "^2.5.5",
+    "@tauri-apps/api": "^2.12.4",
+    "@tauri-apps/plugin-dialog": "^2.8.3",
+    "@tauri-apps/plugin-log": "^2.10.1",
+    "@tauri-apps/plugin-opener": "^2.7.2",
     "@xterm/addon-clipboard": "^0.2.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-search": "^0.16.0",
@@ -44,7 +44,7 @@
   "devDependencies": {
     "@tailwindcss/typography": "^0.5.19",
     "@tailwindcss/vite": "^4.2.4",
-    "@tauri-apps/cli": "^2.11.5",
+    "@tauri-apps/cli": "^2.12.3",
     "@testing-library/jest-dom": "^7.0.1",
     "@testing-library/react": "^16.3.3",
     "@types/react": "^19.3.0",

@@ -41,9 +41,9 @@ tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde-saphyr = "=1.2.0"
+serde-saphyr = "=2.0.0"
 semver = { version = "=1.0.28", features = ["serde"] }
-schemars = "=1.2.2"
+schemars = "=1.2.3"
 rusqlite = { version = "0.40", features = ["bundled"] }
 # Statically compiled into the app; no dylib, Python process, or system SQLite
 # extension is required on user machines. Pin the pre-v1 API deliberately.
@@ -53,7 +53,7 @@ portable-pty = "0.9.0"
 reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], default-features = false }
 # Official Tier-1 MCP client.  Keep the protocol implementation in the SDK and
 # VTerminal's policy (credentials, approvals, sandboxing, lifecycle) around it.
-rmcp = { version = "=3.2.0", default-features = false, features = ["client", "auth", "transport-async-rw", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
+rmcp = { version = "=3.5.1", default-features = false, features = ["client", "auth", "transport-async-rw", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
 # Already in the lock file via reqwest, so this is free to compile. Used by
 # `models::remote_probe` to normalize whatever address a user types for a remote
 # inference server — the policy there is subtle enough (default ports, path
@@ -68,7 +68,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # `next_fire_at` computed in Berlin is simply wrong after a flight to Tokyo, and
 # recomputing it beats reporting a spurious missed run.
 iana-time-zone = "0.1"
-dirs = "6"
+dirs = "7"
 log = "0.4"
 thiserror = "2"
 async-trait = "0.1"
@@ -96,12 +96,12 @@ encoding_rs = { version = "0.8", optional = true }
 # common/chat.cpp does with minja. The legacy C `llama_chat_apply_template`
 # picks a renderer by substring-matching the template and returns -1 when
 # nothing matches — which is exactly how Gemma 4 failed.
-minijinja = { version = "2", features = ["json"], optional = true }
+minijinja = { version = "3", features = ["json", "serde"], optional = true }
 # Hugging Face templates are written against Python's Jinja2 and freely call
 # Python methods — Qwen uses `str.split/.strip/.lstrip`, Gemma 4 uses
 # `dict.get`. `pycompat` supplies exactly those; without it both templates fail
 # to render with "unknown method".
-minijinja-contrib = { version = "2", features = ["pycompat"], optional = true }
+minijinja-contrib = { version = "3", features = ["pycompat"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

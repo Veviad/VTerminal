@@ -176,6 +176,13 @@ try {
   Assert-Equal "" ((Get-UnresolvedPeImport -Imports @("LLAMA.DLL", "KERNEL32.dll") -Provided $payload) -join ",") `
     "Import names are case-insensitive; one binary spells them both ways."
 
+  Assert-Equal "" ((Get-UnresolvedPeImport -Imports @("imm32.dll", "IMM32.DLL") -Provided @()) -join ",") `
+    "Windows provides Input Method Manager for load-critical executables, regardless of import spelling."
+
+  Assert-Equal "libssl-3-x64.dll" `
+    ((Get-UnresolvedPeImport -Imports @("IMM32.dll", "libssl-3-x64.dll") -Provided @()) -join ",") `
+    "Allowing the OS Input Method Manager must not allow an unshipped third-party DLL."
+
   Assert-Equal "" ((Get-UnresolvedPeImport `
         -Imports @("api-ms-win-crt-stdio-l1-1-0.dll", "ext-ms-win-ntuser-dialogbox-l1-1-0.dll") `
         -Provided @()) -join ",") `
@@ -201,7 +208,7 @@ try {
   New-Item -ItemType Directory -Path $backends -Force | Out-Null
 
   $clean = @(
-    New-TestPeImage -Path (Join-Path $app "vterminal.exe") -Module @("kernel32.dll", "llama-common.dll", "ggml.dll")
+    New-TestPeImage -Path (Join-Path $app "vterminal.exe") -Module @("kernel32.dll", "IMM32.dll", "llama-common.dll", "ggml.dll")
     New-TestPeImage -Path (Join-Path $app "llama-common.dll") -Module @("ggml-base.dll", "MSVCP140.dll")
     New-TestPeImage -Path (Join-Path $app "ggml.dll") -Module @("ggml-base.dll")
     New-TestPeImage -Path (Join-Path $app "ggml-base.dll") -Module @("kernel32.dll")

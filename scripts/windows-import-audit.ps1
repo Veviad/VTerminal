@@ -37,6 +37,8 @@ $script:WindowsProvidedModules = @(
   'crypt32.dll',
   'dwmapi.dll',
   'gdi32.dll',
+  # Windows Input Method Manager, used by Tauri's IME support.
+  'imm32.dll',
   'kernel32.dll',
   'ntdll.dll',
   'ole32.dll',

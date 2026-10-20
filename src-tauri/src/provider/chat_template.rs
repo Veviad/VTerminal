@@ -20,6 +20,7 @@
 //! * **Native thinking control.** `enable_thinking` is a documented template
 //!   variable; we no longer append `/think` or `/no_think` to the system turn.
 
+use minijinja::{syntax::SyntaxConfig, value::Serde};
 use serde_json::{json, Map, Value};
 
 use super::{ChatMessage, Role, ToolDef};
@@ -51,8 +52,12 @@ impl ChatTemplate {
         env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
         // Jinja2 trims differently to minijinja's defaults; matching it keeps
         // whitespace-sensitive turn markers exactly where the model expects.
-        env.set_lstrip_blocks(true);
-        env.set_trim_blocks(true);
+        let syntax = SyntaxConfig::builder()
+            .lstrip_blocks(true)
+            .trim_blocks(true)
+            .build()
+            .map_err(|e| format!("chat template syntax configuration failed: {e}"))?;
+        env.set_syntax(syntax);
         env.add_template_owned(TEMPLATE_NAME, source)
             .map_err(|e| format!("chat template failed to parse: {e}"))?;
         Ok(Self {
@@ -76,10 +81,10 @@ impl ChatTemplate {
             .map_err(|e| format!("chat template missing: {e}"))?;
 
         let ctx = minijinja::context! {
-            messages => Value::Array(messages.iter().map(render_message).collect()),
-            tools => if tools.is_empty() { Value::Null } else {
+            messages => Serde(Value::Array(messages.iter().map(render_message).collect())),
+            tools => Serde(if tools.is_empty() { Value::Null } else {
                 Value::Array(tools.iter().map(render_tool).collect())
-            },
+            }),
             add_generation_prompt => true,
             enable_thinking => enable_thinking,
             bos_token => self.bos_token.as_str(),
@@ -199,6 +204,7 @@ mod tests {
                 }]),
                 tool_call_id: None,
                 structured_tool_result: None,
+                provider_state: None,
                 images: None,
             },
             ChatMessage {
@@ -207,6 +213,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: Some("t1".into()),
                 structured_tool_result: None,
+                provider_state: None,
                 images: None,
             },
             ChatMessage::user("STEER_MARKER use ripgrep instead"),
@@ -339,6 +346,7 @@ mod tests {
                 }]),
                 tool_call_id: None,
                 structured_tool_result: None,
+                provider_state: None,
                 images: None,
             },
             ChatMessage {
@@ -347,6 +355,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: Some("call_1".into()),
                 structured_tool_result: None,
+                provider_state: None,
                 images: None,
             },
         ];
