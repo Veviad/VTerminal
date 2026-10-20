@@ -734,6 +734,24 @@ mod tests {
     }
 
     #[test]
+    fn switching_to_mistral_or_remote_uses_only_the_portable_transcript() {
+        let mut assistant = ChatMessage::assistant("portable answer");
+        assistant.provider_state = Some(crate::provider::ProviderState::OpenAiResponses {
+            model: "gpt-6-astra".into(),
+            output: vec![json!({"type":"reasoning", "encrypted_content":"private-opaque-state"})],
+            reasoning_tokens: 100,
+        });
+        let body = build_messages(vec![assistant]);
+        assert_eq!(
+            body,
+            vec![json!({"role":"assistant", "content":"portable answer"})]
+        );
+        assert!(!serde_json::to_string(&body)
+            .unwrap()
+            .contains("private-opaque-state"));
+    }
+
+    #[test]
     fn mistral_only_ever_sends_none_or_high() {
         // Mistral 400s on anything else, so no rung may map elsewhere — not
         // even one the catalog should have clamped away first.
