@@ -145,7 +145,7 @@ if ! ( {WSL_REQUIRED_TOOLS_PROBE} ); then exit 41; fi
 umask 077
 dir="$HOME/.local/share/vterminal"
 mkdir -p "$dir" || exit 42
-bash_tmp="$dir/.bashrc-v8.$$"
+bash_tmp="$dir/.bashrc-v9.$$"
 wrapper_tmp="$dir/.vterminal-bash.$$"
 trap 'rm -f "$bash_tmp" "$wrapper_tmp"' EXIT HUP INT TERM
 cat > "$bash_tmp" <<'VTERMINAL_BUNDLED_BASH_EOF'
@@ -159,9 +159,9 @@ cat > "$bash_tmp" <<'VTERMINAL_BUNDLED_BASH_EOF'
 VTERMINAL_BUNDLED_WRAPPER_EOF
 [ $? -eq 0 ] || exit 42
 chmod 600 "$bash_tmp" && chmod 700 "$wrapper_tmp" || exit 42
-if ! cmp -s "$bash_tmp" "$dir/bashrc-v8"; then mv -f "$bash_tmp" "$dir/bashrc-v8" || exit 42; fi
+if ! cmp -s "$bash_tmp" "$dir/bashrc-v9"; then mv -f "$bash_tmp" "$dir/bashrc-v9" || exit 42; fi
 if ! cmp -s "$wrapper_tmp" "$dir/vterminal-bash"; then mv -f "$wrapper_tmp" "$dir/vterminal-bash" || exit 42; fi
-chmod 600 "$dir/bashrc-v8" && chmod 700 "$dir/vterminal-bash" || exit 42
+chmod 600 "$dir/bashrc-v9" && chmod 700 "$dir/vterminal-bash" || exit 42
 "#);
     script
 }
@@ -443,7 +443,7 @@ mod tests {
         let _ = run(false);
         assert!(!home.path().join(".local").exists());
         assert!(run_provisioner().success());
-        let bash = home.path().join(".local/share/vterminal/bashrc-v8");
+        let bash = home.path().join(".local/share/vterminal/bashrc-v9");
         let before = std::fs::metadata(&bash).unwrap();
         assert_eq!(before.permissions().mode() & 0o777, 0o600);
         assert!(run_provisioner().success());
@@ -452,7 +452,7 @@ mod tests {
         assert!(run_provisioner().success());
         assert!(std::fs::read_to_string(bash)
             .unwrap()
-            .contains("(version: 8)"));
+            .contains("(version: 9)"));
         assert_eq!(
             std::fs::read_dir(home.path().join(".local/share/vterminal"))
                 .unwrap()

@@ -11,7 +11,7 @@ use tauri::Wry;
 
 /// Bump when any generated file changes — the zdotdir is rewritten whenever
 /// the version marker in the existing vterminal.zsh differs.
-pub(crate) const SCRIPT_VERSION: &str = "8";
+pub(crate) const SCRIPT_VERSION: &str = "9";
 
 #[derive(Serialize)]
 pub struct ShellIntegrationInfo {
@@ -49,6 +49,20 @@ fi
 
 export VTERMINAL_INTEGRATION=1
 
+# Keep the token private to this shell, including when SSH forwards environment
+# variables. Standard prompt markers are also emitted for other integrations;
+# VTerminal uses the scoped copy to distinguish local and remote shell output.
+__vterminal_shell_token="$(LC_ALL=C command od -An -N16 -tx1 /dev/urandom | command tr -d ' \n')"
+export -n __vterminal_shell_token
+if [[ ! "$__vterminal_shell_token" =~ ^[a-f0-9]{32}$ ]]; then
+  printf 'VTerminal shell integration: secure token unavailable\n' >&2
+  return
+fi
+__vterminal_emit() {
+  printf '\e]6973;SHELL;%s;%s;%s\e\\' "$__vterminal_shell_token" "$1" "$2"
+}
+printf '\e]6973;SHELL;%s;READY\e\\' "$__vterminal_shell_token"
+
 __vterminal_osc7() {
   local LC_ALL=C encoded="" ch hex i
   for ((i = 0; i < ${#PWD}; i++)); do
@@ -58,12 +72,14 @@ __vterminal_osc7() {
       *) printf -v hex '%%%02X' "'$ch"; encoded+="$hex" ;;
     esac
   done
+  __vterminal_emit 7 "file://${HOSTNAME:-wsl}${encoded}"
   printf '\e]7;file://%s%s\e\\' "${HOSTNAME:-wsl}" "$encoded"
 }
 
 __vterminal_command_finished() {
   local exit_code=$?
   if [[ -n "${__vterminal_cmd_started:-}" ]]; then
+    __vterminal_emit 133 "D;$exit_code"
     printf '\e]133;D;%s\e\\' "$exit_code"
     unset __vterminal_cmd_started
   fi
@@ -73,13 +89,16 @@ __vterminal_command_finished() {
 
 __vterminal_prompt_ready() {
   __vterminal_osc7
+  __vterminal_emit 133 A
   printf '\e]133;A\e\\'
   # PS1 stores Bash prompt escapes, not the bytes they later expand to. The
   # final three backslashes are significant: one terminates OSC (ESC \\) and
   # the last starts Bash's non-printing-span closer (\\]).
-  if [[ "$PS1" != *'\e]133;B'* && "$PS1" != *$'\e]133;B'* ]]; then
-    PS1="${PS1}"'\[\e]133;B\e\\\]'
+  if [[ "$PS1" != *"6973;SHELL;${__vterminal_shell_token};133;B"* ]]; then
+    PS1="${PS1}"'\[\e]6973;SHELL;'"${__vterminal_shell_token}"';133;B\e\\\]\[\e]133;B\e\\\]'
   fi
+  # The prompt now contains our private scope, even if the user exported PS1.
+  export -n PS1
   __vterminal_at_prompt=1
 }
 
@@ -94,7 +113,10 @@ __vterminal_preexec() {
   else
     command="$1"
   fi
-  printf '\e]6973;CMD;%s\e\\' "$(printf '%s' "$command" | base64 | tr -d '\n')"
+  local encoded_command="$(printf '%s' "$command" | base64 | tr -d '\n')"
+  __vterminal_emit CMD "$encoded_command"
+  printf '\e]6973;CMD;%s\e\\' "$encoded_command"
+  __vterminal_emit 133 C
   printf '\e]133;C\e\\'
 }
 
@@ -130,11 +152,11 @@ unset __vterminal_debug_command __vterminal_prior_debug_spec
 
 #[cfg(any(target_os = "windows", test))]
 pub(crate) const WSL_BASH_WRAPPER: &str = r#"#!/bin/sh
-exec /bin/bash --noprofile --rcfile "$HOME/.local/share/vterminal/bashrc-v8" -i
+exec /bin/bash --noprofile --rcfile "$HOME/.local/share/vterminal/bashrc-v9" -i
 "#;
 
 #[cfg(target_os = "windows")]
-pub const WSL_INTEGRATION_PATH: &str = "~/.local/share/vterminal/bashrc-v8";
+pub const WSL_INTEGRATION_PATH: &str = "~/.local/share/vterminal/bashrc-v9";
 
 /// The integration script: emits OSC 133 semantic-prompt marks (A/B/C/D;exit),
 /// a percent-encoded OSC 7 cwd report, and the typed command as a base64 OSC
@@ -142,10 +164,21 @@ pub const WSL_INTEGRATION_PATH: &str = "~/.local/share/vterminal/bashrc-v8";
 /// Guarded against double-injection; coexists with starship/p10k.
 #[cfg(not(target_os = "windows"))]
 const VTERMINAL_ZSH: &str = r#"# vterminal integration (version: __VERSION__)
-if [[ -n "$VTERMINAL_INTEGRATION" ]]; then
+if (( $+functions[__vterminal_preexec] )); then
   return
 fi
 export VTERMINAL_INTEGRATION=1
+
+__vterminal_shell_token="$(LC_ALL=C command od -An -N16 -tx1 /dev/urandom | command tr -d ' \n')"
+typeset +x __vterminal_shell_token
+if [[ ! "$__vterminal_shell_token" =~ ^[a-f0-9]{32}$ ]]; then
+  printf 'VTerminal shell integration: secure token unavailable\n' >&2
+  return
+fi
+__vterminal_emit() {
+  printf '\e]6973;SHELL;%s;%s;%s\e\\' "$__vterminal_shell_token" "$1" "$2"
+}
+printf '\e]6973;SHELL;%s;READY\e\\' "$__vterminal_shell_token"
 
 autoload -Uz add-zsh-hook
 
@@ -160,6 +193,7 @@ __vterminal_osc7() {
       *) url+=$(printf '%%%02X' "'$ch") ;;
     esac
   done
+  __vterminal_emit 7 "file://${HOST}${url}"
   printf '\e]7;file://%s%s\e\\' "$HOST" "$url"
 }
 
@@ -168,17 +202,20 @@ __vterminal_precmd() {
   # A cancelled input line never reaches preexec. Do not reuse its capture.
   unset __vterminal_pending_command
   if [[ -n "$__vterminal_cmd_started" ]]; then
+    __vterminal_emit 133 "D;$exit_code"
     printf '\e]133;D;%s\e\\' "$exit_code"
     unset __vterminal_cmd_started
   fi
   __vterminal_osc7
+  __vterminal_emit 133 A
   printf '\e]133;A\e\\'
   # 133;B (prompt end / input start) belongs at the very end of the prompt.
   # Re-append every cycle: prompt frameworks (starship, p10k) rewrite PS1 in
   # their own precmd, which runs before ours (we were registered last).
-  if [[ "$PS1" != *$'\e]133;B'* ]]; then
-    PS1="${PS1}%{$(printf '\e]133;B\e\\')%}"
+  if [[ "$PS1" != *"6973;SHELL;${__vterminal_shell_token};133;B"* ]]; then
+    PS1="${PS1}%{$(printf '\e]6973;SHELL;%s;133;B\e\\\e]133;B\e\\' "$__vterminal_shell_token")%}"
   fi
+  typeset +x PS1 PROMPT
 }
 
 # This hook sees the accepted line before history options such as
@@ -197,7 +234,10 @@ __vterminal_preexec() {
   # Ship the accepted command out-of-band; buffer scraping picks up
   # RPROMPT/PS2 decorations. Keep preexec's argument as a fallback when another
   # integration invokes this hook without an interactive history event.
-  printf '\e]6973;CMD;%s\e\\' "$(printf '%s' "$command" | base64 | tr -d '\n')"
+  local encoded_command="$(printf '%s' "$command" | base64 | tr -d '\n')"
+  __vterminal_emit CMD "$encoded_command"
+  printf '\e]6973;CMD;%s\e\\' "$encoded_command"
+  __vterminal_emit 133 C
   printf '\e]133;C\e\\'
 }
 
@@ -381,7 +421,9 @@ mod zsh_tests {
             .arg("-di")
             .env("HOME", home.path())
             .env("ZDOTDIR", home.path())
-            .env_remove("VTERMINAL_INTEGRATION")
+            // An app or child shell can inherit the public integration marker.
+            // The generated functions, not that exported marker, own injection.
+            .env("VTERMINAL_INTEGRATION", "1")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -532,6 +574,39 @@ mod zsh_tests {
             ]
         );
     }
+
+    #[test]
+    fn zsh_scopes_lifecycle_to_a_fresh_non_exported_shell_token() {
+        let (first, _) = run_zsh("export PS1='exported>'", "env < /dev/null\n");
+        let (second, _) = run_zsh("", "true < /dev/null\n");
+        let token = |stdout: &str| {
+            stdout
+                .split("\x1b]6973;SHELL;")
+                .skip(1)
+                .find_map(|event| {
+                    event
+                        .split_once(";READY\x1b\\")
+                        .map(|(token, _)| token.to_owned())
+                })
+                .expect("local initialization")
+        };
+        let first_token = token(&first);
+        assert_eq!(first_token.len(), 32);
+        assert!(first_token.chars().all(|ch| ch.is_ascii_hexdigit()));
+        assert_ne!(first_token, token(&second));
+        assert!(!first
+            .lines()
+            .any(|line| line.starts_with("__vterminal_shell_token=")));
+        assert!(!first.lines().any(|line| {
+            (line.starts_with("PS1=") || line.starts_with("PROMPT=")) && line.contains(&first_token)
+        }));
+        for event in ["CMD;", "133;A", "133;C", "133;D;0", "7;file://"] {
+            assert!(
+                first.contains(&format!("6973;SHELL;{first_token};{event}")),
+                "missing {event}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -579,7 +654,7 @@ mod windows_tests {
             assert!(VTERMINAL_BASH.contains(required), "missing {required}");
         }
         assert!(WSL_BASH_WRAPPER.contains("--noprofile --rcfile"));
-        assert!(WSL_BASH_WRAPPER.contains("bashrc-v8"));
+        assert!(WSL_BASH_WRAPPER.contains("bashrc-v9"));
     }
 
     #[cfg(unix)]
@@ -606,7 +681,7 @@ mod windows_tests {
 
     #[test]
     fn bash_prompt_marker_closes_osc_and_the_nonprinting_span() {
-        assert!(VTERMINAL_BASH.contains(r#"'\[\e]133;B\e\\\]'"#));
+        assert!(VTERMINAL_BASH.contains(r#"\[\e]133;B\e\\\]'"#));
         assert!(!VTERMINAL_BASH.contains(r#"PS1=\"${PS1}\\[\e]133;B\e\\\\]\""#));
     }
 
@@ -623,7 +698,11 @@ mod windows_tests {
             "bash failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(output.stdout.ends_with(br"prompt>\[\e]133;B\e\\\]:1"));
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let prompt = stdout.rsplit("prompt>").next().unwrap();
+        assert_eq!(prompt.matches(";133;B").count(), 1);
+        assert!(prompt.starts_with(r"\[\e]6973;SHELL;"));
+        assert!(prompt.ends_with(r"\[\e]133;B\e\\\]:1"));
     }
 
     #[cfg(unix)]
@@ -672,6 +751,41 @@ trap - DEBUG
             "unexpected stderr: {:?}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generated_bash_scopes_lifecycle_and_keeps_token_out_of_child_environment() {
+        let script = format!(
+            "{}\ntrap - DEBUG\nexport PS1='exported>'\n__vterminal_at_prompt=1\n__vterminal_preexec 'ssh example.invalid'\nfalse\n__vterminal_command_finished\n__vterminal_prompt_ready\n/usr/bin/env\n",
+            VTERMINAL_BASH.replace("__VERSION__", "test")
+        );
+        let output = run_bash(&script);
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let token = stdout
+            .split("\x1b]6973;SHELL;")
+            .skip(1)
+            .find_map(|event| {
+                event
+                    .split_once(";READY\x1b\\")
+                    .map(|(token, _)| token.to_owned())
+            })
+            .expect("local initialization");
+        assert_eq!(token.len(), 32);
+        assert!(token.chars().all(|ch| ch.is_ascii_hexdigit()));
+        assert!(!stdout
+            .lines()
+            .any(|line| line.starts_with("__vterminal_shell_token=")));
+        assert!(!stdout
+            .lines()
+            .any(|line| line.starts_with("PS1=") && line.contains(&token)));
+        for event in ["CMD;", "133;A", "133;C", "133;D;1", "7;file://"] {
+            assert!(
+                stdout.contains(&format!("6973;SHELL;{token};{event}")),
+                "missing {event}"
+            );
+        }
     }
 
     #[cfg(unix)]

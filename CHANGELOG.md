@@ -2,6 +2,7 @@
 
 ## 0.6.6
 
+- Fixed SSH sessions incorrectly showing “not connected” when remote shell prompt markers ended local connection tracking, preventing nested reconnects and preserving remote AI context.
 - Updated cloud tiers to Claude Haiku/Sonnet/Opus 5.5, GPT-6 Luna/GPT-6.1 Sol/GPT-6 Astra, and Mistral Small 4/Medium 3.5/Large 4 Preview, retaining saved model selections and effort preferences.
 - Updated adaptive thinking and reasoning controls to each current model's supported settings, including Sonnet's lowest thinking mode and always-on reasoning models.
 - Refreshed dependencies from open Dependabot updates and adjusted provider integration for the current OpenAI Responses API.

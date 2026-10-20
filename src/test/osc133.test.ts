@@ -178,6 +178,102 @@ describe("BlockTracker OSC 133 FSM", () => {
   });
 });
 
+describe("BlockTracker shell-instance provenance", () => {
+  const local = "0123456789abcdef0123456789abcdef";
+  const remote = "fedcba9876543210fedcba9876543210";
+  const scoped = (token: string, kind: string, payload?: string) =>
+    `SHELL;${token};${kind}${payload === undefined ? "" : `;${payload}`}`;
+
+  it("keeps the enclosing SSH connection until its local shell finishes", () => {
+    let connected = false;
+    const cwd: string[] = [];
+    const { term, tracker, commands, exits } = makeTracker({
+      onBlockStart: (_id, command) => {
+        commands.push(command);
+        connected = command.startsWith("ssh ");
+      },
+      onBlockEnd: (_id, exitCode) => {
+        exits.push(exitCode);
+        connected = false;
+      },
+      onCwdChange: (path) => cwd.push(path),
+    });
+    term.sendOsc(6973, scoped(local, "READY"));
+    term.sendOsc(6973, scoped(local, "133", "A"));
+    term.sendOsc(6973, scoped(local, "133", "B"));
+    const command = 'ssh -t deploy@example.invalid \'cd -- /data; exec "${SHELL:-/bin/sh}" -l\'';
+    term.sendOsc(6973, scoped(local, "CMD", btoa(command)));
+    term.sendOsc(6973, scoped(local, "133", "C"));
+    expect(connected).toBe(true);
+
+    // A remote distro's integration, including another VTerminal, must not
+    // finish the local SSH block or let Reconnect run another ssh inside it.
+    term.sendOsc(6973, scoped(remote, "READY"));
+    term.sendOsc(6973, scoped(remote, "CMD", btoa("remote command")));
+    for (const payload of ["D;0", "A", "B", "C", "D;7"]) {
+      term.sendOsc(133, payload);
+      term.sendOsc(6973, scoped(remote, "133", payload));
+    }
+    term.sendOsc(7, "file://remote/data");
+    term.sendOsc(6973, scoped(remote, "7", "file://remote/data"));
+    term.sendOsc(6973, `CMD;${btoa("remote command")}`);
+    expect(connected).toBe(true);
+    expect(tracker.phase).toBe("output");
+    expect(commands).toEqual([command]);
+    expect(exits).toEqual([]);
+    expect(cwd).toEqual([]);
+
+    term.sendOsc(6973, scoped(local, "133", "D;255"));
+    // Our shell emits standard copies as well. They must not finish twice.
+    term.sendOsc(133, "D;255");
+    term.sendOsc(6973, scoped(local, "7", "file://local/Users/deploy"));
+    term.sendOsc(6973, scoped(local, "133", "A"));
+    term.sendOsc(6973, scoped(local, "133", "B"));
+    expect(connected).toBe(false);
+    expect(exits).toEqual([255]);
+    expect(cwd).toEqual(["/Users/deploy"]);
+    expect(tracker.isAtPromptColumn()).toBe(true);
+    // A raw remote CMD could otherwise poison the following local command.
+    term.lines[0] = "pwd";
+    term.cursorX = 3;
+    term.sendOsc(6973, scoped(local, "133", "C"));
+    expect(commands).toEqual([command, "pwd"]);
+  });
+
+  it("keeps remote probe and command completions on their private channel", () => {
+    const privateEvents: string[] = [];
+    const { term } = makeTracker({ onOscPrivate: (payload) => privateEvents.push(payload) });
+    term.sendOsc(6973, scoped(local, "READY"));
+    term.sendOsc(6973, "RP;probe-nonce;bash");
+    term.sendOsc(6973, "RD;command-nonce;0");
+    expect(privateEvents).toEqual(["RP;probe-nonce;bash", "RD;command-nonce;0"]);
+  });
+
+  it("does not initialize from replay or untrusted runbook output", () => {
+    const { term, tracker } = makeTracker();
+    tracker.suspend();
+    term.sendOsc(6973, scoped(remote, "READY"));
+    tracker.resume();
+    tracker.beginRunbookOutputIsolation();
+    term.sendOsc(6973, scoped(remote, "READY"));
+    tracker.endRunbookOutputIsolation();
+    term.sendOsc(6973, "SHELL;invalid-token;READY");
+    term.sendOsc(6973, scoped(remote, "READY", "unexpected"));
+    term.sendOsc(6973, scoped(local, "READY"));
+    term.sendOsc(6973, scoped(local, "133", "A"));
+    expect(tracker.phase).toBe("prompt");
+    term.sendOsc(6973, scoped(remote, "133", "B"));
+    expect(tracker.phase).toBe("prompt");
+
+    // A replacement PTY receives a new TermEntry/BlockTracker and can establish
+    // its own local scope; a previous terminal's token is never persisted.
+    const replacement = makeTracker();
+    replacement.term.sendOsc(6973, scoped(remote, "READY"));
+    replacement.term.sendOsc(6973, scoped(remote, "133", "B"));
+    expect(replacement.tracker.phase).toBe("input");
+  });
+});
+
 // Restored scrollback is written back through term.write(). xterm's serialize
 // addon emits no OSC, so nothing SHOULD reach these handlers — but a replayed
 // mark would create phantom blocks and, worse, re-insert every replayed command

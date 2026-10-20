@@ -733,7 +733,7 @@ pub enum WslStatus {
 }
 
 #[cfg(any(target_os = "windows", test))]
-pub(crate) const WSL_REQUIRED_TOOLS_PROBE: &str = "test -x /bin/sh && test -x /bin/true && test -x /usr/bin/env && test -x /usr/bin/setsid && test -x /usr/bin/printf && for tool in base64 tr grep ps awk sort sleep; do command -v \"$tool\" >/dev/null || exit 1; done";
+pub(crate) const WSL_REQUIRED_TOOLS_PROBE: &str = "test -x /bin/sh && test -x /bin/true && test -x /usr/bin/env && test -x /usr/bin/setsid && test -x /usr/bin/printf && test -r /dev/urandom && for tool in base64 tr od grep ps awk sort sleep; do command -v \"$tool\" >/dev/null || exit 1; done";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalAccelerationInfo {
@@ -1311,6 +1311,8 @@ mod credential_tests {
     #[test]
     fn wsl_tool_probe_requires_the_absolute_printf_bridge() {
         assert!(WSL_REQUIRED_TOOLS_PROBE.contains("test -x /usr/bin/printf"));
+        assert!(WSL_REQUIRED_TOOLS_PROBE.contains("test -r /dev/urandom"));
+        assert!(WSL_REQUIRED_TOOLS_PROBE.contains(" tr od "));
     }
 
     #[test]

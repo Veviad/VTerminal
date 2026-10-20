@@ -1,7 +1,8 @@
 import type { IDisposable, IMarker, Terminal } from "@xterm/xterm";
 
-// Block detection driven by OSC 133 semantic-prompt sequences emitted by the
-// injected zsh integration script:
+// Block detection uses semantic-prompt sequences emitted by the injected local
+// shell. Its private scoped copies distinguish these from remote integrations;
+// standard OSC 133 remains a fallback when no scoped initialization arrived:
 //   ESC]133;A ST  → prompt start
 //   ESC]133;B ST  → prompt end / command input start
 //   ESC]133;C ST  → command output start (command accepted)
@@ -31,6 +32,10 @@ export class BlockTracker {
   private inputStartX = 0;
   /** Exact command shipped out-of-band via OSC 6973 just before 133;C. */
   private pendingCommand: string | null = null;
+  /** Our injected shell owns semantic marks. Remote shells commonly emit the
+   * same standard OSC 133 sequences; accepting those would close the local ssh
+   * block at the first remote prompt and offer a nested Reconnect. */
+  private shellToken: string | null = null;
   private currentBlockId: string | null = null;
   private disposables: IDisposable[] = [];
   /** True while the user hasn't typed since the prompt became ready. */
@@ -81,12 +86,14 @@ export class BlockTracker {
     this.disposables.push(
       this.term.parser.registerOscHandler(133, (data) => {
         if (this.suspended || this.runbookOutputIsolation) return true;
+        if (this.shellToken) return true;
         this.handle133(data);
         return true;
       }),
       // OSC 7 — cwd reporting (file://host/path)
       this.term.parser.registerOscHandler(7, (data) => {
         if (this.suspended || this.runbookOutputIsolation) return true;
+        if (this.shellToken) return true;
         const parsed = parseOsc7(data);
         if (parsed && this.cb.onCwdChange) this.cb.onCwdChange(parsed.path, parsed.host);
         return true;
@@ -100,7 +107,10 @@ export class BlockTracker {
           if (data.startsWith("RD;")) this.cb.onOscPrivate?.(data);
           return true;
         }
-        if (data.startsWith("CMD;")) {
+        if (data.startsWith("SHELL;")) {
+          this.handleShellEvent(data.slice(6));
+        } else if (data.startsWith("CMD;")) {
+          if (this.shellToken) return true;
           const decoded = decodeBase64Utf8(data.slice(4));
           if (decoded !== null) this.pendingCommand = decoded;
         } else {
@@ -116,6 +126,31 @@ export class BlockTracker {
         if (this.phase === "input") this.inputPristine = false;
       }),
     );
+  }
+
+  /** The first local startup establishes a non-exported, random shell token.
+   * A nested shell cannot replace it, including another VTerminal shell. The
+   * fallback standard OSC path stays available when integration is disabled.
+   * Private remote RP/RD completion events deliberately remain independent. */
+  private handleShellEvent(data: string): void {
+    const match = /^([a-f0-9]{32});(READY|133|7|CMD)(?:;([\s\S]*))?$/.exec(data);
+    if (!match) return;
+    const [, token, kind, payload = ""] = match;
+    if (kind === "READY") {
+      if (match[3] !== undefined) return;
+      if (!this.shellToken) this.shellToken = token;
+      return;
+    }
+    if (token !== this.shellToken) return;
+    if (kind === "133") {
+      this.handle133(payload);
+    } else if (kind === "7") {
+      const parsed = parseOsc7(payload);
+      if (parsed) this.cb.onCwdChange?.(parsed.path, parsed.host);
+    } else if (kind === "CMD") {
+      const decoded = decodeBase64Utf8(payload);
+      if (decoded !== null) this.pendingCommand = decoded;
+    }
   }
 
   dispose(): void {
