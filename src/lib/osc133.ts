@@ -23,6 +23,17 @@ export interface BlockTrackerCallbacks {
   onOscPrivate?(payload: string): void;
 }
 
+// Both scopes have already been validated as 32 hex characters. Check every
+// position rather than short-circuiting on the matching prefix.
+function matchesShellScope(candidate: string, expected: string | null): boolean {
+  if (expected === null) return false;
+  let difference = 0;
+  for (let index = 0; index < 32; index++) {
+    difference |= candidate.charCodeAt(index) ^ expected.charCodeAt(index);
+  }
+  return difference === 0;
+}
+
 let nextBlockId = 1;
 
 export class BlockTracker {
@@ -141,7 +152,7 @@ export class BlockTracker {
       if (!this.shellToken) this.shellToken = token;
       return;
     }
-    if (token !== this.shellToken) return;
+    if (!matchesShellScope(token, this.shellToken)) return;
     if (kind === "133") {
       this.handle133(payload);
     } else if (kind === "7") {

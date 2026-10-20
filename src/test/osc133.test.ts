@@ -180,7 +180,7 @@ describe("BlockTracker OSC 133 FSM", () => {
 
 describe("BlockTracker shell-instance provenance", () => {
   const local = "0123456789abcdef0123456789abcdef";
-  const remote = "fedcba9876543210fedcba9876543210";
+  const remote = `${local.slice(0, -1)}0`;
   const scoped = (token: string, kind: string, payload?: string) =>
     `SHELL;${token};${kind}${payload === undefined ? "" : `;${payload}`}`;
 
