@@ -15,37 +15,32 @@ interface EnvelopeFormat {
   partialOuterClose: RegExp;
 }
 
-function envelopeFormat(
-  outerOpen: string,
-  bodyOpen: string,
-  bodyClose: string,
-  outerClose: string,
-  adjacentTags = false,
-): EnvelopeFormat {
-  // These exact protocol close tags contain no regular-expression metacharacters.
-  const separator = adjacentTags ? "\\s*" : "\\s+";
-  return {
-    outerOpen,
-    bodyOpen,
-    bodyClose,
-    outerClose,
-    adjacentTags,
-    completeClosePair: new RegExp(`${bodyClose}${separator}${outerClose}$`, "u"),
-    partialOuterClose: new RegExp(`${bodyClose}${separator}(\\S*)$`, "u"),
-  };
-}
+const LEGACY_FORMAT: EnvelopeFormat = {
+  outerOpen: "<finish>",
+  bodyOpen: "<summary>",
+  bodyClose: "</summary>",
+  outerClose: "</finish>",
+  adjacentTags: false,
+  completeClosePair: /<\/summary>\s+<\/finish>$/u,
+  partialOuterClose: /<\/summary>\s+(\S*)$/u,
+};
 
-const LEGACY_FORMAT = envelopeFormat("<finish>", "<summary>", "</summary>", "</finish>");
+const INVOCATION_CLOSING_FORMAT = {
+  bodyClose: "</parameter>",
+  outerClose: "</invoke>",
+  adjacentTags: true,
+  completeClosePair: /<\/parameter>\s*<\/invoke>$/u,
+  partialOuterClose: /<\/parameter>\s*(\S*)$/u,
+};
+
 const ENVELOPE_FORMATS: readonly EnvelopeFormat[] = [
   LEGACY_FORMAT,
   ...['"', "'"].flatMap((outerQuote) =>
-    ['"', "'"].map((bodyQuote) => envelopeFormat(
-      `<invoke name=${outerQuote}finish${outerQuote}>`,
-      `<parameter name=${bodyQuote}summary${bodyQuote}>`,
-      "</parameter>",
-      "</invoke>",
-      true,
-    )),
+    ['"', "'"].map((bodyQuote) => ({
+      ...INVOCATION_CLOSING_FORMAT,
+      outerOpen: `<invoke name=${outerQuote}finish${outerQuote}>`,
+      bodyOpen: `<parameter name=${bodyQuote}summary${bodyQuote}>`,
+    })),
   ),
 ];
 
