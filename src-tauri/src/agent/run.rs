@@ -483,7 +483,7 @@ async fn one_round(
     params: ChatParams,
     cancel: tokio::sync::watch::Receiver<bool>,
     on_event: &Channel<StreamEvent>,
-) -> Result<(Vec<ToolCall>, String, (u32, u32), FinishReason), ProviderError> {
+) -> Result<crate::provider::round::RoundOutput, ProviderError> {
     let output =
         crate::provider::round::run_round(provider, messages, tools, params, cancel, |event| {
             match event {
@@ -508,7 +508,7 @@ async fn one_round(
             }
         })
         .await?;
-    Ok((output.calls, output.text, output.usage, output.finish))
+    Ok(output)
 }
 
 struct ToolCallContext<'a> {
@@ -1210,6 +1210,7 @@ async fn process_tool_calls(
                     tool_calls: None,
                     tool_call_id: Some(call.id),
                     structured_tool_result: dispatched.structured_tool_result,
+                    provider_state: None,
                     images: None,
                 });
             }
@@ -1465,7 +1466,13 @@ pub async fn run_agent(
             on_event,
         )
         .await;
-        let (calls, text, usage, finish) = match round {
+        let crate::provider::round::RoundOutput {
+            calls,
+            text,
+            usage,
+            finish,
+            provider_state,
+        } = match round {
             Ok(round) => round,
             Err(ProviderError::Cancelled) => {
                 return finish_outcome(
@@ -1540,7 +1547,9 @@ pub async fn run_agent(
             // dropped, which silently cost the NEXT turn the model's own final
             // reply — and a steer cannot be appended after an assistant turn that
             // is not in the transcript.
-            messages.push(ChatMessage::assistant(text));
+            let mut assistant = ChatMessage::assistant(text);
+            assistant.provider_state = provider_state;
+            messages.push(assistant);
             checkpoints.mark_changed();
             // The user typed while this answer was streaming. Keep the run alive
             // and let the top of the loop deliver it, rather than stranding the
@@ -1569,6 +1578,7 @@ pub async fn run_agent(
             tool_calls: Some(calls.clone()),
             tool_call_id: None,
             structured_tool_result: None,
+            provider_state,
             images: None,
         });
         checkpoints.mark_changed();
@@ -1752,6 +1762,7 @@ fn tool_result(tool_call_id: &str, content: &str) -> ChatMessage {
         tool_calls: None,
         tool_call_id: Some(tool_call_id.to_string()),
         structured_tool_result: None,
+        provider_state: None,
         images: None,
     }
 }
@@ -2219,6 +2230,7 @@ mod tests {
             }]),
             tool_call_id: None,
             structured_tool_result: None,
+            provider_state: None,
             images: None,
         }
     }

@@ -456,6 +456,13 @@ export interface ChatMessage {
   /** Present only on the turn being sent. Rust strips these from every history
    *  turn (`HISTORY_IMAGE_TURNS`), so a round-tripped transcript never has them. */
   images?: ImagePart[];
+  /** Opaque provider continuation items; preserve unchanged with the transcript. */
+  provider_state?: {
+    provider: "open_ai_responses";
+    model: string;
+    output: unknown[];
+    reasoning_tokens?: number;
+  };
 }
 
 /** The WIRE shape of an image, mirroring Rust's `provider::ImagePart`.

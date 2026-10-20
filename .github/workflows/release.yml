@@ -35,7 +35,7 @@ jobs:
             ./scripts/check-version.sh
           fi
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -189,7 +189,7 @@ jobs:
 
       # Uploaded before the release step, so a failure there still leaves the
       # build downloadable rather than throwing away 40 minutes.
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: vterminal-macos-aarch64
           path: release-assets/
@@ -205,7 +205,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -287,7 +287,7 @@ jobs:
           $hash = Get-FileHash $installer[0].FullName -Algorithm SHA256
           "$($hash.Hash.ToLower())  $($installer[0].Name)" | Set-Content release-assets/SHA256SUMS-WINDOWS.txt
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: vterminal-windows-x64
           path: release-assets/
@@ -308,7 +308,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: artifacts
 

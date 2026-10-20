@@ -63,7 +63,7 @@ pub use crate::models::catalog::Effort;
 
 // The provider seam: everything AI-related in the app talks to this trait with
 // OpenAI-ish shapes. `local::LocalLlamaCpp` implements it on-device;
-// `http::{anthropic, openai_compat}` implement it over SSE.
+// The HTTP adapters implement it over each vendor's SSE protocol.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -111,6 +111,45 @@ pub struct StructuredToolResult {
     pub truncated: bool,
 }
 
+/// Opaque continuation items returned by a provider, kept beside the portable
+/// transcript. Only the matching adapter and wire model may replay these.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "provider", rename_all = "snake_case")]
+pub enum ProviderState {
+    OpenAiResponses {
+        model: String,
+        output: Vec<Value>,
+        #[serde(default)]
+        reasoning_tokens: u32,
+    },
+}
+
+impl ProviderState {
+    pub fn storage_bytes(&self) -> usize {
+        serde_json::to_vec(self).map_or(0, |bytes| bytes.len())
+    }
+
+    pub fn reasoning_tokens(&self) -> u32 {
+        match self {
+            Self::OpenAiResponses {
+                reasoning_tokens, ..
+            } => *reasoning_tokens,
+        }
+    }
+
+    /// History repair must not resurrect calls that have lost their results.
+    pub fn retain_tool_calls(&mut self, calls: &[ToolCall]) {
+        match self {
+            Self::OpenAiResponses { output, .. } => output.retain(|item| {
+                item["type"] != "function_call"
+                    || calls
+                        .iter()
+                        .any(|call| item["call_id"].as_str() == Some(call.id.as_str()))
+            }),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: Role,
@@ -135,6 +174,8 @@ pub struct ChatMessage {
     /// it does — as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub images: Option<Vec<ImagePart>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_state: Option<ProviderState>,
 }
 
 impl ChatMessage {
@@ -145,6 +186,7 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: None,
             structured_tool_result: None,
+            provider_state: None,
             images: None,
         }
     }
@@ -155,6 +197,7 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: None,
             structured_tool_result: None,
+            provider_state: None,
             images: None,
         }
     }
@@ -165,6 +208,7 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: None,
             structured_tool_result: None,
+            provider_state: None,
             // Empty stays None so every downstream `is_some()` means "there are
             // actually images here".
             images: if images.is_empty() {
@@ -181,6 +225,7 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: None,
             structured_tool_result: None,
+            provider_state: None,
             images: None,
         }
     }
@@ -246,17 +291,15 @@ pub enum ToolChoiceMode {
 pub struct ChatParams {
     /// `None` means "use the model's own default" — for a GGUF that is the
     /// `general.sampling.temp` it ships, matching llama.cpp's precedence.
-    /// Ignored entirely when the catalog says the model rejects it: Claude
-    /// Opus 5 and Sonnet 5 return a 400 for `temperature`, as do GPT-5.6.
+    /// Omitted when the catalog says the selected model rejects it.
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
     pub tool_choice: ToolChoiceMode,
     /// Which provider-native web tools this turn may use. Each adapter intersects
     /// the policy with its model's catalog capabilities and
     /// emits its vendor's wire shape — the same discipline as `effort`, which is
-    /// clamped by `catalog.efforts`. Adapters whose vendor offers nothing on the
-    /// wire shape we speak (OpenAI and Mistral both keep web search on a
-    /// different API) ignore it entirely.
+    /// clamped by `catalog.efforts`. Adapters with no enabled native web tools
+    /// ignore this policy.
     ///
     /// Deliberately NOT a `ToolDef` variant: `ToolDef` means "a function the
     /// agent loop can dispatch", and `chat_template.rs` — which renders it for
@@ -294,6 +337,8 @@ pub enum ProviderEvent {
     /// Complete, parsed tool calls (local models emit them whole).
     ToolCalls(Vec<ToolCall>),
     WebCitation(WebCitation),
+    /// Internal continuation data, never rendered as model output.
+    ProviderState(ProviderState),
     Usage {
         prompt_tokens: u32,
         completion_tokens: u32,

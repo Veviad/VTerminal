@@ -600,6 +600,7 @@ mod tests {
                 }]),
                 tool_call_id: None,
                 structured_tool_result: None,
+                provider_state: None,
                 images: None,
             },
             ChatMessage {
@@ -608,6 +609,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: Some("t1".into()),
                 structured_tool_result: None,
+                provider_state: None,
                 images: None,
             },
             ChatMessage::user("actually, check the logs first"),
@@ -745,6 +747,7 @@ mod tests {
             for id in [
                 "mistral/mistral-small-latest",
                 "mistral/magistral-medium-latest",
+                "mistral/mistral-large-latest",
             ] {
                 let got = effort_body(id, effort)["reasoning_effort"].clone();
                 assert!(
@@ -761,13 +764,17 @@ mod tests {
 
     #[test]
     fn a_model_with_no_rungs_omits_the_field_entirely() {
-        // Mistral Large 3 rejects `reasoning_effort` outright, so even `none`
-        // is a 400 — the key must be absent, not falsy.
+        // Remote servers cannot be assumed to accept vendor reasoning fields.
+        let model = CatalogModel {
+            provider: ProviderId::Remote,
+            efforts: &[],
+            ..*catalog::find("mistral/mistral-large-latest").unwrap()
+        };
         for effort in [Effort::Off, Effort::Medium, Effort::Max] {
+            let mut body = json!({});
+            apply_reasoning(&mut body, &model, effort);
             assert!(
-                effort_body("mistral/mistral-large-latest", effort)
-                    .get("reasoning_effort")
-                    .is_none(),
+                body.get("reasoning_effort").is_none(),
                 "sent reasoning_effort to a model that rejects the field"
             );
         }
@@ -1036,6 +1043,7 @@ mod tests {
             content: "ok".into(),
             tool_call_id: Some("call_1".into()),
             structured_tool_result: None,
+            provider_state: None,
             images: None,
             tool_calls: None,
         }]);

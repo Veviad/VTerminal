@@ -10,8 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::provider::{
-    ChatMessage, ChatParams, FinishReason, Provider, ProviderError, ProviderEvent, Role, ToolCall,
-    ToolChoiceMode, ToolDef,
+    ChatMessage, ChatParams, FinishReason, Provider, Role, ToolCall, ToolChoiceMode, ToolDef,
 };
 
 use super::runtime::{PhaseCompletion, PhaseResult};
@@ -101,7 +100,13 @@ pub async fn execute_agent_phase(
         if *cancel.borrow() {
             return Err("cancelled".into());
         }
-        let (calls, text, finish) = provider_round(
+        let crate::provider::round::RoundOutput {
+            calls,
+            text,
+            finish,
+            provider_state,
+            ..
+        } = crate::provider::round::run_round(
             provider,
             messages.clone(),
             tools.clone(),
@@ -115,11 +120,15 @@ pub async fn execute_agent_phase(
                 effort: config.effort,
             },
             cancel.clone(),
+            |_| {},
         )
-        .await?;
+        .await
+        .map_err(|error| error.to_string())?;
 
         if calls.is_empty() {
-            messages.push(ChatMessage::assistant(text));
+            let mut assistant = ChatMessage::assistant(text);
+            assistant.provider_state = provider_state;
+            messages.push(assistant);
             let reason = if finish == FinishReason::Length {
                 "The response hit its output limit. Call phase_complete with the best supported result."
             } else {
@@ -135,6 +144,7 @@ pub async fn execute_agent_phase(
             tool_calls: Some(calls.clone()),
             tool_call_id: None,
             structured_tool_result: None,
+            provider_state,
             images: None,
         });
 
@@ -440,51 +450,11 @@ pub(super) async fn provider_round(
     params: ChatParams,
     cancel: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(Vec<ToolCall>, String, FinishReason), String> {
-    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-    let stream = provider.chat_stream(messages, tools, params, cancel, tx);
-    tokio::pin!(stream);
-    let mut stream_done: Option<Result<(), ProviderError>> = None;
-    let mut calls = Vec::new();
-    let mut text = String::new();
-    let mut finish = FinishReason::Stop;
-
-    loop {
-        tokio::select! {
-            result = &mut stream, if stream_done.is_none() => stream_done = Some(result),
-            event = rx.recv() => {
-                let Some(event) = event else { break };
-                collect_provider_event(event, &mut calls, &mut text, &mut finish);
-            }
-        }
-        if stream_done.is_some() && rx.is_closed() {
-            while let Ok(event) = rx.try_recv() {
-                collect_provider_event(event, &mut calls, &mut text, &mut finish);
-            }
-            break;
-        }
-    }
-
-    match stream_done {
-        Some(Err(ProviderError::Cancelled)) => Err("cancelled".into()),
-        Some(Err(error)) => Err(error.to_string()),
-        _ => Ok((calls, text, finish)),
-    }
-}
-
-fn collect_provider_event(
-    event: ProviderEvent,
-    calls: &mut Vec<ToolCall>,
-    text: &mut String,
-    finish: &mut FinishReason,
-) {
-    match event {
-        ProviderEvent::TextDelta(delta) => text.push_str(&delta),
-        ProviderEvent::ToolCalls(found) => calls.extend(found),
-        ProviderEvent::Done { finish_reason } => *finish = finish_reason,
-        ProviderEvent::ReasoningDelta(_)
-        | ProviderEvent::WebCitation(_)
-        | ProviderEvent::Usage { .. } => {}
-    }
+    let output =
+        crate::provider::round::run_round(provider, messages, tools, params, cancel, |_| {})
+            .await
+            .map_err(|error| error.to_string())?;
+    Ok((output.calls, output.text, output.finish))
 }
 
 fn tool_result(id: &str, content: &str) -> ChatMessage {
@@ -494,6 +464,7 @@ fn tool_result(id: &str, content: &str) -> ChatMessage {
         tool_calls: None,
         tool_call_id: Some(id.into()),
         structured_tool_result: None,
+        provider_state: None,
         images: None,
     }
 }
@@ -501,6 +472,7 @@ fn tool_result(id: &str, content: &str) -> ChatMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::{ProviderError, ProviderEvent};
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
@@ -640,6 +612,134 @@ mod tests {
         assert_eq!(host.commands, vec!["id"]);
         assert_eq!(completion.result, PhaseResult::Compliant);
         assert_eq!(completion.summary, "identity checked");
+    }
+
+    #[tokio::test]
+    async fn encrypted_provider_state_survives_command_execution_until_completion() {
+        use crate::provider::ProviderState;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct ContinuationProvider {
+            rounds: AtomicUsize,
+        }
+
+        fn command_output() -> Vec<serde_json::Value> {
+            vec![
+                json!({
+                    "id": "reasoning-1",
+                    "type": "reasoning",
+                    "encrypted_content": "opaque-runbook-reasoning",
+                    "summary": [],
+                }),
+                json!({
+                    "id": "function-1",
+                    "type": "function_call",
+                    "call_id": "command-1",
+                    "name": "run_command",
+                    "arguments": r#"{"command":"id","explanation":"inspect identity"}"#,
+                }),
+            ]
+        }
+
+        #[async_trait]
+        impl Provider for ContinuationProvider {
+            fn id(&self) -> &'static str {
+                "openai"
+            }
+
+            fn model_name(&self) -> String {
+                "gpt-6.1-sol".into()
+            }
+
+            async fn chat_stream(
+                &self,
+                messages: Vec<ChatMessage>,
+                _tools: Vec<ToolDef>,
+                _params: ChatParams,
+                _cancel: tokio::sync::watch::Receiver<bool>,
+                tx: tokio::sync::mpsc::Sender<ProviderEvent>,
+            ) -> Result<(), ProviderError> {
+                let next_call = match self.rounds.fetch_add(1, Ordering::SeqCst) {
+                    0 => {
+                        assert!(messages
+                            .iter()
+                            .all(|message| message.provider_state.is_none()));
+                        tx.send(ProviderEvent::ProviderState(
+                            ProviderState::OpenAiResponses {
+                                model: self.model_name(),
+                                output: command_output(),
+                                reasoning_tokens: 37,
+                            },
+                        ))
+                        .await
+                        .unwrap();
+                        call(
+                            "command-1",
+                            "run_command",
+                            json!({"command": "id", "explanation": "inspect identity"}),
+                        )
+                    }
+                    1 => {
+                        let assistant = &messages[messages.len() - 2];
+                        assert_eq!(assistant.role, Role::Assistant);
+                        let ProviderState::OpenAiResponses {
+                            model,
+                            output,
+                            reasoning_tokens,
+                        } = assistant
+                            .provider_state
+                            .as_ref()
+                            .expect("command reasoning must be retained");
+                        assert_eq!(model, "gpt-6.1-sol");
+                        assert_eq!(output, &command_output());
+                        assert_eq!(*reasoning_tokens, 37);
+                        assert_eq!(assistant.tool_calls.as_ref().unwrap()[0].id, "command-1");
+                        let result = messages.last().unwrap();
+                        assert_eq!(result.role, Role::Tool);
+                        assert_eq!(result.tool_call_id.as_deref(), Some("command-1"));
+                        assert!(result.content.contains("ok"));
+                        assert!(messages
+                            .iter()
+                            .all(|message| !message.content.contains("opaque-runbook-reasoning")));
+                        call(
+                            "complete-1",
+                            "phase_complete",
+                            json!({
+                                "run_id": "run-1", "step_id": "step-1", "phase": "check",
+                                "result": "compliant", "summary": "identity checked",
+                            }),
+                        )
+                    }
+                    _ => panic!("phase should complete after its observed command"),
+                };
+                tx.send(ProviderEvent::ToolCalls(vec![next_call]))
+                    .await
+                    .unwrap();
+                tx.send(ProviderEvent::Done {
+                    finish_reason: FinishReason::ToolCalls,
+                })
+                .await
+                .unwrap();
+                Ok(())
+            }
+        }
+
+        let provider = ContinuationProvider {
+            rounds: AtomicUsize::new(0),
+        };
+        let mut host = Host::default();
+        let completion = execute_agent_phase(
+            &provider,
+            &config(RunbookPhase::Check),
+            &mut host,
+            no_cancel(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(host.commands, vec!["id"]);
+        assert_eq!(completion.result, PhaseResult::Compliant);
+        assert_eq!(completion.summary, "identity checked");
+        assert_eq!(provider.rounds.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

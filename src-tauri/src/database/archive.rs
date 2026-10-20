@@ -1770,6 +1770,13 @@ mod tests {
                 }]),
                 tool_call_id: None,
                 structured_tool_result: None,
+                provider_state: Some(crate::provider::ProviderState::OpenAiResponses {
+                    model: "gpt-6-luna".into(),
+                    output: vec![serde_json::json!({
+                        "type": "reasoning", "encrypted_content": "archive-state-sentinel"
+                    })],
+                    reasoning_tokens: 123,
+                }),
                 images: None,
             },
             ChatMessage {
@@ -1786,6 +1793,7 @@ mod tests {
                     is_error: false,
                     truncated: false,
                 }),
+                provider_state: None,
                 images: None,
             },
         ]);
@@ -1793,6 +1801,13 @@ mod tests {
 
         let back = transcript(&conn, "a").unwrap();
         assert_eq!(back.len(), 4);
+        assert_eq!(
+            back[2].provider_state.as_ref().unwrap().reasoning_tokens(),
+            123
+        );
+        assert!(serde_json::to_string(&back[2].provider_state)
+            .unwrap()
+            .contains("archive-state-sentinel"));
         let calls = back[2].tool_calls.as_ref().unwrap();
         assert_eq!(calls[0].id, "call_1");
         assert_eq!(calls[0].arguments, r#"{"command":"ls"}"#);

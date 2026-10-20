@@ -147,6 +147,9 @@ pub async fn resolve_provider_for_model(
             ProviderId::Anthropic => {
                 Box::new(crate::provider::http::anthropic::AnthropicProvider { model, api_key })
             }
+            ProviderId::OpenAi => Box::new(
+                crate::provider::http::openai_responses::OpenAiResponsesProvider { model, api_key },
+            ),
             _ => Box::new(crate::provider::http::openai_compat::OpenAiCompatProvider {
                 model,
                 endpoint: crate::provider::http::openai_compat::vendor_endpoint(model.provider)
@@ -1150,7 +1153,10 @@ fn forward_chat_provider_event(
                 cited_text: citation.cited_text.clone(),
             });
         }
-        ProviderEvent::Usage { .. } | ProviderEvent::Done { .. } | ProviderEvent::ToolCalls(_) => {}
+        ProviderEvent::Usage { .. }
+        | ProviderEvent::Done { .. }
+        | ProviderEvent::ToolCalls(_)
+        | ProviderEvent::ProviderState(_) => {}
     }
 }
 
@@ -1340,6 +1346,7 @@ async fn run_chat_with_mcp(
             calls,
             usage: round_usage,
             finish,
+            provider_state,
             ..
         } = output;
         usage.0 = usage.0.saturating_add(round_usage.0);
@@ -1367,6 +1374,7 @@ async fn run_chat_with_mcp(
             tool_calls: Some(calls.clone()),
             tool_call_id: None,
             structured_tool_result: None,
+            provider_state,
             images: None,
         });
         for call in calls {
@@ -1390,6 +1398,7 @@ async fn run_chat_with_mcp(
                 tool_calls: None,
                 tool_call_id: Some(call.id),
                 structured_tool_result: dispatched.structured_tool_result,
+                provider_state: None,
                 images: None,
             });
         }

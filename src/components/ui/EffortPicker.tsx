@@ -17,14 +17,13 @@ const LABELS: Record<Effort, string> = {
  * Reasoning-depth selector, rendered from the model's OWN capability list.
  *
  * The whole point is that this is not a fixed five-way switch: Mistral offers
- * only off/high, Claude Haiku 4.5 spends depth as a token budget and errors on
- * the effort parameter outright, and the on-device models are an on/off toggle.
+ * only off/high, Opus 5.5 cannot turn thinking off, and the on-device models
+ * spend relative depth as a thinking budget.
  * `available` comes straight from the catalog entry, so a rung the model would
  * reject is never offered — every one of these is a 400, not a downgrade.
  *
- * Renders nothing when there is no choice to make (Mistral Large 3 rejects the
- * parameter entirely, so it declares no rungs at all). An empty control that
- * does nothing is worse than no control.
+ * Renders nothing when there is no choice to make, including remote servers
+ * that do not declare an effort parameter.
  *
  * `layout` picks the presentation, not the behaviour. `"segmented"` shows every rung and
  * suits Settings, where there is room. `"dropdown"` is for the AI panel header: five rungs

@@ -6,8 +6,8 @@
 //! returned calls in their own capability boundary.
 
 use super::{
-    ChatMessage, ChatParams, FinishReason, Provider, ProviderError, ProviderEvent, ToolCall,
-    ToolDef,
+    ChatMessage, ChatParams, FinishReason, Provider, ProviderError, ProviderEvent, ProviderState,
+    ToolCall, ToolDef,
 };
 
 pub struct RoundOutput {
@@ -15,12 +15,14 @@ pub struct RoundOutput {
     pub text: String,
     pub usage: (u32, u32),
     pub finish: FinishReason,
+    pub provider_state: Option<ProviderState>,
 }
 
 fn absorb(output: &mut RoundOutput, event: ProviderEvent) {
     match event {
         ProviderEvent::TextDelta(delta) => output.text.push_str(&delta),
         ProviderEvent::ToolCalls(calls) => output.calls.extend(calls),
+        ProviderEvent::ProviderState(state) => output.provider_state = Some(state),
         ProviderEvent::Usage {
             prompt_tokens,
             completion_tokens,
@@ -47,6 +49,7 @@ pub async fn run_round(
         text: String::new(),
         usage: (0, 0),
         finish: FinishReason::Stop,
+        provider_state: None,
     };
 
     loop {
@@ -107,6 +110,15 @@ mod tests {
             })
             .await
             .unwrap();
+            tx.send(ProviderEvent::ProviderState(
+                ProviderState::OpenAiResponses {
+                    model: "gpt-6-luna".into(),
+                    output: Vec::new(),
+                    reasoning_tokens: 42,
+                },
+            ))
+            .await
+            .unwrap();
             tx.send(ProviderEvent::Done {
                 finish_reason: FinishReason::Stop,
             })
@@ -140,6 +152,7 @@ mod tests {
         assert_eq!(output.text, "answer");
         assert_eq!(output.usage, (9_697, 165));
         assert_eq!(output.finish, FinishReason::Stop);
-        assert_eq!(observed.len(), 3);
+        assert_eq!(output.provider_state.unwrap().reasoning_tokens(), 42);
+        assert_eq!(observed.len(), 4);
     }
 }

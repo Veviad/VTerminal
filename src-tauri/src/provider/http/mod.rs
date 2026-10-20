@@ -1,13 +1,13 @@
 //! Cloud providers over HTTP + SSE.
 //!
-//! Two modules cover three vendors: OpenAI and Mistral both speak the OpenAI
-//! Chat Completions shape and differ only in base URL and the name of their
-//! reasoning parameter, so they share `openai_compat`. Anthropic's Messages API
-//! is genuinely different (top-level `system`, typed content blocks,
-//! `output_config.effort`) and gets its own module.
+//! OpenAI uses Responses to preserve reasoning across client-tool rounds.
+//! Mistral and configured inference servers use `openai_compat` for Chat
+//! Completions. Anthropic uses Messages with typed content blocks and adaptive
+//! thinking.
 
 pub mod anthropic;
 pub mod openai_compat;
+pub mod openai_responses;
 
 use std::sync::OnceLock;
 use std::time::Duration;

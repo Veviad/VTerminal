@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use http::{HeaderName, HeaderValue};
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, ClientCapabilities, ClientInfo, Implementation,
+    CallToolRequestParams, CallToolResponse, ClientCapabilities, ClientConfig, Implementation,
     ProtocolVersion, Tool,
 };
 use rmcp::service::{RoleClient, RunningService};
@@ -36,8 +36,8 @@ struct VTerminalClient {
 }
 
 impl ClientHandler for VTerminalClient {
-    fn get_info(&self) -> ClientInfo {
-        ClientInfo::new(
+    fn get_info(&self) -> ClientConfig {
+        ClientConfig::new(
             ClientCapabilities::default(),
             Implementation::new("vterminal", env!("CARGO_PKG_VERSION"))
                 .with_title("VTerminal")

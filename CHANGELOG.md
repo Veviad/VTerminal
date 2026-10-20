@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Updated cloud tiers to Claude Haiku/Sonnet/Opus 5.5, GPT-6 Luna/GPT-6.1 Sol/GPT-6 Astra, and Mistral Small 4/Medium 3.5/Large 4 Preview, retaining saved model selections and effort preferences.
+- Updated adaptive thinking and reasoning controls to each current model's supported settings, including Sonnet's lowest thinking mode and always-on reasoning models.
+- Refreshed dependencies from open Dependabot updates and adjusted provider integration for the current OpenAI Responses API.
+
 ## 0.4.4
 
 - Added first-class MCP tools in Ask and Agent with per-chat multi-server selection, defaults, tool switches, approvals, archive persistence, and progressive tool discovery.
