@@ -2,7 +2,8 @@ import type { IDisposable, IMarker, Terminal } from "@xterm/xterm";
 
 // Block detection uses semantic-prompt sequences emitted by the injected local
 // shell. Its private scoped copies distinguish these from remote integrations;
-// standard OSC 133 remains a fallback when no scoped initialization arrived:
+// standalone trackers retain standard OSC 133 as a compatibility fallback.
+// App-created terminals require their provisioned scope from the first byte:
 //   ESC]133;A ST  → prompt start
 //   ESC]133;B ST  → prompt end / command input start
 //   ESC]133;C ST  → command output start (command accepted)
@@ -47,6 +48,8 @@ export class BlockTracker {
    * same standard OSC 133 sequences; accepting those would close the local ssh
    * block at the first remote prompt and offer a nested Reconnect. */
   private shellToken: string | null = null;
+  /** Provisioned before spawn, independently of any potentially remote bytes. */
+  private expectedShellToken: string | null = null;
   private currentBlockId: string | null = null;
   private disposables: IDisposable[] = [];
   /** True while the user hasn't typed since the prompt became ready. */
@@ -65,6 +68,18 @@ export class BlockTracker {
     private term: Terminal,
     private cb: BlockTrackerCallbacks,
   ) {}
+
+  /** Bind a newly created terminal before any shell or replay bytes arrive.
+   * Output cannot establish a different scope when local startup is absent. */
+  setExpectedShellScope(scope: string): void {
+    if (!/^[a-f0-9]{32}$/.test(scope)) {
+      throw new Error("Invalid shell scope.");
+    }
+    if (this.expectedShellToken || this.shellToken || this.phase !== "idle") {
+      throw new Error("Shell scope must be configured before terminal output.");
+    }
+    this.expectedShellToken = scope;
+  }
 
   /**
    * Stop acting on OSC while a payload we generated ourselves is written back
@@ -97,14 +112,14 @@ export class BlockTracker {
     this.disposables.push(
       this.term.parser.registerOscHandler(133, (data) => {
         if (this.suspended || this.runbookOutputIsolation) return true;
-        if (this.shellToken) return true;
+        if (this.expectedShellToken || this.shellToken) return true;
         this.handle133(data);
         return true;
       }),
       // OSC 7 — cwd reporting (file://host/path)
       this.term.parser.registerOscHandler(7, (data) => {
         if (this.suspended || this.runbookOutputIsolation) return true;
-        if (this.shellToken) return true;
+        if (this.expectedShellToken || this.shellToken) return true;
         const parsed = parseOsc7(data);
         if (parsed && this.cb.onCwdChange) this.cb.onCwdChange(parsed.path, parsed.host);
         return true;
@@ -121,7 +136,7 @@ export class BlockTracker {
         if (data.startsWith("SHELL;")) {
           this.handleShellEvent(data.slice(6));
         } else if (data.startsWith("CMD;")) {
-          if (this.shellToken) return true;
+          if (this.expectedShellToken || this.shellToken) return true;
           const decoded = decodeBase64Utf8(data.slice(4));
           if (decoded !== null) this.pendingCommand = decoded;
         } else {
@@ -139,16 +154,17 @@ export class BlockTracker {
     );
   }
 
-  /** The first local startup establishes a non-exported, random shell token.
-   * A nested shell cannot replace it, including another VTerminal shell. The
-   * fallback standard OSC path stays available when integration is disabled.
-   * Private remote RP/RD completion events deliberately remain independent. */
+  /** App terminals accept only their provisioned scope. Standalone trackers
+   * retain first-startup binding and standard OSC compatibility. A nested
+   * shell cannot replace an established owner, including another VTerminal
+   * shell. Private remote RP/RD completions remain independent. */
   private handleShellEvent(data: string): void {
     const match = /^([a-f0-9]{32});(READY|133|7|CMD)(?:;([\s\S]*))?$/.exec(data);
     if (!match) return;
     const [, token, kind, payload = ""] = match;
     if (kind === "READY") {
       if (match[3] !== undefined) return;
+      if (this.expectedShellToken && !matchesShellScope(token, this.expectedShellToken)) return;
       if (!this.shellToken) this.shellToken = token;
       return;
     }

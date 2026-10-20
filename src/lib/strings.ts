@@ -45,6 +45,9 @@ export const S = {
     pressEnterToClose: `Close tab with ${shortcutGlyph("W")}`,
     notConnected: "not connected",
     reconnect: "Reconnect",
+    connectionUnknown: "connection status unavailable",
+    connectionUnknownHint: "VTerminal cannot verify this tab's connection. Open SSH in a new tab.",
+    newSshTab: "New SSH tab",
     searchPlaceholder: "Search…",
     rendererGpu: "GPU",
     rendererDom: "DOM",
@@ -221,6 +224,8 @@ export const S = {
       "Completion unknown: this archived command was still marked running when the session was saved.",
     resultSubmitFailed:
       "VTerminal could not report this terminal outcome to the agent. The run was stopped before another command could start.",
+    integrationUnavailableCommand:
+      "Nothing was executed: shell integration did not initialize in this tab, so VTerminal could not verify an idle shell prompt. Check Settings → Terminal → Shell integration and open a new tab.",
     completionUnknownRun:
       "Terminal completion could not be confirmed, so the agent stopped. Check the command's state and output in the terminal before trying again.",
     completionUnknownNote:

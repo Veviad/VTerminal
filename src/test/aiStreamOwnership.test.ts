@@ -137,6 +137,22 @@ beforeEach(() => {
 });
 
 describe("terminal command result classification", () => {
+  it("presents unavailable integration as definitely not run without fencing the agent", () => {
+    const outcome: PtyExecOutcome = {
+      exitCode: null,
+      output: "",
+      durationMs: 1000,
+      mode: null,
+      error: "integration_unavailable",
+    };
+    expect(cardStatus(outcome)).toBe("blocked");
+    expect(commandOutcomeFence(outcome)).toBeUndefined();
+    expect(commandResultPresentation(outcome.error, outcome.exitCode)).toEqual({
+      status: "blocked",
+      note: expect.stringContaining("shell integration did not initialize"),
+    });
+  });
+
   it("distinguishes pre-dispatch closure from post-dispatch uncertainty", () => {
     const beforeDispatch = {
       exitCode: null,

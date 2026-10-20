@@ -171,6 +171,9 @@ export function useSessions() {
       }
       const store = useAppStore.getState();
       const sessionId = `sess-${Date.now()}-${sessionCounter++}`;
+      const shellScope = Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) =>
+        byte.toString(16).padStart(2, "0"),
+      ).join("");
       const shell = isWindows()
         ? "/bin/bash"
         : spec.shell?.trim() || store.shellPath || defaultShell();
@@ -374,6 +377,10 @@ export function useSessions() {
             .updateSessionUi(sessionId, { composerOpen: true }),
       );
 
+      // Establish ownership before replay or PTY output. A missing local
+      // startup must not let a remote shell claim semantic prompt authority.
+      entry.tracker.setExpectedShellScope?.(shellScope);
+
       // Seed the status bar before the first OSC 7 arrives. Legal only here:
       // withSessionUi no-ops for ids not in `sessions`, and addSession ran above.
       if (spec.cwd) store.updateSessionUi(sessionId, { cwd: spec.cwd });
@@ -409,6 +416,7 @@ export function useSessions() {
             rows: entry.term.rows,
             cwd: spec.cwd ?? null,
             shell,
+            shellScope,
           },
           (buf) => {
             const bytes = new Uint8Array(buf);

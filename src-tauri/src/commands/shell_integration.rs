@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 use tauri::Manager;
 use tauri::Wry;
 
-/// Bump when any generated file changes — the zdotdir is rewritten whenever
-/// the version marker in the existing vterminal.zsh differs.
-pub(crate) const SCRIPT_VERSION: &str = "9";
+/// Bump when generated files change. Every bundled asset is also content-checked
+/// so interrupted writes or missing files repair without a version change.
+pub(crate) const SCRIPT_VERSION: &str = "10";
 
 #[derive(Serialize)]
 pub struct ShellIntegrationInfo {
@@ -31,9 +31,21 @@ pub(crate) const VTERMINAL_BASH: &str = r#"# vterminal bash integration (version
 # This file is used as --rcfile. Re-sourcing it in one shell is a no-op, while
 # an interactive child shell still installs its own hooks (the function is not
 # exported, unlike the public integration marker).
+export -n VTERMINAL_SHELL_SCOPE
 if declare -F __vterminal_preexec >/dev/null 2>&1; then
+  unset VTERMINAL_SHELL_SCOPE
   return
 fi
+
+# Consume the native-provisioned scope before any user initialization can
+# launch children or forward environment variables. Manual sourcing can still
+# initialize a standalone scope when no native token was supplied.
+__vterminal_shell_token="${VTERMINAL_SHELL_SCOPE:-}"
+unset VTERMINAL_SHELL_SCOPE
+if [[ ! "$__vterminal_shell_token" =~ ^[a-f0-9]{32}$ ]]; then
+  __vterminal_shell_token="$(LC_ALL=C command od -An -N16 -tx1 /dev/urandom | command tr -d ' \n')"
+fi
+export -n __vterminal_shell_token
 
 # Reproduce Bash login initialization before layering VTerminal on top. A
 # normal interactive login shell reads /etc/profile and the first readable
@@ -52,8 +64,6 @@ export VTERMINAL_INTEGRATION=1
 # Keep the token private to this shell, including when SSH forwards environment
 # variables. Standard prompt markers are also emitted for other integrations;
 # VTerminal uses the scoped copy to distinguish local and remote shell output.
-__vterminal_shell_token="$(LC_ALL=C command od -An -N16 -tx1 /dev/urandom | command tr -d ' \n')"
-export -n __vterminal_shell_token
 if [[ ! "$__vterminal_shell_token" =~ ^[a-f0-9]{32}$ ]]; then
   printf 'VTerminal shell integration: secure token unavailable\n' >&2
   return
@@ -152,11 +162,11 @@ unset __vterminal_debug_command __vterminal_prior_debug_spec
 
 #[cfg(any(target_os = "windows", test))]
 pub(crate) const WSL_BASH_WRAPPER: &str = r#"#!/bin/sh
-exec /bin/bash --noprofile --rcfile "$HOME/.local/share/vterminal/bashrc-v9" -i
+exec /bin/bash --noprofile --rcfile "$HOME/.local/share/vterminal/bashrc-v10" -i
 "#;
 
 #[cfg(target_os = "windows")]
-pub const WSL_INTEGRATION_PATH: &str = "~/.local/share/vterminal/bashrc-v9";
+pub const WSL_INTEGRATION_PATH: &str = "~/.local/share/vterminal/bashrc-v10";
 
 /// The integration script: emits OSC 133 semantic-prompt marks (A/B/C/D;exit),
 /// a percent-encoded OSC 7 cwd report, and the typed command as a base64 OSC
@@ -164,13 +174,25 @@ pub const WSL_INTEGRATION_PATH: &str = "~/.local/share/vterminal/bashrc-v9";
 /// Guarded against double-injection; coexists with starship/p10k.
 #[cfg(not(target_os = "windows"))]
 const VTERMINAL_ZSH: &str = r#"# vterminal integration (version: __VERSION__)
+typeset +x VTERMINAL_SHELL_SCOPE
+typeset +x VTERMINAL_SHELL_SCOPE_FILE
 if (( $+functions[__vterminal_preexec] )); then
+  unset VTERMINAL_SHELL_SCOPE
   return
 fi
 export VTERMINAL_INTEGRATION=1
 
-__vterminal_shell_token="$(LC_ALL=C command od -An -N16 -tx1 /dev/urandom | command tr -d ' \n')"
+__vterminal_shell_token=""
+if [[ -n "${VTERMINAL_SHELL_SCOPE_FILE:-}" && -r "$VTERMINAL_SHELL_SCOPE_FILE" ]]; then
+  IFS= read -r __vterminal_shell_token < "$VTERMINAL_SHELL_SCOPE_FILE" || :
+fi
+unset VTERMINAL_SHELL_SCOPE
+if [[ ! "$__vterminal_shell_token" =~ ^[a-f0-9]{32}$ ]]; then
+  __vterminal_shell_token="$(LC_ALL=C command od -An -N16 -tx1 /dev/urandom | command tr -d ' \n')"
+fi
 typeset +x __vterminal_shell_token
+__vterminal_scope_ready=0
+typeset +x __vterminal_scope_ready
 if [[ ! "$__vterminal_shell_token" =~ ^[a-f0-9]{32}$ ]]; then
   printf 'VTerminal shell integration: secure token unavailable\n' >&2
   return
@@ -178,8 +200,6 @@ fi
 __vterminal_emit() {
   printf '\e]6973;SHELL;%s;%s;%s\e\\' "$__vterminal_shell_token" "$1" "$2"
 }
-printf '\e]6973;SHELL;%s;READY\e\\' "$__vterminal_shell_token"
-
 autoload -Uz add-zsh-hook
 
 # OSC 7 cwd report with percent-encoded path (%, #, ?, spaces, unicode…)
@@ -199,6 +219,18 @@ __vterminal_osc7() {
 
 __vterminal_precmd() {
   local exit_code=$?
+  # A startup tool may replace the shell while loading a profile. Bind only
+  # the shell that actually reaches a prompt, after every startup file ran.
+  if [[ "${__vterminal_scope_ready:-0}" != 1 ]]; then
+    __vterminal_scope_ready=1
+    printf '\e]6973;SHELL;%s;READY\e\\' "$__vterminal_shell_token"
+  fi
+  if [[ -n "${VTERMINAL_USER_ZDOTDIR:-}" ]]; then
+    ZDOTDIR="$VTERMINAL_USER_ZDOTDIR"
+  fi
+  unset VTERMINAL_ZDOTDIR VTERMINAL_USER_ZDOTDIR VTERMINAL_SHELL_SCOPE VTERMINAL_SHELL_SCOPE_FILE
+  unset __vterminal_exec_saved __vterminal_exec_present __vterminal_exec_bridge
+  unfunction __vterminal_begin_user_init __vterminal_end_user_init 2>/dev/null
   # A cancelled input line never reaches preexec. Do not reuse its capture.
   unset __vterminal_pending_command
   if [[ -n "$__vterminal_cmd_started" ]]; then
@@ -247,7 +279,7 @@ add-zsh-hook preexec __vterminal_preexec
 "#;
 
 /// zsh reads $ZDOTDIR/{.zshenv,.zprofile,.zshrc,.zlogin} in that order for an
-/// interactive login shell. All three generated stubs chain the user's real
+/// interactive login shell. All four generated stubs chain the user's real
 /// files (skipping any would silently drop PATH/env — e.g. Homebrew's
 /// `brew shellenv` lives in ~/.zprofile).
 ///
@@ -259,6 +291,8 @@ add-zsh-hook preexec __vterminal_preexec
 /// .zshenv runs FIRST and may itself relocate ZDOTDIR — honor that.
 #[cfg(not(target_os = "windows"))]
 const ZSHENV: &str = r#"# vterminal generated zdotdir (version: __VERSION__)
+typeset +x VTERMINAL_SHELL_SCOPE
+typeset +x VTERMINAL_SHELL_SCOPE_FILE
 VTERMINAL_ZDOTDIR="$ZDOTDIR"
 if [[ -n "$VTERMINAL_ORIG_ZDOTDIR" ]]; then
   ZDOTDIR="$VTERMINAL_ORIG_ZDOTDIR"
@@ -266,7 +300,47 @@ else
   ZDOTDIR="$HOME"
 fi
 unset VTERMINAL_ORIG_ZDOTDIR
+
+# Keep user startup files in their own ZDOTDIR context. A bounded alias carries
+# the injection directory only across an exec during startup, including an
+# assignment-prefixed exec -a used by terminal wrappers. Explicit alias bypasses,
+# disabled alias expansion and environment-clearing wrappers remain unsupported;
+# no remote is inferred when startup integration cannot be observed.
+__vterminal_begin_user_init() {
+  typeset -ga __vterminal_exec_saved __vterminal_exec_present __vterminal_exec_bridge
+  __vterminal_exec_saved+=("${aliases[exec]-}")
+  __vterminal_exec_present+=("${+aliases[exec]}")
+  # Alias expansion is captured in user-defined function bodies. Keep that
+  # expansion inert after startup: never forward our token from a later exec.
+  # Carry only a local file path. Startup may exec ssh with broad SendEnv;
+  # forwarding the raw nonce would let remote output impersonate our shell.
+  __vterminal_exec_bridge+=('VTERMINAL_ORIG_ZDOTDIR="${VTERMINAL_ZDOTDIR:+$ZDOTDIR}" ZDOTDIR="${VTERMINAL_ZDOTDIR:-$ZDOTDIR}" VTERMINAL_SHELL_SCOPE_FILE="${VTERMINAL_ZDOTDIR:+${VTERMINAL_SHELL_SCOPE_FILE:-}}" '"${aliases[exec]-exec}")
+  builtin alias exec="${__vterminal_exec_bridge[-1]}"
+}
+__vterminal_end_user_init() {
+  # Restore only our alias: a replacement authored by the user must survive.
+  if [[ "${aliases[exec]-}" == "${__vterminal_exec_bridge[-1]}" ]]; then
+    if [[ "${__vterminal_exec_present[-1]}" == 1 ]]; then
+      builtin alias exec="${__vterminal_exec_saved[-1]}"
+    else
+      builtin unalias exec
+    fi
+  fi
+  __vterminal_exec_saved[-1]=()
+  __vterminal_exec_present[-1]=()
+  __vterminal_exec_bridge[-1]=()
+  # A bare exec (no argv or redirections) retains prefix assignments until this
+  # file boundary. Restore the context before the next startup file or prompt.
+  if [[ "$ZDOTDIR" == "$VTERMINAL_ZDOTDIR" && -n "$VTERMINAL_ORIG_ZDOTDIR" ]]; then
+    ZDOTDIR="$VTERMINAL_ORIG_ZDOTDIR"
+  fi
+  unset VTERMINAL_ORIG_ZDOTDIR
+  typeset +x VTERMINAL_SHELL_SCOPE
+  typeset +x VTERMINAL_SHELL_SCOPE_FILE
+}
+__vterminal_begin_user_init
 [[ -f "$ZDOTDIR/.zshenv" ]] && source "$ZDOTDIR/.zshenv"
+__vterminal_end_user_init
 VTERMINAL_USER_ZDOTDIR="$ZDOTDIR"
 ZDOTDIR="$VTERMINAL_ZDOTDIR"
 "#;
@@ -274,18 +348,23 @@ ZDOTDIR="$VTERMINAL_ZDOTDIR"
 #[cfg(not(target_os = "windows"))]
 const ZPROFILE: &str = r#"# vterminal generated zdotdir (version: __VERSION__)
 ZDOTDIR="$VTERMINAL_USER_ZDOTDIR"
+__vterminal_begin_user_init
 [[ -f "$ZDOTDIR/.zprofile" ]] && source "$ZDOTDIR/.zprofile"
+__vterminal_end_user_init
 VTERMINAL_USER_ZDOTDIR="$ZDOTDIR"
 ZDOTDIR="$VTERMINAL_ZDOTDIR"
 "#;
 
 /// .zshrc: chain the user's (with their ZDOTDIR), layer the integration on
-/// top, and LEAVE ZDOTDIR as the user's — .zlogin and anything else that
-/// inspects it later sees the real value.
+/// top. Keep the injection directory between startup files so .zlogin can use
+/// the same bounded exec bridge; the user's ZDOTDIR is restored at the prompt.
 #[cfg(not(target_os = "windows"))]
 const ZSHRC: &str = r#"# vterminal generated zdotdir (version: __VERSION__)
 ZDOTDIR="$VTERMINAL_USER_ZDOTDIR"
+__vterminal_begin_user_init
 [[ -f "$ZDOTDIR/.zshrc" ]] && source "$ZDOTDIR/.zshrc"
+__vterminal_end_user_init
+VTERMINAL_USER_ZDOTDIR="$ZDOTDIR"
 source "$VTERMINAL_ZDOTDIR/vterminal.zsh"
 # macOS /etc/zshrc runs while ZDOTDIR still points at this stub dir and sets
 # HISTFILE=${ZDOTDIR}/.zsh_history — remap it to the user's dir unless their
@@ -293,7 +372,17 @@ source "$VTERMINAL_ZDOTDIR/vterminal.zsh"
 if [[ "$HISTFILE" == "$VTERMINAL_ZDOTDIR"/* ]]; then
   HISTFILE="$VTERMINAL_USER_ZDOTDIR${HISTFILE#$VTERMINAL_ZDOTDIR}"
 fi
-unset VTERMINAL_ZDOTDIR VTERMINAL_USER_ZDOTDIR
+ZDOTDIR="$VTERMINAL_ZDOTDIR"
+"#;
+
+#[cfg(not(target_os = "windows"))]
+const ZLOGIN: &str = r#"# vterminal generated zdotdir (version: __VERSION__)
+ZDOTDIR="$VTERMINAL_USER_ZDOTDIR"
+__vterminal_begin_user_init
+[[ -f "$ZDOTDIR/.zlogin" ]] && source "$ZDOTDIR/.zlogin"
+__vterminal_end_user_init
+VTERMINAL_USER_ZDOTDIR="$ZDOTDIR"
+ZDOTDIR="$VTERMINAL_ZDOTDIR"
 "#;
 
 #[cfg(not(target_os = "windows"))]
@@ -305,25 +394,37 @@ pub fn ensure_zdotdir(app: &tauri::AppHandle<Wry>) -> Result<PathBuf, String> {
         .join("zdotdir");
     std::fs::create_dir_all(&dir).map_err(|e| format!("create zdotdir: {e}"))?;
 
-    let version_marker = format!("(version: {SCRIPT_VERSION})");
-    let script_path = dir.join("vterminal.zsh");
-    let needs_write = std::fs::read_to_string(&script_path)
-        .map(|content| !content.contains(&version_marker))
-        .unwrap_or(true);
-    if needs_write {
-        let write = |name: &str, content: &str| {
-            std::fs::write(
-                dir.join(name),
-                content.replace("__VERSION__", SCRIPT_VERSION),
-            )
-            .map_err(|e| format!("write {name}: {e}"))
-        };
-        write("vterminal.zsh", VTERMINAL_ZSH)?;
-        write(".zshenv", ZSHENV)?;
-        write(".zprofile", ZPROFILE)?;
-        write(".zshrc", ZSHRC)?;
-    }
+    write_zdotdir_assets(&dir)?;
     Ok(dir)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn write_zdotdir_assets(dir: &std::path::Path) -> Result<(), String> {
+    use std::io::Write;
+    // Verify every bundled asset, even when another file has the current
+    // version marker. Interrupted writes and missing dotfiles must self-repair.
+    for (name, source) in [
+        ("vterminal.zsh", VTERMINAL_ZSH),
+        (".zshenv", ZSHENV),
+        (".zprofile", ZPROFILE),
+        (".zshrc", ZSHRC),
+        (".zlogin", ZLOGIN),
+    ] {
+        let expected = source.replace("__VERSION__", SCRIPT_VERSION);
+        let path = dir.join(name);
+        if std::fs::read_to_string(&path).ok().as_deref() == Some(expected.as_str()) {
+            continue;
+        }
+        let mut temporary =
+            tempfile::NamedTempFile::new_in(dir).map_err(|e| format!("prepare {name}: {e}"))?;
+        temporary
+            .write_all(expected.as_bytes())
+            .map_err(|e| format!("write {name}: {e}"))?;
+        temporary
+            .persist(&path)
+            .map_err(|e| format!("save {name}: {e}"))?;
+    }
+    Ok(())
 }
 
 #[cfg(all(test, unix))]
@@ -400,7 +501,7 @@ pub async fn shell_integration_status(
 
 #[cfg(all(test, target_os = "macos"))]
 mod zsh_tests {
-    use super::{wait_for_child_bounded, SCRIPT_VERSION, VTERMINAL_ZSH};
+    use super::{wait_for_child_bounded, write_zdotdir_assets, SCRIPT_VERSION, VTERMINAL_ZSH};
     use base64::Engine;
     use std::io::{Read, Write};
     use std::time::Duration;
@@ -424,6 +525,8 @@ mod zsh_tests {
             // An app or child shell can inherit the public integration marker.
             // The generated functions, not that exported marker, own injection.
             .env("VTERMINAL_INTEGRATION", "1")
+            .env_remove("VTERMINAL_SHELL_SCOPE")
+            .env_remove("VTERMINAL_SHELL_SCOPE_FILE")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -470,6 +573,235 @@ mod zsh_tests {
                 }
             })
             .collect()
+    }
+
+    fn run_startup(
+        files: &[(&str, &str)],
+        commands: &str,
+        injected: bool,
+    ) -> (std::process::ExitStatus, String, String) {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home with spaces");
+        let user = root.path().join("custom dotfiles with spaces");
+        let app = root.path().join("application stubs");
+        for dir in [&home, &user, &app] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let scope_file = root.path().join("private native scope");
+        std::fs::write(&scope_file, "0123456789abcdef0123456789abcdef").unwrap();
+        write_zdotdir_assets(&app).unwrap();
+        for name in [".zshenv", ".zprofile", ".zshrc", ".zlogin"] {
+            let body = files
+                .iter()
+                .find(|(file, _)| *file == name)
+                .map_or("", |(_, body)| *body);
+            std::fs::write(user.join(name), format!(
+                "[[ \"$ZDOTDIR\" == \"$VT_EXPECTED_USER_DIR\" ]] || print BAD_USER_CONTEXT\nif /usr/bin/env | /usr/bin/grep -Eq '^(VTERMINAL_SHELL_SCOPE|VTERMINAL_SHELL_SCOPE_FILE|__vterminal_shell_token)=.+'; then print EXPORTED_PRIVATE_SCOPE; fi\n{body}\n"
+            )).unwrap();
+        }
+        let mut child = std::process::Command::new("/bin/zsh")
+            .arg("-il")
+            .env("HOME", &home)
+            .env("ZDOTDIR", if injected { &app } else { &user })
+            .env("VTERMINAL_ORIG_ZDOTDIR", &user)
+            .env("VT_EXPECTED_USER_DIR", &user)
+            .env(
+                "VTERMINAL_SHELL_SCOPE_FILE",
+                if injected {
+                    scope_file.as_os_str()
+                } else {
+                    std::ffi::OsStr::new("")
+                },
+            )
+            .env_remove("VTERMINAL_SHELL_SCOPE")
+            .env_remove("VT_FAKE_WRAPPED")
+            .env_remove("VTERMINAL_INTEGRATION")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(commands.as_bytes())
+            .unwrap();
+        let (status, stderr) = wait_for_child_bounded(&mut child, Duration::from_secs(5)).unwrap();
+        let mut stdout = String::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut stdout)
+            .unwrap();
+        (status, stdout, stderr)
+    }
+
+    #[test]
+    fn generated_startup_survives_profile_rc_and_login_exec_handoffs() {
+        for file in [".zprofile", ".zshrc", ".zlogin"] {
+            for exec in [
+                "exec /bin/zsh -il",
+                "VT_WRAPPER_META=ok exec -a zsh /bin/zsh -il",
+                "eval 'VT_WRAPPER_META=ok exec -a zsh /bin/zsh -il'",
+            ] {
+                let handoff = format!(
+                    "if [[ -z \"$VT_FAKE_WRAPPED\" ]]; then export VT_FAKE_WRAPPED=1; {exec}; fi"
+                );
+                let (status, stdout, stderr) =
+                    run_startup(&[(file, &handoff)], "printf WRAPPER_OK\n", true);
+                assert!(status.success(), "{file}: {stderr}");
+                assert!(!stdout.contains("BAD_USER_CONTEXT"), "{file}: {stdout}");
+                assert!(
+                    !stdout.contains("EXPORTED_PRIVATE_SCOPE"),
+                    "{file}: {stdout}"
+                );
+                assert!(stdout.contains("SHELL;0123456789abcdef0123456789abcdef;READY"));
+                assert_eq!(
+                    stdout.matches(";READY\x1b\\").count(),
+                    1,
+                    "{file}: {stdout}"
+                );
+                assert_eq!(
+                    lifecycle(&stdout),
+                    ["CMD:printf WRAPPER_OK", "133;C", "133;D;0"]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn generated_startup_keeps_custom_zdotdir_and_removes_bridge_before_prompt() {
+        let (status, stdout, stderr) = run_startup(&[],
+            "[[ \"$ZDOTDIR\" == \"$VT_EXPECTED_USER_DIR\" ]] && print USER_CONTEXT_OK\nalias exec 2>/dev/null || print NO_EXEC_ALIAS\n", true);
+        assert!(status.success(), "{stderr}");
+        assert!(!stdout.contains("BAD_USER_CONTEXT"));
+        assert!(stdout.contains("USER_CONTEXT_OK\n"));
+        assert!(stdout.contains("NO_EXEC_ALIAS\n"));
+        assert_eq!(stdout.matches(";READY\x1b\\").count(), 1);
+    }
+
+    #[test]
+    fn generated_startup_composes_prior_alias_and_preserves_new_user_alias() {
+        let handoff = "if [[ -z \"$VT_FAKE_WRAPPED\" ]]; then export VT_FAKE_WRAPPED=1; exec /bin/zsh -il; fi";
+        let (status, stdout, stderr) = run_startup(
+            &[
+                (".zshenv", "alias exec='exec -a zsh'"),
+                (".zprofile", handoff),
+            ],
+            "alias exec\n",
+            true,
+        );
+        assert!(status.success(), "{stderr}");
+        assert!(!stdout.contains("BAD_USER_CONTEXT"));
+        assert!(stdout.contains("exec='exec -a zsh'"));
+        assert_eq!(stdout.matches(";READY\x1b\\").count(), 1);
+
+        let (status, stdout, stderr) = run_startup(
+            &[(".zshrc", "alias exec='nocorrect exec'")],
+            "alias exec\n",
+            true,
+        );
+        assert!(status.success(), "{stderr}");
+        assert!(stdout.contains("exec='nocorrect exec'"));
+        assert!(!stdout.contains("VTERMINAL_ORIG_ZDOTDIR=\"$ZDOTDIR\""));
+    }
+
+    #[test]
+    fn generated_startup_exec_honors_a_relocated_user_zdotdir() {
+        let relocate = r#"mkdir -p "$HOME/relocated dotfiles"
+printf '%s\n' 'if [[ -z "$VT_FAKE_WRAPPED" ]]; then export VT_FAKE_WRAPPED=1; exec /bin/zsh -il; fi' > "$HOME/relocated dotfiles/.zprofile"
+printf '%s\n' '[[ "$ZDOTDIR" == "$VT_EXPECTED_USER_DIR" ]] || print BAD_USER_CONTEXT' > "$HOME/relocated dotfiles/.zshrc"
+ZDOTDIR="$HOME/relocated dotfiles"
+export VT_EXPECTED_USER_DIR="$ZDOTDIR"
+"#;
+        let (status, stdout, stderr) = run_startup(
+            &[(".zshenv", relocate)],
+            "[[ \"$ZDOTDIR\" == \"$VT_EXPECTED_USER_DIR\" ]] && print RELOCATED_CONTEXT_OK\n",
+            true,
+        );
+        assert!(status.success(), "{stderr}");
+        assert!(!stdout.contains("BAD_USER_CONTEXT"));
+        assert!(stdout.contains("RELOCATED_CONTEXT_OK\n"));
+        assert_eq!(stdout.matches(";READY\x1b\\").count(), 1);
+    }
+
+    #[test]
+    fn startup_defined_exec_function_is_inert_after_the_first_prompt() {
+        let function = r#"restart_shell() {
+  exec /bin/zsh -dfc '[[ "$ZDOTDIR" == "$VT_EXPECTED_USER_DIR" ]] && print CHILD_USER_CONTEXT_OK; [[ -z "${VTERMINAL_ORIG_ZDOTDIR:-}${VTERMINAL_SHELL_SCOPE:-}${VTERMINAL_SHELL_SCOPE_FILE:-}${__vterminal_shell_token:-}" ]] && print CHILD_SCOPE_EMPTY'
+}"#;
+        let (status, stdout, stderr) =
+            run_startup(&[(".zshrc", function)], "restart_shell\n", true);
+        assert!(status.success(), "{stderr}");
+        assert!(stdout.contains("CHILD_USER_CONTEXT_OK\n"));
+        assert!(stdout.contains("CHILD_SCOPE_EMPTY\n"));
+        assert!(!stdout.contains("EXPORTED_PRIVATE_SCOPE"));
+        assert_eq!(stdout.matches(";READY\x1b\\").count(), 1);
+    }
+
+    #[test]
+    fn generated_startup_restores_bare_exec_at_file_boundary_and_keeps_redirections() {
+        for exec in ["exec", "exec 3>/dev/null; print REDIRECT_OK >&3"] {
+            let (status, stdout, stderr) = run_startup(
+                &[(".zprofile", exec)],
+                "[[ \"$ZDOTDIR\" == \"$VT_EXPECTED_USER_DIR\" ]] && print CONTEXT_OK\n",
+                true,
+            );
+            assert!(status.success(), "{exec}: {stderr}");
+            assert!(!stdout.contains("BAD_USER_CONTEXT"), "{exec}: {stdout}");
+            assert!(stdout.contains("CONTEXT_OK\n"));
+        }
+    }
+
+    #[test]
+    fn generated_startup_preserves_failed_exec_behavior() {
+        let files = [(
+            ".zprofile",
+            "exec /vterminal-test-nonexistent-command; print AFTER_FAILED_EXEC",
+        )];
+        let (baseline, baseline_out, baseline_err) =
+            run_startup(&files, "printf AFTER_STARTUP\n", false);
+        let (injected, injected_out, injected_err) =
+            run_startup(&files, "printf AFTER_STARTUP\n", true);
+        assert_eq!(injected.code(), baseline.code());
+        assert_eq!(
+            injected_out.contains("AFTER_FAILED_EXEC"),
+            baseline_out.contains("AFTER_FAILED_EXEC")
+        );
+        assert_eq!(
+            injected_out.contains("AFTER_STARTUP"),
+            baseline_out.contains("AFTER_STARTUP")
+        );
+        assert!(baseline_err.contains("vterminal-test-nonexistent-command"));
+        assert!(injected_err.contains("vterminal-test-nonexistent-command"));
+    }
+
+    #[test]
+    fn generated_assets_repair_every_file_even_with_current_version_markers() {
+        let root = tempfile::tempdir().unwrap();
+        write_zdotdir_assets(root.path()).unwrap();
+        let script = std::fs::read_to_string(root.path().join("vterminal.zsh")).unwrap();
+        for file in [".zshenv", ".zprofile", ".zshrc", ".zlogin", "vterminal.zsh"] {
+            std::fs::write(
+                root.path().join(file),
+                format!("# version: {SCRIPT_VERSION}\ncorrupt"),
+            )
+            .unwrap();
+            write_zdotdir_assets(root.path()).unwrap();
+            assert!(!std::fs::read_to_string(root.path().join(file))
+                .unwrap()
+                .contains("corrupt"));
+            std::fs::remove_file(root.path().join(file)).unwrap();
+            write_zdotdir_assets(root.path()).unwrap();
+            assert!(root.path().join(file).is_file());
+        }
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("vterminal.zsh")).unwrap(),
+            script
+        );
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 5);
     }
 
     #[test]
@@ -654,7 +986,7 @@ mod windows_tests {
             assert!(VTERMINAL_BASH.contains(required), "missing {required}");
         }
         assert!(WSL_BASH_WRAPPER.contains("--noprofile --rcfile"));
-        assert!(WSL_BASH_WRAPPER.contains("bashrc-v9"));
+        assert!(WSL_BASH_WRAPPER.contains("bashrc-v10"));
     }
 
     #[cfg(unix)]
@@ -786,6 +1118,30 @@ trap - DEBUG
                 "missing {event}"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generated_bash_consumes_provisioned_scope_before_user_initialization() {
+        let script = format!(
+            r#"export VTERMINAL_SHELL_SCOPE=0123456789abcdef0123456789abcdef
+printf '%s\n' 'if /usr/bin/env | /usr/bin/grep -Eq "^(VTERMINAL_SHELL_SCOPE|__vterminal_shell_token)=.+"; then printf EXPORTED_PRIVATE_SCOPE; fi' > "$HOME/.bash_profile"
+{}
+trap - DEBUG
+__vterminal_prompt_ready
+/usr/bin/env
+"#,
+            VTERMINAL_BASH.replace("__VERSION__", "test")
+        );
+        let output = run_bash(&script);
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.contains("SHELL;0123456789abcdef0123456789abcdef;READY"));
+        assert!(!stdout.contains("EXPORTED_PRIVATE_SCOPE"));
+        assert!(!stdout
+            .lines()
+            .any(|line| line.starts_with("VTERMINAL_SHELL_SCOPE=")
+                || line.starts_with("__vterminal_shell_token=")));
     }
 
     #[cfg(unix)]

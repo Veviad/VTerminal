@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.7
+
+- Preserve shell tracking when startup tools replace the local shell, covering saved-host reconnect and local Agent commands without editing user profiles or depending on a particular CLI.
+- Bind terminal prompt reports to a private per-tab scope before startup, preventing remote or unrelated prompt messages from claiming local shell ownership.
+- Distinguish unavailable connection tracking from disconnection, offer a new SSH tab when the current connection cannot be verified, and explain missing shell integration instead of reporting a busy foreground program.
+- Repair all generated integration assets when missing or corrupted, including the login-stage startup file.
+
 ## 0.6.6
 
 - Fixed SSH sessions incorrectly showing “not connected” when remote shell prompt markers ended local connection tracking, preventing nested reconnects and preserving remote AI context.

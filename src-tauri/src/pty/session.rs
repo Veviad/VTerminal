@@ -99,6 +99,11 @@ pub struct PtySession {
     /// Set by the wait thread once the shell has been reaped. Guards kill()
     /// against SIGHUP-ing a recycled pid hours later.
     pub exited: Arc<AtomicBool>,
+    /// Keep the provisioned local scope readable through profile exec handoffs.
+    /// Only its path enters the child environment; the nonce stays in this
+    /// private file and in non-exported shell variables.
+    #[cfg(not(target_os = "windows"))]
+    _shell_scope_file: Option<tempfile::NamedTempFile>,
     #[cfg(target_os = "windows")]
     wsl_session_tag: String,
 }
@@ -110,10 +115,38 @@ pub struct SpawnParams {
     pub cwd: Option<String>,
     #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub shell_path: Option<String>,
+    pub shell_scope: Option<String>,
     #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub zdotdir: Option<std::path::PathBuf>,
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub integration_enabled: bool,
+}
+
+pub(crate) fn validate_shell_scope(scope: Option<&str>) -> Result<(), String> {
+    if scope.is_some_and(|scope| {
+        scope.len() != 32
+            || !scope
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }) {
+        return Err("invalid shell scope".into());
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn create_shell_scope_file(scope: Option<&str>) -> Result<Option<tempfile::NamedTempFile>, String> {
+    validate_shell_scope(scope)?;
+    let Some(scope) = scope else {
+        return Ok(None);
+    };
+    let mut file = tempfile::Builder::new()
+        .prefix("vterminal-shell-scope-")
+        .tempfile()
+        .map_err(|error| format!("create private shell scope file: {error}"))?;
+    writeln!(file, "{scope}")
+        .map_err(|error| format!("write private shell scope file: {error}"))?;
+    Ok(Some(file))
 }
 
 /// A requested cwd can be a directory that was deleted, renamed, or lives on an
@@ -165,7 +198,12 @@ fn resolve_wsl_cwd(requested: Option<&str>) -> (String, bool) {
 }
 
 #[cfg(any(target_os = "windows", test))]
-fn wsl_command_args(cwd: &str, integration_enabled: bool, session_tag: &str) -> Vec<String> {
+fn wsl_command_args(
+    cwd: &str,
+    integration_enabled: bool,
+    session_tag: &str,
+    shell_scope: Option<&str>,
+) -> Vec<String> {
     // WSL2 starts this command in a fresh session with a controlling terminal.
     // `setsid --wait --ctty` forks away from that session, then fails to claim
     // the terminal still owned by its waiting parent (TIOCSCTTY returns EPERM).
@@ -183,6 +221,9 @@ fn wsl_command_args(cwd: &str, integration_enabled: bool, session_tag: &str) -> 
         format!("VTERMINAL_SESSION_ID={session_tag}"),
     ];
     if integration_enabled {
+        if let Some(scope) = shell_scope {
+            args.push(format!("VTERMINAL_SHELL_SCOPE={scope}"));
+        }
         args.extend([
             "/bin/sh".into(),
             "-c".into(),
@@ -277,6 +318,7 @@ pub fn spawn(
     on_data: Channel<InvokeResponseBody>,
     on_event: Channel<PtyEvent>,
 ) -> Result<PtySession, String> {
+    validate_shell_scope(params.shell_scope.as_deref())?;
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -294,6 +336,13 @@ pub fn spawn(
         .unwrap_or_else(|| "/bin/zsh".to_string());
 
     #[cfg(not(target_os = "windows"))]
+    let shell_scope_file = if params.zdotdir.is_some() && shell.ends_with("zsh") {
+        create_shell_scope_file(params.shell_scope.as_deref())?
+    } else {
+        None
+    };
+
+    #[cfg(not(target_os = "windows"))]
     let mut cmd = CommandBuilder::new(&shell);
     #[cfg(not(target_os = "windows"))]
     cmd.args(["-il"]);
@@ -307,6 +356,8 @@ pub fn spawn(
     #[cfg(target_os = "windows")]
     let cmd = {
         let mut command = CommandBuilder::new("wsl.exe");
+        command.env_remove("VTERMINAL_SHELL_SCOPE");
+        command.env_remove("VTERMINAL_SHELL_SCOPE_FILE");
         let (cwd, fell_back) = resolve_wsl_cwd(params.cwd.as_deref());
         if fell_back {
             let _ = on_event.send(PtyEvent::Warning {
@@ -317,6 +368,7 @@ pub fn spawn(
             &cwd,
             params.integration_enabled,
             &wsl_session_tag,
+            params.shell_scope.as_deref(),
         ));
         command
     };
@@ -327,6 +379,8 @@ pub fn spawn(
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", "VTerminal");
         cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+        cmd.env_remove("VTERMINAL_SHELL_SCOPE");
+        cmd.env_remove("VTERMINAL_SHELL_SCOPE_FILE");
     }
     #[cfg(not(target_os = "windows"))]
     if let Some(zdotdir) = &params.zdotdir {
@@ -336,6 +390,9 @@ pub fn spawn(
             let orig = std::env::var("ZDOTDIR").unwrap_or_default();
             cmd.env("VTERMINAL_ORIG_ZDOTDIR", orig);
             cmd.env("ZDOTDIR", zdotdir);
+            if let Some(file) = &shell_scope_file {
+                cmd.env("VTERMINAL_SHELL_SCOPE_FILE", file.path());
+            }
         }
     }
     #[cfg(not(target_os = "windows"))]
@@ -507,6 +564,8 @@ pub fn spawn(
         child_killer,
         flow,
         exited,
+        #[cfg(not(target_os = "windows"))]
+        _shell_scope_file: shell_scope_file,
         #[cfg(target_os = "windows")]
         wsl_session_tag,
     })
@@ -602,8 +661,8 @@ mod wsl_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_cwd, wsl_cleanup_args, wsl_command_args, FlowControl, HIGH_WATERMARK,
-        WSL_SESSION_CLEANUP,
+        resolve_cwd, validate_shell_scope, wsl_cleanup_args, wsl_command_args, FlowControl,
+        HIGH_WATERMARK, WSL_SESSION_CLEANUP,
     };
     use std::sync::Arc;
     use std::time::Duration;
@@ -639,8 +698,61 @@ mod tests {
     }
 
     #[test]
+    fn accepts_only_optional_lowercase_128_bit_shell_scopes() {
+        assert!(validate_shell_scope(None).is_ok());
+        assert!(validate_shell_scope(Some("0123456789abcdef0123456789abcdef")).is_ok());
+        for invalid in [
+            "",
+            "0123456789abcdef",
+            "0123456789ABCDEF0123456789ABCDEF",
+            "0123456789abcdef0123456789abcdeg",
+            "0123456789abcdef0123456789abcdef;echo",
+        ] {
+            assert_eq!(
+                validate_shell_scope(Some(invalid)).unwrap_err(),
+                "invalid shell scope"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provisioned_shell_scope_file_is_private_and_removed_on_drop() {
+        use std::os::unix::fs::PermissionsExt;
+        let scope = "0123456789abcdef0123456789abcdef";
+        let file = super::create_shell_scope_file(Some(scope))
+            .unwrap()
+            .unwrap();
+        let path = file.path().to_owned();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("{scope}\n")
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(!path.to_string_lossy().contains(scope));
+        drop(file);
+        assert!(!path.exists());
+        assert!(super::create_shell_scope_file(None).unwrap().is_none());
+    }
+
+    #[test]
+    fn wsl_provisions_shell_scope_as_an_environment_argument_only_with_integration() {
+        let scope = "0123456789abcdef0123456789abcdef";
+        let args = wsl_command_args("~", true, "vt-test-session", Some(scope));
+        assert!(args
+            .iter()
+            .any(|arg| arg == &format!("VTERMINAL_SHELL_SCOPE={scope}")));
+        assert!(!args.last().unwrap().contains(scope));
+        let disabled = wsl_command_args("~", false, "vt-test-session", Some(scope));
+        assert!(!disabled.iter().any(|arg| arg.contains(scope)));
+    }
+
+    #[test]
     fn wsl_launch_uses_structured_linux_environment_and_fixed_shell_source() {
-        let args = wsl_command_args("/home/Casey/My Project", true, "vt-test-session");
+        let args = wsl_command_args("/home/Casey/My Project", true, "vt-test-session", None);
         assert_eq!(
             &args[..4],
             ["--cd", "/home/Casey/My Project", "--exec", "/usr/bin/env"]
@@ -663,7 +775,7 @@ mod tests {
 
     #[test]
     fn wsl_launch_without_integration_is_login_bash() {
-        let args = wsl_command_args("~", false, "vt-test-session");
+        let args = wsl_command_args("~", false, "vt-test-session", None);
         assert_eq!(&args[..4], ["--cd", "~", "--exec", "/usr/bin/env"]);
         assert_eq!(&args[args.len() - 2..], ["/bin/bash", "-il"]);
     }

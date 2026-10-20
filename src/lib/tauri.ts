@@ -101,6 +101,7 @@ export async function ptySpawn(
     rows: number;
     cwd?: string | null;
     shell?: string | null;
+    shellScope?: string | null;
   },
   onData: (buf: ArrayBuffer) => void,
   onEvent: (e: PtyEvent) => void,
@@ -118,6 +119,7 @@ export async function ptySpawn(
       rows: opts.rows,
       cwd: opts.cwd ?? null,
       shell: opts.shell ?? null,
+      shellScope: opts.shellScope ?? null,
       onData: dataChannel,
       onEvent: eventChannel,
     });

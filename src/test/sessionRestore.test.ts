@@ -27,6 +27,7 @@ const abortSessionMock = vi.fn();
 const archiveOnCloseMock = vi.fn(async (_sessionId: string) => {});
 const disposeTermMock = vi.fn();
 const releaseWebglMock = vi.fn();
+const setExpectedShellScopeMock = vi.fn();
 
 vi.mock("../lib/tauri", () => ({
   workspaceRestore: () => restoreMock(),
@@ -93,7 +94,10 @@ vi.mock("../lib/termRegistry", () => ({
     disposed: false,
     unackedBytes: 0,
     blockMarkers: new Map(),
-    tracker: { isAtPromptColumn: () => true },
+    tracker: {
+      isAtPromptColumn: () => true,
+      setExpectedShellScope: (scope: string) => setExpectedShellScopeMock(scope),
+    },
   }),
   getTerm: () => ({
     term: fakeTerm,
@@ -249,6 +253,7 @@ beforeEach(() => {
   archiveOnCloseMock.mockClear();
   disposeTermMock.mockClear();
   releaseWebglMock.mockClear();
+  setExpectedShellScopeMock.mockClear();
   useAppStore.setState({
     sessions: [],
     activeSessionId: null,
@@ -264,6 +269,24 @@ afterEach(() => {
 });
 
 describe("session creation update barrier", () => {
+  it("binds a fresh private shell scope before each PTY spawn and passes the same scope to native", async () => {
+    const { result } = renderHook(() => useSessions());
+    await result.current.createSession();
+    await result.current.createSession();
+
+    const scopes = setExpectedShellScopeMock.mock.calls.map(([scope]) => scope as string);
+    expect(scopes).toHaveLength(2);
+    expect(scopes[0]).toMatch(/^[a-f0-9]{32}$/);
+    expect(scopes[1]).toMatch(/^[a-f0-9]{32}$/);
+    expect(scopes[0]).not.toBe(scopes[1]);
+    for (let index = 0; index < 2; index++) {
+      expect(spawnMock.mock.calls[index][1]).toMatchObject({ shellScope: scopes[index] });
+      expect(setExpectedShellScopeMock.mock.invocationCallOrder[index]).toBeLessThan(
+        spawnMock.mock.invocationCallOrder[index],
+      );
+    }
+  });
+
   it("refuses to add or spawn a terminal after durable update saving begins", async () => {
     useUpdateStore.setState({ status: "saving" });
     const { result } = renderHook(() => useSessions());

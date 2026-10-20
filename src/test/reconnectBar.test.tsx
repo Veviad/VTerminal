@@ -141,4 +141,47 @@ describe("ReconnectBar", () => {
     fireEvent.click(reconnect);
     expect(mocks.connectToHost).not.toHaveBeenCalled();
   });
+
+  it("offers a new tab when connection tracking is unavailable", async () => {
+    useAppStore.getState().updateSessionUi(session.id, {
+      integrationActive: false,
+      phase: "idle",
+    });
+    render(<ReconnectBar sessionId={session.id} />);
+
+    const open = await screen.findByRole("button", { name: "New SSH tab" });
+    expect(screen.getByTitle("ansible@cluster2.maholick.com")).toHaveTextContent(
+      "connection status unavailable",
+    );
+    expect(screen.queryByRole("button", { name: "Reconnect" })).not.toBeInTheDocument();
+    expect(open).toBeEnabled();
+    fireEvent.click(open);
+    await waitFor(() => {
+      expect(mocks.connectToHost).toHaveBeenCalledWith(
+        host,
+        "new-tab",
+        mocks.createSession,
+        session.id,
+      );
+    });
+  });
+
+  it("returns to reconnect once the local shell handshake arrives", async () => {
+    useAppStore.getState().updateSessionUi(session.id, {
+      integrationActive: false,
+      phase: "idle",
+    });
+    render(<ReconnectBar sessionId={session.id} />);
+    await screen.findByRole("button", { name: "New SSH tab" });
+
+    mocks.atPrompt = true;
+    act(() => {
+      useAppStore.getState().updateSessionUi(session.id, {
+        integrationActive: true,
+        phase: "input",
+      });
+    });
+    expect(screen.getByRole("button", { name: "Reconnect" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "New SSH tab" })).not.toBeInTheDocument();
+  });
 });

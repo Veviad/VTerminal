@@ -11,6 +11,7 @@ import {
 } from "./types";
 import { protectPrivateTerminal } from "./runbookTerminalPrivacy";
 import { expectPtyEcho } from "./ptyEcho";
+import { S } from "./strings";
 import {
   canSentinel,
   dialectFromProbe,
@@ -67,6 +68,7 @@ import {
 export type ExecError =
   | "timeout"
   | "terminal_busy"
+  | "integration_unavailable"
   | "terminal_closed"
   | "not_a_shell"
   | "command_not_observed"
@@ -562,6 +564,26 @@ async function runReservedInTerminal({
     : await resolveMode(sessionId, idleWaitMs, remoteAtStart, commandDeadlineAt);
   if (resolvedMode === "closed") return closedOutcome(startedAt, null);
   if (resolvedMode === "busy") {
+    // Without any local integration events, a missing prompt is an unknown
+    // shell state rather than evidence that another program is foreground.
+    // Preserve the prompt gate: diagnosing startup must never type a probe or
+    // the approved command into a shell we could not establish as idle.
+    const entry = getTerm(sessionId);
+    if (
+      !remoteAtStart &&
+      remoteIdentityMatches(sessionId, remoteAtStart) &&
+      entry?.term.buffer.active.type === "normal" &&
+      !useAppStore.getState().sessionUi[sessionId]?.integrationActive
+    ) {
+      return {
+        exitCode: null,
+        output: "",
+        durationMs: Date.now() - startedAt,
+        mode: null,
+        error: "integration_unavailable",
+        note: S.aiPanel.integrationUnavailableCommand,
+      };
+    }
     return busyOutcome(startedAt, null, "a program is in the foreground or the user is typing");
   }
   if (resolvedMode === "not_a_shell") {

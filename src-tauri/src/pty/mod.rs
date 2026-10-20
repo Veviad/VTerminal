@@ -377,6 +377,7 @@ mod tests {
                 rows: 24,
                 cwd: None,
                 shell_path: Some(shell.to_string_lossy().into_owned()),
+                shell_scope: None,
                 zdotdir: None,
                 integration_enabled: false,
             },

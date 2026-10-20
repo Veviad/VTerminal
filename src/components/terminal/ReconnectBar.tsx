@@ -9,8 +9,9 @@ import { describeSshTarget } from "../../lib/ssh";
 import { S } from "../../lib/strings";
 
 /**
- * Shown when a tab belongs to a saved host but is NOT currently connected —
- * a restored tab, or one where the user typed `exit`.
+ * Shown when a saved-host tab is disconnected, or when missing shell tracking
+ * leaves its connection unknown. The latter can already contain a live SSH
+ * session and therefore only offers to connect in a new tab.
  *
  * Deliberately a click, never automatic. Reconnecting N restored tabs at launch
  * would fire N MFA pushes / YubiKey touches / host-key prompts before the user
@@ -38,27 +39,36 @@ export function ReconnectBar({ sessionId }: { sessionId: string }) {
 
   const gate = canConnectHere(sessionId);
   const target = describeSshTarget(host);
+  // Without a local shell handshake, the absence of `remote` says nothing
+  // about liveness. A startup wrapper may already be carrying an SSH session.
+  // A new tab is safe; writing another SSH command into this one is not.
+  const trackingAvailable = sessionUi?.integrationActive ?? false;
 
   return (
     <div className="pointer-events-auto absolute inset-x-0 bottom-0 z-20 flex items-center justify-between gap-2 overflow-hidden border-t border-border-subtle bg-bg-secondary/95 px-3 py-1.5 text-[11px] text-text-muted">
       <span className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
         <Server aria-hidden="true" className="shrink-0" size={11} />
         <span className="min-w-0 truncate font-mono" title={target}>
-          {target} · {S.terminal.notConnected}
+          {target} · {trackingAvailable ? S.terminal.notConnected : S.terminal.connectionUnknown}
         </span>
       </span>
       <button
         onClick={() => {
           setBusy(true);
-          void connectToHost(host, "current-tab", createSession, sessionId).finally(() => {
+          void connectToHost(
+            host,
+            trackingAvailable ? "current-tab" : "new-tab",
+            createSession,
+            sessionId,
+          ).finally(() => {
             setBusy(false);
           });
         }}
-        disabled={busy || !gate.ok}
-        title={gate.ok ? undefined : gate.reason}
+        disabled={busy || (trackingAvailable && !gate.ok)}
+        title={trackingAvailable ? (gate.ok ? undefined : gate.reason) : S.terminal.connectionUnknownHint}
         className="shrink-0 rounded-md border border-border-subtle px-2 py-0.5 text-accent transition-colors duration-150 hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-60"
       >
-        {S.terminal.reconnect}
+        {trackingAvailable ? S.terminal.reconnect : S.terminal.newSshTab}
       </button>
     </div>
   );

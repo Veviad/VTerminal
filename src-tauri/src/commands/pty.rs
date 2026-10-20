@@ -17,9 +17,11 @@ pub async fn pty_spawn(
     rows: u16,
     cwd: Option<String>,
     shell: Option<String>,
+    shell_scope: Option<String>,
     on_data: Channel<InvokeResponseBody>,
     on_event: Channel<PtyEvent>,
 ) -> Result<u32, String> {
+    session::validate_shell_scope(shell_scope.as_deref())?;
     let shell_path = shell
         .filter(|s| !s.trim().is_empty())
         .or_else(|| settings::read_string(&app, "shell_path"));
@@ -62,6 +64,7 @@ pub async fn pty_spawn(
                 rows,
                 cwd,
                 shell_path,
+                shell_scope,
                 zdotdir,
                 integration_enabled,
             },

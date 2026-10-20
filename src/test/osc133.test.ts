@@ -184,6 +184,73 @@ describe("BlockTracker shell-instance provenance", () => {
   const scoped = (token: string, kind: string, payload?: string) =>
     `SHELL;${token};${kind}${payload === undefined ? "" : `;${payload}`}`;
 
+  it("rejects remote ownership and unscoped events before local startup initializes", () => {
+    const cwd: string[] = [];
+    const { term, tracker, events, commands } = makeTracker({
+      onCwdChange: (path) => cwd.push(path),
+    });
+    tracker.setExpectedShellScope(local);
+
+    term.sendOsc(6973, scoped(remote, "READY"));
+    term.sendOsc(6973, `CMD;${btoa("forged unscoped command")}`);
+    term.sendOsc(6973, scoped(remote, "CMD", btoa("forged remote command")));
+    term.sendOsc(6973, scoped(local, "CMD", btoa("before initialization")));
+    for (const payload of ["A", "B", "C", "D;0"]) {
+      term.sendOsc(133, payload);
+      term.sendOsc(6973, scoped(remote, "133", payload));
+      term.sendOsc(6973, scoped(local, "133", payload));
+    }
+    term.sendOsc(7, "file://remote/data");
+    term.sendOsc(6973, scoped(remote, "7", "file://remote/data"));
+    term.sendOsc(6973, scoped(local, "7", "file://local/before-ready"));
+    expect(tracker.phase).toBe("idle");
+    expect(tracker.isAtEmptyPrompt()).toBe(false);
+    expect(events).toEqual([]);
+    expect(commands).toEqual([]);
+    expect(cwd).toEqual([]);
+
+    // The real startup can still initialize after ignored foreign output.
+    term.sendOsc(6973, scoped(local, "READY"));
+    term.sendOsc(6973, scoped(local, "133", "A"));
+    term.sendOsc(6973, scoped(local, "133", "B"));
+    expect(tracker.isAtEmptyPrompt()).toBe(true);
+    term.lines[0] = "pwd";
+    term.cursorX = 3;
+    term.sendOsc(6973, scoped(local, "133", "C"));
+    expect(commands).toEqual(["pwd"]);
+    term.sendOsc(6973, scoped(local, "133", "D;0"));
+    expect(events.filter((event) => event.startsWith("end:"))).toHaveLength(1);
+  });
+
+  it("keeps provisioned ownership immutable and rejects invalid scopes without exposing them", () => {
+    const { tracker } = makeTracker();
+    expect(() => tracker.setExpectedShellScope("not-a-valid-secret")).toThrow("Invalid shell scope.");
+    tracker.setExpectedShellScope(local);
+    expect(() => tracker.setExpectedShellScope(remote)).toThrow(
+      "Shell scope must be configured before terminal output.",
+    );
+  });
+
+  it("requires matching READY after replay before accepting provisioned shell events", () => {
+    const { term, tracker, commands } = makeTracker();
+    tracker.setExpectedShellScope(local);
+    tracker.suspend();
+    term.sendOsc(6973, scoped(local, "READY"));
+    tracker.resume();
+    term.sendOsc(6973, scoped(local, "133", "B"));
+    expect(tracker.phase).toBe("idle");
+    term.sendOsc(6973, scoped(local, "READY"));
+    term.sendOsc(6973, scoped(local, "133", "A"));
+    term.sendOsc(6973, scoped(local, "133", "B"));
+    term.sendOsc(6973, scoped(local, "CMD", btoa("ssh example.invalid")));
+    term.sendOsc(6973, scoped(local, "133", "C"));
+    term.sendOsc(6973, scoped(remote, "READY"));
+    term.sendOsc(133, "D;0");
+    term.sendOsc(6973, scoped(remote, "133", "D;0"));
+    expect(tracker.phase).toBe("output");
+    expect(commands).toEqual(["ssh example.invalid"]);
+  });
+
   it("keeps the enclosing SSH connection until its local shell finishes", () => {
     let connected = false;
     const cwd: string[] = [];

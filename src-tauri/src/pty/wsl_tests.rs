@@ -69,6 +69,7 @@ exit 23
         cwd.to_str().unwrap(),
         integration_enabled,
         "vt-test;literal-session",
+        None,
     );
     assert_eq!(&args[..3], ["--cd", cwd.to_str().unwrap(), "--exec"]);
     // portable-pty supplies the controlling terminal that WSL already owns.

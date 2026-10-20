@@ -41,9 +41,13 @@ fn result_flags(error: Option<&str>, exit_code: Option<i32>) -> (bool, bool) {
         Some("cancelled") => (false, true),
         // These fail before a command is dispatched, so the Agent can rewrite
         // or wait without treating the terminal as an unknown foreground job.
-        Some("terminal_busy" | "unsafe_command" | "not_a_shell" | "target_changed") => {
-            (false, false)
-        }
+        Some(
+            "terminal_busy"
+            | "integration_unavailable"
+            | "unsafe_command"
+            | "not_a_shell"
+            | "target_changed",
+        ) => (false, false),
         // A confirmed completion after SIGINT is an ordinary interrupted step.
         Some("interrupted") => (false, false),
         // Future or malformed machine codes are conservative by default. If no
@@ -170,6 +174,7 @@ mod tests {
         assert_eq!(result_flags(Some("interrupted"), Some(130)), (false, false));
         for error in [
             "terminal_busy",
+            "integration_unavailable",
             "unsafe_command",
             "not_a_shell",
             "target_changed",

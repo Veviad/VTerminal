@@ -14,9 +14,23 @@ vi.mock("@tauri-apps/api/core", () => ({
   },
 }));
 
-import { agentStart } from "../lib/tauri";
+import { agentStart, ptySpawn, releasePtyChannels } from "../lib/tauri";
 
 beforeEach(() => invokeMock.mockReset());
+
+describe("PTY API", () => {
+  it("passes a provisioned shell scope under Tauri's camelCase command key", async () => {
+    invokeMock.mockResolvedValue(123);
+    const shellScope = "0123456789abcdef0123456789abcdef";
+    await ptySpawn("scoped-session", { cols: 80, rows: 24, shellScope }, vi.fn(), vi.fn());
+    expect(invokeMock).toHaveBeenCalledWith("pty_spawn", expect.objectContaining({
+      sessionId: "scoped-session",
+      shellScope,
+    }));
+    expect(invokeMock.mock.calls[0][1]).not.toHaveProperty("shell_scope");
+    releasePtyChannels("scoped-session");
+  });
+});
 
 describe("agent API", () => {
   it("sends attached Qdrant buckets under Tauri's camelCase command key", async () => {

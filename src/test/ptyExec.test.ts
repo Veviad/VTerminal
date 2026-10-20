@@ -760,10 +760,80 @@ describe("runInTerminal — refusing to type", () => {
   it("never writes when the prompt is busy", async () => {
     vi.useFakeTimers();
     entry = makeEntry(["$ running"], { atPrompt: false });
+    useAppStore.getState().updateSessionUi("s1", { integrationActive: true });
     const promise = runInTerminal("s1", "ap1", "echo hi", { idleWaitMs: 1000 });
     await vi.advanceTimersByTimeAsync(2000);
     const outcome = await promise;
     expect(outcome.error).toBe("terminal_busy");
+    expect(ptyWrite).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    "reports unavailable integration without probing or dispatching (nonce completion: %s)",
+    async (nonceCompletion) => {
+      vi.useFakeTimers();
+      entry = makeEntry(["visible shell prompt> "], { atPrompt: false });
+      const beforeWrite = vi.fn(() => true);
+      const promise = runInTerminal("s1", "ap1", "echo hi", {
+        idleWaitMs: 1000,
+        nonceCompletion,
+        beforeWrite,
+      });
+      await vi.advanceTimersByTimeAsync(1000);
+
+      const outcome = await promise;
+      expect(outcome).toMatchObject({
+        error: "integration_unavailable",
+        exitCode: null,
+        output: "",
+        mode: null,
+      });
+      expect(outcome.note).toContain("Nothing was executed");
+      expect(outcome.note).toContain("shell integration did not initialize");
+      expect(outcome.note).toContain("Settings → Terminal → Shell integration");
+      expect(outcome.note).not.toContain("program is in the foreground");
+      expect(beforeWrite).not.toHaveBeenCalled();
+      expect(ptyWrite).not.toHaveBeenCalled();
+    },
+  );
+
+  it("allows integration to initialize and prove an idle prompt during the wait", async () => {
+    vi.useFakeTimers();
+    entry = makeEntry(["$ ", "hello", "$ "], { atPrompt: false });
+    let atPrompt = false;
+    entry.tracker.isAtEmptyPrompt = () => atPrompt;
+    entry.tracker.isAtPromptColumn = () => atPrompt;
+    const promise = runInTerminal("s1", "ap1", "echo hello", {
+      idleWaitMs: 1000,
+      timeoutMs: 5000,
+    });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(ptyWrite).not.toHaveBeenCalled();
+
+    useAppStore.getState().updateSessionUi("s1", { integrationActive: true });
+    atPrompt = true;
+    await vi.advanceTimersByTimeAsync(100);
+    expect(ptyWrite).toHaveBeenCalledExactlyOnceWith("s1", `${typed("echo hello")}\r`);
+    entry.blockMarkers.set("b1", {
+      start: { line: 1, isDisposed: false },
+      end: { line: 2, isDisposed: false },
+    });
+    emit({ type: "blockStart", blockId: "b1", command: typed("echo hello") });
+    emit({ type: "blockEnd", blockId: "b1", exitCode: 0, endLine: 2 });
+
+    expect(await promise).toMatchObject({ exitCode: 0, output: "hello", mode: "integrated" });
+    expect(ptyWrite).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports busy when integration initializes without reaching an idle prompt", async () => {
+    vi.useFakeTimers();
+    entry = makeEntry(["running startup command"], { atPrompt: false });
+    const promise = runInTerminal("s1", "ap1", "echo hi", { idleWaitMs: 1000 });
+    await vi.advanceTimersByTimeAsync(500);
+    useAppStore.getState().updateSessionUi("s1", { integrationActive: true });
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect((await promise).error).toBe("terminal_busy");
     expect(ptyWrite).not.toHaveBeenCalled();
   });
 

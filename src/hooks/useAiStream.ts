@@ -1180,6 +1180,7 @@ export function cardStatus(o: PtyExecOutcome): SettledCommandStatus {
       // process may still own the terminal, so this is completion unknown.
       return "timeout";
     case "terminal_busy":
+    case "integration_unavailable":
     case "unsafe_command":
     case "not_a_shell":
     case "target_changed":
@@ -1215,6 +1216,8 @@ function noteForCommandError(error: string | null | undefined): string | undefin
       return S.aiPanel.completionUnknownNote;
     case "terminal_busy":
       return "Nothing was executed: the terminal was busy.";
+    case "integration_unavailable":
+      return S.aiPanel.integrationUnavailableCommand;
     case "unsafe_command":
       return "Nothing was executed: the command could not be typed safely.";
     case "not_a_shell":
@@ -1260,6 +1263,7 @@ export function commandResultPresentation(
   }
   if (
     error === "terminal_busy" ||
+    error === "integration_unavailable" ||
     error === "unsafe_command" ||
     error === "not_a_shell" ||
     error === "target_changed"
