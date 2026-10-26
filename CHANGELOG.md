@@ -2,6 +2,7 @@
 
 ## 0.6.10
 
+- Stabilize Windows console-probe tests by allowing cold PowerShell/.NET startup while retaining bounded execution and the no-console assertion.
 - Refresh frontend dependencies: lucide-react 1.61.0, Zustand 5.0.16, Tauri CLI 2.12.4, and Vite 8.3.5.
 - Refresh Rust dependencies: Tauri 2.12.5, Tokio 1.54.1, rmcp 3.7.0, MiniJinja and minijinja-contrib 3.0.2, libc 0.2.191, plist 1.10.3, and tauri-build 2.7.4.
 - Update the Rust cache action to 2.9.3 across CI and release builds.

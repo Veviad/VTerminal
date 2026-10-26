@@ -153,6 +153,10 @@ mod windows_tests {
     use std::path::PathBuf;
     use std::process::Stdio;
 
+    // Allow cold PowerShell/.NET startup and Add-Type compilation on busy CI
+    // runners. These probes verify console allocation, not startup latency.
+    const CONSOLE_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+
     // Query the child process itself. Inspecting command flags alone would
     // miss a regression where the flags were lost before process creation.
     const CONSOLE_PROBE: &str = r#"$ErrorActionPreference = 'Stop'
@@ -179,7 +183,7 @@ Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; pu
 
     #[test]
     fn standard_background_child_has_no_console_window() {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + CONSOLE_PROBE_TIMEOUT;
         let mut command = background_command(powershell());
         command
             .args(["-NoProfile", "-NonInteractive", "-Command", CONSOLE_PROBE])
@@ -188,7 +192,7 @@ Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; pu
             .stderr(Stdio::piped());
         assert_no_console(
             command_output_until(&mut command, deadline)
-                .expect("the Windows console probe must finish within 10 seconds"),
+                .expect("the Windows console probe must finish within its startup deadline"),
         );
     }
 
@@ -202,9 +206,9 @@ Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; pu
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         assert_no_console(
-            tokio::time::timeout(Duration::from_secs(10), command.output())
+            tokio::time::timeout(CONSOLE_PROBE_TIMEOUT, command.output())
                 .await
-                .expect("the Windows console probe must finish within 10 seconds")
+                .expect("the Windows console probe must finish within its startup deadline")
                 .expect("start the Windows console probe"),
         );
     }
