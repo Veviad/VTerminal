@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 
 use super::{client, emit, read_sse, send_with_retry};
 use crate::models::catalog::{CatalogModel, Effort, ProviderId};
+use crate::provider::tool_summary::ToolSummaryStream;
 use crate::provider::{
     ChatMessage, ChatParams, FinishReason, Provider, ProviderError, ProviderEvent, Role, ToolCall,
     ToolChoiceMode, ToolDef,
@@ -395,6 +396,8 @@ impl Provider for OpenAiCompatProvider {
         // Tool call arguments arrive as partial JSON keyed by index.
         let mut pending: std::collections::BTreeMap<u64, (String, String, String)> =
             Default::default();
+        let mut summaries: std::collections::BTreeMap<u64, ToolSummaryStream> = Default::default();
+        let mut summary_started = std::collections::HashSet::new();
         let mut prompt_tokens = 0u32;
         let mut completion_tokens = 0u32;
         let mut finish = FinishReason::Stop;
@@ -443,9 +446,23 @@ impl Provider for OpenAiCompatProvider {
             if let Some(calls) = delta["tool_calls"].as_array() {
                 for call in calls {
                     let idx = call["index"].as_u64().unwrap_or(0);
-                    let entry = pending.entry(idx).or_default();
-                    if let Some(id) = call["id"].as_str().filter(|s| !s.is_empty()) {
-                        entry.0 = id.to_string();
+                    // Keep one identity throughout the preview and the complete
+                    // call, including servers that omit streamed call IDs.
+                    let entry = pending.entry(idx).or_insert_with(|| {
+                        (
+                            call["id"]
+                                .as_str()
+                                .filter(|id| !id.is_empty())
+                                .map(String::from)
+                                .unwrap_or_else(|| format!("call_{idx}")),
+                            String::new(),
+                            String::new(),
+                        )
+                    });
+                    if !summary_started.contains(&idx) {
+                        if let Some(id) = call["id"].as_str().filter(|id| !id.is_empty()) {
+                            entry.0 = id.to_string();
+                        }
                     }
                     if let Some(name) = call.pointer("/function/name").and_then(Value::as_str) {
                         if !name.is_empty() {
@@ -455,6 +472,17 @@ impl Provider for OpenAiCompatProvider {
                     if let Some(args) = call.pointer("/function/arguments").and_then(Value::as_str)
                     {
                         entry.2.push_str(args);
+                    }
+                    if pending.keys().next().copied() == Some(idx) {
+                        let entry = pending.get(&idx).unwrap();
+                        if let Some(event) = summaries
+                            .entry(idx)
+                            .or_default()
+                            .push_json(&entry.0, &entry.1, &entry.2)
+                        {
+                            summary_started.insert(idx);
+                            out.push(event);
+                        }
                     }
                 }
             }
@@ -489,14 +517,8 @@ impl Provider for OpenAiCompatProvider {
             let calls: Vec<ToolCall> = pending
                 .into_values()
                 .filter(|(_, name, _)| !name.is_empty())
-                .enumerate()
-                .map(|(i, (id, name, arguments))| ToolCall {
-                    // Some vendors omit the id on streamed calls.
-                    id: if id.is_empty() {
-                        format!("call_{i}")
-                    } else {
-                        id
-                    },
+                .map(|(id, name, arguments)| ToolCall {
+                    id,
                     name,
                     arguments: if arguments.trim().is_empty() {
                         "{}".to_string()
@@ -1035,6 +1057,91 @@ mod tests {
     /// The regression that matters most. Enabling the splitter for every provider
     /// would silently eat a literal `<think>` out of a legitimate answer — an
     /// answer *about* this feature, for instance.
+    #[tokio::test]
+    async fn finish_summary_streams_before_completion_with_interleaved_calls() {
+        use super::super::test_stream::{sse, staged_response};
+
+        let prefix = r###"{"summary":"## Fertig\nGrüße \uD83D"###;
+        let tail = r#"\uDE80"}"#;
+        let initial = sse(vec![
+            json!({"choices":[{"delta":{"tool_calls":[
+                {"index":2,"function":{"name":"finish","arguments":prefix}},
+                {"index":4,"function":{"name":"run_command","arguments":"{\"summary\":\"hidden command data\"}"}},
+                {"index":6,"function":{"name":"inspect","arguments":""}},
+                {"index":8,"function":{"name":"finish","arguments":"{\"summary\":\"hidden sibling summary\"}"}}
+            ]}}]}),
+            json!({"choices":[{"delta":{"tool_calls":[
+                {"index":6,"id":"late_inspect_id","function":{"arguments":"{}"}}
+            ]}}]}),
+        ]);
+        let final_frames = sse(vec![
+            json!({"choices":[{"delta":{"tool_calls":[{"index":2,"function":{"arguments":tail}}]}}]}),
+            json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]}),
+        ]);
+        let (base, release) = staged_response(initial, final_frames).await;
+        let provider = OpenAiCompatProvider {
+            model: remote_model(),
+            endpoint: format!("{base}/v1/chat/completions"),
+            api_key: None,
+            split_think_tags: false,
+        };
+        let (_cancel_tx, cancel) = tokio::sync::watch::channel(false);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let task = tokio::spawn(async move {
+            provider
+                .chat_stream(
+                    vec![],
+                    vec![],
+                    ChatParams {
+                        temperature: None,
+                        max_tokens: None,
+                        tool_choice: ToolChoiceMode::Auto,
+                        web: crate::provider::WebToolPolicy::Disabled,
+                        effort: Effort::Off,
+                    },
+                    cancel,
+                    tx,
+                )
+                .await
+        });
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(&first, ProviderEvent::ToolSummaryDelta { call_id, content }
+            if call_id == "call_2" && content == "## Fertig\nGrüße ")
+        );
+        assert!(
+            !task.is_finished(),
+            "the response must still be awaiting its final frames"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "partial arguments must not dispatch any call"
+        );
+        release.send(()).unwrap();
+        task.await.unwrap().unwrap();
+
+        let mut summary = String::from("## Fertig\nGrüße ");
+        let mut completed_calls = Vec::new();
+        while let Some(event) = rx.recv().await {
+            match event {
+                ProviderEvent::ToolSummaryDelta { call_id, content } => {
+                    assert_eq!(call_id, "call_2");
+                    summary.push_str(&content);
+                }
+                ProviderEvent::ToolCalls(calls) => completed_calls.extend(calls),
+                _ => {}
+            }
+        }
+        assert_eq!(summary, "## Fertig\nGrüße 🚀");
+        assert_eq!(completed_calls.len(), 4);
+        assert_eq!(completed_calls[0].id, "call_2");
+        assert_eq!(completed_calls[0].arguments, format!("{prefix}{tail}"));
+        assert_eq!(completed_calls[2].id, "late_inspect_id");
+    }
+
     #[test]
     fn the_vendors_never_split_think_tags() {
         let vendor = OpenAiCompatProvider {

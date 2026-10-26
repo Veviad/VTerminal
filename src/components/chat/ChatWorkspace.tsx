@@ -34,21 +34,17 @@ import type {
   WebCitation,
 } from "../../lib/types";
 import { useDismissibleLayer } from "../../hooks/useDismissibleLayer";
+import { useFollowOutput } from "../../hooks/useFollowOutput";
 import { GenerationModeBadge } from "../layout/GenerationModeBadge";
 import { ChatActions } from "./ChatActions";
 import { McpApprovalCard } from "../ai/McpApprovalCard";
 import { McpPicker } from "../ai/McpPicker";
 import { McpToolGroup } from "../ai/McpToolCard";
 
-const CHAT_BOTTOM_THRESHOLD_PX = 48;
 const GENERATION_STATUS_POLL_MS = 500;
 const NO_ATTACHED_BUCKETS: readonly KnowledgeBucketRef[] = [];
 
-export function isNearChatBottom(
-  viewport: Pick<HTMLElement, "scrollTop" | "scrollHeight" | "clientHeight">,
-): boolean {
-  return viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= CHAT_BOTTOM_THRESHOLD_PX;
-}
+export { isNearOutputBottom as isNearChatBottom } from "../../hooks/useFollowOutput";
 
 export function ChatWorkspace() {
   const current = useChatStore((state) => state.current);
@@ -60,24 +56,8 @@ export function ChatWorkspace() {
   const activeModelId = useAppStore((state) => state.activeModelId);
   const [composer, setComposer] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const stickToBottomRef = useRef(true);
+  const { viewportRef, contentRef } = useFollowOutput(current?.summary.id, stream);
   const archived = Boolean(current?.summary.archived_at);
-
-  useEffect(() => {
-    stickToBottomRef.current = true;
-    const viewport = scrollRef.current;
-    if (viewport) viewport.scrollTo({ top: viewport.scrollHeight });
-  }, [current?.summary.id]);
-
-  useEffect(() => {
-    const viewport = scrollRef.current;
-    if (!viewport || !stickToBottomRef.current) return;
-    viewport.scrollTo({
-      top: viewport.scrollHeight,
-      behavior: stream.status === "streaming" ? "auto" : "smooth",
-    });
-  }, [current?.messages.length, stream.content, stream.thinking]);
 
   useEffect(() => {
     if (stream.status !== "streaming" || !activeModelId.startsWith("local/")) return;
@@ -125,14 +105,11 @@ export function ChatWorkspace() {
       <div className="flex min-w-0 flex-1 flex-col">
         <ChatToolbar />
         <div
-          ref={scrollRef}
+          ref={viewportRef}
           data-testid="chat-timeline"
-          className="min-h-0 flex-1 overflow-y-auto px-6 py-7"
-          onScroll={(event) => {
-            stickToBottomRef.current = isNearChatBottom(event.currentTarget);
-          }}
+          className="min-h-0 flex-1 overflow-y-auto px-6 py-7 [overflow-anchor:none]"
         >
-          <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
+          <div ref={contentRef} className="mx-auto flex w-full max-w-3xl flex-col gap-5">
             {current?.messages.length ? (
               current.messages.map((message) => <Message key={message.id} message={message} />)
             ) : (

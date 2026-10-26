@@ -213,6 +213,62 @@ function installSidecar(): void {
 }
 
 describe("AI generation ownership", () => {
+  it.each(["ask", "startAgent"] as const)(
+    "%s delivers successive reasoning and answer chunks before the backend settles",
+    async (mode) => {
+      const backend = deferred<ChatMessage[] | void>();
+      let onEvent!: (event: StreamEvent) => void;
+      const endpoint = mode === "ask" ? api.aiAsk : api.agentStart;
+      endpoint.mockImplementationOnce((...args: unknown[]) => {
+        onEvent = args[6] as (event: StreamEvent) => void;
+        return backend.promise;
+      });
+      const { result } = renderHook(() => ({
+        actions: useAiStream(),
+        stream: useAppStore((state) => state.aiStreams[SID]),
+      }));
+      let settled = false;
+      let run!: Promise<void>;
+      act(() => {
+        run = result.current.actions[mode](SID, "Prüfe die Ausgabe").then(() => { settled = true; });
+      });
+      await flushPreflight();
+
+      act(() => onEvent({ type: "ThinkingDelta", content: "Ich prüfe " }));
+      expect(result.current.stream.thinkingContent).toBe("Ich prüfe ");
+      act(() => onEvent({ type: "ThinkingDelta", content: "die Ausgabe 🚀." }));
+      expect(result.current.stream.thinkingContent).toBe("Ich prüfe die Ausgabe 🚀.");
+
+      const chunks = ["## Ergebnis\n\n", "Grüße **aus ", "Köln** 🚀.\n\n", "```sh\npwd\n```"];
+      let visible = "";
+      for (const content of chunks) {
+        act(() => onEvent({ type: "Delta", content }));
+        visible += content;
+        expect(result.current.stream.streamingContent).toBe(visible);
+        expect(result.current.stream.status).toBe("streaming");
+        expect(result.current.stream.messages.filter((message) => message.role === "assistant")).toHaveLength(0);
+        expect(settled).toBe(false);
+      }
+
+      act(() => onEvent({ type: "Done", prompt_tokens: 7, completion_tokens: 20 }));
+      expect(result.current.stream.status).toBe("idle");
+      expect(result.current.stream.streamingContent).toBe("");
+      expect(result.current.stream.thinkingContent).toBe("");
+      const assistant = result.current.stream.messages.filter((message) => message.role === "assistant");
+      expect(assistant).toHaveLength(1);
+      expect(assistant[0]).toMatchObject({
+        content: chunks.join(""),
+        thinking: "Ich prüfe die Ausgabe 🚀.",
+        usage: { prompt: 7, completion: 20 },
+      });
+      expect(settled).toBe(false);
+
+      backend.resolve(mode === "ask" ? undefined : []);
+      await act(async () => run);
+      expect(result.current.stream.messages.filter((message) => message.role === "assistant")).toHaveLength(1);
+    },
+  );
+
   it("sends an attachment-only Ask turn with the complete fenced text", async () => {
     const body = "START-OF-PASTE\n```embedded fence```\nEND-OF-PASTE";
     const attachment = pastedText(body);

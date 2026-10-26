@@ -1029,6 +1029,8 @@ struct OutputSplitter {
     calls: Vec<ToolCall>,
     markers: Markers,
     family: LocalFamily,
+    tool_id: String,
+    tool_summary: super::tool_summary::ToolSummaryStream,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -1063,6 +1065,8 @@ impl OutputSplitter {
             calls: Vec::new(),
             markers: Markers::for_family(family),
             family,
+            tool_id: String::new(),
+            tool_summary: Default::default(),
         }
     }
 
@@ -1105,6 +1109,10 @@ impl OutputSplitter {
                         out.push(ProviderEvent::TextDelta(self.buf[..at].to_string()));
                     }
                     self.buf.drain(..at + tag.len());
+                    if next == Mode::Tool {
+                        self.tool_id = format!("call_{}", uuid::Uuid::new_v4().simple());
+                        self.tool_summary = Default::default();
+                    }
                     self.mode = next;
                 }
                 Mode::Think => {
@@ -1133,11 +1141,26 @@ impl OutputSplitter {
                         out.push(ProviderEvent::ReasoningDelta(self.buf[..at].to_string()));
                     }
                     self.buf.drain(..at + tag.len());
+                    if next == Mode::Tool {
+                        self.tool_id = format!("call_{}", uuid::Uuid::new_v4().simple());
+                        self.tool_summary = Default::default();
+                    }
                     self.mode = next;
                 }
                 Mode::Tool => {
-                    // Withhold everything until the call is whole — a half
-                    // parsed call must never reach the user or the agent loop.
+                    // Preview only finish.summary. Execution still requires a
+                    // whole parsed call, and command/MCP arguments stay hidden.
+                    if self.calls.is_empty() {
+                        let preview = match self.family {
+                            LocalFamily::Qwen => {
+                                self.tool_summary.push_qwen(&self.tool_id, &self.buf)
+                            }
+                            LocalFamily::Gemma => {
+                                self.tool_summary.push_gemma(&self.tool_id, &self.buf)
+                            }
+                        };
+                        out.extend(preview);
+                    }
                     let Some(at) = self.buf.find(m.tool_close) else {
                         return out;
                     };
@@ -1145,7 +1168,10 @@ impl OutputSplitter {
                     self.buf.drain(..at + m.tool_close.len());
                     self.mode = Mode::Text;
                     match parse_tool_call(self.family, &payload) {
-                        Some(call) => self.calls.push(call),
+                        Some(mut call) => {
+                            call.id = self.tool_id.clone();
+                            self.calls.push(call);
+                        }
                         None => log::warn!("discarding unparseable tool call: {payload}"),
                     }
                 }
@@ -2365,6 +2391,72 @@ mod tests {
         let (text, think) = drain(&mut s, &["<th", "ink>", "hmm", "</thi", "nk>", "done"]);
         assert_eq!(think, "hmm");
         assert_eq!(text, "done");
+    }
+
+    #[test]
+    fn local_finish_summaries_stream_before_tool_dispatch_with_stable_ids() {
+        for (family, open, payload, close) in [
+            (
+                LocalFamily::Qwen,
+                "<tool_call>",
+                r#"{"name":"finish","arguments":{"summary":"Grüße 🚀"}}"#,
+                "</tool_call>",
+            ),
+            (
+                LocalFamily::Qwen,
+                "<tool_call>",
+                "<function=finish><parameter=summary>\nGrüße 🚀\n</parameter></function>",
+                "</tool_call>",
+            ),
+            (
+                LocalFamily::Gemma,
+                "<|tool_call>",
+                "call:finish{summary:<|\"|>Grüße 🚀<|\"|>}",
+                "<tool_call|>",
+            ),
+        ] {
+            let mut splitter = OutputSplitter::new(family, false);
+            splitter.push(open);
+            let mut text = String::new();
+            let mut ids = Vec::new();
+            for ch in payload.chars() {
+                for event in splitter.push(&ch.to_string()) {
+                    if let ProviderEvent::ToolSummaryDelta { call_id, content } = event {
+                        text.push_str(&content);
+                        ids.push(call_id);
+                    }
+                }
+                assert!(
+                    splitter.calls.is_empty(),
+                    "partial tools must remain undispatched"
+                );
+            }
+            assert_eq!(text, "Grüße 🚀");
+            splitter.push(close);
+            assert_eq!(splitter.calls.len(), 1);
+            assert!(ids.iter().all(|id| id == &splitter.calls[0].id));
+            let args: serde_json::Value =
+                serde_json::from_str(&splitter.calls[0].arguments).unwrap();
+            assert_eq!(args["summary"], text);
+        }
+    }
+
+    #[test]
+    fn local_summary_previews_respect_tool_dispatch_order() {
+        for first in [
+            r#"{"name":"run_command","arguments":{"command":"true"}}"#,
+            r#"{"name":"finish","arguments":{"summary":"first"}}"#,
+        ] {
+            let mut splitter = OutputSplitter::new(LocalFamily::Qwen, false);
+            splitter.push(&format!("<tool_call>{first}</tool_call>"));
+            let events = splitter.push(
+                r#"<tool_call>{"name":"finish","arguments":{"summary":"later"}}</tool_call>"#,
+            );
+            assert!(events
+                .iter()
+                .all(|event| !matches!(event, ProviderEvent::ToolSummaryDelta { .. })));
+            assert_eq!(splitter.calls.len(), 2);
+        }
     }
 
     #[test]

@@ -125,6 +125,71 @@ describe("AiPanel renders", () => {
 
   afterEach(() => vi.restoreAllMocks());
 
+  it("preserves a reader's position while agent text and command output update", () => {
+    seedReadyPanel({
+      mode: "agent",
+      status: "streaming",
+      streamingContent: "First token",
+      messages: [{
+        id: "cmd-output",
+        role: "assistant",
+        kind: "command",
+        content: "",
+        createdAt: "2026-10-26T10:00:00Z",
+        command: { command: "ls", output: "", exitCode: null, status: "running" },
+      }],
+    });
+    render(<AiPanel sessionId="s1" />);
+    const timeline = screen.getByTestId("ai-timeline");
+    Object.defineProperties(timeline, {
+      scrollHeight: { configurable: true, value: 1_000 },
+      clientHeight: { configurable: true, value: 300 },
+      scrollTop: { configurable: true, writable: true, value: 100 },
+    });
+    const scrollTo = vi.fn();
+    timeline.scrollTo = scrollTo;
+    fireEvent.scroll(timeline);
+
+    act(() => {
+      useAppStore.setState((state) => ({
+        aiStreams: {
+          ...state.aiStreams,
+          s1: { ...state.aiStreams.s1, streamingContent: "A longer answer", thinkingContent: "Considering the output" },
+        },
+      }));
+    });
+    act(() => useAppStore.getState().appendCommandOutput("s1", "output", "Another output line"));
+    expect(screen.getByText("Another output line")).toBeInTheDocument();
+    expect(scrollTo).not.toHaveBeenCalled();
+
+    timeline.scrollTop = 700;
+    fireEvent.scroll(timeline);
+    act(() => useAppStore.getState().appendAiDelta("s1", " and the next token"));
+    expect(scrollTo).toHaveBeenCalledWith({ top: 1_000, behavior: "auto" });
+  });
+
+  it("follows long live thinking independently and lets the reader scroll back through it", () => {
+    seedReadyPanel({ status: "streaming", thinkingContent: "Beginning of reasoning" });
+    render(<AiPanel sessionId="s1" />);
+    const thinking = screen.getByTestId("thinking-output");
+    Object.defineProperties(thinking, {
+      scrollHeight: { configurable: true, value: 800 },
+      clientHeight: { configurable: true, value: 160 },
+      scrollTop: { configurable: true, writable: true, value: 640 },
+    });
+    const scrollTo = vi.fn();
+    thinking.scrollTo = scrollTo;
+    act(() => useAppStore.getState().appendThinking("s1", "\nA later thought"));
+    expect(scrollTo).toHaveBeenCalledWith({ top: 800, behavior: "auto" });
+
+    scrollTo.mockClear();
+    thinking.scrollTop = 100;
+    fireEvent.scroll(thinking);
+    act(() => useAppStore.getState().appendThinking("s1", "\nStill thinking"));
+    expect(scrollTo).not.toHaveBeenCalled();
+    expect(thinking).toHaveTextContent("Still thinking");
+  });
+
   it("renders with an API model selected and a key present", () => {
     useAppStore.setState({
       catalog: [cloudEntry()],

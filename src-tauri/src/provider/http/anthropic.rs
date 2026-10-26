@@ -9,6 +9,7 @@ use serde_json::{json, Map, Value};
 
 use super::{client, emit, read_sse, send_with_retry};
 use crate::models::catalog::{CatalogModel, Effort};
+use crate::provider::tool_summary::ToolSummaryStream;
 use crate::provider::{
     ChatMessage, ChatParams, FinishReason, Provider, ProviderError, ProviderEvent, Role, ToolCall,
     ToolChoiceMode, ToolDef,
@@ -264,18 +265,10 @@ fn build_messages(messages: Vec<ChatMessage>) -> (String, Vec<Value>) {
     (system, out)
 }
 
-#[async_trait::async_trait]
-impl Provider for AnthropicProvider {
-    fn id(&self) -> &'static str {
-        "anthropic"
-    }
-
-    fn model_name(&self) -> String {
-        self.model.wire_model.to_string()
-    }
-
-    async fn chat_stream(
+impl AnthropicProvider {
+    async fn chat_stream_at(
         &self,
+        endpoint: &str,
         messages: Vec<ChatMessage>,
         tools: Vec<ToolDef>,
         params: ChatParams,
@@ -321,7 +314,7 @@ impl Provider for AnthropicProvider {
             || {
                 client()
                     .expect("client built once")
-                    .post(API_URL)
+                    .post(endpoint)
                     .header("x-api-key", self.api_key.expose())
                     .header("anthropic-version", API_VERSION)
                     .json(&body)
@@ -331,10 +324,11 @@ impl Provider for AnthropicProvider {
         )
         .await?;
 
-        // Tool calls stream as partial JSON per block; they are only meaningful
-        // whole, so accumulate and emit once at the end.
+        // Dispatch only complete calls. The finish tool's user-facing summary
+        // can be displayed as its JSON string arrives.
         let mut pending: std::collections::BTreeMap<u64, (String, String, String)> =
             Default::default();
+        let mut summaries: std::collections::BTreeMap<u64, ToolSummaryStream> = Default::default();
         let mut prompt_tokens = 0u32;
         let mut completion_tokens = 0u32;
         let mut finish = FinishReason::Stop;
@@ -368,8 +362,9 @@ impl Provider for AnthropicProvider {
                             (
                                 v.pointer("/content_block/id")
                                     .and_then(Value::as_str)
-                                    .unwrap_or_default()
-                                    .to_string(),
+                                    .filter(|id| !id.is_empty())
+                                    .map(String::from)
+                                    .unwrap_or_else(|| format!("call_{idx}")),
                                 v.pointer("/content_block/name")
                                     .and_then(Value::as_str)
                                     .unwrap_or_default()
@@ -398,6 +393,16 @@ impl Provider for AnthropicProvider {
                                 entry
                                     .2
                                     .push_str(delta["partial_json"].as_str().unwrap_or_default());
+                            }
+                            if pending.keys().next().copied() == Some(idx) {
+                                let entry = pending.get(&idx).unwrap();
+                                if let Some(event) = summaries
+                                    .entry(idx)
+                                    .or_default()
+                                    .push_json(&entry.0, &entry.1, &entry.2)
+                                {
+                                    out.push(event);
+                                }
                             }
                         }
                         "citations_delta" => {
@@ -501,10 +506,104 @@ impl Provider for AnthropicProvider {
     }
 }
 
+#[async_trait::async_trait]
+impl Provider for AnthropicProvider {
+    fn id(&self) -> &'static str {
+        "anthropic"
+    }
+
+    fn model_name(&self) -> String {
+        self.model.wire_model.to_string()
+    }
+
+    async fn chat_stream(
+        &self,
+        messages: Vec<ChatMessage>,
+        tools: Vec<ToolDef>,
+        params: ChatParams,
+        cancel: tokio::sync::watch::Receiver<bool>,
+        tx: tokio::sync::mpsc::Sender<ProviderEvent>,
+    ) -> Result<(), ProviderError> {
+        self.chat_stream_at(API_URL, messages, tools, params, cancel, tx)
+            .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::catalog;
+
+    #[tokio::test]
+    async fn finish_summary_streams_before_message_stop() {
+        use super::super::test_stream::{sse, staged_response};
+
+        let prefix = r###"{"summary":"## Fertig\nGrüße \uD83D"###;
+        let tail = r#"\uDE80"}"#;
+        let initial = sse(vec![
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"finish_1","name":"finish","input":{}}}),
+            json!({"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"inspect_1","name":"run_command","input":{}}}),
+            json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"summary\":\"hidden command data\"}"}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":prefix}}),
+            json!({"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"finish_2","name":"finish","input":{}}}),
+            json!({"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"summary\":\"hidden sibling summary\"}"}}),
+        ]);
+        let final_frames = sse(vec![
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":tail}}),
+            json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":50}}),
+            json!({"type":"message_stop"}),
+        ]);
+        let (base, release) = staged_response(initial, final_frames).await;
+        let provider = AnthropicProvider {
+            model: opus(),
+            api_key: "test-key".into(),
+        };
+        let (_cancel_tx, cancel) = tokio::sync::watch::channel(false);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let task = tokio::spawn(async move {
+            provider
+                .chat_stream_at(
+                    &format!("{base}/v1/messages"),
+                    vec![],
+                    vec![],
+                    params(false, ToolChoiceMode::Auto),
+                    cancel,
+                    tx,
+                )
+                .await
+        });
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(&first, ProviderEvent::ToolSummaryDelta { call_id, content }
+            if call_id == "finish_1" && content == "## Fertig\nGrüße ")
+        );
+        assert!(!task.is_finished());
+        assert!(
+            rx.try_recv().is_err(),
+            "a partial call must remain undispatched"
+        );
+        release.send(()).unwrap();
+        task.await.unwrap().unwrap();
+        let mut summary = String::from("## Fertig\nGrüße ");
+        let mut completed_calls = Vec::new();
+        while let Some(event) = rx.recv().await {
+            match event {
+                ProviderEvent::ToolSummaryDelta { call_id, content } => {
+                    assert_eq!(call_id, "finish_1");
+                    summary.push_str(&content);
+                }
+                ProviderEvent::ToolCalls(calls) => completed_calls.extend(calls),
+                _ => {}
+            }
+        }
+        assert_eq!(summary, "## Fertig\nGrüße 🚀");
+        assert_eq!(completed_calls.len(), 3);
+        assert_eq!(completed_calls[0].id, "finish_1");
+        assert_eq!(completed_calls[0].arguments, format!("{prefix}{tail}"));
+    }
 
     #[test]
     fn every_claude_effort_builds_a_supported_adaptive_payload() {

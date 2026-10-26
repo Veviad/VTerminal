@@ -8,6 +8,7 @@ pub mod http;
 #[cfg(feature = "local-llm")]
 pub mod local;
 pub mod round;
+pub(crate) mod tool_summary;
 pub mod usage;
 #[cfg(feature = "local-llm")]
 pub mod vision;
@@ -324,6 +325,12 @@ pub enum ProviderEvent {
     ReasoningDelta(String),
     /// Complete, parsed tool calls (local models emit them whole).
     ToolCalls(Vec<ToolCall>),
+    /// Display-only text from a finish tool's summary as its arguments arrive.
+    /// This never makes a partial tool call executable.
+    ToolSummaryDelta {
+        call_id: String,
+        content: String,
+    },
     WebCitation(WebCitation),
     /// Internal continuation data, never rendered as model output.
     ProviderState(ProviderState),

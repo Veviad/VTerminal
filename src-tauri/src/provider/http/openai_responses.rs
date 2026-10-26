@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 
 use super::{client, emit, read_sse, send_with_retry};
 use crate::models::catalog::{CatalogModel, Effort};
+use crate::provider::tool_summary::ToolSummaryStream;
 use crate::provider::{
     ChatMessage, ChatParams, FinishReason, Provider, ProviderError, ProviderEvent, ProviderState,
     Role, ToolCall, ToolChoiceMode, ToolDef, ALLOWED_IMAGE_TYPES,
@@ -259,6 +260,18 @@ enum ResponseEvent {
     RefusalDelta { delta: String },
     #[serde(rename = "response.reasoning_summary_text.delta")]
     ReasoningDelta { delta: String },
+    #[serde(rename = "response.output_item.added")]
+    ItemAdded { output_index: usize, item: Value },
+    #[serde(rename = "response.function_call_arguments.delta")]
+    ArgumentsDelta {
+        output_index: Option<usize>,
+        delta: String,
+    },
+    #[serde(rename = "response.function_call_arguments.done")]
+    ArgumentsDone {
+        output_index: usize,
+        arguments: String,
+    },
     #[serde(rename = "response.output_item.done")]
     ItemDone { output_index: usize, item: Value },
     #[serde(rename = "response.completed")]
@@ -283,6 +296,9 @@ struct ResponseStream {
     text: String,
     reasoning: String,
     completed_items: std::collections::BTreeMap<usize, Value>,
+    pending_calls: std::collections::BTreeMap<usize, Value>,
+    summaries: std::collections::BTreeMap<usize, ToolSummaryStream>,
+    first_call_index: Option<usize>,
     terminal: bool,
 }
 
@@ -291,6 +307,58 @@ fn token_count(value: &Value) -> u32 {
 }
 
 impl ResponseStream {
+    fn validate_call_prefix(
+        pending: Option<&Value>,
+        complete: &Value,
+    ) -> Result<(), ProviderError> {
+        let Some(pending) = pending.filter(|item| item["type"] == "function_call") else {
+            return Ok(());
+        };
+        if complete["type"] != "function_call"
+            || complete["call_id"] != pending["call_id"]
+            || complete["name"] != pending["name"]
+            || !complete["arguments"].as_str().is_some_and(|arguments| {
+                arguments.starts_with(pending["arguments"].as_str().unwrap_or_default())
+            })
+        {
+            return Err(malformed(
+                "terminal function call disagrees with streamed arguments",
+            ));
+        }
+        Ok(())
+    }
+
+    fn stream_summary(
+        summaries: &mut std::collections::BTreeMap<usize, ToolSummaryStream>,
+        first_call_index: &mut Option<usize>,
+        index: usize,
+        item: &Value,
+        out: &mut Vec<ProviderEvent>,
+    ) {
+        if item["type"] != "function_call" {
+            return;
+        }
+        if *first_call_index.get_or_insert(index) != index {
+            return;
+        }
+        let Some(call_id) = item["call_id"].as_str() else {
+            return;
+        };
+        let Some(name) = item["name"].as_str() else {
+            return;
+        };
+        let Some(arguments) = item["arguments"].as_str() else {
+            return;
+        };
+        if let Some(event) = summaries
+            .entry(index)
+            .or_default()
+            .push_json(call_id, name, arguments)
+        {
+            out.push(event);
+        }
+    }
+
     fn finish(
         &mut self,
         response: Value,
@@ -348,10 +416,18 @@ impl ResponseStream {
                     output.push(item.clone());
                 }
                 Some("function_call") if !incomplete => {
+                    Self::validate_call_prefix(self.pending_calls.get(&index), item)?;
                     let call = item_call(item)?;
                     if !call_ids.insert(call.id.clone()) {
                         return Err(malformed("duplicate function call id"));
                     }
+                    Self::stream_summary(
+                        &mut self.summaries,
+                        &mut self.first_call_index,
+                        index,
+                        item,
+                        out,
+                    );
                     calls.push(call);
                     output.push(item.clone());
                 }
@@ -426,7 +502,69 @@ impl ResponseStream {
                     out.push(ProviderEvent::ReasoningDelta(delta));
                 }
             }
+            ResponseEvent::ItemAdded { output_index, item } => {
+                Self::stream_summary(
+                    &mut self.summaries,
+                    &mut self.first_call_index,
+                    output_index,
+                    &item,
+                    out,
+                );
+                if item["type"] == "function_call" {
+                    self.pending_calls.insert(output_index, item);
+                }
+            }
+            ResponseEvent::ArgumentsDelta {
+                output_index,
+                delta,
+            } => {
+                if let Some(index) = output_index {
+                    if let Some(item) = self.pending_calls.get_mut(&index) {
+                        if !item["arguments"].is_string() {
+                            item["arguments"] = Value::String(String::new());
+                        }
+                        if let Value::String(arguments) = &mut item["arguments"] {
+                            arguments.push_str(&delta);
+                        }
+                        Self::stream_summary(
+                            &mut self.summaries,
+                            &mut self.first_call_index,
+                            index,
+                            item,
+                            out,
+                        );
+                    }
+                }
+            }
+            ResponseEvent::ArgumentsDone {
+                output_index,
+                arguments,
+            } => {
+                if let Some(item) = self.pending_calls.get_mut(&output_index) {
+                    if !arguments.starts_with(item["arguments"].as_str().unwrap_or_default()) {
+                        return Err(malformed(
+                            "completed function arguments disagree with streamed deltas",
+                        ));
+                    }
+                    item["arguments"] = Value::String(arguments);
+                    Self::stream_summary(
+                        &mut self.summaries,
+                        &mut self.first_call_index,
+                        output_index,
+                        item,
+                        out,
+                    );
+                }
+            }
             ResponseEvent::ItemDone { output_index, item } => {
+                Self::validate_call_prefix(self.pending_calls.get(&output_index), &item)?;
+                Self::stream_summary(
+                    &mut self.summaries,
+                    &mut self.first_call_index,
+                    output_index,
+                    &item,
+                    out,
+                );
                 self.completed_items.insert(output_index, item);
             }
             ResponseEvent::Completed { response } => self.finish(response, false, model, out)?,
@@ -833,6 +971,127 @@ mod tests {
         let mut orphan = ChatMessage::user("output");
         orphan.role = Role::Tool;
         assert!(build_body(model(), vec![orphan], vec![], &params()).is_err());
+    }
+
+    #[test]
+    fn finish_summary_streams_before_completion_and_reconciles_without_duplicates() {
+        let prefix = r###"{"summary":"## Fertig\nGrüße \uD83D"###;
+        let tail = r#"\uDE80"}"#;
+        let mut finish = call("finish_1");
+        finish["name"] = json!("finish");
+        finish["arguments"] = json!(format!("{prefix}{tail}"));
+        let mut started = finish.clone();
+        started["arguments"] = json!("");
+        started["status"] = json!("in_progress");
+
+        let mut stream = ResponseStream::default();
+        let mut events = Vec::new();
+        for event in [
+            json!({"type":"response.output_item.added","output_index":0,"item":reasoning()}),
+            json!({"type":"response.output_item.added","output_index":1,"item":started}),
+            json!({"type":"response.function_call_arguments.delta","output_index":1,"delta":prefix}),
+        ] {
+            stream
+                .event(&event.to_string(), model(), &"test-key".into(), &mut events)
+                .unwrap();
+        }
+        assert!(
+            matches!(events.as_slice(), [ProviderEvent::ToolSummaryDelta { call_id, content }]
+            if call_id == "finish_1" && content == "## Fertig\nGrüße ")
+        );
+        assert!(
+            !stream.terminal,
+            "the summary must be readable before response.completed"
+        );
+
+        for event in [
+            json!({"type":"response.function_call_arguments.delta","output_index":1,"delta":tail}),
+            json!({"type":"response.function_call_arguments.done","output_index":1,"arguments":finish["arguments"]}),
+            json!({"type":"response.output_item.done","output_index":1,"item":finish}),
+            completed(vec![reasoning(), finish.clone()]),
+        ] {
+            stream
+                .event(&event.to_string(), model(), &"test-key".into(), &mut events)
+                .unwrap();
+        }
+        let summary: String = events
+            .iter()
+            .filter_map(|event| match event {
+                ProviderEvent::ToolSummaryDelta { call_id, content } => {
+                    assert_eq!(call_id, "finish_1");
+                    Some(content.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(summary, "## Fertig\nGrüße 🚀");
+        assert!(events.iter().any(|event| matches!(event, ProviderEvent::ToolCalls(calls)
+            if calls.len() == 1 && calls[0].id == "finish_1" && calls[0].arguments == finish["arguments"])));
+    }
+
+    #[test]
+    fn completed_arguments_cannot_replace_a_summary_that_is_already_visible() {
+        let mut started = call("finish_1");
+        started["name"] = json!("finish");
+        started["arguments"] = json!("");
+        let mut changed = started.clone();
+        changed["arguments"] = json!(r#"{"summary":"Changed"}"#);
+        for terminal in [
+            json!({"type":"response.function_call_arguments.done","output_index":0,"arguments":changed["arguments"]}),
+            json!({"type":"response.output_item.done","output_index":0,"item":changed}),
+            completed(vec![changed]),
+        ] {
+            let (result, _) = apply(vec![
+                json!({"type":"response.output_item.added","output_index":0,"item":started}),
+                json!({"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"summary\":\"Original"}),
+                terminal,
+            ]);
+            assert!(
+                result.is_err(),
+                "changed arguments must fail instead of duplicating or mixing summaries"
+            );
+        }
+    }
+
+    #[test]
+    fn later_finish_calls_do_not_preview_ahead_of_the_first_client_call() {
+        let mut finish = call("finish_1");
+        finish["name"] = json!("finish");
+        finish["arguments"] = json!(r#"{"summary":"Finished"}"#);
+        let (result, events) = apply(vec![
+            json!({"type":"response.output_item.added","output_index":0,"item":call("inspect_1")}),
+            json!({"type":"response.output_item.added","output_index":1,"item":finish}),
+            completed(vec![call("inspect_1"), finish]),
+        ]);
+        result.unwrap();
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::ToolSummaryDelta { .. })));
+    }
+
+    #[test]
+    fn only_the_first_finish_summary_is_previewed_in_a_parallel_group() {
+        let mut first = call("finish_1");
+        first["name"] = json!("finish");
+        first["arguments"] = json!(r#"{"summary":"First summary"}"#);
+        let mut second = first.clone();
+        second["call_id"] = json!("finish_2");
+        second["id"] = json!("fc_finish_2");
+        second["arguments"] = json!(r#"{"summary":"Second summary"}"#);
+        let (result, events) = apply(vec![
+            json!({"type":"response.output_item.added","output_index":0,"item":first}),
+            json!({"type":"response.output_item.added","output_index":1,"item":second}),
+            completed(vec![first, second]),
+        ]);
+        result.unwrap();
+        let summary: String = events
+            .iter()
+            .filter_map(|event| match event {
+                ProviderEvent::ToolSummaryDelta { content, .. } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(summary, "First summary");
     }
 
     #[test]

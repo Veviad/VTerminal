@@ -57,6 +57,30 @@ describe("AiMessageView origin", () => {
     "</finish>",
   ].join("\n");
 
+  it("shows successive Markdown and Unicode chunks while the answer is still streaming", () => {
+    let content = "<finish>\n<summary>\n## Ergebnis\n\nGrüße ";
+    const { container, rerender } = render(<AiMessageView content={content} origin="model" streaming />);
+    expect(screen.getByRole("heading", { name: "Ergebnis" })).toBeVisible();
+    expect(container).toHaveTextContent("Grüße");
+
+    content += "**aus Köln** 🚀.\n\n```sh\npw";
+    rerender(<AiMessageView content={content} origin="model" streaming />);
+    expect(container.querySelector("strong")).toHaveTextContent("aus Köln");
+    expect(container).toHaveTextContent("🚀.");
+    expect(container.querySelector("pre code")).toHaveTextContent("pw");
+
+    content += "d\n```\n</summary>\n</finish>";
+    rerender(<AiMessageView content={content} origin="model" streaming />);
+    expect(container.querySelector("pre code")).toHaveTextContent("pwd");
+    expect(container).not.toHaveTextContent("<summary>");
+    expect(container).not.toHaveTextContent("<finish>");
+    const streamedText = container.textContent;
+
+    rerender(<AiMessageView content={content} origin="model" />);
+    expect(container.textContent).toBe(streamedText);
+    expect(screen.getAllByRole("heading", { name: "Ergebnis" })).toHaveLength(1);
+  });
+
   it("cleans known control markup from model prose", () => {
     const { container } = render(<AiMessageView content={wrapped} origin="model" />);
 

@@ -1156,6 +1156,7 @@ fn forward_chat_provider_event(
         ProviderEvent::Usage { .. }
         | ProviderEvent::Done { .. }
         | ProviderEvent::ToolCalls(_)
+        | ProviderEvent::ToolSummaryDelta { .. }
         | ProviderEvent::ProviderState(_) => {}
     }
 }

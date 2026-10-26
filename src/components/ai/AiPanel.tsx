@@ -37,6 +37,7 @@ import { ownRecordValue } from "../../lib/records";
 import { useAiStream } from "../../hooks/useAiStream";
 import { useDismissibleLayer } from "../../hooks/useDismissibleLayer";
 import { useAutoGrow } from "../../hooks/useAutoGrow";
+import { useFollowOutput } from "../../hooks/useFollowOutput";
 import { useClipboardStaging } from "../../hooks/useClipboardStaging";
 import { AiMessageView } from "./AiMessageView";
 import { BlockContextChip } from "./BlockContextChip";
@@ -203,7 +204,6 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const [confirmClear, setConfirmClear] = useState(false);
   const [sidecarMenuOpen, setSidecarMenuOpen] = useState(false);
   const [replacingTarget, setReplacingTarget] = useState(false);
-  const scrollRef = useRef<HTMLDivElement>(null);
   const asideRef = useRef<HTMLElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [panelHeight, setPanelHeight] = useState(0);
@@ -335,6 +335,11 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const attachStatus = stream?.attachStatus ?? null;
   const knowledgeWarning = stream?.knowledgeWarning ?? null;
   const hasChat = streamHasConversation(stream);
+  const { viewportRef, contentRef } = useFollowOutput(
+    `${sessionId ?? ""}:${messages[0]?.id ?? ""}`,
+    stream,
+    !collapsed,
+  );
 
   /** Change the standing mode and, when Full is selected, release the exact
    *  approval already on screen. That release is part of the user's Full-mode
@@ -382,16 +387,6 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const readerKind = useAppStore((s) => s.imageReader().kind);
   const imagesBlocked = pendingImages.length > 0 && readerKind === "none";
   const imagesViaOcr = pendingImages.length > 0 && readerKind === "sidecar";
-
-  useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
-  }, [
-    messages.length,
-    streamingContent,
-    thinkingContent,
-    pendingProposal,
-    pendingMcpProposal,
-  ]);
 
   // Feeds `composerMax` and the composer's re-fit. Both axes: height for the
   // former, width for the latter, and only width changes on a window resize now
@@ -845,9 +840,11 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
 
       {/* Messages */}
       <div
-        ref={scrollRef}
-        className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3"
+        ref={viewportRef}
+        data-testid="ai-timeline"
+        className="min-h-0 flex-1 overflow-y-auto px-3 py-3 [overflow-anchor:none]"
       >
+        <div ref={contentRef} className="space-y-3">
         {messages.length === 0 && !busy && (
           <p className="pt-6 text-center text-[12px] text-text-muted">
             {aiReady
@@ -1003,6 +1000,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             {S.aiPanel.errorPrefix}: {stream.lastError}
           </p>
         )}
+        </div>
       </div>
 
       {/* The active model cannot read what is staged. Blocking, with the two ways
@@ -1817,6 +1815,7 @@ function ThinkingSection({
   live: boolean;
 }) {
   const [open, setOpen] = useState(live);
+  const { viewportRef, contentRef } = useFollowOutput("thinking", content, open && live);
   // Auto-collapse when the live stream transitions into the answer.
   useEffect(() => {
     if (!live) setOpen(false);
@@ -1835,8 +1834,12 @@ function ThinkingSection({
         )}
       </button>
       {open && (
-        <div className="max-h-40 overflow-y-auto px-3 pb-2 text-[11px] leading-relaxed text-text-muted">
-          {content}
+        <div
+          ref={viewportRef}
+          data-testid="thinking-output"
+          className="max-h-40 overflow-y-auto whitespace-pre-wrap px-3 pb-2 text-[11px] leading-relaxed text-text-muted [overflow-anchor:none]"
+        >
+          <div ref={contentRef}>{content}</div>
         </div>
       )}
     </div>

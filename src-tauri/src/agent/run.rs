@@ -483,7 +483,14 @@ async fn one_round(
     params: ChatParams,
     cancel: tokio::sync::watch::Receiver<bool>,
     on_event: &Channel<StreamEvent>,
-) -> Result<crate::provider::round::RoundOutput, ProviderError> {
+) -> Result<
+    (
+        crate::provider::round::RoundOutput,
+        std::collections::HashMap<String, String>,
+    ),
+    ProviderError,
+> {
+    let mut streamed_summaries = std::collections::HashMap::<String, String>::new();
     let output =
         crate::provider::round::run_round(provider, messages, tools, params, cancel, |event| {
             match event {
@@ -497,6 +504,16 @@ async fn one_round(
                         content: content.clone(),
                     });
                 }
+                ProviderEvent::ToolSummaryDelta { call_id, content } => {
+                    let summary = streamed_summaries.entry(call_id.clone()).or_default();
+                    let visible = if summary.is_empty() {
+                        format!("\n\n{content}")
+                    } else {
+                        content.clone()
+                    };
+                    summary.push_str(content);
+                    let _ = on_event.send(StreamEvent::Delta { content: visible });
+                }
                 ProviderEvent::WebCitation(citation) => {
                     let _ = on_event.send(StreamEvent::WebCitation {
                         url: citation.url.clone(),
@@ -508,7 +525,7 @@ async fn one_round(
             }
         })
         .await?;
-    Ok(output)
+    Ok((output, streamed_summaries))
 }
 
 struct ToolCallContext<'a> {
@@ -524,6 +541,7 @@ struct ToolCallContext<'a> {
     mcp: Option<&'a crate::mcp::chat::McpRunContext<'a>>,
     cancel: &'a tokio::sync::watch::Receiver<bool>,
     on_event: &'a Channel<StreamEvent>,
+    streamed_summaries: &'a std::collections::HashMap<String, String>,
 }
 
 struct ToolBatchState<'a> {
@@ -536,6 +554,14 @@ struct ToolBatchState<'a> {
 enum ToolBatchResult {
     Continue,
     Terminate(AgentTermination),
+}
+
+fn finish_summary_tail(summary: &str, streamed: Option<&String>) -> String {
+    match streamed {
+        Some(prefix) => summary.strip_prefix(prefix).unwrap_or(summary).to_string(),
+        None if !summary.is_empty() => format!("\n\n{summary}"),
+        None => String::new(),
+    }
 }
 
 async fn smart_assess(
@@ -744,6 +770,7 @@ async fn process_tool_calls(
         mcp,
         cancel,
         on_event,
+        streamed_summaries,
     } = context;
     let ToolBatchState {
         messages,
@@ -762,10 +789,9 @@ async fn process_tool_calls(
                     .ok()
                     .and_then(|v| v.get("summary").and_then(|s| s.as_str()).map(String::from))
                     .unwrap_or_default();
-                if !summary.is_empty() {
-                    let _ = on_event.send(StreamEvent::Delta {
-                        content: format!("\n\n{summary}"),
-                    });
+                let tail = finish_summary_tail(&summary, streamed_summaries.get(&call.id));
+                if !tail.is_empty() {
+                    let _ = on_event.send(StreamEvent::Delta { content: tail });
                 }
                 if steers.has_pending(&config.request_id) {
                     messages.push(tool_result(
@@ -1466,13 +1492,7 @@ pub async fn run_agent(
             on_event,
         )
         .await;
-        let crate::provider::round::RoundOutput {
-            calls,
-            text,
-            usage,
-            finish,
-            provider_state,
-        } = match round {
+        let (round, streamed_summaries) = match round {
             Ok(round) => round,
             Err(ProviderError::Cancelled) => {
                 return finish_outcome(
@@ -1500,6 +1520,13 @@ pub async fn run_agent(
                 );
             }
         };
+        let crate::provider::round::RoundOutput {
+            calls,
+            text,
+            usage,
+            finish,
+            provider_state,
+        } = round;
         stats.tool_calls = stats.tool_calls.saturating_add(calls.len() as u32);
         // Each round is billed its own input tokens, so this is a sum. Taking
         // the max here under-reported a 10-round run by roughly 5x.
@@ -1598,6 +1625,7 @@ pub async fn run_agent(
                 mcp,
                 cancel: &cancel,
                 on_event,
+                streamed_summaries: &streamed_summaries,
             },
             ToolBatchState {
                 messages: &mut messages,
@@ -1784,6 +1812,118 @@ fn command_tool_result(tool_call_id: &str, target: &CommandTarget, content: &str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_finish_summary_emits_only_its_unstreamed_suffix() {
+        assert_eq!(finish_summary_tail("done", None), "\n\ndone");
+        assert_eq!(
+            finish_summary_tail("Grüße 🚀", Some(&"Grüße ".into())),
+            "🚀"
+        );
+        assert_eq!(finish_summary_tail("done", Some(&"done".into())), "");
+        assert_eq!(finish_summary_tail("", None), "");
+    }
+
+    struct SummaryPreviewProvider {
+        visible: std::sync::Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for SummaryPreviewProvider {
+        fn id(&self) -> &'static str {
+            "summary-preview"
+        }
+        fn model_name(&self) -> String {
+            "summary-preview".into()
+        }
+
+        async fn chat_stream(
+            &self,
+            _messages: Vec<ChatMessage>,
+            _tools: Vec<ToolDef>,
+            _params: ChatParams,
+            _cancel: tokio::sync::watch::Receiver<bool>,
+            tx: tokio::sync::mpsc::Sender<ProviderEvent>,
+        ) -> Result<(), ProviderError> {
+            tx.send(ProviderEvent::ToolSummaryDelta {
+                call_id: "finish-1".into(),
+                content: "first ".into(),
+            })
+            .await
+            .unwrap();
+            // The provider cannot complete the call until the UI has received
+            // its first words; buffering until ToolCalls would deadlock here.
+            tokio::time::timeout(std::time::Duration::from_secs(2), self.visible.notified())
+                .await
+                .expect("summary must reach the UI before tool completion");
+            tx.send(ProviderEvent::ToolSummaryDelta {
+                call_id: "finish-1".into(),
+                content: "second".into(),
+            })
+            .await
+            .unwrap();
+            tx.send(ProviderEvent::ToolCalls(vec![ToolCall {
+                id: "finish-1".into(),
+                name: "finish".into(),
+                arguments: r#"{"summary":"first second"}"#.into(),
+            }]))
+            .await
+            .unwrap();
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_finish_summary_reaches_the_ui_before_the_call_completes() {
+        use tauri::ipc::InvokeResponseBody;
+        let visible = std::sync::Arc::new(tokio::sync::Notify::new());
+        let notify = visible.clone();
+        let deltas = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = deltas.clone();
+        let channel = Channel::new(move |body: InvokeResponseBody| {
+            if let InvokeResponseBody::Json(body) = body {
+                let event: serde_json::Value = serde_json::from_str(&body).unwrap();
+                if event["type"] == "Delta" {
+                    let content = event["content"].as_str().unwrap().to_string();
+                    if content == "\n\nfirst " {
+                        notify.notify_one();
+                    }
+                    captured.lock().unwrap().push(content);
+                }
+            }
+            Ok(())
+        });
+        let (_, cancel) = tokio::sync::watch::channel(false);
+        let outcome = run_agent(
+            &SummaryPreviewProvider { visible },
+            config_with_buckets(vec![]),
+            "system".into(),
+            "goal".into(),
+            vec![],
+            vec![],
+            &ApprovalState::default(),
+            None,
+            &PtyExecState::default(),
+            &SteerState::default(),
+            None,
+            None,
+            None,
+            cancel,
+            &channel,
+        )
+        .await;
+        assert_eq!(outcome.termination, AgentTermination::Completed);
+        assert_eq!(*deltas.lock().unwrap(), vec!["\n\nfirst ", "second"]);
+        assert!(
+            outcome
+                .transcript
+                .iter()
+                .filter(|message| message.role == Role::Assistant)
+                .all(|message| message.content.is_empty()),
+            "display previews must not duplicate tool arguments in history"
+        );
+        assert_eq!(outcome.stats.tool_calls, 1);
+    }
 
     enum SmartProviderBehavior {
         ToolCall(&'static str),

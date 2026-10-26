@@ -8,6 +8,8 @@
 pub mod anthropic;
 pub mod openai_compat;
 pub mod openai_responses;
+#[cfg(test)]
+mod test_stream;
 
 use std::sync::OnceLock;
 use std::time::Duration;
