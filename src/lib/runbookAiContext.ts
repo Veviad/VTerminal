@@ -153,6 +153,27 @@ export function renderContext(
   return rendered.join("\n");
 }
 
+/** Include the observed environment without mistaking a tab's SSH provenance
+ * for a live connection. Historical commands may belong to earlier connections;
+ * the model must not infer their platform from the desktop running VTerminal. */
+export function renderSessionContext(
+  sessionId: string,
+  blocks: RunbookContextBlock[],
+  budget = CONTEXT_BUDGET,
+): string {
+  const state = useAppStore.getState();
+  if (!contextAvailability(sessionId, state.sendContextToAi).available) return "";
+  const session = state.sessions.find((entry) => entry.id === sessionId);
+  const ui = Object.entries(state.sessionUi).find(([id]) => id === sessionId)?.[1];
+  if (!session) return renderContext(blocks, budget);
+  const remote = ui?.remote;
+  const environment = remote
+    ? `Current target: remote ${remote.kind} (${remote.target ?? "unknown host"}).\nRemote operating system: unknown; do not infer it from the local shell or local paths.`
+    : `Current target: local shell (${session.shell}).\nLocal working directory: ${ui?.cwd ?? session.cwd ?? "unknown"}.\nOperating system: not verified; do not infer it from a saved SSH host label.`;
+  const header = `[Session environment observed now]\n${environment}\nA session transcript may span local and remote shells. Commands and paths below are historical evidence, not proof of the current target or operating system. Confirm the intended platform and target before execution.\n\n`;
+  return header + renderContext(blocks, Math.max(1, budget - header.length));
+}
+
 function renderBlock(block: RunbookContextBlock): string {
   const status = block.exitCode === null ? "" : ` (exit ${block.exitCode})`;
   const body = block.outputUnavailable

@@ -7,6 +7,7 @@ import { useSchedules } from "../../hooks/useSchedules";
 import { isTerminalScheduleRunStatus, type ScheduleRun } from "../../lib/schedules";
 import { useScheduleStore } from "../../stores/scheduleStore";
 import { useAppStore } from "../../stores/appStore";
+import { ScheduleRunbookReport, scheduledRunbookReportId } from "./ScheduleRunbookReport";
 import {
   dangerButton,
   formatDuration,
@@ -168,6 +169,9 @@ function RunDetail({
               <p className="whitespace-pre-wrap text-[11px] text-text-secondary">
                 {attempt.summary}
               </p>
+            )}
+            {!live && attempt.step_id === "runbook" && scheduledRunbookReportId(attempt.summary) && (
+              <ScheduleRunbookReport key={attempt.summary} runId={scheduledRunbookReportId(attempt.summary)!} />
             )}
             {attempt.output_tail && (
               <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded border border-border-subtle bg-bg-primary p-1.5 font-mono text-[10px] text-text-muted">

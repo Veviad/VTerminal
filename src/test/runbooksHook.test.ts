@@ -381,6 +381,41 @@ describe("useRunbooks channel activation", () => {
     await waitFor(() => expect(mocks.submitTerminal).toHaveBeenCalledTimes(1));
   });
 
+  it("ignores an overlapping replay and reports a known preflight refusal with its reason", async () => {
+    let onEvent!: (event: RunbookEvent) => void;
+    let settle!: (outcome: unknown) => void;
+    mocks.start.mockImplementation(async (request: RunbookStartRequest, handler: typeof onEvent) => {
+      onEvent = handler;
+      return { ...run("run-preflight", "running"), target: request.target_context };
+    });
+    mocks.runInTerminal.mockImplementation(async (_sessionId, _attemptId, _command, options) => {
+      expect(await options.beforeWrite()).toBe(true);
+      return await new Promise((resolve) => (settle = resolve));
+    });
+    const { result } = renderHook(() => useRunbooks());
+    await act(async () => { await result.current.start("source-1", "session-1", {}, "tail"); });
+    act(() => onEvent(approvalEvent("run-preflight", "approval-preflight", "uname -s")));
+    await act(async () => {
+      await result.current.respondApproval("run-preflight", "approval-preflight", true, "uname -s");
+    });
+    const event = terminalEvent("run-preflight", "attempt-preflight", "approval-preflight", "uname -s");
+    act(() => { onEvent(event); onEvent(event); });
+    await waitFor(() => expect(mocks.runInTerminal).toHaveBeenCalledOnce());
+    await act(async () => {
+      settle({
+        commandDispatched: false, exitCode: null, output: "", durationMs: 20,
+        mode: null, error: "terminal_busy", note: "Nothing was executed: shell is busy.",
+      });
+    });
+    await waitFor(() => expect(mocks.submitTerminal).toHaveBeenCalledOnce());
+    expect(mocks.claimTerminal).toHaveBeenCalledOnce();
+    expect(mocks.submitTerminal).toHaveBeenCalledWith("run-preflight", "attempt-preflight", expect.objectContaining({
+      command_dispatched: false,
+      exit_code: null,
+      error: "Command was not dispatched: Nothing was executed: shell is busy.",
+    }));
+  });
+
   it("never types a replayed terminal event when Rust denies the dispatch lease", async () => {
     let onEvent!: (event: RunbookEvent) => void;
     mocks.claimTerminal.mockResolvedValue(false);

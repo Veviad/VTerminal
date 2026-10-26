@@ -135,6 +135,7 @@ export interface RunbookSource {
   version: string | null;
   title: string | null;
   digest_sha256: string | null;
+  canonical_sha256?: string;
   state: RunbookSourceState;
   validation_issues: RunbookValidationIssue[];
   imported_at: string;
@@ -740,6 +741,7 @@ export interface AnsibleImportRequest {
 }
 
 export interface RunbookTerminalResult {
+  command_dispatched?: boolean | null;
   exit_code: number | null;
   output_tail: string;
   output_truncated?: boolean;
@@ -1439,6 +1441,7 @@ export function normalizeRunbookSource(source: RunbookSourceWire): RunbookSource
     version: source.definition_version,
     title: source.title,
     digest_sha256: source.source_sha256,
+    canonical_sha256: source.canonical_sha256,
     state: source.valid ? "valid" : "invalid",
     validation_issues: source.validation_error
       ? [{ path: null, message: source.validation_error }]

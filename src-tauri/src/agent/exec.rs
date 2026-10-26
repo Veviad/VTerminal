@@ -36,20 +36,86 @@ pub async fn run_command(
     approval_id: &str,
     timeout_secs: u64,
     output_policy: OutputPolicy,
+    cancel: tokio::sync::watch::Receiver<bool>,
+    on_event: &Channel<StreamEvent>,
+) -> Result<ExecResult, String> {
+    run_command_mode(
+        shell,
+        cwd,
+        command,
+        approval_id,
+        timeout_secs,
+        output_policy,
+        cancel,
+        on_event,
+        false,
+        None,
+    )
+    .await
+}
+
+/// Captured runbooks have a clean, non-login execution boundary. User startup
+/// files and exported shell functions cannot widen a persisted read-only grant.
+pub async fn run_clean_command(
+    cwd: Option<&str>,
+    command: &str,
+    approval_id: &str,
+    timeout_secs: u64,
+    output_policy: OutputPolicy,
+    cancel: tokio::sync::watch::Receiver<bool>,
+    on_event: &Channel<StreamEvent>,
+    ssh_auth_sock: Option<&std::ffi::OsStr>,
+) -> Result<ExecResult, String> {
+    run_command_mode(
+        "/bin/sh",
+        cwd,
+        command,
+        approval_id,
+        timeout_secs,
+        output_policy,
+        cancel,
+        on_event,
+        true,
+        ssh_auth_sock,
+    )
+    .await
+}
+
+async fn run_command_mode(
+    shell: &str,
+    cwd: Option<&str>,
+    command: &str,
+    approval_id: &str,
+    timeout_secs: u64,
+    output_policy: OutputPolicy,
     mut cancel: tokio::sync::watch::Receiver<bool>,
     on_event: &Channel<StreamEvent>,
+    clean: bool,
+    ssh_auth_sock: Option<&std::ffi::OsStr>,
 ) -> Result<ExecResult, String> {
     let started = std::time::Instant::now();
 
     #[cfg(not(target_os = "windows"))]
     let mut cmd = {
         let mut command_builder = crate::windows_process::background_tokio_command(shell);
-        command_builder.args(["-lc", command]);
+        command_builder.args([if clean { "-c" } else { "-lc" }, command]);
+        if clean {
+            command_builder
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+                .env("LANG", "C")
+                .env("LC_ALL", "C");
+            // Batch SSH may authenticate through the user's existing key agent.
+            // A socket path is transport state, not shell initialization.
+            if let Some(socket) = ssh_auth_sock {
+                command_builder.env("SSH_AUTH_SOCK", socket);
+            }
+        }
         command_builder
     };
     #[cfg(target_os = "windows")]
     let cmd = {
-        let _ = shell;
+        let _ = (shell, ssh_auth_sock);
         // A unique inherited tag lets cancellation and normal completion find
         // descendants which detached from wsl.exe (for example via nohup).
         // `setsid --wait` gives the captured command its own Linux session;
@@ -64,9 +130,19 @@ pub async fn run_command(
             "/usr/bin/setsid",
             "--wait",
             "/usr/bin/env",
+        ]);
+        if clean {
+            command_builder.args([
+                "-i",
+                "PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+                "LANG=C",
+                "LC_ALL=C",
+            ]);
+        }
+        command_builder.args([
             &format!("VTERMINAL_SESSION_ID={session_tag}"),
-            "/bin/bash",
-            "-lc",
+            if clean { "/bin/sh" } else { "/bin/bash" },
+            if clean { "-c" } else { "-lc" },
             command,
         ]);
         (command_builder, session_tag)
@@ -306,6 +382,50 @@ mod tests {
         let (tx, rx) = tokio::sync::watch::channel(false);
         std::mem::forget(tx); // keep the channel alive for the test's duration
         rx
+    }
+
+    #[tokio::test]
+    async fn clean_capture_uses_only_explicit_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        // `env` exposes only the explicit clean boundary, with no inherited HOME
+        // or loader/shell startup variables. The child shell may add PWD.
+        let result = run_clean_command(
+            Some(dir.path().to_str().unwrap()),
+            "/usr/bin/env",
+            "clean",
+            5,
+            OutputPolicy::Normal,
+            no_cancel(),
+            &null_channel(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.exit_code, 0);
+        assert!(!result.output_tail.contains("HOME="));
+        assert!(!result.output_tail.contains("SSH_AUTH_SOCK="));
+        assert!(!result.output_tail.contains("startup-ran"));
+        assert!(result
+            .output_tail
+            .contains("PATH=/usr/bin:/bin:/usr/sbin:/sbin"));
+        let socket = std::ffi::OsStr::new("/tmp/vterminal-test-agent.sock");
+        let transport = run_clean_command(
+            None,
+            "/usr/bin/env",
+            "ssh-transport",
+            5,
+            OutputPolicy::Normal,
+            no_cancel(),
+            &null_channel(),
+            Some(socket),
+        )
+        .await
+        .unwrap();
+        assert!(transport
+            .output_tail
+            .contains("SSH_AUTH_SOCK=/tmp/vterminal-test-agent.sock"));
+        assert!(!transport.output_tail.contains("HOME="));
+        assert!(!transport.output_tail.contains("DYLD_"));
     }
 
     #[tokio::test]

@@ -318,11 +318,33 @@ impl Recurrence {
     }
 }
 
+string_enum! {
+    /// Explicit permission for a pinned runbook, independent of AI prompt modes.
+    pub enum RunbookApprovalPolicy {
+        None => "none",
+        ReadOnly => "read_only",
+        All => "all",
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduledRunbook {
+    pub source_id: String,
+    /// Re-authorizing an edited package requires selecting its new digest.
+    pub canonical_sha256: String,
+    #[serde(default)]
+    pub inputs: std::collections::BTreeMap<String, serde_json::Value>,
+    pub approval: RunbookApprovalPolicy,
+}
+
 /// What the editor sends. Deliberately separate from `ScheduledAction`: the
 /// derived fields (`next_fire_at`, `last_*`, timestamps, the armed snapshot) are
 /// the engine's to write and must never be accepted over IPC.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduledActionInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runbook: Option<ScheduledRunbook>,
     pub name: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -567,6 +589,7 @@ mod tests {
         );
         assert_eq!(RunTrigger::CatchUp.as_str(), "catch_up");
         assert_eq!(StepAttemptStatus::Cancelled.as_str(), "cancelled");
+        check!(RunbookApprovalPolicy: None, ReadOnly, All);
         // And an unknown literal must fail rather than falling back to a default.
         assert!("auto".parse::<ExecutionMode>().is_err());
         assert!("Tab".parse::<ExecutionMode>().is_err());

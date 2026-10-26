@@ -167,7 +167,12 @@ pub struct PhaseCompletion {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObservedPtyResult {
-    /// `None` means the command timed out or otherwise has an unknown outcome.
+    /// Explicit false means preflight rejected the command before its PTY write.
+    /// Missing values from older clients remain conservative.
+    #[serde(default)]
+    pub command_dispatched: Option<bool>,
+    /// `None` means there is no observed exit code. Check dispatch before
+    /// classifying a preflight refusal as an unknown command outcome.
     pub exit_code: Option<i32>,
     pub output_tail: String,
     #[serde(default)]
@@ -489,7 +494,7 @@ impl RunCoordinator {
             run.status = RunStatus::WaitingOperator;
             run.pause_reason = Some(match next {
                 StepStatus::Unknown => "command outcome is unknown; reconcile before retry".into(),
-                _ => "step phase failed".into(),
+                _ => completion.summary.clone(),
             });
         }
         run.active_phase = None;
@@ -1557,6 +1562,7 @@ mod tests {
             .register("attempt-1", "run-1", std::time::Duration::from_secs(60))
             .unwrap();
         let result = ObservedPtyResult {
+            command_dispatched: None,
             exit_code: Some(0),
             output_tail: "ok".into(),
             output_truncated: false,

@@ -775,6 +775,8 @@ pub struct RunbookOperatorDecision {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunbookTerminalResult {
+    #[serde(default)]
+    pub command_dispatched: Option<bool>,
     pub exit_code: Option<i32>,
     pub output_tail: String,
     #[serde(default)]
@@ -2742,6 +2744,11 @@ pub fn runbooks_submit_terminal_result(
             attempt.id, attempt.status
         ));
     }
+    log::info!(
+        "runbook terminal result run={} attempt={} dispatched={:?} exit={:?} mode={:?} duration_ms={}",
+        run_id, attempt_id, result.command_dispatched, result.exit_code,
+        result.execution_mode, result.duration_ms
+    );
     let drift_error = match result.target_context.as_ref() {
         Some(observed) => validate_observed_target(observed).err().or_else(|| {
             (!run.target.same_execution_context(observed)).then(|| {
@@ -2760,10 +2767,19 @@ pub fn runbooks_submit_terminal_result(
         .map(|value| sanitize_bounded(value, MAX_TERMINAL_ERROR_BYTES))
         .transpose()?;
     let target_drifted = drift_error.is_some();
-    let error = drift_error.or(reported_error);
+    let error = if result.command_dispatched == Some(false) {
+        reported_error.or_else(|| {
+            drift_error.map(|_| {
+                "Command was not dispatched: the terminal target changed before dispatch.".into()
+            })
+        })
+    } else {
+        drift_error.or(reported_error)
+    };
     command_state.pty.respond(
         &attempt_id,
         ObservedPtyResult {
+            command_dispatched: result.command_dispatched,
             exit_code: if target_drifted {
                 None
             } else {
@@ -4101,6 +4117,14 @@ fn validate_path_argument(value: &str, label: &str) -> Result<(), String> {
 }
 
 fn validate_terminal_capture(result: &RunbookTerminalResult) -> Result<(), String> {
+    if result.command_dispatched == Some(false)
+        && (result.exit_code.is_some()
+            || !result.output_tail.is_empty()
+            || result.output_observed_bytes != 0
+            || result.output_captured_bytes != 0)
+    {
+        return Err("an undispatched command cannot carry an exit code or command output".into());
+    }
     if result.output_tail.len() > FULL_EVIDENCE_BYTES {
         return Err(format!(
             "terminal result exceeds the {} byte IPC limit",
@@ -6002,6 +6026,7 @@ spec:
         let output = "🔒é".to_string();
         let captured_bytes = output.len() as u64;
         let mut result = RunbookTerminalResult {
+            command_dispatched: None,
             exit_code: Some(0),
             output_tail: output,
             output_truncated: false,
@@ -6026,6 +6051,32 @@ spec:
             .contains("without marking"));
         result.output_truncated = true;
         assert!(validate_terminal_capture(&result).is_ok());
+    }
+
+    #[test]
+    fn undispatched_terminal_result_rejects_exit_status_or_output() {
+        let mut result = RunbookTerminalResult {
+            command_dispatched: Some(false),
+            exit_code: None,
+            output_tail: String::new(),
+            output_truncated: false,
+            output_observed_bytes: 0,
+            output_captured_bytes: 0,
+            duration_ms: 1,
+            error: Some("terminal_busy".into()),
+            execution_mode: None,
+            target_context: None,
+        };
+        assert!(validate_terminal_capture(&result).is_ok());
+        result.exit_code = Some(0);
+        assert!(validate_terminal_capture(&result)
+            .unwrap_err()
+            .contains("undispatched"));
+        result.exit_code = None;
+        result.output_observed_bytes = 1;
+        assert!(validate_terminal_capture(&result)
+            .unwrap_err()
+            .contains("undispatched"));
     }
 
     #[test]

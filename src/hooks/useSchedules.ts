@@ -124,6 +124,7 @@ export function useSchedules() {
         // Carrying the original's mode across would hand a fresh action a
         // standing approval nobody granted it.
         permission_mode: "ask",
+        ...(input.runbook ? { runbook: { ...input.runbook, approval: "none" as const } } : {}),
         steps: input.steps.map((step) => ({ ...step, id: api.newStepId() })),
       });
     },

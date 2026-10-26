@@ -110,6 +110,33 @@ pub fn validate(
 
     validate_recurrence(&input.recurrence, &mut issues);
     validate_steps(input, &mut issues);
+    if let Some(runbook) = &input.runbook {
+        if !input.steps.is_empty() {
+            issues.push(ScheduledValidationIssue::blocking(
+                "steps",
+                "Choose either a runbook or command/prompt steps.",
+            ));
+        }
+        if input.execution_mode != ExecutionMode::Headless {
+            issues.push(ScheduledValidationIssue::blocking(
+                "execution_mode",
+                "Scheduled runbooks use headless execution.",
+            ));
+        }
+        if runbook.source_id.trim().is_empty()
+            || runbook.canonical_sha256.len() != 64
+            || !runbook
+                .canonical_sha256
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit())
+        {
+            issues.push(ScheduledValidationIssue::blocking(
+                "runbook",
+                "Select a valid, version-pinned runbook from the library.",
+            ));
+        }
+    }
+
     validate_target(input, host, &mut issues);
 
     if clamp_for_schedule(input.permission_mode).is_err() {
@@ -209,7 +236,7 @@ fn validate_recurrence(rule: &Recurrence, issues: &mut Vec<ScheduledValidationIs
 }
 
 fn validate_steps(input: &ScheduledActionInput, issues: &mut Vec<ScheduledValidationIssue>) {
-    if input.steps.is_empty() {
+    if input.steps.is_empty() && input.runbook.is_none() {
         issues.push(ScheduledValidationIssue::blocking(
             "steps",
             "Add at least one step.",
@@ -383,7 +410,13 @@ pub fn check_before_fire(
                 .to_string(),
         );
     }
-    if input.permission_mode != PermissionMode::Ask && armed_at.is_none() {
+    if (input.permission_mode != PermissionMode::Ask
+        || input
+            .runbook
+            .as_ref()
+            .is_some_and(|r| r.approval != super::types::RunbookApprovalPolicy::None))
+        && armed_at.is_none()
+    {
         return Err(
             "this action has a permission mode but no record of it being armed; \
                     re-open it and confirm the mode"
@@ -434,6 +467,7 @@ mod tests {
 
     fn base(target: ScheduledTarget) -> ScheduledActionInput {
         ScheduledActionInput {
+            runbook: None,
             name: "nightly".into(),
             enabled: true,
             target,
@@ -471,6 +505,30 @@ mod tests {
             has_identity_file: true,
             extra_args: None,
         }
+    }
+
+    #[test]
+    fn runbook_schedules_require_pinned_headless_exclusive_execution() {
+        use super::super::types::{RunbookApprovalPolicy, ScheduledRunbook};
+        let mut input = base(ScheduledTarget::LocalShell { cwd: None });
+        input.runbook = Some(ScheduledRunbook {
+            source_id: "runbook-1".into(),
+            canonical_sha256: "a".repeat(64),
+            inputs: Default::default(),
+            approval: RunbookApprovalPolicy::All,
+        });
+        assert!(blocking(&validate(&input, None)).contains(&"steps"));
+        input.steps.clear();
+        assert!(blocking(&validate(&input, None)).is_empty());
+        input.execution_mode = ExecutionMode::Tab;
+        assert!(blocking(&validate(&input, None)).contains(&"execution_mode"));
+        input.execution_mode = ExecutionMode::Headless;
+        let fingerprint = crate::scheduled::db::action_fingerprint(&input);
+        input.permission_mode = PermissionMode::Ask;
+        assert!(check_before_fire(&input, &fingerprint, &fingerprint, None, None).is_err());
+        assert!(check_before_fire(&input, &fingerprint, &fingerprint, Some("now"), None).is_ok());
+        input.runbook.as_mut().unwrap().canonical_sha256 = "not-a-digest".into();
+        assert!(blocking(&validate(&input, None)).contains(&"runbook"));
     }
 
     #[test]

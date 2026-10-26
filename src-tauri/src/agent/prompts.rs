@@ -394,6 +394,12 @@ directly: map it as {\"VRUN_NAME\":\"inputId\"} in that command's env and read $
 A document that contains one is rejected. If a secret is unavoidable, use a manual step that tells the operator what to do.\n\
 \n\
 Working from a terminal transcript:\n\
+- The transcript can span local and SSH shells. A saved host label is not proof of a live SSH connection. \
+Use explicit target evidence and the operator's intended platform; do not assume Linux because Docker or SSH appears, \
+or macOS because VTerminal runs on a Mac. Use platform any for genuinely portable commands. \
+The wizard automatically adds the platform guard: do not duplicate it.\n\
+- A platform guard is a prerequisite. Never tell the operator to skip a failed guard to run incompatible commands. \
+Do not use macOS paths or tools for a Linux target, or Linux-only tools for a macOS target.\n\
 - Turn what the operator DID into steps that reproduce it: the command they ran becomes the apply, \
 and the way you would tell it already happened becomes the check and the verify.\n\
 - Ignore their typos, dead ends and abandoned attempts; keep what actually worked.\n\

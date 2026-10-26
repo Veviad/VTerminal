@@ -359,6 +359,7 @@ struct EngineRunner<'a> {
     /// step and reused by every agent phase — per-step probes would multiply
     /// approval clicks for facts that do not change between steps.
     discoveries: Vec<(String, String)>,
+    discovery_completed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -468,6 +469,7 @@ impl<'a> EngineRunner<'a> {
             stopped: false,
             evidence_budget_noted: false,
             discoveries: Vec::new(),
+            discovery_completed: false,
         }
     }
 
@@ -512,12 +514,6 @@ impl<'a> EngineRunner<'a> {
             session_id: self.spec.target.lock_key(),
             target_label: self.spec.target.label(),
         });
-
-        match self.run_discovery().await? {
-            StepFlow::Next => {}
-            StepFlow::Cancel => return self.finish(RunStatus::Cancelled).await,
-            _ => return self.finish(RunStatus::Failed).await,
-        }
 
         for index in 0..self.spec.definition.spec.steps.len() {
             if self.cancelled() {
@@ -593,29 +589,33 @@ impl<'a> EngineRunner<'a> {
     ///
     /// A probe that fails is not fatal. Discovery is context, not a check: a
     /// host without `apt-get` should leave that fact absent, not stop the run.
-    /// Only cancellation and a target change stop here.
-    async fn run_discovery(&mut self) -> Result<StepFlow, String> {
+    /// Cancellation, declined dispatch or missing completion stop discovery
+    /// before another command can reach an uncertain terminal.
+    async fn run_discovery(
+        &mut self,
+        index: usize,
+        step: &Step,
+    ) -> Result<Option<PhaseRun>, String> {
         let probes = match &self.spec.definition.spec.context {
             Some(context) if !context.discover.is_empty() => context.discover.clone(),
-            _ => return Ok(StepFlow::Next),
+            _ => return Ok(None),
         };
         // Nothing consumes discovery except an agent phase's prompt, so a
         // definition with no agent action pays neither the clicks nor the time.
         if !self.spec.definition.uses_agent_action() {
-            return Ok(StepFlow::Next);
+            return Ok(None);
         }
-
-        let first = self.spec.definition.spec.steps[0].clone();
+        self.discoveries.clear();
         for probe in &probes {
             if self.cancelled() {
-                return Ok(StepFlow::Cancel);
+                return Ok(Some(PhaseRun::Cancelled));
             }
             validate_runtime_command(&probe.command)?;
             let environment = self.resolve_environment_map(&probe.env)?;
             let outcome = self
                 .execute_command(
-                    0,
-                    &first,
+                    index,
+                    step,
                     RunbookPhase::Check,
                     &probe.command,
                     environment,
@@ -625,9 +625,31 @@ impl<'a> EngineRunner<'a> {
                 )
                 .await?;
             match outcome {
-                CommandDispatch::Cancelled => return Ok(StepFlow::Cancel),
-                CommandDispatch::Paused(_) => return Ok(StepFlow::Cancel),
+                CommandDispatch::Cancelled => return Ok(Some(PhaseRun::Cancelled)),
+                CommandDispatch::Paused(reason) => return Ok(Some(PhaseRun::Paused(reason))),
                 CommandDispatch::Observed(observed) => {
+                    if observed.exit_code.is_none() {
+                        // A discovery command can still own the terminal. It
+                        // must be reconciled before any step command is typed.
+                        return Ok(Some(PhaseRun::Completed {
+                            completion: PhaseCompletion {
+                                run_id: self.spec.run_id.clone(),
+                                step_id: step.id.clone(),
+                                phase: RunbookPhase::Check,
+                                result: PhaseResult::Unknown,
+                                assurance: None,
+                                summary: format!(
+                                    "target discovery `{}` has an unknown outcome: {}",
+                                    probe.name,
+                                    observed
+                                        .error
+                                        .as_deref()
+                                        .unwrap_or("no terminal completion was observed")
+                                ),
+                            },
+                            operator_comment: None,
+                        }));
+                    }
                     if observed.exit_code == Some(0) {
                         let text = sanitize_output_tail(&observed.output_tail).text;
                         if !text.trim().is_empty() {
@@ -638,7 +660,7 @@ impl<'a> EngineRunner<'a> {
                 }
             }
         }
-        Ok(StepFlow::Next)
+        Ok(None)
     }
 
     async fn run_resumed_step(
@@ -995,6 +1017,16 @@ impl<'a> EngineRunner<'a> {
         if self.cancelled() {
             return Ok(PhaseRun::Cancelled);
         }
+        if phase == RunbookPhase::Check && !self.discovery_completed {
+            // Discovery is attributed to the first check that will actually
+            // execute, after both coordinator and durable cursor own the phase.
+            // On resume this preserves completed steps and the operator's
+            // reconciliation boundary for an interrupted step.
+            if let Some(outcome) = self.run_discovery(index, step).await? {
+                return Ok(outcome);
+            }
+            self.discovery_completed = true;
+        }
         match action {
             PhaseActionRef::ShellCheck(action, outcomes) => {
                 let mut accepted = outcomes.compliant_exit_codes.clone();
@@ -1108,7 +1140,7 @@ impl<'a> EngineRunner<'a> {
                 operator_comment,
             } => {
                 let result = completion.result.clone();
-                self.complete_phase(index, &completion, operator_comment)?;
+                self.complete_phase(index, &completion, operator_comment, true)?;
                 Ok(SettledPhase::Result(result))
             }
         }
@@ -1171,6 +1203,7 @@ impl<'a> EngineRunner<'a> {
         index: usize,
         completion: &PhaseCompletion,
         operator_comment: Option<String>,
+        command_dispatched: bool,
     ) -> Result<(), String> {
         let current = self.checklist[index].status;
         let snapshot = self.context.coordinator.complete_phase(completion)?;
@@ -1180,7 +1213,8 @@ impl<'a> EngineRunner<'a> {
             .find(|value| value.id == completion.step_id)
             .ok_or_else(|| format!("missing step {} after completion", completion.step_id))?;
         let next = step_snapshot.status;
-        let changed = self.checklist[index].changed || completion.phase == RunbookPhase::Apply;
+        let changed = self.checklist[index].changed
+            || (command_dispatched && completion.phase == RunbookPhase::Apply);
         let assurance = completion.assurance;
         let summary = clean_persisted_text(&completion.summary);
         if !summary.is_empty() {
@@ -1957,6 +1991,7 @@ impl<'a> EngineRunner<'a> {
         // The approval, intent record and terminal dispatch all carry the same
         // complete semantic line. Only the mode-specific exit observation
         // sentinel is frontend transport instrumentation.
+        let changed_before_dispatch = self.checklist[index].changed;
         self.start_attempt(&attempt_id, &executed_command)?;
         let claim_timeout = Duration::from_secs(self.context.config.command_timeout_secs);
         let receiver = self
@@ -1980,7 +2015,7 @@ impl<'a> EngineRunner<'a> {
             environment: HashMap::new(),
         });
 
-        let wait = Duration::from_secs(self.context.config.command_timeout_secs.saturating_add(15));
+        let wait = Duration::from_secs(self.context.config.command_timeout_secs.saturating_add(30));
         let observed = tokio::select! {
             result = receiver => result.ok(),
             changed = self.cancel.changed() => {
@@ -2013,6 +2048,7 @@ impl<'a> EngineRunner<'a> {
             return Ok(CommandDispatch::Cancelled);
         }
         let observed = observed.unwrap_or_else(|| ObservedPtyResult {
+            command_dispatched: None,
             exit_code: None,
             output_tail: String::new(),
             output_truncated: false,
@@ -2022,6 +2058,7 @@ impl<'a> EngineRunner<'a> {
             error: Some("visible terminal did not return a result before the timeout".into()),
         });
         let status = match observed.exit_code {
+            None if observed.command_dispatched == Some(false) => AttemptStatus::Failed,
             Some(exit) if accepted_exit_codes.contains(&exit) => AttemptStatus::Succeeded,
             Some(_) => AttemptStatus::Failed,
             None => AttemptStatus::Unknown,
@@ -2039,6 +2076,27 @@ impl<'a> EngineRunner<'a> {
             observed.error.as_deref(),
             None,
         )?;
+        if observed.command_dispatched == Some(false) {
+            self.checklist[index].changed = changed_before_dispatch;
+            let reason = observed.error.clone().unwrap_or_else(||
+                "Command was not dispatched: terminal preflight failed; return to a shell prompt and retry.".into());
+            // This is an operational refusal, not evidence that a mutation may
+            // have run. Preserve that distinction in the step, report and retry UI.
+            self.complete_phase(
+                index,
+                &PhaseCompletion {
+                    run_id: self.spec.run_id.clone(),
+                    step_id: step.id.clone(),
+                    phase,
+                    result: PhaseResult::Failed,
+                    assurance: None,
+                    summary: reason.clone(),
+                },
+                None,
+                false,
+            )?;
+            return Ok(CommandDispatch::Paused(reason));
+        }
         Ok(CommandDispatch::Observed(observed))
     }
 
@@ -4798,6 +4856,97 @@ pub(crate) fn classify_runtime_command(command: &str) -> RuntimeCommandClass {
     }
 }
 
+/// Recover only wrappers authored by this engine, for captured-transport policy
+/// checks. Never unwrap arbitrary `sh -c` or a user-authored environment prefix.
+pub(crate) fn captured_command_subject(command: &str) -> String {
+    let unwrapped = unwrap_terminal_guards(command);
+    let semantic = unwrapped.as_deref().unwrap_or(command);
+    unwrap_runbook_environment(semantic).unwrap_or_else(|| semantic.to_string())
+}
+
+/// Captured commands run in the engine's clean child shell, so deterministic
+/// reads can honor a saved read-only policy without changing interactive trust.
+pub(crate) fn classify_captured_command(command: &str) -> RuntimeCommandClass {
+    let subject = captured_command_subject(command);
+    let shared = crate::agent::policy::assess(&subject);
+    let privileged = shared.privileged || command_is_privileged(&subject);
+    let opaque = shared.opaque || command_is_opaque(&subject);
+    RuntimeCommandClass {
+        read_only: shared.read_only() && !privileged && !opaque && captured_read_shape(&subject),
+        network: shared.network
+            || shared.network_unknown
+            || runbook_network_ambiguous_command(&subject),
+        privileged,
+        opaque,
+    }
+}
+
+/// An unattended read grant is deliberately narrower than interactive command
+/// hints: tools such as sort/date/git have write or custom-executable options.
+/// Unknown shapes remain available under the explicit All policy.
+fn captured_read_shape(command: &str) -> bool {
+    if command
+        .chars()
+        .any(|ch| matches!(ch, '|' | ';' | '&' | '<' | '>'))
+    {
+        return false;
+    }
+    let Some(words) = shlex::split(command) else {
+        return false;
+    };
+    let Some(program) = words.first() else {
+        return false;
+    };
+    let executable = if let Some(name) = program
+        .strip_prefix("/usr/bin/")
+        .or_else(|| program.strip_prefix("/bin/"))
+        .or_else(|| program.strip_prefix("/usr/sbin/"))
+        .or_else(|| program.strip_prefix("/sbin/"))
+    {
+        if name.contains('/') {
+            return false;
+        }
+        name
+    } else if program.contains('/') {
+        return false;
+    } else {
+        program.as_str()
+    };
+    if matches!(executable, "test" | "[")
+        && words
+            .iter()
+            .any(|word| matches!(word.as_str(), "-v" | "-R"))
+    {
+        return false;
+    }
+    matches!(
+        executable,
+        "true"
+            | "false"
+            | "pwd"
+            | "whoami"
+            | "id"
+            | "uname"
+            | "uptime"
+            | "df"
+            | "du"
+            | "ls"
+            | "stat"
+            | "cat"
+            | "free"
+            | "head"
+            | "tail"
+            | "wc"
+            | "grep"
+            | "cut"
+            | "test"
+            | "["
+    ) || (executable == "command"
+        && words.len() >= 3
+        && matches!(words[1].as_str(), "-v" | "-V")
+        && words[2..].iter().all(|word| !word.starts_with('-')))
+}
+
 fn unwrap_terminal_guards(command: &str) -> Option<String> {
     let encoded = command
         .strip_prefix(TERMINAL_GUARD_PREFIX)?
@@ -4834,7 +4983,19 @@ fn unwrap_runbook_environment(command: &str) -> Option<String> {
     {
         return None;
     }
-    words.last().cloned()
+    let inner = words.last()?.clone();
+    let environment = words[clean_prefix.len()..words.len() - 3]
+        .iter()
+        .map(|assignment| {
+            let (name, value) = assignment.split_once('=')?;
+            Some((name.to_string(), value.to_string()))
+        })
+        .collect::<Option<HashMap<String, String>>>()?;
+    // shlex removes quotes and cannot by itself distinguish a literal value
+    // from command substitution. Only our exact, sorted and safely quoted
+    // serializer is eligible for unwrapping across an automatic policy gate.
+    let canonical = command_with_runbook_environment(&inner, &environment).ok()?;
+    (canonical == command).then_some(inner)
 }
 
 fn runbook_network_ambiguous_command(command: &str) -> bool {
@@ -5056,6 +5217,8 @@ mod tests {
         RetryCompliant,
         RetryVerifyFails,
         UnknownCheck,
+        NotDispatched,
+        NotDispatchedApply,
     }
 
     struct AutoSink<'a> {
@@ -5094,53 +5257,70 @@ mod tests {
                     command,
                     ..
                 } => {
-                    let exit_code = if matches!(self.mode, TerminalMode::UnknownCheck) {
-                        None
-                    } else if command.contains("definitely-missing") {
-                        let check_number = self.check_count.fetch_add(1, Ordering::SeqCst);
-                        Some(match self.mode {
-                            TerminalMode::Compliant => 0,
-                            TerminalMode::RetryCompliant | TerminalMode::RetryVerifyFails
-                                if check_number > 0 =>
-                            {
-                                0
-                            }
-                            TerminalMode::Remediated
-                            | TerminalMode::VerifyFails
-                            | TerminalMode::RetryCompliant
-                            | TerminalMode::RetryVerifyFails => 1,
-                            TerminalMode::UnknownCheck => unreachable!(),
-                        })
-                    } else if command.contains("verify-target") {
-                        Some(match self.mode {
-                            TerminalMode::VerifyFails | TerminalMode::RetryVerifyFails => 1,
-                            TerminalMode::RetryCompliant
-                                if self.check_count.load(Ordering::SeqCst) <= 1 =>
-                            {
-                                1
-                            }
-                            TerminalMode::Compliant
-                            | TerminalMode::Remediated
-                            | TerminalMode::RetryCompliant
-                            | TerminalMode::UnknownCheck => 0,
-                        })
+                    let not_dispatched = matches!(self.mode, TerminalMode::NotDispatched)
+                        || (matches!(self.mode, TerminalMode::NotDispatchedApply)
+                            && command.contains("touch /tmp/runbook-engine-test"));
+                    let exit_code =
+                        if not_dispatched || matches!(self.mode, TerminalMode::UnknownCheck) {
+                            None
+                        } else if command.contains("discovery-unavailable") {
+                            Some(127)
+                        } else if command.contains("definitely-missing") {
+                            let check_number = self.check_count.fetch_add(1, Ordering::SeqCst);
+                            Some(match self.mode {
+                                TerminalMode::Compliant => 0,
+                                TerminalMode::RetryCompliant | TerminalMode::RetryVerifyFails
+                                    if check_number > 0 =>
+                                {
+                                    0
+                                }
+                                TerminalMode::Remediated
+                                | TerminalMode::VerifyFails
+                                | TerminalMode::RetryCompliant
+                                | TerminalMode::RetryVerifyFails
+                                | TerminalMode::NotDispatchedApply => 1,
+                                TerminalMode::UnknownCheck | TerminalMode::NotDispatched => {
+                                    unreachable!()
+                                }
+                            })
+                        } else if command.contains("verify-target") {
+                            Some(match self.mode {
+                                TerminalMode::VerifyFails | TerminalMode::RetryVerifyFails => 1,
+                                TerminalMode::RetryCompliant
+                                    if self.check_count.load(Ordering::SeqCst) <= 1 =>
+                                {
+                                    1
+                                }
+                                TerminalMode::Compliant
+                                | TerminalMode::Remediated
+                                | TerminalMode::RetryCompliant
+                                | TerminalMode::UnknownCheck
+                                | TerminalMode::NotDispatched
+                                | TerminalMode::NotDispatchedApply => 0,
+                            })
+                        } else {
+                            Some(0)
+                        };
+                    let output = if not_dispatched {
+                        String::new()
                     } else {
-                        Some(0)
+                        format!("observed {command}")
                     };
-                    let output = format!("observed {command}");
                     let output_bytes = output.len() as u64;
                     self.pty.claim_dispatch(&attempt_id, &run_id).unwrap();
                     self.pty
                         .respond(
                             &attempt_id,
                             ObservedPtyResult {
+                                command_dispatched: Some(!not_dispatched),
                                 exit_code,
                                 output_tail: output,
                                 output_truncated: false,
                                 output_observed_bytes: output_bytes,
                                 output_captured_bytes: output_bytes,
                                 duration_ms: 4,
-                                error: None,
+                                error: not_dispatched
+                                    .then(|| "Command was not dispatched: terminal is busy".into()),
                             },
                         )
                         .unwrap();
@@ -5177,7 +5357,13 @@ mod tests {
                     run_id,
                     step_id: Some(step_id),
                     ..
-                } if matches!(self.mode, TerminalMode::UnknownCheck) => {
+                } if matches!(
+                    self.mode,
+                    TerminalMode::UnknownCheck
+                        | TerminalMode::NotDispatched
+                        | TerminalMode::NotDispatchedApply
+                ) =>
+                {
                     self.decisions
                         .respond(
                             &run_id,
@@ -5261,9 +5447,58 @@ spec:
         ) {
             definition.spec.defaults.on_failure = FailurePolicy::Pause;
         }
+        run_test_definition(mode, evidence_mode, definition, false)
+            .await
+            .0
+    }
+
+    async fn run_test_definition(
+        mode: TerminalMode,
+        evidence_mode: EvidenceCaptureMode,
+        definition: RunbookDefinition,
+        durable: bool,
+    ) -> (RunbookReport, Option<DbState>) {
         let snapshot =
             super::super::package::snapshot_definition("test yaml", &definition).unwrap();
         let target = target();
+        let mut run_id = uuid::Uuid::new_v4().to_string();
+        let database = if durable {
+            let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+            crate::database::migrations::run(&connection).unwrap();
+            let stored = super::super::db::create_run(
+                &mut connection,
+                &super::super::db::RunCreation {
+                    source_id: None,
+                    definition_id: definition.metadata.id.clone(),
+                    definition_version: definition.metadata.version.clone(),
+                    definition_title: definition.metadata.title.clone(),
+                    source_yaml: snapshot.source_yaml.clone(),
+                    canonical_json: snapshot.canonical_json.clone(),
+                    source_sha256: snapshot.source_sha256.clone(),
+                    canonical_sha256: snapshot.canonical_sha256.clone(),
+                    target: target.clone(),
+                    inputs: serde_json::json!({}),
+                    evidence_mode,
+                    app_version: "test".into(),
+                    model: None,
+                    steps: definition
+                        .spec
+                        .steps
+                        .iter()
+                        .map(|step| super::super::db::StepSeed {
+                            id: step.id.clone(),
+                            title: step.title.clone(),
+                            required: step.required,
+                        })
+                        .collect(),
+                },
+            )
+            .unwrap();
+            run_id = stored.id;
+            Some(DbState(Mutex::new(connection)))
+        } else {
+            None
+        };
         let coordinator = RunCoordinator::default();
         let approvals = RunbookApprovalState::default();
         let pty = RunbookPtyState::default();
@@ -5291,7 +5526,7 @@ spec:
             decisions: &decisions,
             cancellations: &cancellations,
             events: &sink,
-            database: None,
+            database: database.as_ref(),
             evidence_root: None,
             provider: None,
             target_observer: &observer,
@@ -5300,7 +5535,6 @@ spec:
                 ..EngineConfig::default()
             },
         };
-        let run_id = uuid::Uuid::new_v4().to_string();
         // The sink needs the dynamic run id for an operator response.
         let report = execute_runbook(
             &context,
@@ -5326,7 +5560,113 @@ spec:
                 .unwrap()
                 .contains(&RunbookPhase::Apply));
         }
-        report
+        (report, database)
+    }
+
+    fn discovery_definition() -> RunbookDefinition {
+        let mut definition = definition();
+        definition.spec.context = Some(super::super::definition::SpecContext {
+            discover: vec![
+                super::super::definition::DiscoveryProbe {
+                    name: "platform".into(),
+                    command: "uname -s".into(),
+                    env: BTreeMap::new(),
+                },
+                super::super::definition::DiscoveryProbe {
+                    name: "optional-tool".into(),
+                    command: "discovery-unavailable".into(),
+                    env: BTreeMap::new(),
+                },
+            ],
+        });
+        // Discovery is only needed when an agent phase exists. A compliant
+        // shell check skips this apply, allowing the test to remain model-free.
+        definition.spec.steps[0].apply = Some(ApplyAction::Agent {
+            instructions: "Use the discovered target facts.".into(),
+        });
+        definition
+    }
+
+    #[tokio::test]
+    async fn discovery_approval_and_attempts_use_the_active_durable_check_phase() {
+        let (report, database) = run_test_definition(
+            TerminalMode::Compliant,
+            EvidenceCaptureMode::Tail,
+            discovery_definition(),
+            true,
+        )
+        .await;
+        assert_eq!(report.status, RunStatus::Succeeded);
+        assert_eq!(report.checklist[0].status, StepStatus::AlreadyCompliant);
+        assert_eq!(report.checklist[0].attempts.len(), 3);
+        assert_eq!(report.checklist[0].attempts[0].executor, "discovery");
+        assert_eq!(
+            report.checklist[0].attempts[1].status,
+            AttemptStatus::Failed
+        );
+        assert_eq!(report.checklist[0].attempts[2].executor, "shell");
+        let connection = database.as_ref().unwrap().0.lock().unwrap();
+        let approvals = super::super::db::list_approvals(&connection, &report.run_id).unwrap();
+        assert_eq!(approvals.len(), 3);
+        assert!(approvals.iter().all(|approval| approval.step_id == "one"
+            && approval.phase == RunbookPhase::Check
+            && approval.status == ApprovalStatus::Approved));
+        let run = super::super::db::get_run(&connection, &report.run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.status, RunStatus::Succeeded);
+        assert!(run.active_step_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn discovery_unknown_outcome_stops_before_the_authored_check() {
+        let (report, _) = run_test_definition(
+            TerminalMode::UnknownCheck,
+            EvidenceCaptureMode::Tail,
+            discovery_definition(),
+            true,
+        )
+        .await;
+        assert_eq!(report.status, RunStatus::Failed);
+        assert_eq!(report.checklist[0].attempts.len(), 1);
+        assert_eq!(report.checklist[0].attempts[0].executor, "discovery");
+        assert_eq!(
+            report.checklist[0].attempts[0].status,
+            AttemptStatus::Unknown
+        );
+        assert!(report.checklist[0]
+            .summary
+            .as_deref()
+            .is_some_and(|summary| summary.contains("target discovery")));
+    }
+
+    #[tokio::test]
+    async fn discovery_preflight_refusal_pauses_without_claiming_unknown_effects() {
+        let (report, _) = run_test_definition(
+            TerminalMode::NotDispatched,
+            EvidenceCaptureMode::Tail,
+            discovery_definition(),
+            true,
+        )
+        .await;
+        assert_eq!(report.status, RunStatus::Failed);
+        assert_eq!(report.checklist[0].attempts.len(), 1);
+        assert_eq!(report.checklist[0].attempts[0].executor, "discovery");
+        assert_eq!(
+            report.checklist[0].attempts[0].status,
+            AttemptStatus::Failed
+        );
+        assert!(!report.checklist[0].changed);
+        // An unverified requirement remains a risk in the durable report, but
+        // the report must not claim an undispatched action changed the target.
+        assert!(report.checklist[0]
+            .unresolved_risks
+            .iter()
+            .all(|risk| !risk.contains("unknown") && !risk.contains("changed")));
+        assert!(report.checklist[0].attempts[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("not dispatched")));
     }
 
     #[tokio::test]
@@ -5407,6 +5747,37 @@ spec:
     }
 
     #[tokio::test]
+    async fn undispatched_command_pauses_without_unknown_effect_or_mutation_claim() {
+        let report = run(TerminalMode::NotDispatched, EvidenceCaptureMode::Tail).await;
+        assert_eq!(report.status, RunStatus::Failed);
+        assert_eq!(report.checklist[0].attempts.len(), 1);
+        assert_eq!(
+            report.checklist[0].attempts[0].status,
+            AttemptStatus::Failed
+        );
+        assert!(!report.checklist[0].changed);
+        assert!(report.checklist[0].unresolved_risks.is_empty());
+        assert!(report.checklist[0]
+            .exceptions
+            .iter()
+            .any(|reason| reason.contains("not dispatched")));
+    }
+
+    #[tokio::test]
+    async fn undispatched_apply_does_not_claim_that_the_step_changed() {
+        let report = run(TerminalMode::NotDispatchedApply, EvidenceCaptureMode::Tail).await;
+        assert_eq!(report.status, RunStatus::Failed);
+        assert_eq!(report.checklist[0].attempts.len(), 2);
+        assert_eq!(
+            report.checklist[0].attempts[1].status,
+            AttemptStatus::Failed
+        );
+        assert_eq!(report.checklist[0].attempts[1].phase, RunbookPhase::Apply);
+        assert!(!report.checklist[0].changed);
+        assert!(report.checklist[0].unresolved_risks.is_empty());
+    }
+
+    #[tokio::test]
     async fn fatal_engine_setup_error_is_reported_failed_not_cancelled() {
         let definition = definition();
         let snapshot =
@@ -5470,6 +5841,68 @@ spec:
         assert_eq!(report.status, RunStatus::Failed);
         assert!(report.executive_summary.contains("internal engine error"));
         assert!(!report.executive_summary.contains("was cancelled"));
+    }
+
+    #[test]
+    fn captured_transport_classifies_only_exact_native_wrappers() {
+        let guarded = command_with_terminal_guards("df -h").unwrap();
+        assert_eq!(captured_command_subject(&guarded), "df -h");
+        let class = classify_captured_command(&guarded);
+        assert!(class.read_only && !class.network && !class.privileged && !class.opaque);
+        assert!(!classify_runtime_command(&guarded).read_only);
+        assert!(classify_runtime_command(&guarded).opaque);
+        let env = HashMap::from([("VRUN_PATH".into(), "/tmp".into())]);
+        let semantic = command_with_runbook_environment("df -h", &env).unwrap();
+        let guarded = command_with_terminal_guards(&semantic).unwrap();
+        assert_eq!(captured_command_subject(&guarded), "df -h");
+        assert!(classify_captured_command(&guarded).read_only);
+        assert!(!classify_captured_command("sh -c 'df -h'").read_only);
+        let dynamic_env = "/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C VRUN_X=$(touch${IFS}/tmp/marker) /bin/sh -c 'df -h'";
+        let guarded_dynamic = command_with_terminal_guards(dynamic_env).unwrap();
+        assert_eq!(captured_command_subject(&guarded_dynamic), dynamic_env);
+        assert!(!classify_captured_command(&guarded_dynamic).read_only);
+
+        assert!(classify_captured_command("sudo df -h").privileged);
+        for unsafe_read in [
+            "sort -o /tmp/out /tmp/in",
+            "date -s 2026-10-26",
+            "hostname changed",
+            "git -c core.fsmonitor=touch status",
+            "/tmp/df -h",
+            "/tmp/ls -l",
+            "test -v value",
+            "[ -R value ]",
+        ] {
+            assert!(
+                !classify_captured_command(&command_with_terminal_guards(unsafe_read).unwrap())
+                    .read_only,
+                "{unsafe_read}"
+            );
+        }
+
+        let guarded = command_with_terminal_guards("docker system prune -f").unwrap();
+        let rule = crate::agent::policy::CommandPolicyRule {
+            id: "deny-prune".into(),
+            effect: crate::agent::policy::PolicyRuleEffect::Deny,
+            scope: "local".into(),
+            argv: vec![
+                "docker".into(),
+                "system".into(),
+                "prune".into(),
+                "**".into(),
+            ],
+            enabled: true,
+            description: String::new(),
+        };
+        assert_eq!(
+            crate::agent::policy::evaluate_rules(
+                &captured_command_subject(&guarded),
+                "local",
+                &[rule]
+            )
+            .0,
+            crate::agent::policy::RuleDecision::Deny
+        );
     }
 
     #[test]

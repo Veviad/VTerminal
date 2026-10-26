@@ -133,6 +133,16 @@ export type ScheduleBucketRef =
   | { source: "local"; bucket_id: string }
   | { source: "qdrant"; connection_id: string; collection: string };
 
+export type ScheduleRunbookApproval = "none" | "read_only" | "all";
+
+/** A schedule authorizes this exact published definition, never a moving library entry. */
+export interface ScheduleRunbook {
+  source_id: string;
+  canonical_sha256: string;
+  inputs: Record<string, unknown>;
+  approval: ScheduleRunbookApproval;
+}
+
 /** What the editor sends. Derived fields (`next_fire_at`, `armed_at`, the
  *  `last_*` projection) are the engine's to write and are never accepted here. */
 export interface ScheduleActionInput {
@@ -140,6 +150,7 @@ export interface ScheduleActionInput {
   enabled: boolean;
   target: ScheduleTarget;
   steps: ScheduleStep[];
+  runbook?: ScheduleRunbook | null;
   execution_mode: ScheduleExecutionMode;
   permission_mode: SchedulePermissionMode;
   recurrence: ScheduleRecurrence;
@@ -311,6 +322,19 @@ export function schedulePreview(
 
 export function scheduleCreate(input: ScheduleActionInput): Promise<ScheduleAction> {
   return invoke<ScheduleAction>("scheduled_action_create", { input });
+}
+
+/** Generate an unsaved, disabled draft. Only the explicit save can arm it. */
+export function scheduleAiGenerate(
+  requestId: string,
+  requirements: string,
+  terminalContext: string | null,
+): Promise<ScheduleActionInput> {
+  return invoke<ScheduleActionInput>("scheduled_action_ai_generate", {
+    request_id: requestId,
+    requirements,
+    terminal_context: terminalContext,
+  });
 }
 
 export function scheduleUpdate(
@@ -502,6 +526,7 @@ export function toScheduleInput(action: ScheduleAction): ScheduleActionInput {
     enabled: action.enabled,
     target: action.target,
     steps: action.steps.map((step, index) => ({ ...step, sort_order: index })),
+    ...(action.runbook ? { runbook: { ...action.runbook, inputs: { ...action.runbook.inputs } } } : {}),
     execution_mode: action.execution_mode,
     permission_mode: action.permission_mode,
     recurrence: action.recurrence,

@@ -13,6 +13,7 @@ pub mod models;
 pub mod pty;
 pub mod remote_servers;
 pub mod runbooks;
+pub mod schedule_authoring;
 pub mod scheduled;
 pub mod settings;
 pub mod shell_integration;

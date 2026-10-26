@@ -175,6 +175,20 @@ describe("ScheduleEditor", () => {
     ]);
   });
 
+  it("uses background execution and a separate approval policy for runbooks", async () => {
+    await mountEditor();
+    await act(async () => {
+      useScheduleStore.getState().patchDraft({ execution_mode: "tab", permission_mode: "auto_all" });
+      screen.getByRole("radio", { name: "Runbook" }).click();
+    });
+    expect(useScheduleStore.getState().draft?.input).toMatchObject({
+      steps: [], execution_mode: "headless", runbook: { source_id: "", approval: "none" },
+    });
+    expect(screen.getByLabelText("Runbook automatic approval")).toBeTruthy();
+    expect(screen.queryByLabelText("Step 1 command")).toBeNull();
+    expect(screen.queryByLabelText(S.schedules.permission)).toBeNull();
+  });
+
   it("blocks Save while a blocking issue stands", async () => {
     mocks.scheduleValidate.mockResolvedValue([
       { field: "name", message: "Give the action a name.", blocking: true },

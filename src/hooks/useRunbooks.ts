@@ -13,6 +13,7 @@ import { protectRunbookTerminal } from "../lib/runbookTerminalPrivacy";
 import {
   clearRunbookRunRevocation,
   isRunbookRunRevoked,
+  listLiveRunbookPtyJobs,
   registerLiveRunbookPtyJob,
   revokeRunbookRun,
   unregisterLiveRunbookPtyJob,
@@ -511,6 +512,7 @@ export function useRunbooks() {
             event.run_id,
             event.attempt_id,
             {
+              command_dispatched: false,
               exit_code: null,
               output_tail: "",
               output_truncated: false,
@@ -586,7 +588,7 @@ export function useRunbooks() {
         if (!dispatchClaimed) {
           // Prompt rejection can happen before the normal beforeWrite lease
           // boundary (for example an expired approval-click binding). Claim only
-          // to settle that attempt Unknown; never type it.
+          // to settle that attempt as undispatched; never type it.
           if (claimAttempted || isRunbookRunRevoked(event.run_id)) return;
           dispatchClaimed = await api.runbooksClaimTerminalDispatch(
             event.run_id,
@@ -602,6 +604,7 @@ export function useRunbooks() {
           // observation so Rust will not accept the exit code as authoritative.
         }
         await api.runbooksSubmitTerminalResult(event.run_id, event.attempt_id, {
+          command_dispatched: outcome.commandDispatched ?? null,
           exit_code: outcome.exitCode,
           output_tail: outcome.output,
           output_truncated: outcome.outputTruncated ?? false,
@@ -612,7 +615,9 @@ export function useRunbooks() {
             outcome.outputCapturedBytes ??
             new TextEncoder().encode(outcome.output).length,
           duration_ms: outcome.durationMs,
-          error: outcome.error ?? null,
+          error: outcome.commandDispatched === false
+            ? `Command was not dispatched: ${outcome.note ?? outcome.error ?? "terminal preflight failed"}`
+            : (outcome.error ?? null),
           execution_mode: outcome.mode,
           target_context: resultTarget,
         });
@@ -641,6 +646,11 @@ export function useRunbooks() {
 
   const executeTerminalEvent = useCallback(
     async (event: Extract<RunbookEvent, { type: "RunInTerminal" }>) => {
+      // Event replay can overlap a handler that already consumed the one-shot
+      // prompt binding. The duplicate must not claim and settle its live attempt
+      // as a preflight refusal while the original is still acquiring its lease.
+      if (listLiveRunbookPtyJobs(event.run_id).some((job) =>
+        job.attemptId === event.attempt_id && job.sessionId === event.session_id)) return;
       // Register synchronously, before prompt probing, target inspection or
       // the dispatch claim. Cancellation never relies on the capped
       // presentation event list and therefore cannot lose ownership of a

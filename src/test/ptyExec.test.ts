@@ -658,6 +658,45 @@ describe("runInTerminal — integrated session", () => {
     expect(ptyWrite).not.toHaveBeenCalled();
   });
 
+  it("recovers an attested local Runbook prompt when shell integration is stale", async () => {
+    entry = makeEntry(["local$ "], { atPrompt: false });
+    const binding = captureApprovalPromptBinding("s1");
+    const beforeWrite = vi.fn(() => true);
+    const promise = runInTerminal("s1", "local-recovery", "uname -s", {
+      timeoutMs: 5_000,
+      nonceCompletion: true,
+      approvalPromptBinding: binding!,
+      beforeWrite,
+    });
+    await flush();
+    expect(beforeWrite).toHaveBeenCalledOnce();
+    expect(ptyWrite).toHaveBeenCalledTimes(1);
+    const probeNonce = /6973;RP;([a-f0-9]{32});/.exec(ptyWrite.mock.calls[0][1])?.[1];
+    expect(probeNonce).toHaveLength(32);
+    emit({ type: "osc", payload: `RP;${probeNonce};z5.9;b;f` });
+    await flush();
+    expect(ptyWrite).toHaveBeenCalledTimes(2);
+    expect(ptyWrite.mock.calls[1][1]).toContain("uname -s");
+    const commandNonce = /RD;%s;([a-f0-9]{32})\\007/.exec(ptyWrite.mock.calls[1][1])?.[1];
+    emit({ type: "osc", payload: `RD;0;${commandNonce}` });
+    expect(await promise).toMatchObject({ exitCode: 0, mode: "sentinel", commandDispatched: true });
+  });
+
+  it("does not dispatch a local Runbook command when the attested shell probe fails", async () => {
+    vi.useFakeTimers();
+    entry = makeEntry(["local$ "], { atPrompt: false });
+    const promise = runInTerminal("s1", "local-probe-refused", "touch /tmp/nope", {
+      timeoutMs: 5_000,
+      nonceCompletion: true,
+      approvalPromptBinding: captureApprovalPromptBinding("s1")!,
+      beforeWrite: () => true,
+    });
+    await vi.advanceTimersByTimeAsync(2_100);
+    expect(await promise).toMatchObject({ error: "not_a_shell", commandDispatched: false });
+    expect(ptyWrite).toHaveBeenCalledOnce();
+    expect(ptyWrite.mock.calls[0][1]).not.toContain("touch /tmp/nope");
+  });
+
   it("claims a remote runbook lease before using separate probe and command nonces", async () => {
     useAppStore.getState().updateSessionUi("s1", {
       remote: { kind: "ssh", target: "prod-01" },
@@ -687,7 +726,7 @@ describe("runInTerminal — integrated session", () => {
     const commandNonce = /RD;%s;([a-f0-9]{32})\\007/.exec(commandWrite)?.[1];
     expect(commandNonce).toHaveLength(32);
     expect(commandNonce).not.toBe(probeNonce);
-    expect(canWrite).toHaveBeenCalledTimes(1);
+    expect(canWrite).toHaveBeenCalledTimes(2);
 
     emit({ type: "osc", payload: `RD;0;${commandNonce}` });
     const outcome = await promise;
@@ -764,6 +803,7 @@ describe("runInTerminal — refusing to type", () => {
     await vi.advanceTimersByTimeAsync(2000);
     const outcome = await promise;
     expect(outcome.error).toBe("terminal_busy");
+    expect(outcome.commandDispatched).toBe(false);
     expect(ptyWrite).not.toHaveBeenCalled();
   });
 

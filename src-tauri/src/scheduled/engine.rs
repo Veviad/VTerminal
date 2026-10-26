@@ -132,6 +132,10 @@ pub async fn execute_run(
         db::set_run_status(conn, run_id, ScheduledRunStatus::Running, None, &now)
     });
 
+    if action.input.runbook.is_some() {
+        return super::runbook::execute(app, run_id, action, cancel).await;
+    }
+
     // Snapshot the remote transport once, at the start of the run. Re-reading the
     // host row per command would let a mid-run edit redirect the second half of a
     // run to a different machine.

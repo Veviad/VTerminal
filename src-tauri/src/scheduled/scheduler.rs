@@ -412,6 +412,7 @@ mod tests {
         ScheduledAction {
             id: "a1".into(),
             input: ScheduledActionInput {
+                runbook: None,
                 name: "nightly".into(),
                 enabled: true,
                 target: ScheduledTarget::LocalShell { cwd: None },

@@ -169,7 +169,9 @@ function ActionDetail({
         />
         <Detail
           label={S.schedules.permission}
-          value={S.schedules.permissionOptions[action.permission_mode]}
+          value={action.runbook
+            ? action.runbook.approval === "all" ? "Approve all runbook commands" : action.runbook.approval === "read_only" ? "Approve read-only commands" : "No automatic approval"
+            : S.schedules.permissionOptions[action.permission_mode]}
         />
         <Detail
           label={S.schedules.lastRun}
@@ -192,6 +194,12 @@ function ActionDetail({
           {action.last_error}
         </p>
       )}
+
+      {action.runbook && <div className="space-y-1 rounded-md border border-border-subtle bg-bg-card p-2 text-[10px]">
+        <p className="text-text-secondary">Scheduled runbook</p>
+        <p className="break-all font-mono text-text-muted">{action.runbook.source_id}</p>
+        <p className="break-all font-mono text-text-muted">Definition: {action.runbook.canonical_sha256}</p>
+      </div>}
 
       <ol className="space-y-1">
         {action.steps.map((step, index) => (

@@ -6,7 +6,7 @@ import {
   blocksOf,
   collectSessionBlocks,
   contextAvailability,
-  renderContext,
+  renderSessionContext,
   type RunbookContextBlock,
 } from "../../lib/runbookAiContext";
 import { runbooksAiGenerate, runbooksDraftCreate, type RunbookDraft } from "../../lib/runbooks";
@@ -93,7 +93,7 @@ export function RunbookAiGenerator({
   // already deleted, silently, at the moment they were still editing. Going back
   // to the generated text is possible but has to be asked for.
   const [edited, setEdited] = useState<string | null>(null);
-  const payload = edited ?? renderContext(included);
+  const payload = edited ?? (chosenSession ? renderSessionContext(chosenSession, included) : "");
 
   useEffect(() => {
     if (!busy) {
@@ -116,7 +116,10 @@ export function RunbookAiGenerator({
   useEffect(
     () => () => {
       const id = activeRequestRef.current;
-      if (id) void aiCancel(id).catch(() => undefined);
+      if (id) {
+        cancelledRequestRef.current = id;
+        void aiCancel(id).catch(() => undefined);
+      }
     },
     [],
   );

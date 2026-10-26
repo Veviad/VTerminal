@@ -77,6 +77,8 @@ export type ExecError =
   | "cancelled";
 
 export interface PtyExecOutcome {
+  /** False only when the command never reached the PTY write boundary. */
+  commandDispatched?: boolean;
   exitCode: number | null;
   output: string;
   durationMs: number;
@@ -386,7 +388,14 @@ export async function runInTerminal(
   const privateOutput = opts.outputPolicy === "private";
   const startedAt = Date.now();
   const remoteAtStart = useAppStore.getState().sessionUi[sessionId]?.remote ?? null;
-  const authorizedRemoteProbe = !!opts.nonceCompletion && !!remoteAtStart;
+  const tracker = getTerm(sessionId)?.tracker;
+  // Restored terminals and shells that returned from SSH can have no usable
+  // integration markers. An exact operator prompt attestation still permits a
+  // nonce-bound shell challenge; never infer shell readiness from silence alone.
+  const attestedWithoutIntegration = !!opts.approvalPromptBinding && !!tracker
+    && !tracker.isAtEmptyPrompt() && !tracker.isAtPromptColumn();
+  const authorizedShellProbe = !!opts.nonceCompletion
+    && (!!remoteAtStart || attestedWithoutIntegration);
 
   const sanitized = sanitizeCommand(rawCommand);
   if (!sanitized.ok) {
@@ -394,6 +403,7 @@ export async function runInTerminal(
       exitCode: null,
       output: "",
       durationMs: 0,
+      commandDispatched: false,
       mode: null,
       error: "unsafe_command",
       note: `Nothing was executed: ${sanitized.reason}. Rewrite it as a single line without control characters.`,
@@ -416,7 +426,7 @@ export async function runInTerminal(
 
   preflightReservations.set(sessionId, approvalId);
   try {
-    return await runReservedInTerminal({
+    const outcome = await runReservedInTerminal({
       sessionId,
       approvalId,
       command,
@@ -427,8 +437,9 @@ export async function runInTerminal(
       privateOutput,
       startedAt,
       remoteAtStart,
-      authorizedRemoteProbe,
+      authorizedShellProbe,
     });
+    return { ...outcome, commandDispatched: outcome.commandDispatched ?? false };
   } finally {
     if (preflightReservations.get(sessionId) === approvalId) {
       preflightReservations.delete(sessionId);
@@ -447,7 +458,7 @@ interface ReservedRun {
   privateOutput: boolean;
   startedAt: number;
   remoteAtStart: RemoteContext | null;
-  authorizedRemoteProbe: boolean;
+  authorizedShellProbe: boolean;
 }
 
 async function runReservedInTerminal({
@@ -461,7 +472,7 @@ async function runReservedInTerminal({
   privateOutput,
   startedAt,
   remoteAtStart,
-  authorizedRemoteProbe,
+  authorizedShellProbe,
 }: ReservedRun): Promise<PtyExecOutcome> {
   let dispatchAuthorized = false;
   const commandDeadlineAt = startedAt + timeoutMs;
@@ -519,10 +530,11 @@ async function runReservedInTerminal({
     note: "Nothing was executed: final backend dispatch authorization was unavailable.",
   });
 
-  // A remote Runbook probe is itself a PTY write. Claim the one-shot backend
+  // A Runbook shell challenge is itself a PTY write. Claim the one-shot backend
   // dispatch lease first, then recheck the operator-bound epoch before emitting
   // even this harmless capability challenge.
-  if (authorizedRemoteProbe) {
+  if (authorizedShellProbe) {
+    if (opts.canWrite && !opts.canWrite()) return authorizationUnavailable(null);
     dispatchAuthorized = await acquireDispatchAuthorization();
     if (!dispatchAuthorized) return authorizationUnavailable(null);
     if (!remoteIdentityMatches(sessionId, remoteAtStart)) {
@@ -554,12 +566,12 @@ async function runReservedInTerminal({
   }
 
   // 1. Wait for the terminal to be safe to type into (never inject blind).
-  // Local Runbooks can use the integrated prompt gate directly. Remote
-  // Runbooks took their lease above and now perform the same fresh probe as any
-  // other remote command.
-  const resolvedMode = opts.nonceCompletion && !authorizedRemoteProbe
+  // Local Runbooks with integration use its prompt gate directly. SSH and
+  // attested local shells without integration take their lease above and prove
+  // shell readiness using the same nonce-bound capability challenge.
+  const resolvedMode = opts.nonceCompletion && !authorizedShellProbe
     ? await resolveSentinelPrompt(sessionId, idleWaitMs, remoteAtStart, commandDeadlineAt)
-    : await resolveMode(sessionId, idleWaitMs, remoteAtStart, commandDeadlineAt);
+    : await resolveMode(sessionId, idleWaitMs, remoteAtStart, commandDeadlineAt, authorizedShellProbe);
   if (resolvedMode === "closed") return closedOutcome(startedAt, null);
   if (resolvedMode === "busy") {
     return busyOutcome(startedAt, null, "a program is in the foreground or the user is typing");
@@ -657,7 +669,7 @@ async function runReservedInTerminal({
   const dispatchEntry = getTerm(sessionId);
   const dispatchBuffer = dispatchEntry?.term.buffer.active;
   const approvedEpochStillBound = !approvedPrompt || (
-    authorizedRemoteProbe
+    authorizedShellProbe
       ? dispatchEntry === approvedPrompt.entry
         && !dispatchEntry?.disposed
         && dispatchBuffer?.type === approvedPrompt.bufferType
@@ -756,6 +768,7 @@ async function runReservedInTerminal({
       if (refresh) clearInterval(refresh);
       unsubscribe();
       jobs.delete(sessionId);
+      outcome = { ...outcome, commandDispatched: job.injected };
       resolve(
         privateOutput
           ? {
@@ -1396,10 +1409,11 @@ async function resolveMode(
   idleWaitMs: number,
   expectedRemote: RemoteContext | null,
   commandDeadlineAt: number,
+  requireShellProof = false,
 ): Promise<ModeResolution> {
   if (!remoteIdentityMatches(sessionId, expectedRemote)) return "target_changed";
 
-  if (!expectedRemote) {
+  if (!expectedRemote && !requireShellProof) {
     const ready = await waitForPrompt(
       sessionId,
       Math.max(0, Math.min(idleWaitMs, commandDeadlineAt - Date.now())),
@@ -1551,6 +1565,7 @@ function makeNonce(): string {
 
 function unsafeSentinelOutcome(startedAt: number): PtyExecOutcome {
   return {
+    commandDispatched: false,
     exitCode: null,
     output: "",
     durationMs: Date.now() - startedAt,
@@ -1565,6 +1580,7 @@ function busyOutcome(startedAt: number, mode: ExecMode | null, why: string): Pty
     exitCode: null,
     output: "",
     durationMs: Date.now() - startedAt,
+    commandDispatched: false,
     mode,
     error: "terminal_busy",
     note: `Nothing was executed: ${why}. No state changed. Wait and propose a harmless check, or finish and tell the user.`,
@@ -1576,6 +1592,7 @@ function closedOutcome(startedAt: number, mode: ExecMode | null): PtyExecOutcome
     exitCode: null,
     output: "",
     durationMs: Date.now() - startedAt,
+    commandDispatched: false,
     mode,
     error: "terminal_closed",
     note: "Nothing was executed: the terminal was closed or its shell exited.",

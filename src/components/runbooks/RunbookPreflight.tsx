@@ -15,6 +15,7 @@ import {
   type RunbookInputDefinition,
 } from "../../lib/runbooks";
 import { buildRunbookTargetContext, describeRunbookTarget } from "../../hooks/useRunbooks";
+import { resolveSessionTitle } from "../../lib/sessionTitle";
 import { useAppStore } from "../../stores/appStore";
 import { primaryButton, runbookInputClass, secondaryButton } from "./runbookUi";
 
@@ -36,6 +37,9 @@ export function RunbookPreflight({
   // Subscribing to these objects keeps the target summary fresh while the user
   // enters/exits SSH or changes tabs during preflight.
   const session = useAppStore((state) => state.sessions.find((item) => item.id === sessionId));
+  const sessions = useAppStore((state) => state.sessions);
+  const sessionUi = useAppStore((state) => state.sessionUi);
+  const setActiveSession = useAppStore((state) => state.setActiveSession);
   const targetUi = useAppStore((state) => (sessionId ? state.sessionUi[sessionId] : undefined));
   const [values, setValues] = useState<Record<string, string | number | boolean>>(() =>
     defaultRunbookInputs(definition),
@@ -49,6 +53,7 @@ export function RunbookPreflight({
   const [requested, setRequested] = useState<EvidenceMode>(floor);
   const evidenceMode = atLeastEvidence(requested, floor);
   const [submitted, setSubmitted] = useState(false);
+  const [localTargetConfirmed, setLocalTargetConfirmed] = useState(false);
   const ansibleTarget = definition.spec.target.kind === "ansible-inventory";
   const [runner, setRunner] = useState<AnsibleRunnerStatus | null>(null);
 
@@ -70,6 +75,10 @@ export function RunbookPreflight({
     setValues(defaultRunbookInputs(definition));
     setSubmitted(false);
   }, [definition]);
+
+  useEffect(() => {
+    setLocalTargetConfirmed(false);
+  }, [sessionId, targetUi?.remote?.kind, targetUi?.remote?.target, definition]);
 
   // A package with its own request, or a changed policy, moves the floor. Reset
   // rather than clamp so the control never shows a stale higher choice the
@@ -111,7 +120,10 @@ export function RunbookPreflight({
     ),
   );
   const ansibleSelection = ansibleActions[0]?.with;
-  const targetReady = ansibleTarget ? runner?.installed === true : target.context !== null;
+  const disconnectedSshTab = !!session?.hostId && !target.context?.remote_kind;
+  const targetReady = ansibleTarget
+    ? runner?.installed === true
+    : target.context !== null && (!disconnectedSshTab || localTargetConfirmed);
   const missing = inputs.filter(([name, input]) => {
     if (!input.required) return false;
     const value = values[name];
@@ -135,6 +147,25 @@ export function RunbookPreflight({
           {ansibleTarget ? <Workflow size={11} /> : <TerminalSquare size={11} />}
           {ansibleTarget ? "Ansible controller target" : "Active terminal target"}
         </h3>
+        {!ansibleTarget && (
+          <label className="block text-[10px] text-text-muted">
+            Execution target
+            <select
+              className={`${runbookInputClass} mt-1 w-full`}
+              value={sessionId ?? ""}
+              disabled={busy}
+              onChange={(event) => setActiveSession(event.target.value)}
+            >
+              {!sessionId && <option value="">Select a terminal</option>}
+              {sessions.filter((entry) => !entry.exited).map((entry) => {
+                const ui = Object.entries(sessionUi).find(([id]) => id === entry.id)?.[1];
+                return <option key={entry.id} value={entry.id}>
+                  {resolveSessionTitle(entry, ui)} · {ui?.remote ? `${ui.remote.kind}: ${ui.remote.target ?? "remote"}` : "local shell"}
+                </option>;
+              })}
+            </select>
+          </label>
+        )}
         {ansibleTarget ? (
           <>
             <p className={`text-[12px] ${runner?.installed ? "text-success" : "text-warning"}`}>
@@ -182,6 +213,23 @@ export function RunbookPreflight({
               <ShieldAlert size={11} className="mt-0.5 shrink-0" />
               This exact visible terminal is bound to the run. Changing its local, SSH or container context pauses execution.
             </p>
+            {!target.context.remote_kind && session?.hostId && (
+              <div className="space-y-2 text-[10px] leading-relaxed text-warning">
+                <p>
+                  This tab is currently local. Its saved SSH host label does not mean it is connected. Reconnect to the intended host before starting a remote runbook.
+                </p>
+                <label className="flex items-start gap-2">
+                  <input type="checkbox" checked={localTargetConfirmed} disabled={busy}
+                    onChange={(event) => setLocalTargetConfirmed(event.target.checked)} />
+                  I intend to run this runbook on the local shell in this disconnected SSH tab.
+                </label>
+              </div>
+            )}
+            {definition.spec.steps[0]?.id.startsWith("supported-") && (
+              <p className="text-[10px] leading-relaxed text-text-secondary">
+                Prerequisite: {definition.spec.steps[0].title}. If this check fails, choose a compatible target before continuing.
+              </p>
+            )}
           </>
         ) : (
           <p className="text-[11px] text-error">{target.error}</p>

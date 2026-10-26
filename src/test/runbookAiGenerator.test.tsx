@@ -224,7 +224,8 @@ describe("RunbookAiGenerator", () => {
   });
 
   it("cancels generation when the wizard unmounts", async () => {
-    mocks.generate.mockReturnValue(new Promise(() => undefined));
+    let release: (value: unknown) => void = () => {};
+    mocks.generate.mockReturnValue(new Promise((resolve) => { release = resolve; }));
     const onGenerated = vi.fn().mockResolvedValue(undefined);
     const view = render(<RunbookAiGenerator onGenerated={onGenerated} />);
     fireEvent.click(screen.getByRole("button", { name: /generate with ai/i }));
@@ -236,6 +237,9 @@ describe("RunbookAiGenerator", () => {
 
     view.unmount();
     expect(mocks.aiCancel).toHaveBeenCalledWith(mocks.generate.mock.calls[0][0]);
+    release({ definitionId: "nginx" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mocks.create).not.toHaveBeenCalled();
   });
 
   it("keeps the request open and reports a failure", async () => {

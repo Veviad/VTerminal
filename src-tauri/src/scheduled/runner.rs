@@ -195,12 +195,7 @@ fn commit_due_decisions(
                     .target
                     .host_id()
                     .and_then(|id| host_facts(&conn, id));
-                let live_sha = db::steps_fingerprint(
-                    &action.input.target,
-                    &action.input.steps,
-                    &action.input.mcp_selection,
-                    &action.input.doc_buckets,
-                );
+                let live_sha = db::action_fingerprint(&action.input);
                 let gate = validate::check_before_fire(
                     &action.input,
                     &action.steps_sha256,

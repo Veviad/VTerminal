@@ -10,6 +10,7 @@ import {
   collectSessionBlocks,
   contextAvailability,
   renderContext,
+  renderSessionContext,
   type RunbookContextBlock,
 } from "../lib/runbookAiContext";
 import {
@@ -138,5 +139,28 @@ describe("renderContext", () => {
     const out = renderContext([sample("gone", { output: "", outputUnavailable: true })]);
     expect(out).toContain("[output no longer in scrollback]");
     expect(renderContext([sample("quiet", { output: "" })])).toContain("[no output]");
+  });
+});
+
+describe("renderSessionContext", () => {
+  it("uses the live remote observation and does not present the Mac cwd as remote", () => {
+    useAppStore.setState({
+      sessions: [{ id: "s1", shell: "/bin/zsh", cwd: "/Users/op", hostId: "saved-ssh" }],
+      sessionUi: { s1: { remote: { kind: "ssh", target: "linux-server" }, cwd: "/Users/op" } },
+    } as never);
+    const text = renderSessionContext("s1", []);
+    expect(text).toContain("remote ssh (linux-server)");
+    expect(text).toContain("Remote operating system: unknown");
+    expect(text).not.toContain("/Users/op");
+  });
+
+  it("treats an exited SSH connection as local despite saved-host provenance", () => {
+    useAppStore.setState({
+      sessions: [{ id: "s1", shell: "/bin/zsh", cwd: "/Users/op", hostId: "saved-ssh" }],
+      sessionUi: { s1: { remote: null, cwd: "/Users/op" } },
+    } as never);
+    expect(renderSessionContext("s1", [])).toContain("Current target: local shell");
+    useAppStore.setState({ sendContextToAi: false });
+    expect(renderSessionContext("s1", [])).toBe("");
   });
 });

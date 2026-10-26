@@ -9,6 +9,7 @@ import { blockingIssues, useScheduleStore } from "../../stores/scheduleStore";
 import { useAppStore } from "../../stores/appStore";
 import {
   SCHEDULE_PERMISSION_MODES,
+  emptyScheduleInput,
   type ScheduleExecutionMode,
   type ScheduleMissedPolicy,
   type SchedulePermissionMode,
@@ -22,6 +23,8 @@ import { McpPicker } from "../ai/McpPicker";
 import { BucketPicker } from "../ai/BucketPicker";
 import { ScheduleRecurrenceEditor } from "./ScheduleRecurrenceEditor";
 import { ScheduleStepList } from "./ScheduleStepList";
+import { ScheduleRunbookPicker } from "./ScheduleRunbookPicker";
+import { ScheduleAiGenerator } from "./ScheduleAiGenerator";
 import { primaryButton, scheduleInputClass, secondaryButton } from "./scheduleUi";
 
 export function ScheduleEditor() {
@@ -89,13 +92,19 @@ export function ScheduleEditor() {
   // by comparing a fingerprint over the target, the steps and the attachments,
   // and any edit at all is enough for this warning to be worth showing.
   const willReArm =
-    input.permission_mode !== "ask" &&
+    (input.permission_mode !== "ask" || (input.runbook && input.runbook.approval !== "none")) &&
     (draft.storedPermissionMode === null ||
       draft.storedPermissionMode !== input.permission_mode ||
       dirty);
 
   return (
     <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
+      <ScheduleAiGenerator
+        disabled={busy !== null}
+        onGenerated={async (generated) => {
+          patchDraft(generated);
+        }}
+      />
       <Field label="Name" error={issueFor("name")}>
         <input
           value={input.name}
@@ -103,6 +112,23 @@ export function ScheduleEditor() {
           placeholder="Nightly checks"
           className={scheduleInputClass}
           aria-label="Action name"
+        />
+      </Field>
+
+      <label className="flex items-center gap-1.5 text-[11px] text-text-secondary">
+        <input type="checkbox" checked={input.enabled} onChange={(event) => patchDraft({ enabled: event.target.checked })} className="accent-accent" />
+        Enable scheduled task
+      </label>
+
+      <Field label="Task content">
+        <Segmented
+          value={input.runbook ? "runbook" : "steps"}
+          options={[{ value: "steps", label: "Commands and prompts" }, { value: "runbook", label: "Runbook" }]}
+          onChange={(kind) => patchDraft(kind === "runbook"
+            ? { runbook: { source_id: "", canonical_sha256: "", inputs: {}, approval: "none" }, steps: [], execution_mode: "headless", permission_mode: "ask" }
+            : { runbook: null, steps: emptyScheduleInput().steps, permission_mode: "ask" })}
+          ariaLabel="Task content"
+          size="sm"
         />
       </Field>
 
@@ -169,7 +195,7 @@ export function ScheduleEditor() {
         </div>
       </Field>
 
-      <Field
+      {!input.runbook && <Field
         label={S.schedules.executionMode}
         hint={S.schedules.executionHint}
         error={issueFor("execution_mode")}
@@ -194,7 +220,7 @@ export function ScheduleEditor() {
             <p className="text-[10px] text-warning">{S.schedules.tabExecutionOff}</p>
           )}
         </div>
-      </Field>
+      </Field>}
 
       <ScheduleRecurrenceEditor
         value={input.recurrence}
@@ -217,16 +243,18 @@ export function ScheduleEditor() {
         />
       </Field>
 
-      <ScheduleStepList
+      {input.runbook ? (
+        <ScheduleRunbookPicker value={input.runbook} onChange={(runbook) => patchDraft({ runbook })} error={issueFor("runbook")} />
+      ) : <ScheduleStepList
         steps={input.steps}
         onPatch={patchStep}
         onAdd={addStep}
         onRemove={removeStep}
         onMove={moveStep}
         issueFor={(index) => issueFor(`steps.${index}`)}
-      />
+      />}
 
-      <Field
+      {!input.runbook && <Field
         label={S.schedules.permission}
         hint={S.schedules.permissionDescriptions[input.permission_mode]}
         error={issueFor("permission_mode")}
@@ -252,9 +280,11 @@ export function ScheduleEditor() {
             <p className="text-[10px] text-warning">{S.schedules.permissionReArm}</p>
           )}
         </div>
-      </Field>
+      </Field>}
 
-      <Field label={S.schedules.context}>
+      {input.runbook && willReArm && <p className="text-[10px] text-warning">Saving authorizes the selected runbook definition, target and inputs with the automatic approval policy shown above.</p>}
+
+      {!input.runbook && <Field label={S.schedules.context}>
         <div className="flex flex-wrap items-center gap-1.5">
           <McpPicker
             conversationId={`schedule:${draft.actionId ?? "new"}`}
@@ -280,7 +310,7 @@ export function ScheduleEditor() {
             />
           )}
         </div>
-      </Field>
+      </Field>}
 
       <details className="rounded-md border border-border-subtle bg-bg-card p-2">
         <summary className="cursor-pointer text-[11px] text-text-secondary">

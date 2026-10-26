@@ -360,6 +360,7 @@ pub fn run() {
             commands::scheduled::scheduled_actions_list,
             commands::scheduled::scheduled_action_get,
             commands::scheduled::scheduled_action_validate,
+            commands::schedule_authoring::scheduled_action_ai_generate,
             commands::scheduled::scheduled_action_preview,
             commands::scheduled::scheduled_action_create,
             commands::scheduled::scheduled_action_update,

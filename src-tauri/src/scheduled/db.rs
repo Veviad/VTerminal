@@ -273,6 +273,29 @@ pub fn migrate_v20(conn: &Connection) -> Result<(), String> {
         .map_err(|e| format!("migration v20 failed: {e}"))
 }
 
+pub fn migrate_v21(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch("BEGIN; ALTER TABLE scheduled_actions ADD COLUMN runbook_json TEXT; INSERT INTO schema_version(version) VALUES (21); COMMIT;")
+        .map_err(|e| format!("migration v21 failed: {e}"))
+}
+
+/// Preserve existing step fingerprints while binding runbook approval to the
+/// exact package, inputs and target. New optional fields cannot invalidate old jobs.
+pub fn action_fingerprint(input: &ScheduledActionInput) -> String {
+    let base = steps_fingerprint(
+        &input.target,
+        &input.steps,
+        &input.mcp_selection,
+        &input.doc_buckets,
+    );
+    match &input.runbook {
+        None => base,
+        Some(runbook) => plan_fingerprint(&format!(
+            "{base}\x1erunbook\x1f{}",
+            serde_json::to_string(runbook).expect("runbook serializes")
+        )),
+    }
+}
+
 pub fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
@@ -457,6 +480,18 @@ fn action_from_row(row: &Row<'_>, steps: Vec<ScheduledStep>) -> rusqlite::Result
     Ok(ScheduledAction {
         id: row.get("id")?,
         input: ScheduledActionInput {
+            runbook: row
+                .get::<_, Option<String>>("runbook_json")?
+                .map(|json| {
+                    serde_json::from_str(&json).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })
+                })
+                .transpose()?,
             name: row.get("name")?,
             enabled: row.get::<_, i64>("enabled")? != 0,
             target,
@@ -518,7 +553,7 @@ const ACTION_COLUMNS: &str = "id, name, enabled, target_kind, target_host_id, ta
      at_hour, at_minute, weekday_mask, once_at, timezone, interval_anchor_at, missed_run_policy,
      mcp_selection_json, doc_buckets_json, web_access, max_iterations, command_timeout_secs,
      max_run_secs, close_tab_when_done, next_fire_at, last_fire_at, last_run_id, last_status,
-     last_error, created_at, updated_at";
+     last_error, created_at, updated_at, runbook_json";
 
 pub fn list_actions(conn: &Connection) -> Result<Vec<ScheduledAction>, String> {
     let ids: Vec<String> = {
@@ -667,6 +702,17 @@ pub fn upsert_action(
         )
         .map_err(|e| e.to_string())?;
     }
+    let runbook_json = input
+        .runbook
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE scheduled_actions SET runbook_json = ?2 WHERE id = ?1",
+        params![id, runbook_json],
+    )
+    .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())
 }
 
@@ -908,8 +954,8 @@ pub fn add_run_usage(
 pub fn insert_attempt(conn: &Connection, attempt: &StepAttempt) -> Result<(), String> {
     conn.execute(
         "INSERT INTO scheduled_step_attempts
-           (id, run_id, step_id, sort_order, kind, title, status, intent_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+           (id, run_id, step_id, sort_order, kind, title, status, intent_at, summary, started_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             attempt.id,
             attempt.run_id,
@@ -919,6 +965,8 @@ pub fn insert_attempt(conn: &Connection, attempt: &StepAttempt) -> Result<(), St
             attempt.title,
             attempt.status.as_str(),
             attempt.intent_at,
+            attempt.summary,
+            attempt.started_at,
         ],
     )
     .map_err(|e| e.to_string())
@@ -1253,6 +1301,7 @@ mod tests {
 
     fn input(name: &str, target: ScheduledTarget) -> ScheduledActionInput {
         ScheduledActionInput {
+            runbook: None,
             name: name.into(),
             enabled: true,
             target,
@@ -1330,6 +1379,56 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    #[test]
+    fn runbook_reference_round_trips_and_approval_is_digest_bound() {
+        use super::super::types::{RunbookApprovalPolicy, ScheduledRunbook};
+        let mut conn = memory_db();
+        let mut input = input("nightly runbook", ScheduledTarget::LocalShell { cwd: None });
+        let steps_sha = action_fingerprint(&input);
+        assert_eq!(
+            steps_sha,
+            steps_fingerprint(
+                &input.target,
+                &input.steps,
+                &input.mcp_selection,
+                &input.doc_buckets
+            )
+        );
+        input.steps.clear();
+        input.runbook = Some(ScheduledRunbook {
+            source_id: "source-1".into(),
+            canonical_sha256: "a".repeat(64),
+            inputs: std::collections::BTreeMap::from([("count".into(), serde_json::json!(2))]),
+            approval: RunbookApprovalPolicy::All,
+        });
+        let original = action_fingerprint(&input);
+        save(&mut conn, "rb", &input);
+        assert_eq!(get_action(&conn, "rb").unwrap().unwrap().input, input);
+        input.runbook.as_mut().unwrap().approval = RunbookApprovalPolicy::ReadOnly;
+        assert_ne!(original, action_fingerprint(&input));
+        input.runbook.as_mut().unwrap().approval = RunbookApprovalPolicy::All;
+        input
+            .runbook
+            .as_mut()
+            .unwrap()
+            .inputs
+            .insert("count".into(), serde_json::json!(3));
+        assert_ne!(original, action_fingerprint(&input));
+        input
+            .runbook
+            .as_mut()
+            .unwrap()
+            .inputs
+            .insert("count".into(), serde_json::json!(2));
+        input.runbook.as_mut().unwrap().canonical_sha256 = "b".repeat(64);
+        assert_ne!(original, action_fingerprint(&input));
+        input.runbook.as_mut().unwrap().canonical_sha256 = "a".repeat(64);
+        input.target = ScheduledTarget::SshHost {
+            host_id: "prod".into(),
+        };
+        assert_ne!(original, action_fingerprint(&input));
     }
 
     #[test]
@@ -1552,7 +1651,12 @@ mod tests {
             finished_at: None,
             duration_ms: None,
         };
+        attempt.summary = Some("Runbook report: native-1".into());
+        attempt.started_at = Some("2026-06-02T01:00:02Z".into());
         insert_attempt(&conn, &attempt).unwrap();
+        let linked = get_run(&conn, "r1").unwrap().unwrap().attempts.remove(0);
+        assert_eq!(linked.summary.as_deref(), Some("Runbook report: native-1"));
+        assert_eq!(linked.started_at.as_deref(), Some("2026-06-02T01:00:02Z"));
         // A caller that has no finishing timestamp must not write one.
         attempt.status = StepAttemptStatus::Unknown;
         finish_attempt(&conn, &attempt).unwrap();

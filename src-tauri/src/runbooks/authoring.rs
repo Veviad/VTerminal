@@ -76,7 +76,20 @@ pub async fn author_draft(
     ];
 
     let raw = round(provider, messages.clone(), effort, cancel.clone()).await?;
-    let document = parse_generated_draft(&raw)?;
+    let document = match parse_generated_draft(&raw) {
+        Ok(document) => document,
+        Err(error) => {
+            messages.push(ChatMessage::assistant(raw));
+            messages.push(ChatMessage::user(format!(
+                "The response could not be parsed: {error}. Return the complete Runbook draft \
+                 as one valid JSON object matching the required shape. No markdown or prose."
+            )));
+            let repaired = round(provider, messages, effort, cancel).await?;
+            let document = parse_generated_draft(&repaired)?;
+            let issues = validate(&document);
+            return Ok(AuthoredDraft { document, issues });
+        }
+    };
     let issues = validate(&document);
     if issues.is_empty() {
         return Ok(AuthoredDraft { document, issues });
@@ -230,6 +243,43 @@ fn truncate_chars(value: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::{FinishReason, ProviderError, ProviderEvent, ToolDef};
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    struct ScriptedProvider(Mutex<VecDeque<String>>);
+
+    #[async_trait::async_trait]
+    impl Provider for ScriptedProvider {
+        fn id(&self) -> &'static str {
+            "scripted"
+        }
+        fn model_name(&self) -> String {
+            "scripted".into()
+        }
+        async fn chat_stream(
+            &self,
+            _messages: Vec<ChatMessage>,
+            _tools: Vec<ToolDef>,
+            _params: ChatParams,
+            _cancel: tokio::sync::watch::Receiver<bool>,
+            tx: tokio::sync::mpsc::Sender<ProviderEvent>,
+        ) -> Result<(), ProviderError> {
+            let response = self
+                .0
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("unexpected extra repair round");
+            tx.send(ProviderEvent::TextDelta(response)).await.unwrap();
+            tx.send(ProviderEvent::Done {
+                finish_reason: FinishReason::Stop,
+            })
+            .await
+            .unwrap();
+            Ok(())
+        }
+    }
 
     const MINIMAL: &str = r#"{
         "definitionId": "nginx-baseline",
@@ -253,6 +303,27 @@ mod tests {
         assert_eq!(document.definition_id, "nginx-baseline");
         assert!(document.steps[0].apply.is_some());
         assert!(document.steps[0].verify.is_some());
+    }
+
+    #[tokio::test]
+    async fn repairs_malformed_initial_json_once_instead_of_losing_generation() {
+        let provider = ScriptedProvider(Mutex::new(VecDeque::from([
+            "{\"definitionId\": broken".into(),
+            MINIMAL.into(),
+        ])));
+        let (_, cancel) = tokio::sync::watch::channel(false);
+        let authored = author_draft(
+            &provider,
+            "verify nginx",
+            None,
+            Effort::Off,
+            cancel,
+            &|_| Vec::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(authored.document.definition_id, "nginx-baseline");
+        assert!(provider.0.lock().unwrap().is_empty());
     }
 
     /// Told not to fence, models fence anyway.

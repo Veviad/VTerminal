@@ -17,6 +17,7 @@ import {
   onScheduleRunNotice,
   SCHEDULE_PERMISSION_MODES,
   scheduleCreate,
+  scheduleAiGenerate,
   scheduleDelete,
   scheduleGet,
   schedulePreview,
@@ -48,6 +49,12 @@ beforeEach(() => {
  *  Tauri's default is camelCase. Getting this backwards is SILENT: the parameter
  *  simply arrives as its serde default, which for an id means an empty string. */
 describe("schedules API argument casing", () => {
+  it("sends generation requirements and the reviewed context without creating an action", async () => {
+    await scheduleAiGenerate("request-1", "Check disk nightly", "reviewed transcript");
+    expect(invokeMock).toHaveBeenCalledExactlyOnceWith("scheduled_action_ai_generate", {
+      request_id: "request-1", requirements: "Check disk nightly", terminal_context: "reviewed transcript",
+    });
+  });
   it("sends snake_case keys for every id-bearing command", async () => {
     const cases: [() => Promise<unknown>, string, Record<string, unknown>][] = [
       [() => scheduleGet("a1"), "scheduled_action_get", { id: "a1" }],

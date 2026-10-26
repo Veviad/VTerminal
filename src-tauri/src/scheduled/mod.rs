@@ -39,11 +39,13 @@
 //! helper that executes model-authored commands with no window is a materially
 //! different security product with its own signing and threat model.
 
+pub mod authoring;
 pub mod context;
 pub mod db;
 pub mod engine;
 pub mod recurrence;
 pub mod runner;
+pub mod runbook;
 pub mod scheduler;
 pub mod ssh;
 pub mod types;

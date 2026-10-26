@@ -55,7 +55,13 @@ pub fn scheduled_action_validate(
         .target
         .host_id()
         .and_then(|id| runner::host_facts(&conn, id));
-    Ok(validate::validate(&input, host.as_ref()))
+    let mut issues = validate::validate(&input, host.as_ref());
+    if input.runbook.is_some() {
+        if let Err(message) = crate::scheduled::runbook::validate_package(&conn, &input) {
+            issues.push(ScheduledValidationIssue::blocking("runbook", message));
+        }
+    }
+    Ok(issues)
 }
 
 /// The next `count` fire times, rendered. Makes DST and weekday arithmetic
@@ -91,7 +97,12 @@ fn resolve_arming(
     fingerprint: &str,
     now: &str,
 ) -> (crate::agent::PermissionMode, Option<String>) {
-    if input.permission_mode == crate::agent::PermissionMode::Ask {
+    if input.permission_mode == crate::agent::PermissionMode::Ask
+        && !input
+            .runbook
+            .as_ref()
+            .is_some_and(|r| r.approval != RunbookApprovalPolicy::None)
+    {
         return (crate::agent::PermissionMode::Ask, None);
     }
     match previous {
@@ -136,13 +147,11 @@ fn save(
         return Err(blocking.message.clone());
     }
 
+    if input.runbook.is_some() {
+        crate::scheduled::runbook::validate_package(&conn, &input)?;
+    }
     let previous = db::get_action(&conn, &id)?;
-    let fingerprint = db::steps_fingerprint(
-        &input.target,
-        &input.steps,
-        &input.mcp_selection,
-        &input.doc_buckets,
-    );
+    let fingerprint = db::action_fingerprint(&input);
     let now = db::now_rfc3339();
     let (mode, armed_at) = resolve_arming(previous.as_ref(), &input, &fingerprint, &now);
     input.permission_mode = mode;
@@ -289,12 +298,7 @@ pub fn scheduled_action_run_now(
         .target
         .host_id()
         .and_then(|hid| runner::host_facts(&conn, hid));
-    let live = db::steps_fingerprint(
-        &action.input.target,
-        &action.input.steps,
-        &action.input.mcp_selection,
-        &action.input.doc_buckets,
-    );
+    let live = db::action_fingerprint(&action.input);
     validate::check_before_fire(
         &action.input,
         &action.steps_sha256,
@@ -703,6 +707,7 @@ mod tests {
 
     fn input(mode: PermissionMode) -> ScheduledActionInput {
         ScheduledActionInput {
+            runbook: None,
             name: "nightly".into(),
             enabled: true,
             target: ScheduledTarget::LocalShell { cwd: None },
