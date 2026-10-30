@@ -30,6 +30,8 @@ const persistence = vi.hoisted(() => ({
 const pty = vi.hoisted(() => ({
   abortSession: vi.fn(),
   runInTerminal: vi.fn(),
+  captureApprovalPromptBinding: vi.fn(() => "prompt-binding"),
+  releaseApprovalPromptBinding: vi.fn(),
 }));
 const terminalRegistry = vi.hoisted(() => ({
   entries: new Map<string, { disposed: boolean }>(),
@@ -134,6 +136,98 @@ beforeEach(() => {
     activeModelId: "test-model",
   });
   useAppStore.getState().addSession(session());
+});
+
+describe("steering with attachments", () => {
+  it("keeps newly staged files when the opening agent turn finishes saving its image", async () => {
+    useAppStore.setState({ catalog: [{ id: "test-model", supports_vision: true } as never] });
+    const write = deferred<{ path: string }>();
+    const agent = deferred<ChatMessage[]>();
+    api.attachmentPut.mockImplementationOnce(() => write.promise);
+    api.agentStart.mockImplementationOnce(() => agent.promise);
+    useAppStore.getState().attachFilesToAi(SID, [{ id: "img", kind: "image", name: "screen.png", mediaType: "image/png", bytes: 4, data: "AAAA" }]);
+    const { result } = renderHook(() => useAiStream());
+    let run!: Promise<void>;
+    act(() => { run = result.current.startAgent(SID, "first"); });
+    const later = pastedText("next message");
+    act(() => { useAppStore.getState().attachFilesToAi(SID, [later]); });
+    write.resolve({ path: "/tmp/screen.png" });
+    await flushPreflight();
+    expect(useAppStore.getState().aiStreams[SID].pendingAttachments).toEqual([later]);
+    agent.resolve([]);
+    await act(async () => run);
+  });
+
+  it("sends text and images with the queued message and removes only those chips", async () => {
+    useAppStore.setState({ catalog: [{ id: "test-model", supports_vision: true } as never] });
+    useAppStore.getState().initAiStream(SID, "agent", "running-agent");
+    const file = pastedText("diagnostic log");
+    const image: Attachment = { id: "img", kind: "image", name: "screen.png", mediaType: "image/png", bytes: 4, data: "AAAA" };
+    useAppStore.getState().attachFilesToAi(SID, [file, image]);
+    const { result } = renderHook(() => useAiStream());
+    await act(async () => result.current.steer(SID, "look at these"));
+    expect(api.agentSteer).toHaveBeenCalledWith("running-agent", expect.any(String), "look at these", expect.stringContaining("diagnostic log"), [{ media_type: "image/png", data: "AAAA" }]);
+    const stream = useAppStore.getState().aiStreams[SID];
+    expect(stream.pendingAttachments).toEqual([]);
+    const message = stream.messages[stream.messages.length - 1];
+    expect(message?.attachments?.map((a) => a.id)).toEqual([file.id, image.id]);
+    expect(message?.steer).toBe("queued");
+  });
+
+  it("keeps attachments on an undelivered message when the backend rejects it", async () => {
+    useAppStore.getState().initAiStream(SID, "agent", "running-agent");
+    const file = pastedText("keep this log");
+    useAppStore.getState().attachFilesToAi(SID, [file]);
+    api.agentSteer.mockRejectedValueOnce(new Error("run ended"));
+    const { result } = renderHook(() => useAiStream());
+    await act(async () => result.current.steer(SID, "inspect"));
+    const messages = useAppStore.getState().aiStreams[SID].messages;
+    const message = messages[messages.length - 1];
+    expect(message?.steer).toBe("undelivered");
+    expect(message?.attachments).toEqual([file]);
+    expect(message?.content).toContain("keep this log");
+  });
+
+  it("delivers queued messages in order when image persistence is slow", async () => {
+    useAppStore.setState({ catalog: [{ id: "test-model", supports_vision: true } as never] });
+    useAppStore.getState().initAiStream(SID, "agent", "running-agent");
+    const write = deferred<{ path: string }>();
+    api.attachmentPut.mockImplementationOnce(() => write.promise);
+    useAppStore.getState().attachFilesToAi(SID, [{ id: "img", kind: "image", name: "screen.png", mediaType: "image/png", bytes: 4, data: "AAAA" }]);
+    const { result } = renderHook(() => useAiStream());
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    act(() => {
+      first = result.current.steer(SID, "first");
+      second = result.current.steer(SID, "second");
+    });
+    await flushPreflight();
+    expect(api.agentSteer).not.toHaveBeenCalled();
+    write.resolve({ path: "/tmp/screen.png" });
+    await act(async () => { await Promise.all([first, second]); });
+    expect(api.agentSteer.mock.calls.map((call) => call[2])).toEqual(["first", "second"]);
+  });
+
+  it("retains an image saved after its run ended and a new run started", async () => {
+    useAppStore.setState({ catalog: [{ id: "test-model", supports_vision: true } as never] });
+    useAppStore.getState().initAiStream(SID, "agent", "old-agent");
+    const write = deferred<{ path: string }>();
+    api.attachmentPut.mockImplementationOnce(() => write.promise);
+    useAppStore.getState().attachFilesToAi(SID, [{ id: "img", kind: "image", name: "screen.png", mediaType: "image/png", bytes: 4, data: "AAAA" }]);
+    const { result } = renderHook(() => useAiStream());
+    let pending!: Promise<void>;
+    act(() => { pending = result.current.steer(SID, "look"); });
+    await flushPreflight();
+    act(() => {
+      useAppStore.getState().finishAiStream(SID, undefined, undefined, "old-agent");
+      useAppStore.getState().initAiStream(SID, "agent", "new-agent");
+    });
+    write.resolve({ path: "/tmp/saved-screen.png" });
+    await act(async () => pending);
+    const message = useAppStore.getState().aiStreams[SID].messages.find((m) => m.steer === "undelivered");
+    expect(message?.attachments?.[0].path).toBe("/tmp/saved-screen.png");
+    expect(api.agentSteer).not.toHaveBeenCalled();
+  });
 });
 
 describe("terminal command result classification", () => {
@@ -561,6 +655,63 @@ describe("AI generation ownership", () => {
 });
 
 describe("single-terminal command routing", () => {
+  it("does not turn an SSH proposal into a local command after disconnect", async () => {
+    useAppStore.getState().updateSessionUi(SID, {
+      remote: { kind: "ssh", target: "prod-01" }, nestedBlockId: "ssh-block",
+    });
+    let onEvent!: (event: StreamEvent) => void;
+    api.agentStart.mockImplementationOnce((...args: unknown[]) => {
+      onEvent = args[6] as (event: StreamEvent) => void;
+      return Promise.resolve([]);
+    });
+    const { result } = renderHook(() => useAiStream());
+    await act(async () => result.current.startAgent(SID, "inspect remote"));
+    act(() => onEvent({
+      type: "CommandProposal", approval_id: "ssh-disconnect", command: "pwd",
+      explanation: "Inspect remote directory", read_only: true, network: false,
+      output_policy: "normal",
+    }));
+    expect(useAppStore.getState().aiStreams[SID].pendingProposal).toMatchObject({
+      proposedRemote: true,
+      proposedTargetLabel: "ssh prod-01",
+    });
+    act(() => useAppStore.getState().updateSessionUi(SID, { remote: null, nestedBlockId: null }));
+    expect(result.current.proposalTargetIsCurrent(SID)).toBe(false);
+    await act(async () => result.current.respondToProposal(SID, "run"));
+    expect(api.respondToApproval).toHaveBeenCalledWith("ssh-disconnect", "skip");
+    expect(pty.runInTerminal).not.toHaveBeenCalled();
+    expect(useAppStore.getState().aiStreams[SID].messages.some(
+      (message) => message.command?.note?.includes("terminal target changed"),
+    )).toBe(true);
+  });
+
+  it("rejects a remote command when SSH disconnects between approval and dispatch", async () => {
+    useAppStore.getState().updateSessionUi(SID, {
+      remote: { kind: "ssh", target: "prod-01" }, nestedBlockId: "ssh-block",
+    });
+    let onEvent!: (event: StreamEvent) => void;
+    api.agentStart.mockImplementationOnce((...args: unknown[]) => {
+      onEvent = args[6] as (event: StreamEvent) => void;
+      return Promise.resolve([]);
+    });
+    const { result } = renderHook(() => useAiStream());
+    await act(async () => result.current.startAgent(SID, "inspect remote"));
+    act(() => onEvent({
+      type: "CommandProposal", approval_id: "ssh-after-approval", command: "pwd",
+      explanation: "Inspect remote directory", read_only: true, network: false,
+      output_policy: "normal",
+    }));
+    act(() => expect(result.current.attestProposalPrompt(SID, true)).toBe(true));
+    await act(async () => result.current.respondToProposal(SID, "run"));
+    act(() => useAppStore.getState().updateSessionUi(SID, { remote: null, nestedBlockId: null }));
+    act(() => onEvent({
+      type: "RunInTerminal", approval_id: "ssh-after-approval", session_id: SID,
+      command: "pwd", timeout_secs: 30, explanation: "Inspect remote directory", output_policy: "normal",
+    }));
+    expect(pty.runInTerminal).not.toHaveBeenCalled();
+    expect(api.submitCommandResult).toHaveBeenCalledWith("ssh-after-approval", null,
+      expect.stringContaining("terminal target changed"), 0, "target_changed");
+  });
   it("accepts an ordinary approval and dispatch without treating it as Sidecar", async () => {
     let onEvent!: (event: StreamEvent) => void;
     api.agentStart.mockImplementationOnce((...args: unknown[]) => {

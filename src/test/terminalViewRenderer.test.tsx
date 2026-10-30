@@ -1,10 +1,11 @@
-import { render } from "@testing-library/react";
+import { act, render } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   entries: new Map<string, any>(),
   acquire: vi.fn(),
   release: vi.fn(),
+  resize: vi.fn(() => Promise.resolve()),
 }));
 
 vi.mock("../lib/termRegistry", () => ({
@@ -19,7 +20,7 @@ vi.mock("../lib/termRegistry", () => ({
   },
 }));
 
-vi.mock("../lib/tauri", () => ({ ptyResize: vi.fn(() => Promise.resolve()) }));
+vi.mock("../lib/tauri", () => ({ ptyResize: mocks.resize }));
 vi.mock("../lib/aiPanel", () => ({ isPanelResizing: () => false }));
 
 import { TerminalView } from "../components/terminal/TerminalView";
@@ -43,6 +44,7 @@ beforeEach(() => {
   mocks.entries.clear();
   mocks.acquire.mockClear();
   mocks.release.mockClear();
+  mocks.resize.mockClear();
   mocks.entries.set("local", entry());
   mocks.entries.set("remote", entry());
   Object.defineProperty(document, "fonts", {
@@ -52,6 +54,33 @@ beforeEach(() => {
 });
 
 describe("Sidecar terminal renderer ownership", () => {
+  it("fits a resized pane without issuing a second PTY resize", () => {
+    const originalObserver = globalThis.ResizeObserver;
+    let notify!: ResizeObserverCallback;
+    globalThis.ResizeObserver = class {
+      constructor(callback: ResizeObserverCallback) { notify = callback; }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+    vi.useFakeTimers();
+    try {
+      const view = render(<TerminalView sessionId="local" active />);
+      const host = view.container.firstElementChild as HTMLElement;
+      Object.defineProperty(host, "offsetParent", { value: document.body });
+      act(() => {
+        notify([], {} as ResizeObserver);
+        vi.advanceTimersByTime(16);
+      });
+      expect(mocks.entries.get("local").fit.fit).toHaveBeenCalled();
+      expect(mocks.resize).not.toHaveBeenCalled();
+      view.unmount();
+    } finally {
+      vi.useRealTimers();
+      globalThis.ResizeObserver = originalObserver;
+    }
+  });
+
   it("keeps both visible renderers across focus switches", () => {
     const view = render(
       <>

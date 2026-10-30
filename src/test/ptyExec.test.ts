@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Terminal } from "@xterm/xterm";
+import { readFileSync } from "node:fs";
 import type { TermEvent } from "../lib/termRegistry";
 import { writePtyOutput } from "../lib/ptyEcho";
 
@@ -27,6 +29,7 @@ vi.mock("../lib/termRegistry", () => ({
 const {
   runInTerminal,
   abortSession,
+  awaitApprovalPromptBinding,
   captureApprovalPromptBinding,
   interruptJob,
   forgetShellProof,
@@ -579,6 +582,31 @@ describe("runInTerminal — integrated session", () => {
     expect(outcome.outputCapturedBytes).toBe(retainedBytes);
   });
 
+  it("retains wrapped output after the dispatch anchor is trimmed", async () => {
+    const lines = ["$ "];
+    entry = makeEntry(lines);
+    const promise = runInTerminal("s1", "runbook-attempt", "printf lots", {
+      timeoutMs: 5_000,
+      nonceCompletion: true,
+    });
+    await flush();
+    const written = ptyWrite.mock.calls[0][1];
+    const nonce = /;([a-z0-9]+)\\007/.exec(written)?.[1];
+    expect(nonce).toBeTruthy();
+    const marker = entry.registeredMarkers[0];
+    lines.splice(0, lines.length, "retained continuation", "new line");
+    entry.term.buffer.active.getLine = (y) => lines[y] === undefined
+      ? undefined
+      : { translateToString: () => lines[y], isWrapped: y === 0 };
+    entry.term.buffer.active.length = lines.length;
+    entry.term.buffer.active.cursorY = 1;
+    marker.dispose();
+    emit({ type: "osc", payload: `RD;0;${nonce}` });
+    const outcome = await promise;
+    expect(outcome.output).toBe("retained continuation\nnew line");
+    expect(outcome.outputTruncated).toBe(true);
+  });
+
   it("harvests sentinel output from the marker's shifted live line", async () => {
     const lines = ["old history", "$ "];
     entry = makeEntry(lines);
@@ -608,6 +636,91 @@ describe("runInTerminal — integrated session", () => {
     expect(outcome.outputObservedBytes).toBe(4);
     expect(outcome.outputCapturedBytes).toBe(4);
   });
+
+  it("excludes wrapped command echo from sentinel output", async () => {
+    const lines = ["$ long command", "echo continuation", "actual output"];
+    entry = makeEntry(["$ "]);
+    const promise = runInTerminal("s1", "runbook-attempt", "printf actual", { timeoutMs: 5000, nonceCompletion: true });
+    await flush();
+    const written = ptyWrite.mock.calls[0][1];
+    const nonce = /;([a-z0-9]+)\\007/.exec(written)?.[1];
+    entry.term.buffer.active.getLine = (y) => lines[y] === undefined ? undefined : { translateToString: () => lines[y], isWrapped: y === 1 };
+    entry.term.buffer.active.length = lines.length;
+    entry.term.buffer.active.cursorY = 2;
+    emit({ type: "osc", payload: `RD;0;${nonce}` });
+    expect((await promise).output).toBe("actual output");
+  });
+
+  it("captures wrapped output after a long echo in an actual xterm buffer", async () => {
+    entry = makeEntry(["$ "]);
+    const promise = runInTerminal("s1", "runbook-attempt", "printf output", {
+      timeoutMs: 5_000,
+      nonceCompletion: true,
+    });
+    await flush();
+    const written = ptyWrite.mock.calls[0][1];
+    const nonce = /;([a-z0-9]+)\\007/.exec(written)?.[1];
+    expect(nonce).toBeTruthy();
+    const terminal = new Terminal({ cols: 40, rows: 24 });
+    const output = "actual-output-".repeat(9);
+    await new Promise<void>((resolve) => terminal.write(`$ ${"command-".repeat(20)}\r\n${output}`, resolve));
+    const real = terminal.buffer.active;
+    entry.term.buffer.active.getLine = (y) => {
+      const line = real.getLine(y);
+      return line ? { translateToString: () => line.translateToString(true), isWrapped: line.isWrapped } : undefined;
+    };
+    entry.term.buffer.active.length = real.length;
+    entry.term.buffer.active.cursorY = real.cursorY;
+    entry.term.buffer.active.baseY = real.baseY;
+    emit({ type: "osc", payload: `RD;0;${nonce}` });
+    const outcome = await promise;
+    expect(outcome.output).toBe(output);
+    terminal.dispose();
+  });
+
+  it.each((JSON.parse(readFileSync("src/test/fixtures/pty-echo.json", "utf8")) as Array<{
+    kind: string; shell: string; cols: number; initial: string; rawEcho: string; line: string;
+  }>).filter((fixture) => fixture.kind === "sentinel"))(
+    "captures output after a real $shell echo at $cols columns",
+    async (fixture) => {
+      const terminal = new Terminal({ cols: fixture.cols, rows: 24 });
+      const write = (value: string) => new Promise<void>((resolve) => terminal.write(value, resolve));
+      await write(fixture.initial);
+      const real = terminal.buffer.active;
+      entry = makeEntry(["$ "]);
+      const buffer = entry.term.buffer.active;
+      buffer.cursorY = real.cursorY;
+      buffer.cursorX = real.cursorX;
+      buffer.baseY = real.baseY;
+      buffer.length = real.length;
+      buffer.getLine = (y) => {
+        const line = real.getLine(y);
+        return line ? { translateToString: (trim?: boolean, start?: number) => line.translateToString(trim, start), isWrapped: line.isWrapped } : undefined;
+      };
+      const random = vi.spyOn(globalThis.crypto, "getRandomValues").mockImplementation((bytes) => {
+        (bytes as Uint8Array).set([1, 35, 69, 103, 137, 171, 205, 239, 1, 35, 69, 103, 137, 171, 205, 239]);
+        return bytes;
+      });
+      const promise = runInTerminal("s1", "runbook-attempt", "printf 'hello world\\n'", {
+        timeoutMs: 5_000,
+        nonceCompletion: true,
+        harden: false,
+      });
+      await flush();
+      const written = ptyWrite.mock.calls[0][1];
+      random.mockRestore();
+      expect(written.trim()).toBe(fixture.line);
+      const nonce = /;([a-z0-9]+)\\007/.exec(written)?.[1];
+      expect(nonce).toBeTruthy();
+      await write(`${fixture.rawEcho}hello world\r\n`);
+      buffer.cursorY = real.cursorY;
+      buffer.baseY = real.baseY;
+      buffer.length = real.length;
+      emit({ type: "osc", payload: `RD;0;${nonce}` });
+      expect((await promise).output).toBe("hello world");
+      terminal.dispose();
+    },
+  );
 
   it("disposes a sentinel anchor after complete capture without claiming truncation", async () => {
     const lines = ["$ "];
@@ -1284,6 +1397,83 @@ describe("runInTerminal — remote session", () => {
     useAppStore.getState().updateSessionUi("s1", {
       remote: { kind: "ssh", target: "prod-01" },
     });
+  });
+
+  it("does not auto-attest a quiet row without a proven integrated empty prompt", async () => {
+    vi.useFakeTimers();
+    entry = makeEntry(["remote$ unfinished"], { atPrompt: false });
+    const binding = awaitApprovalPromptBinding("s1", { quiescenceMs: 0, timeoutMs: 200 });
+    await vi.advanceTimersByTimeAsync(300);
+    expect(await binding).toBeNull();
+  });
+
+  it("does not probe or submit a quiet, partially typed remote command without attestation", async () => {
+    entry = makeEntry(["remote$ rm -rf /unfinished"]);
+    const outcome = await runInTerminal("s1", "ap1", "hostname", {
+      requireRemotePromptAttestation: true,
+    });
+    expect(outcome.error).toBe("terminal_busy");
+    expect(outcome.exitCode).toBeNull();
+    expect(ptyWrite).not.toHaveBeenCalled();
+  });
+
+  it("runs at a freshly attested remote prompt and reuses the untouched proof", async () => {
+    entry = makeEntry(["remote$ "]);
+    const binding = captureApprovalPromptBinding("s1")!;
+    const first = runInTerminal("s1", "ap1", "hostname", {
+      requireRemotePromptAttestation: true,
+      approvalPromptBinding: binding,
+      timeoutMs: 5_000,
+    });
+    await flush();
+    const probe = probeNonce(ptyWrite.mock.calls[0][1]);
+    emit({ type: "osc", payload: `RP;${probe};z;b5.2;f` });
+    await flush();
+    const nonce = commandNonce(ptyWrite.mock.calls[1][1]);
+    emit({ type: "osc", payload: `RD;0;${nonce}` });
+    expect((await first).exitCode).toBe(0);
+
+    const second = runInTerminal("s1", "ap2", "whoami", {
+      requireRemotePromptAttestation: true,
+      timeoutMs: 5_000,
+    });
+    await flush();
+    expect(ptyWrite).toHaveBeenCalledTimes(3);
+    emit({ type: "osc", payload: `RD;0;${commandNonce(ptyWrite.mock.calls[2][1])}` });
+    expect((await second).exitCode).toBe(0);
+  });
+
+  it("does not submit an attested probe if the user types while the terminal becomes quiet", async () => {
+    vi.useFakeTimers();
+    entry = makeEntry(["remote$ "]);
+    entry.lastDataAt = Date.now();
+    const binding = captureApprovalPromptBinding("s1")!;
+    const run = runInTerminal("s1", "ap1", "hostname", {
+      requireRemotePromptAttestation: true,
+      approvalPromptBinding: binding,
+      timeoutMs: 5_000,
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    entry.lastUserInputAt = Date.now();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect((await run).error).toBe("target_changed");
+    expect(ptyWrite).not.toHaveBeenCalled();
+  });
+
+  it("does not dispatch an agent command if the user types during the remote probe", async () => {
+    entry = makeEntry(["remote$ "]);
+    const binding = captureApprovalPromptBinding("s1")!;
+    const run = runInTerminal("s1", "ap1", "hostname", {
+      requireRemotePromptAttestation: true,
+      approvalPromptBinding: binding,
+      timeoutMs: 5_000,
+    });
+    await flush();
+    const probe = probeNonce(ptyWrite.mock.calls[0][1]);
+    entry.lastUserInputAt = Date.now();
+    emit({ type: "osc", payload: `RP;${probe};z;b5.2;f` });
+    expect((await run).error).toBe("target_changed");
+    expect(ptyWrite).toHaveBeenCalledTimes(1);
   });
 
   it("hides the probe and completion suffix while preserving command output and tokens", async () => {

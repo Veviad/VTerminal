@@ -133,6 +133,10 @@ export async function ptySpawn(
 export const ptyWrite = (sessionId: string, data: string) =>
   invoke<void>("pty_write", { sessionId, data });
 
+/** xterm binary input (e.g. legacy mouse reports) is bytes, not UTF-8 text. */
+export const ptyWriteBytes = (sessionId: string, data: number[]) =>
+  invoke<void>("pty_write_bytes", { sessionId, data });
+
 export const ptyResize = (sessionId: string, cols: number, rows: number) =>
   invoke<void>("pty_resize", { sessionId, cols, rows });
 
@@ -450,11 +454,13 @@ export const submitCommandResult = (
  *  Rejects once the run is over — the caller turns that into an undelivered
  *  badge rather than losing what the user typed. Snake_case like the other two
  *  agent-adjacent commands. */
-export const agentSteer = (requestId: string, steerId: string, text: string) =>
+export const agentSteer = (requestId: string, steerId: string, text: string, attachmentText?: string, images?: ImagePart[]) =>
   invoke<void>("agent_steer", {
     request_id: requestId,
     steer_id: steerId,
     text,
+    attachment_text: attachmentText ?? null,
+    images: images ?? [],
   });
 
 export const aiCancel = (requestId: string) =>

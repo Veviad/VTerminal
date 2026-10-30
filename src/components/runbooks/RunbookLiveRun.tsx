@@ -338,6 +338,7 @@ export function RunbookLiveRun({ sessionId }: { sessionId: string | null }) {
             <RunbookApprovalCard
               approval={pendingApproval}
               targetLabel={describeRunbookTarget(run.target)}
+              remoteTarget={run.target.kind === "active-terminal" && Boolean(run.target.remote_kind)}
               busy={busyAction === `approval:${pendingApproval.approval_id}`}
               autoApproving={autoApproving}
               onApproveAll={(command) => {

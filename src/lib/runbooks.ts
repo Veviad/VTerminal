@@ -1047,11 +1047,13 @@ export const runbooksAiGenerate = (
   requestId: string,
   requirements: string,
   terminalContext: string | null,
+  platform: RunbookDraftPlatform,
 ) =>
   invoke<RunbookDraftDocument>("runbooks_ai_generate", {
     request_id: requestId,
     requirements,
     terminal_context: terminalContext,
+    platform,
   });
 
 export const runbooksDraftPublish = (draftId: string, expectedRevision: number) =>

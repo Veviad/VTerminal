@@ -241,8 +241,8 @@ export const S = {
     // boundary, never mid-step, so the wording never promises "now".
     steerPlaceholder: "Redirect the agent — delivered at its next step…",
     steerHint: "Send to the running agent — it picks this up at its next step",
-    steerQueued: "Queued — the agent picks this up at its next step",
-    steerUndelivered: "Not delivered — the run ended before the agent read this",
+    steerQueued: "Queued — waiting for the agent to respond",
+    steerUndelivered: "Delivery not confirmed — the run ended before the agent responded",
     steerSend: "Send as a new message",
     steerWaitingOne: "1 message waiting — answer this step to deliver it",
     steerWaitingMany: "messages waiting — answer this step to deliver them",
@@ -610,6 +610,8 @@ export const S = {
         ? "Fixed to Bash in the default WSL2 distribution"
         : "Leave empty for /bin/zsh",
       shellIntegration: "Shell integration (command blocks)",
+      shellIntegrationHint:
+        "Open a new tab after changing this setting.",
       historyEnabled: "Save command history",
       historyCaptureOutput: "Capture output tails in history",
       aiSessionNaming: "Name tabs with AI",

@@ -328,7 +328,7 @@ describe("AiPanel renders", () => {
     expect(screen.getByText(/without approval/i)).toBeTruthy();
   });
 
-  it("releases the approval already on screen when Full is selected", async () => {
+  it("refuses an approval without its original target snapshot when Full is selected", async () => {
     const setMode = vi.spyOn(api, "agentSetPermissionMode").mockResolvedValue(undefined);
     const approve = vi.spyOn(api, "respondToApproval").mockResolvedValue(undefined);
     useAppStore.setState({
@@ -361,7 +361,7 @@ describe("AiPanel renders", () => {
 
     await waitFor(() => {
       expect(setMode).toHaveBeenCalledWith("req-full", "full", undefined);
-      expect(approve).toHaveBeenCalledWith("approval-full", "run", undefined);
+      expect(approve).toHaveBeenCalledWith("approval-full", "skip");
     });
   });
 
@@ -1164,7 +1164,7 @@ describe("AiPanel renders", () => {
     render(<AiPanel sessionId="s1" />);
 
     expect(screen.getByText(/use ripgrep instead/i)).toBeTruthy();
-    expect(screen.getByText(/Not delivered/i)).toBeTruthy();
+    expect(screen.getByText(/Delivery not confirmed/i)).toBeTruthy();
     expect(screen.getByRole("button", { name: /send as a new message/i })).toBeTruthy();
   });
 

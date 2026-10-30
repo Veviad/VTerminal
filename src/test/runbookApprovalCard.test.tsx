@@ -21,6 +21,21 @@ function shellApproval(command: string) {
 }
 
 describe("RunbookApprovalCard", () => {
+  it("requires individual approval and an empty prompt on remote terminals", () => {
+    render(
+      <RunbookApprovalCard
+        approval={shellApproval("printf hi")}
+        busy={false}
+        targetLabel="ssh linux.example"
+        remoteTarget
+        onRespond={vi.fn()}
+        onApproveAll={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: /every later step unseen/i })).toBeNull();
+    expect(screen.getByText(/no partially typed command or program waiting/i)).toBeInTheDocument();
+    expect(screen.getByText(/remote commands require individual approval/i)).toBeInTheDocument();
+  });
   it("approves a shell approval from one explicit action with valid command", () => {
     const onRespond = vi.fn();
     render(

@@ -573,9 +573,14 @@ pub fn spawn(
 
 impl PtySession {
     pub fn write(&self, data: &str) -> Result<(), String> {
+        self.write_bytes(data.as_bytes())
+    }
+
+    /// Forward xterm binary reports byte-for-byte, without UTF-8 encoding.
+    pub fn write_bytes(&self, data: &[u8]) -> Result<(), String> {
         let mut writer = self.writer.lock().map_err(|_| "writer poisoned")?;
         writer
-            .write_all(data.as_bytes())
+            .write_all(data)
             .map_err(|e| format!("pty write failed: {e}"))
     }
 
@@ -666,6 +671,59 @@ mod tests {
     };
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[cfg(unix)]
+    #[test]
+    fn binary_input_reaches_a_real_pty_without_utf8_conversion() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::Instant;
+        use tauri::ipc::Channel;
+
+        let root = tempfile::tempdir().unwrap();
+        let shell = root.path().join("read-binary");
+        std::fs::write(
+            &shell,
+            "#!/bin/sh\nstty raw -echo\n: > ready\ndd bs=1 count=4 of=captured 2>/dev/null\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let session = super::spawn(
+            super::SpawnParams {
+                session_id: "binary-input-test".into(),
+                cols: 80,
+                rows: 24,
+                cwd: Some(root.path().to_string_lossy().into_owned()),
+                shell_path: Some(shell.to_string_lossy().into_owned()),
+                shell_scope: None,
+                zdotdir: None,
+                integration_enabled: false,
+            },
+            Channel::new(|_| Ok(())),
+            Channel::new(|_| Ok(())),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !root.path().join("ready").exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            root.path().join("ready").exists(),
+            "test PTY did not become ready"
+        );
+        let bytes = [0x1b, 0x5b, 0xe1, 0xff];
+        session.write_bytes(&bytes).unwrap();
+        while std::fs::metadata(root.path().join("captured"))
+            .map(|m| m.len())
+            .unwrap_or(0)
+            < bytes.len() as u64
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let captured = std::fs::read(root.path().join("captured"));
+        session.kill();
+        assert_eq!(captured.unwrap(), bytes);
+    }
 
     #[test]
     fn keeps_an_existing_directory() {

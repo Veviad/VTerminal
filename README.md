@@ -38,6 +38,10 @@ Modern AI terminals tend to be Electron apps that phone home for every completio
 - OSC 133 shell integration marks every command: exit-code badges, copy command or output, re-run, attach as AI context
 - Restored tabs never reconnect on their own — an `ssh` tab offers *Reconnect* instead
 
+Starting another interactive shell inside a tab does not install VTerminal's
+integration in that nested shell. Command blocks and agent command execution may
+be unavailable until you exit the nested shell or open a fresh terminal tab.
+
 **AI**
 - **Faster local generation with MTP:** VTerminal automatically accelerates supported Qwen3.5, Qwen3.6, and Gemma 4 models using Multi-Token Prediction, with safe fallback to standard decoding.
 - **Command suggestion** (⌘I on macOS, Ctrl+Shift+I on Windows, or `#` at an empty prompt) — describe the goal, get a command inserted into your prompt

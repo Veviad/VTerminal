@@ -1,0 +1,190 @@
+apiVersion: runbooks.veviad.com/v1alpha1
+kind: Runbook
+
+metadata:
+  id: macos-orbstack-docker-cleanup
+  version: 1.0.0
+  title: macOS OrbStack Docker Cleanup
+  description: |
+    Inspect and clean the local OrbStack Docker daemon using an explicit Docker
+    binary, configuration directory, and context. Remove stopped containers
+    created over 24 hours ago, unused dangling images, and dangling build cache
+    limited by Docker's until=168h filter. Keep volumes and tagged images.
+  tags: [macos, orbstack, docker, cleanup]
+
+spec:
+  target:
+    kind: active-terminal
+
+  inputs:
+    dockerBinary:
+      type: path
+      description: Absolute path to the Docker CLI on this Mac.
+      default: /usr/local/bin/docker
+    dockerConfigDir:
+      type: path
+      description: Absolute path to your Docker config directory, for example /Users/yourname/.docker.
+      required: true
+
+  declaredCapabilities:
+    network: true
+    privilege: none
+    writes: [/var/lib/docker]
+
+  defaults:
+    onFailure: stop
+
+  steps:
+    - id: supported-macos-target
+      title: Target is macOS
+      required: true
+      check:
+        uses: shell
+        with:
+          command: "os=$(uname -s) || exit 2; test \"$os\" = Darwin || exit 64"
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]
+
+    - id: explicit-docker-inputs
+      title: Docker binary and explicit configuration exist
+      required: true
+      check:
+        uses: shell
+        with:
+          command: "test -x \"$VRUN_DOCKER_BINARY\" && test -d \"$VRUN_DOCKER_CONFIG_DIR\" && test -r \"$VRUN_DOCKER_CONFIG_DIR/config.json\" || exit 64"
+          env:
+            VRUN_DOCKER_BINARY: dockerBinary
+            VRUN_DOCKER_CONFIG_DIR: dockerConfigDir
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]
+
+    - id: local-orbstack-context
+      title: OrbStack context uses a local Unix socket
+      required: true
+      check:
+        uses: shell
+        with:
+          command: "endpoint=$(\"$VRUN_DOCKER_BINARY\" --config \"$VRUN_DOCKER_CONFIG_DIR\" --context orbstack context inspect orbstack --format '{{.Endpoints.docker.Host}}') || exit 2; case \"$endpoint\" in unix:///*) printf 'Local OrbStack endpoint: %s\\n' \"$endpoint\";; *) printf 'Refusing a non-local OrbStack endpoint: %s\\n' \"$endpoint\" >&2; exit 64;; esac"
+          env:
+            VRUN_DOCKER_BINARY: dockerBinary
+            VRUN_DOCKER_CONFIG_DIR: dockerConfigDir
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]
+
+    - id: docker-space-before
+      title: Record Docker disk usage before cleanup
+      required: true
+      check:
+        uses: shell
+        with:
+          command: "\"$VRUN_DOCKER_BINARY\" --config \"$VRUN_DOCKER_CONFIG_DIR\" --context orbstack system df || exit 2"
+          env:
+            VRUN_DOCKER_BINARY: dockerBinary
+            VRUN_DOCKER_CONFIG_DIR: dockerConfigDir
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]
+
+    - id: old-stopped-containers
+      title: No stopped containers created over 24 hours ago
+      required: true
+      check:
+        uses: shell
+        with:
+          command: "parse_time() { parse_value=$1; case \"$parse_value\" in *Z) parse_zone=+0000; parse_body=${parse_value%Z};; *[+-][0-9][0-9]:[0-9][0-9]) parse_body=${parse_value%??????}; parse_zone=${parse_value#\"$parse_body\"}; parse_zone=\"${parse_zone%:*}${parse_zone##*:}\";; *) return 2;; esac; /bin/date -ju -f '%Y-%m-%dT%H:%M:%S%z' \"${parse_body%%.*}$parse_zone\" +%s; }; now=$(\"$VRUN_DOCKER_BINARY\" --config \"$VRUN_DOCKER_CONFIG_DIR\" --context orbstack info --format '{{.SystemTime}}') || exit 2; now=$(parse_time \"$now\") || exit 2; cutoff=$((now - 86400)); ids=$(\"$VRUN_DOCKER_BINARY\" --config \"$VRUN_DOCKER_CONFIG_DIR\" --context orbstack container ls --all --quiet --no-trunc --filter status=created --filter status=exited --filter status=dead) || exit 2; found=0; for id in $ids; do created=$(\"$VRUN_DOCKER_BINARY\" --config \"$VRUN_DOCKER_CONFIG_DIR\" --context orbstack container inspect --format '{{.Created}}' \"$id\") || exit 2; stamp=$(parse_time \"$created\") || exit 2; if test \"$stamp\" -lt \"$cutoff\"; then printf 'Eligible stopped container (created over 24h ago): %s\\n' \"$id\"; found=1; fi; done; exit \"$found\""
+          env:
+            VRUN_DOCKER_BINARY: dockerBinary
+            VRUN_DOCKER_CONFIG_DIR: dockerConfigDir
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]
+      apply:
+        uses: shell
+        with:
+          command: "\"$VRUN_DOCKER_BINARY\" --config \"$VRUN_DOCKER_CONFIG_DIR\" --context orbstack container prune --force --filter until=24h"
+          env:
+            VRUN_DOCKER_BINARY: dockerBinary
+            VRUN_DOCKER_CONFIG_DIR: dockerConfigDir
+        successExitCodes: [0]
+      verify:
+        uses: shell
+        with:
+          command: "parse_time() { parse_value=$1; case \"$parse_value\" in *Z) parse_zone=+0000; parse_body=${parse_value%Z};; *[+-][0-9][0-9]:[0-9][0-9]) parse_body=${parse_value%??????}; parse_zone=${parse_value#\"$parse_body\"}; parse_zone=\"${parse_zone%:*}${parse_zone##*:}\";; *) return 2;; esac; /bin/date -ju -f '%Y-%m-%dT%H:%M:%S%z' \"${parse_body%%.*}$parse_zone\" +%s; }; now=$(\"$VRUN_DOCKER_BINARY\" --config \"$VRUN_DOCKER_CONFIG_DIR\" --context orbstack info --format '{{.SystemTime}}') || exit 2; now=$(parse_time \"$now\") || exit 2; cutoff=$((now - 86400)); ids=$(\"$VRUN_DOCKER_BINARY\" --config \"$VRUN_DOCKER_CONFIG_DIR\" --context orbstack container ls --all --quiet --no-trunc --filter status=created --filter status=exited --filter status=dead) || exit 2; found=0; for id in $ids; do created=$(\"$VRUN_DOCKER_BINARY\" --config \"$VRUN_DOCKER_CONFIG_DIR\" --context orbstack container inspect --format '{{.Created}}' \"$id\") || exit 2; stamp=$(parse_time \"$created\") || exit 2; if test \"$stamp\" -lt \"$cutoff\"; then printf 'Eligible stopped container (created over 24h ago): %s\\n' \"$id\"; found=1; fi; done; exit \"$found\""
+          env:
+            VRUN_DOCKER_BINARY: dockerBinary
+            VRUN_DOCKER_CONFIG_DIR: dockerConfigDir
+        passExitCodes: [0]
+
+    - id: dangling-images
+      title: No unused dangling images
+      required: true
+      check:
+        uses: shell
+        with:
+          command: "ids=$(\"$VRUN_DOCKER_BINARY\" --config \"$VRUN_DOCKER_CONFIG_DIR\" --context orbstack image ls --quiet --no-trunc --filter dangling=true) || exit 2; found=0; for id in $ids; do refs=$(\"$VRUN_DOCKER_BINARY\" --config \"$VRUN_DOCKER_CONFIG_DIR\" --context orbstack container ls --all --quiet --filter ancestor=\"$id\") || exit 2; if test -z \"$refs\"; then printf 'Eligible dangling image: %s\\n' \"$id\"; found=1; fi; done; exit \"$found\""
+          env:
+            VRUN_DOCKER_BINARY: dockerBinary
+            VRUN_DOCKER_CONFIG_DIR: dockerConfigDir
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]
+      apply:
+        uses: shell
+        with:
+          command: "\"$VRUN_DOCKER_BINARY\" --config \"$VRUN_DOCKER_CONFIG_DIR\" --context orbstack image prune --force"
+          env:
+            VRUN_DOCKER_BINARY: dockerBinary
+            VRUN_DOCKER_CONFIG_DIR: dockerConfigDir
+        successExitCodes: [0]
+      verify:
+        uses: shell
+        with:
+          command: "ids=$(\"$VRUN_DOCKER_BINARY\" --config \"$VRUN_DOCKER_CONFIG_DIR\" --context orbstack image ls --quiet --no-trunc --filter dangling=true) || exit 2; found=0; for id in $ids; do refs=$(\"$VRUN_DOCKER_BINARY\" --config \"$VRUN_DOCKER_CONFIG_DIR\" --context orbstack container ls --all --quiet --filter ancestor=\"$id\") || exit 2; if test -z \"$refs\"; then printf 'Eligible dangling image: %s\\n' \"$id\"; found=1; fi; done; exit \"$found\""
+          env:
+            VRUN_DOCKER_BINARY: dockerBinary
+            VRUN_DOCKER_CONFIG_DIR: dockerConfigDir
+        passExitCodes: [0]
+
+    - id: old-dangling-build-cache
+      title: Review dangling build cache with the seven-day filter
+      required: false
+      check:
+        uses: manual
+        instructions: |
+          Review the Build Cache section recorded by docker-space-before. Choose
+          Noncompliant only when you want to prune dangling build cache limited
+          by until=168h; choose Compliant to keep it. No --all flag is used.
+          Docker does not provide a stable read-only listing with exactly the
+          same builder-prune predicate, so this decision is operator-attested.
+      apply:
+        uses: shell
+        with:
+          command: "\"$VRUN_DOCKER_BINARY\" --config \"$VRUN_DOCKER_CONFIG_DIR\" --context orbstack builder prune --force --filter until=168h"
+          env:
+            VRUN_DOCKER_BINARY: dockerBinary
+            VRUN_DOCKER_CONFIG_DIR: dockerConfigDir
+        successExitCodes: [0]
+      verify:
+        uses: manual
+        instructions: |
+          Review the successful builder-prune result and reclaimed-space output.
+          Record that the approved dangling-cache prune used until=168h and no
+          --all flag. This is an operator attestation, not a deterministic proof
+          that all cache is gone. If the command failed, report Failed.
+
+    - id: docker-space-after
+      title: Record Docker disk usage after cleanup
+      required: true
+      check:
+        uses: shell
+        with:
+          command: "\"$VRUN_DOCKER_BINARY\" --config \"$VRUN_DOCKER_CONFIG_DIR\" --context orbstack system df || exit 2"
+          env:
+            VRUN_DOCKER_BINARY: dockerBinary
+            VRUN_DOCKER_CONFIG_DIR: dockerConfigDir
+        outcomes:
+          compliantExitCodes: [0]
+          noncompliantExitCodes: [1]

@@ -693,8 +693,16 @@ pub fn agent_steer(
     request_id: String,
     steer_id: String,
     text: String,
+    attachment_text: Option<String>,
+    images: Option<Vec<crate::provider::ImagePart>>,
 ) -> Result<(), String> {
-    steers.push(&request_id, steer_id, text)
+    steers.push_with_attachments(
+        &request_id,
+        steer_id,
+        text,
+        attachment_text.unwrap_or_default(),
+        images.unwrap_or_default(),
+    )
 }
 
 /// The frontend reports what it observed after typing a command into the live
@@ -838,6 +846,7 @@ pub async fn agent_start(
         }
     };
     let model_id = resolved.model.label.to_string();
+    steers.set_vision(&request_id, resolved.model.supports_vision);
     // The user's switch AND what this model can actually do. Each provider
     // intersects it again with its own catalog entry, so this is a ceiling.
     let web_access = crate::commands::settings::read_bool(&app, "ai_web_access", true);

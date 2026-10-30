@@ -28,7 +28,7 @@ import type {
 } from "./types";
 
 /** Archive rows -> the panel's shape. */
-function toAiMessages(rows: ArchivedMessage[]): AiMessage[] {
+export function toAiMessages(rows: ArchivedMessage[]): AiMessage[] {
   return rows.map((r) => ({
     // Ids are regenerated from the stable sort order rather than reused: this is
     // a NEW session, and the compaction bookkeeping positions entries by id.
@@ -37,6 +37,7 @@ function toAiMessages(rows: ArchivedMessage[]): AiMessage[] {
     content: r.content,
     createdAt: r.created_at,
     thinking: r.thinking ?? undefined,
+    steer: r.role === "user" && r.steer_undelivered ? "undelivered" : undefined,
     kind:
       r.kind === "command"
         ? "command"

@@ -30,6 +30,10 @@ use crate::provider::ChatMessage;
 /// Per display message. Generous — a long answer is legitimately long — but
 /// bounded, because this is multiplied by MAX_MESSAGES.
 const MAX_MESSAGE_CONTENT: usize = 16 * 1024;
+/// An unconfirmed steer may contain up to 1 MiB of folded text attachments and
+/// 4,096 characters of user input. Retain that bounded payload so a retry
+/// after reopening does not silently send an incomplete attachment.
+const MAX_UNDELIVERED_STEER_CONTENT: usize = 1024 * 1024 + 4096 + 2;
 /// Per command card. Tail-kept: the end of a command's output is what says
 /// whether it worked.
 const MAX_COMMAND_OUTPUT: usize = 8 * 1024;
@@ -152,6 +156,7 @@ pub struct ArchivedMessage {
     pub kind: String,
     pub content: String,
     pub thinking: Option<String>,
+    pub steer_undelivered: bool,
     pub command: Option<ArchivedCommand>,
     pub attachments: Vec<ArchivedAttachment>,
     pub created_at: String,
@@ -213,6 +218,8 @@ pub struct ArchiveMessageInput {
     pub content: String,
     #[serde(default)]
     pub thinking: Option<String>,
+    #[serde(default)]
+    pub steer_undelivered: bool,
     #[serde(default)]
     pub command: Option<ArchiveCommandInput>,
     /// Metadata for the chips. The bytes were written to disk by
@@ -374,7 +381,7 @@ pub fn get(conn: &Connection, session_id: &str) -> Result<Option<ArchiveDetail>,
         .prepare(
             "SELECT id, sort_order, role, kind, content, thinking, cmd_command, cmd_output,
                     cmd_exit_code, cmd_status, cmd_note, cmd_output_policy, cmd_target_role,
-                    cmd_target_label, created_at
+                    cmd_target_label, created_at, steer_undelivered
                FROM archived_messages WHERE session_id = ?1 ORDER BY sort_order ASC",
         )
         .map_err(|e| e.to_string())?;
@@ -425,6 +432,7 @@ pub fn get(conn: &Connection, session_id: &str) -> Result<Option<ArchiveDetail>,
                 kind,
                 content: row.get(4)?,
                 thinking: row.get(5)?,
+                steer_undelivered: row.get(15)?,
                 command,
                 attachments: Vec::new(),
                 created_at: row.get(14)?,
@@ -750,8 +758,8 @@ pub fn put_many(
                     "INSERT INTO archived_messages
                         (id, session_id, sort_order, role, kind, content, thinking,
                          cmd_command, cmd_output, cmd_exit_code, cmd_status, cmd_note,
-                         cmd_output_policy, cmd_target_role, cmd_target_label, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                         cmd_output_policy, cmd_target_role, cmd_target_label, created_at, steer_undelivered)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                     params![
                         // Message ids are only unique per session on the frontend
                         // ("msg-<ms>-<len>" can repeat across tabs), and this
@@ -761,7 +769,14 @@ pub fn put_many(
                         i as i64,
                         role,
                         kind,
-                        head(&m.content, MAX_MESSAGE_CONTENT),
+                        head(
+                            &m.content,
+                            if m.steer_undelivered && role == "user" {
+                                MAX_UNDELIVERED_STEER_CONTENT
+                            } else {
+                                MAX_MESSAGE_CONTENT
+                            },
+                        ),
                         m.thinking.as_deref().map(|t| head(t, MAX_MESSAGE_CONTENT)),
                         cmd,
                         out,
@@ -772,6 +787,7 @@ pub fn put_many(
                         target_role,
                         target_label,
                         m.created_at,
+                        m.steer_undelivered && role == "user",
                     ],
                 )
                 .map_err(|e| format!("archive message {i} of {}: {e}", input.session_id))?;
@@ -1111,6 +1127,7 @@ mod tests {
             kind: None,
             content: format!("message {i}"),
             thinking: None,
+            steer_undelivered: false,
             command: None,
             attachments: None,
             created_at: "2026-08-01T00:00:00+00:00".into(),
@@ -1123,6 +1140,7 @@ mod tests {
             kind: Some("command".into()),
             content: String::new(),
             thinking: None,
+            steer_undelivered: false,
             command: Some(ArchiveCommandInput {
                 command: format!("ls -la /{i}"),
                 output: format!("output {i}"),
@@ -1186,6 +1204,40 @@ mod tests {
         assert!(detail.messages[0].content.contains("<finish>"));
         assert!(detail.messages[0].content.contains("<summary>"));
         assert!(detail.messages[0].command.is_none());
+    }
+
+    #[test]
+    fn undelivered_steer_status_survives_archive_rewrite() {
+        let mut conn = mem();
+        let mut r = row("steer");
+        let mut queued = msg(0, "user");
+        queued.steer_undelivered = true;
+        let delivered = msg(1, "user");
+        r.messages = Some(vec![queued, delivered]);
+        put(&mut conn, &r, KEEP_ALL).unwrap();
+        let detail = get(&conn, "steer").unwrap().unwrap();
+        assert!(detail.messages[0].steer_undelivered);
+        assert!(!detail.messages[1].steer_undelivered);
+    }
+
+    #[test]
+    fn undelivered_steer_retains_large_attachment_text_but_stays_bounded() {
+        let mut conn = mem();
+        let mut r = row("large-steer");
+        let mut undelivered = msg(0, "user");
+        undelivered.steer_undelivered = true;
+        undelivered.content = format!("{}end-of-file", "é".repeat(128 * 1024));
+        let mut oversized = msg(1, "user");
+        oversized.steer_undelivered = true;
+        oversized.content = "x".repeat(MAX_UNDELIVERED_STEER_CONTENT + 10);
+        r.messages = Some(vec![undelivered, oversized]);
+        put(&mut conn, &r, KEEP_ALL).unwrap();
+        let detail = get(&conn, "large-steer").unwrap().unwrap();
+        assert!(detail.messages[0].content.ends_with("end-of-file"));
+        assert_eq!(
+            detail.messages[1].content.chars().count(),
+            MAX_UNDELIVERED_STEER_CONTENT
+        );
     }
 
     #[test]

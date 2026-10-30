@@ -194,6 +194,8 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
     startAgent,
     continueRun,
     steer,
+    attestProposalPrompt,
+    proposalTargetIsCurrent,
     respondToProposal,
     respondToMcpProposal,
     cancel,
@@ -313,10 +315,12 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
         ? sidecar.permissions.local
         : sidecar.permissions.remote
       : permissionMode;
-  const proposalTarget =
-    sidecar && proposalRole
+  const proposalTarget = pendingProposal?.proposedTargetLabel !== undefined
+    ? pendingProposal.proposedTargetLabel
+    : sidecar && proposalRole
       ? sidecarTargetLabel(sidecar, proposalRole, sessions, sessionUi)
       : (describeRemote(remote) ?? cwd);
+  const proposedTargetChanged = !!pendingProposal && !proposalTargetIsCurrent(sessionId ?? "");
   const attachedBlocks = (stream?.attachedBlockIds ?? [])
     .map((id) => blocks.find((b) => b.id === id))
     .filter((b) => b !== undefined);
@@ -462,9 +466,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
     // received is indistinguishable from an answer about one it did.
     if (imagesBlocked) return;
     if (busy) {
-      // Pending attachments belong to the NEXT ordinary turn. The steering API
-      // accepts text only, so a chip must never make this Send button look ready.
-      if (!steering || !hasInlineInput) return;
+      if (!steering || !hasIdlePayload) return;
       void steer(sessionId, input.trim());
     } else if (agentMode) {
       if (!hasIdlePayload) return;
@@ -899,8 +901,11 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             key={pendingProposal.approvalId}
             command={pendingProposal.command}
             explanation={pendingProposal.explanation}
-            remote={proposalRole ? proposalRole === "remote" : !!remote}
+            remote={pendingProposal.proposedRemote ?? (proposalRole ? proposalRole === "remote" : !!remote)}
             targetRole={proposalRole ?? undefined}
+            targetChanged={proposedTargetChanged}
+            remoteSessionId={pendingProposal.targetSessionId ?? sessionId}
+            onConfirmPrompt={(confirmed) => attestProposalPrompt(sessionId, confirmed)}
             outputPolicy={pendingProposal.outputPolicy}
             target={proposalTarget}
             queuedSteers={queuedSteers}
@@ -1186,7 +1191,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
                 !aiReady ||
                 imagesBlocked ||
                 Boolean(sidecar?.degraded) ||
-                (steering ? !hasInlineInput : !hasIdlePayload)
+                !hasIdlePayload
               }
               aria-label={steering ? S.aiPanel.steerHint : S.aiPanel.send}
               title={
@@ -1614,7 +1619,7 @@ function SteerBadge({
       <span>{S.aiPanel.steerUndelivered}</span>
       {sessionId && (
         <button
-          onClick={() => void startAgent(sessionId, message.content)}
+          onClick={() => void startAgent(sessionId, message.content, message.attachments?.filter((a) => a.kind === "image"))}
           className="rounded-md border border-warning/40 px-1.5 py-0.5 text-warning transition-colors duration-150 hover:bg-warning/10"
         >
           {S.aiPanel.steerSend}

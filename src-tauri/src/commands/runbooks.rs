@@ -1894,6 +1894,7 @@ pub async fn runbooks_ai_generate(
     request_id: String,
     requirements: String,
     terminal_context: Option<String>,
+    platform: Option<crate::runbooks::drafts::DraftPlatform>,
 ) -> Result<RunbookDraftDocument, String> {
     use crate::runbooks::authoring::{MAX_CONTEXT_CHARS, MAX_REQUIREMENTS_CHARS};
 
@@ -1922,6 +1923,7 @@ pub async fn runbooks_ai_generate(
         resolved.provider.as_ref(),
         &requirements,
         terminal_context.as_deref(),
+        platform,
         effort,
         cancel,
         &|document| validate_draft_preview(document).issues,
@@ -3960,6 +3962,7 @@ fn engine_config(
             .map(|value| value.clamp(0.0, 2.0) as f32),
         effort: crate::commands::settings::read_effort(app, model),
         model_networked: provider_invocation_is_networked(model.provider),
+        preserve_target_environment: true,
         ..EngineConfig::default()
     }
 }

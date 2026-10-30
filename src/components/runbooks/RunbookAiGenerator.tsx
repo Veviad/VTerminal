@@ -9,7 +9,12 @@ import {
   renderContext,
   type RunbookContextBlock,
 } from "../../lib/runbookAiContext";
-import { runbooksAiGenerate, runbooksDraftCreate, type RunbookDraft } from "../../lib/runbooks";
+import {
+  runbooksAiGenerate,
+  runbooksDraftCreate,
+  type RunbookDraft,
+  type RunbookDraftPlatform,
+} from "../../lib/runbooks";
 import { resolveSessionTitle } from "../../lib/sessionTitle";
 import { useAppStore } from "../../stores/appStore";
 import { secondaryButton } from "./runbookUi";
@@ -43,6 +48,7 @@ export function RunbookAiGenerator({
 }) {
   const [open, setOpen] = useState(false);
   const [requirements, setRequirements] = useState("");
+  const [platform, setPlatform] = useState<RunbookDraftPlatform | "">("");
   const [attach, setAttach] = useState(false);
   const [busy, setBusy] = useState(false);
   const [stopping, setStopping] = useState(false);
@@ -123,6 +129,7 @@ export function RunbookAiGenerator({
 
   const reset = () => {
     setRequirements("");
+    setPlatform("");
     setAttach(false);
     setEdited(null);
     setExcluded(new Set());
@@ -130,6 +137,7 @@ export function RunbookAiGenerator({
   };
 
   const generate = async () => {
+    if (!platform) return;
     const id = `runbook-gen-${Date.now()}-${requestCounter++}`;
     activeRequestRef.current = id;
     cancelledRequestRef.current = null;
@@ -138,7 +146,7 @@ export function RunbookAiGenerator({
     setError(null);
     try {
       const context = attach && availability.available && payload.trim() ? payload : null;
-      const document = await runbooksAiGenerate(id, requirements, context);
+      const document = await runbooksAiGenerate(id, requirements, context, platform);
       if (cancelledRequestRef.current === id) return;
       const draft = await runbooksDraftCreate(document);
       await onGenerated(draft);
@@ -219,6 +227,27 @@ export function RunbookAiGenerator({
           }}
         />
       </label>
+
+      <label className={`${labelClass} mt-3`}>
+        Target platform
+        <select
+          className={fieldClass}
+          value={platform}
+          disabled={busy}
+          onChange={(event) => {
+            setPlatform(event.target.value as RunbookDraftPlatform | "");
+          }}
+        >
+          <option value="">Choose the machine this runbook will manage</option>
+          <option value="macos13">macOS 13 or newer</option>
+          <option value="linux">Linux / WSL</option>
+          <option value="any">Portable across platforms</option>
+        </select>
+      </label>
+      <p className="mt-1 text-[9px] text-text-muted">
+        Choose the target machine's platform, including when it is reached over SSH.
+        For Docker through OrbStack on macOS, choose macOS.
+      </p>
 
       <label className="mt-3 flex items-center gap-1.5 text-[10px] text-text-secondary">
         <input
@@ -329,7 +358,7 @@ export function RunbookAiGenerator({
         )}
         <button
           type="button"
-          disabled={busy || !requirements.trim()}
+          disabled={busy || !requirements.trim() || !platform}
           onClick={() => void generate()}
           className="flex items-center gap-1 rounded-md bg-accent px-3 py-1.5 text-[10px] text-white disabled:opacity-50"
         >

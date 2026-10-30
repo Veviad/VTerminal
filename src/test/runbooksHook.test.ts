@@ -711,6 +711,66 @@ describe("useRunbooks channel activation", () => {
   });
 });
 
+describe("useRunbooks durable refresh races", () => {
+  it("keeps a new approval when an earlier StepChanged refresh arrives late", async () => {
+    const current = run("run-step-refresh", "running");
+    useRunbookStore.getState().setActiveRun(current);
+    let resolveSnapshot!: (snapshot: RunbookRun) => void;
+    mocks.get.mockImplementationOnce(() => new Promise<RunbookRun>((resolve) => {
+      resolveSnapshot = resolve;
+    }));
+    const { result } = renderHook(() => useRunbooks());
+
+    await act(async () => {
+      await result.current.handleRunbookEvent({
+        type: "StepChanged", run_id: current.run_id, step_id: "one",
+        status: "checking", phase: "check",
+      });
+    });
+    expect(mocks.get).toHaveBeenCalledWith(current.run_id);
+    await act(async () => {
+      await result.current.handleRunbookEvent(
+        approvalEvent(current.run_id, "approval-next", "docker system df"),
+      );
+      resolveSnapshot({ ...current, pending_approval: null });
+    });
+
+    expect(useRunbookStore.getState().activeRun?.status).toBe("waiting_approval");
+    expect(useRunbookStore.getState().activeRun?.pending_approval?.approval_id)
+      .toBe("approval-next");
+  });
+
+  it("keeps the next approval when the previous approval response refresh arrives late", async () => {
+    const current = waitingApprovalRun("run-approval-refresh", "approval-first", "docker info");
+    useRunbookStore.getState().setActiveRun(current);
+    let resolveSnapshot!: (snapshot: RunbookRun) => void;
+    mocks.get.mockImplementationOnce(() => new Promise<RunbookRun>((resolve) => {
+      resolveSnapshot = resolve;
+    }));
+    const { result } = renderHook(() => useRunbooks());
+    let approvalResponse!: Promise<void>;
+    act(() => {
+      approvalResponse = result.current.respondApproval(
+        current.run_id, "approval-first", true, "docker info",
+      );
+    });
+    await waitFor(() => expect(mocks.get).toHaveBeenCalledWith(current.run_id));
+    await act(async () => {
+      await result.current.handleRunbookEvent(
+        approvalEvent(current.run_id, "approval-next", "docker system df"),
+      );
+      resolveSnapshot({
+        ...current, status: "running", pending_approval_id: null, pending_approval: null,
+      });
+      await approvalResponse;
+    });
+
+    expect(useRunbookStore.getState().activeRun?.status).toBe("waiting_approval");
+    expect(useRunbookStore.getState().activeRun?.pending_approval?.approval_id)
+      .toBe("approval-next");
+  });
+});
+
 describe("useRunbooks recovery and deletion", () => {
   it("uses native-controller attestation without an editable command", async () => {
     const native = waitingApprovalRun(
@@ -1069,6 +1129,85 @@ describe("useRunbooks recovery and deletion", () => {
     );
     expect(useRunbookStore.getState().error).toBeNull();
     expect(useRunbookStore.getState().busyAction).toBeNull();
+  });
+
+  it("does not arm unseen approvals for an SSH target", async () => {
+    const armed = waitingApprovalRun("run-ssh", "approval-1", "printf one", {
+      target: {
+        kind: "active-terminal",
+        session_id: "session-1",
+        remote_kind: "ssh",
+        remote_target: "linux.example",
+        observed_at: "2026-08-13T12:00:00Z",
+      },
+    });
+    useRunbookStore.getState().setActiveRun(armed);
+    const { result } = renderHook(() => useRunbooks());
+    await act(async () => {
+      await result.current.approveAllPendingSteps("run-ssh", "printf one");
+    });
+    expect(mocks.respondApproval).not.toHaveBeenCalled();
+    expect(mocks.awaitPrompt).not.toHaveBeenCalled();
+    expect(useRunbookStore.getState().hasAutoApproveRun("run-ssh")).toBe(false);
+    expect(useRunbookStore.getState().error).toContain("approve each command individually");
+  });
+
+  it("disarms an already armed run if its live terminal enters SSH", async () => {
+    const armed = waitingApprovalRun("run-enter-ssh", "approval-1", "printf one");
+    useRunbookStore.getState().setActiveRun(armed);
+    useRunbookStore.getState().setAutoApprove("run-enter-ssh", true);
+    useAppStore.setState((state) => ({
+      sessionUi: {
+        ...state.sessionUi,
+        "session-1": {
+          ...state.sessionUi["session-1"],
+          remote: { kind: "ssh", target: "linux.example" },
+        },
+      },
+    }));
+    const { result } = renderHook(() => useRunbooks());
+    await act(async () => {
+      await result.current.handleRunbookEvent(
+        approvalEvent("run-enter-ssh", "approval-2", "printf two"),
+      );
+    });
+    expect(mocks.respondApproval).not.toHaveBeenCalled();
+    expect(mocks.awaitPrompt).not.toHaveBeenCalled();
+    expect(useRunbookStore.getState().hasAutoApproveRun("run-enter-ssh")).toBe(false);
+    expect(useRunbookStore.getState().error).toContain("approve each command individually");
+  });
+
+  it("rejects auto-approval if the terminal enters SSH while the prompt settles", async () => {
+    const armed = waitingApprovalRun("run-enter-ssh-wait", "approval-1", "printf one");
+    useRunbookStore.getState().setActiveRun(armed);
+    useRunbookStore.getState().setAutoApprove("run-enter-ssh-wait", true);
+    let finishWait!: (binding: string) => void;
+    mocks.awaitPrompt.mockImplementationOnce(
+      () => new Promise<string>((resolve) => { finishWait = resolve; }),
+    );
+    const { result } = renderHook(() => useRunbooks());
+    let pending!: Promise<void>;
+    act(() => {
+      pending = result.current.handleRunbookEvent(
+        approvalEvent("run-enter-ssh-wait", "approval-2", "printf two"),
+      );
+    });
+    await waitFor(() => expect(mocks.awaitPrompt).toHaveBeenCalledTimes(1));
+    act(() => {
+      useAppStore.setState((state) => ({
+        sessionUi: {
+          ...state.sessionUi,
+          "session-1": {
+            ...state.sessionUi["session-1"],
+            remote: { kind: "ssh", target: "linux.example" },
+          },
+        },
+      }));
+      finishWait("prompt-binding");
+    });
+    await act(async () => { await pending; });
+    expect(mocks.respondApproval).not.toHaveBeenCalled();
+    expect(useRunbookStore.getState().hasAutoApproveRun("run-enter-ssh-wait")).toBe(false);
   });
 
   it("arms before releasing the visible approval so the next request cannot race it", async () => {

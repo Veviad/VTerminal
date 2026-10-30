@@ -81,10 +81,13 @@ beforeEach(() => {
   } as never);
 });
 
-function openPanel() {
+function openPanel(platform: "macos13" | "linux" | "any" | null = "macos13") {
   const onGenerated = vi.fn().mockResolvedValue(undefined);
   render(<RunbookAiGenerator onGenerated={onGenerated} />);
   fireEvent.click(screen.getByRole("button", { name: /generate with ai/i }));
+  if (platform) {
+    fireEvent.change(screen.getByLabelText(/Target platform/), { target: { value: platform } });
+  }
   return { onGenerated };
 }
 
@@ -105,10 +108,29 @@ describe("RunbookAiGenerator", () => {
       expect(mocks.generate).toHaveBeenCalled();
     });
     expect(mocks.generate.mock.calls[0][2]).toBeNull();
+    expect(mocks.generate.mock.calls[0][3]).toBe("macos13");
     // The generated document becomes an ordinary draft through the ordinary
     // command — nothing downstream is special-cased for AI.
     expect(mocks.create).toHaveBeenCalledWith({ definitionId: "nginx" });
     expect(onGenerated).toHaveBeenCalledWith(draft);
+  });
+
+  it("requires the operator to choose a platform even when requirements mention Docker", () => {
+    openPanel(null);
+    requirement("clean up Docker on my host");
+    expect(screen.getByRole("button", { name: /generate draft/i })).toBeDisabled();
+    expect(mocks.generate).not.toHaveBeenCalled();
+  });
+
+  it("sends the chosen remote platform without attaching a session transcript", async () => {
+    useAppStore.setState({
+      sessionUi: { s1: { ...useAppStore.getState().sessionUi.s1, remote: { kind: "ssh", target: "server" } } },
+    } as never);
+    openPanel("linux");
+    requirement("clean up Docker on the remote server");
+    clickGenerate();
+    await waitFor(() => expect(mocks.generate).toHaveBeenCalled());
+    expect(mocks.generate.mock.calls[0].slice(2)).toEqual([null, "linux"]);
   });
 
   it("sends the session transcript when attached", async () => {
@@ -228,6 +250,7 @@ describe("RunbookAiGenerator", () => {
     const onGenerated = vi.fn().mockResolvedValue(undefined);
     const view = render(<RunbookAiGenerator onGenerated={onGenerated} />);
     fireEvent.click(screen.getByRole("button", { name: /generate with ai/i }));
+    fireEvent.change(screen.getByLabelText(/Target platform/), { target: { value: "macos13" } });
     requirement("verify nginx");
     clickGenerate();
     await waitFor(() => {

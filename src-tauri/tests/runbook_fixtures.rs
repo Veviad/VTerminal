@@ -43,6 +43,7 @@ fn reusable_example_packages_load_and_create_immutable_snapshots() {
         ("idempotent-software-install", "1.0.0", 1, true, true),
         ("manual-server-assessment", "1.0.0", 2, false, false),
         ("linux-host-hardening", "1.0.0", 4, true, true),
+        ("macos-orbstack-docker-cleanup", "1.0.0", 8, true, true),
     ];
 
     for (name, version, step_count, network, has_apply) in cases {

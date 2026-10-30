@@ -4,6 +4,16 @@
 // with a recursion error pointing at whichever key happens to be last.
 #![recursion_limit = "256"]
 
+// Rust unit-test executables do not receive the application manifest from
+// tauri-build. Some transitively linked Windows dialog code requires Common
+// Controls v6 before the test harness starts. This MSVC directive belongs only
+// to the library unit-test executable; the application manifest is unchanged.
+#[cfg(all(test, target_os = "windows", target_env = "msvc"))]
+core::arch::global_asm!(
+    ".section .drectve",
+    ".ascii \" \\\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\\\"\"",
+);
+
 pub mod agent;
 mod app_exit;
 mod commands;
@@ -220,6 +230,7 @@ pub fn run() {
             // pty
             commands::pty::pty_spawn,
             commands::pty::pty_write,
+            commands::pty::pty_write_bytes,
             commands::pty::pty_resize,
             commands::pty::pty_ack,
             commands::pty::pty_kill,

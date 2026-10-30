@@ -111,6 +111,13 @@ supported.
 **Library → New → Generate with AI** authors a draft from a plain-language
 requirement and, optionally, a terminal session as context.
 
+Choose **Target platform** before generating, even when no terminal transcript
+is attached. Choose the machine the runbook will manage: macOS for Docker
+through OrbStack on a Mac, Linux for a Linux host reached over SSH, or
+**Portable across platforms** when the commands support both. Generation asks
+the model to repair a conflicting platform once and refuses the draft if it
+still conflicts with your selection.
+
 The usual case: you installed and configured something by hand in a tab, and you
 want a runbook that does it again elsewhere. Attach that session and the model
 turns what you ran into steps. The command you used becomes the `apply`, and
@@ -440,8 +447,9 @@ cannot drive the same terminal at once.
   `PATH` shims, loader variables, or an already-root SSH context, so no command
   can be proven read-only from its text alone.
 - Every shell approval shows the immutable run target and asks you to attest
-  that the visible row is a POSIX prompt on that host, and that the shell's
-  functions, aliases and `PATH` are trusted. That click binds to the exact
+  that the visible row is an empty POSIX prompt on that host, with no partially
+  typed command or program waiting for input, and that the shell's functions,
+  aliases and `PATH` are trusted. That click binds to the exact
   terminal row, cursor and input/output epoch for 30 seconds; any intervening
   terminal change prevents dispatch. **A compromised interactive shell is
   outside the trust model.**
@@ -454,7 +462,10 @@ cannot drive the same terminal at once.
   ends it at any point, including mid-wait. If a run goes quiet for longer than
   one command's timeout allows, the flow hands the remaining approvals back to
   you rather than holding the button indefinitely. The same approval is never
-  approved twice. Runbooks do not mirror the agent panel's `Full` mode.
+  approved twice. This mode is unavailable for SSH and other nested targets:
+  approve each remote command at an empty prompt. Local automatic shell
+  approvals also require an integrated empty prompt. Runbooks do not mirror
+  the agent panel's `Full` mode.
 - Native Ansible controller approvals are bound to the project and inventory
   digests. The controller command cannot be edited, prompt binding is skipped,
   and bulk auto-approval is unavailable.
@@ -471,6 +482,12 @@ cannot drive the same terminal at once.
 - Networked, privileged or opaque checks and verifications are approved and then
   reported as phase deviations.
 - Editing a command keeps both the proposed and the executed text in the report.
+- Interactive shell actions keep the target's exported `PATH`, `HOME`, and
+  Docker client settings (`DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG`,
+  `DOCKER_TLS_VERIFY`, `DOCKER_CERT_PATH`, `DOCKER_API_VERSION`). Other inherited
+  variables are cleared; locale, pager and noninteractive guards are applied.
+  Input mappings retain this filtered environment. Captured scheduled runs use
+  their fixed system path and clean environment instead.
 - Visible-terminal checks and verifications are reported as `shell_observed`,
   never as an attested deterministic executor. A per-attempt token stops stale
   or replayed terminal output settling a different attempt; it cannot prove your
