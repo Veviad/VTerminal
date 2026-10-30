@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 
+// Fixed repository fixture; no user-controlled path is read.
+// eslint-disable-next-line security/detect-non-literal-fs-filename
 const source = readFileSync(new URL("../examples/runbooks/macos-orbstack-docker-cleanup/runbook.vrun.yaml", import.meta.url), "utf8");
 const commands = new Map();
 let step;
@@ -25,10 +27,14 @@ const recent = "2026-10-30T11:00:00Z";
 const boundary = "2026-10-29T12:00:00Z";
 const offsetNow = "2026-10-30T08:51:48.950408645+01:00";
 const offsetOld = "2026-10-28T23:30:00.123456789-05:00";
-const normalizeTimestamp = (stamp) => stamp.replace(
-  /(\.\d+)?(Z|[+-]\d{2}:\d{2})$/,
-  (_, _fraction, zone) => zone === "Z" ? "+0000" : zone.replace(":", ""),
-);
+const normalizeTimestamp = (stamp) => {
+  const zoneLength = stamp.endsWith("Z") ? 1 : 6;
+  const zone = stamp.slice(-zoneLength);
+  const dateAndTime = stamp.slice(0, -zoneLength);
+  const fraction = dateAndTime.indexOf(".");
+  const wholeSeconds = fraction < 0 ? dateAndTime : dateAndTime.slice(0, fraction);
+  return wholeSeconds + (zone === "Z" ? "+0000" : zone.replace(":", ""));
+};
 
 // All executable commands go to these temporary shell stubs. The host's Docker
 // executable and daemon are never invoked, including when testing apply phases.
@@ -38,14 +44,18 @@ function run(key, scenario = {}) {
   const config = join(root, "config with ' quote");
   const date = join(root, "date stub");
   const log = join(root, "calls");
+  // All paths here are generated inside this test's private temporary directory.
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
   mkdirSync(config);
   const candidates = scenario.containers ?? [];
   const timestampCases = [now, old, recent, boundary, offsetNow, offsetOld, scenario.now, ...candidates.map((item) => item.created)].filter((stamp) => Number.isFinite(Date.parse(stamp))).map((stamp) => {
     const normalized = normalizeTimestamp(stamp);
     return `${quote(normalized)}) printf '%s\\n' ${Math.floor(Date.parse(stamp) / 1000)};;`;
   }).join("\n");
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
   writeFileSync(date, `#!/bin/sh\ntest "$1 $2 $3 $5" = '-ju -f %Y-%m-%dT%H:%M:%S%z +%s' || exit 98\ncase "$4" in\n${timestampCases}\n*) exit 1;;\nesac\n`, { mode: 0o700 });
   const inspectCases = candidates.map(({ id, created }) => `${quote(id)}) printf '%s\\n' ${quote(created)};;`).join("\n");
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
   writeFileSync(docker, `#!/bin/sh
 test "$1" = --config && test "$2" = ${quote(config)} && test "$3" = --context && test "$4" = orbstack || exit 97
 shift 4
@@ -74,6 +84,7 @@ esac
     const semantic = `/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C VRUN_DOCKER_BINARY=${quote(docker)} VRUN_DOCKER_CONFIG_DIR=${quote(config)} /bin/sh -c ${quote(adapted)}`;
     const result = spawnSync("/bin/sh", ["-c", semantic], { env: {}, encoding: "utf8" });
     assert.equal(result.error, undefined);
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
     const calls = readFileSync(log, "utf8");
     assert.doesNotMatch(calls, /volume prune|system prune|--all.*prune|prune.*--all/);
     return { ...result, calls };
