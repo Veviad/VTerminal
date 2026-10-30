@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.11
+
+- Preserve queued agent attachments and retry state through provider responses and restored sessions.
+- Protect SSH commands with remote prompt confirmation and original-target binding; recognize `command ssh` sessions.
+- Fix terminal input ordering, binary input, resizing, output capture, and search selection cleanup.
+- Add explicit runbook target platforms, preserve remote Docker context for approved commands, and include an OrbStack cleanup example.
+- Fix the Windows unit-test manifest required for Common Controls v6.
+
 ## 0.6.10
 
 - Stabilize Windows console-probe tests by allowing cold PowerShell/.NET startup while retaining bounded execution and the no-console assertion.
