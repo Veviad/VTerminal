@@ -23,6 +23,11 @@ const spawnMock = vi.fn(
 );
 const aiCancelMock = vi.fn(async (_requestId: string) => {});
 const ptyKillMock = vi.fn(async (_sessionId: string) => {});
+const ptyResizeMock = vi.fn(async (_sessionId: string, _cols: number, _rows: number) => {});
+const ptyWriteMock = vi.fn(async (_sessionId: string, _data: string) => {});
+const ptyWriteBytesMock = vi.fn(async (_sessionId: string, _data: number[]) => {});
+let terminalDataHandler: ((data: string) => void) | undefined;
+let terminalBinaryHandler: ((data: string) => void) | undefined;
 const abortSessionMock = vi.fn();
 const archiveOnCloseMock = vi.fn(async (_sessionId: string) => {});
 const disposeTermMock = vi.fn();
@@ -42,8 +47,9 @@ vi.mock("../lib/tauri", () => ({
     onData: unknown,
     onEvent: (event: { type: string; exit_code?: number | null }) => void,
   ) => spawnMock(sessionId, params, onData, onEvent),
-  ptyWrite: async () => {},
-  ptyResize: async () => {},
+  ptyWrite: (sessionId: string, data: string) => ptyWriteMock(sessionId, data),
+  ptyWriteBytes: (sessionId: string, data: number[]) => ptyWriteBytesMock(sessionId, data),
+  ptyResize: (sessionId: string, cols: number, rows: number) => ptyResizeMock(sessionId, cols, rows),
   ptyAck: async () => {},
   ptyKill: (sessionId: string) => ptyKillMock(sessionId),
   releasePtyChannels: () => {},
@@ -77,7 +83,8 @@ const fakeTerm = {
   rows: 36,
   write: (_d: unknown, cb?: () => void) => cb?.(),
   resize: vi.fn(),
-  onData: () => ({ dispose() {} }),
+  onData: (handler: (data: string) => void) => { terminalDataHandler = handler; return { dispose() {} }; },
+  onBinary: (handler: (data: string) => void) => { terminalBinaryHandler = handler; return { dispose() {} }; },
   onResize: () => ({ dispose() {} }),
   onSelectionChange: () => ({ dispose() {} }),
   hasSelection: () => false,
@@ -120,6 +127,7 @@ vi.mock("../lib/sessionPersistence", () => ({
 }));
 
 import { useSessions } from "../hooks/useSessions";
+import { toAiMessages } from "../lib/sessionReopen";
 import { useAppStore } from "../stores/appStore";
 import { captureSidecarRemoteIdentity } from "../lib/sidecar";
 import { initialUpdateState, useUpdateStore } from "../stores/updateStore";
@@ -128,6 +136,16 @@ import type {
   ChatMessage,
   SessionSnapshotMeta,
 } from "../lib/types";
+
+describe("restored steering messages", () => {
+  it("retains the retry state without treating ordinary old messages as undelivered", () => {
+    const base = { id: "m", sort_order: 0, role: "user" as const, kind: "text" as const,
+      content: "inspect this", thinking: null, command: null, attachments: [], created_at: "2026-01-01T00:00:00Z" };
+    const restored = toAiMessages([{ ...base, steer_undelivered: true }, { ...base, sort_order: 1 }]);
+    expect(restored[0].steer).toBe("undelivered");
+    expect(restored[1].steer).toBeUndefined();
+  });
+});
 
 function meta(id: string, index: number, over: Partial<SessionSnapshotMeta> = {}): SessionSnapshotMeta {
   return {
@@ -249,6 +267,15 @@ beforeEach(() => {
   aiCancelMock.mockResolvedValue(undefined);
   ptyKillMock.mockClear();
   ptyKillMock.mockResolvedValue(undefined);
+  ptyResizeMock.mockClear();
+  ptyWriteMock.mockReset();
+  ptyWriteMock.mockResolvedValue(undefined);
+  ptyWriteBytesMock.mockReset();
+  ptyWriteBytesMock.mockResolvedValue(undefined);
+  terminalDataHandler = undefined;
+  terminalBinaryHandler = undefined;
+  fakeTerm.cols = 144;
+  fakeTerm.rows = 36;
   abortSessionMock.mockClear();
   archiveOnCloseMock.mockClear();
   disposeTermMock.mockClear();
@@ -287,6 +314,62 @@ describe("session creation update barrier", () => {
         spawnMock.mock.invocationCallOrder[index],
       );
     }
+  });
+
+  it("buffers terminal input while spawning and ignores input after exit", async () => {
+    let resolveSpawn!: (pid: number) => void;
+    spawnMock.mockImplementationOnce(() => new Promise<number>((resolve) => { resolveSpawn = resolve; }));
+    const { result } = renderHook(() => useSessions());
+    const creating = result.current.createSession();
+    terminalDataHandler?.("echo ");
+    terminalDataHandler?.("ready\r");
+    expect(ptyWriteMock).not.toHaveBeenCalled();
+    resolveSpawn(1234);
+    const sessionId = await creating;
+    await vi.waitFor(() => expect(ptyWriteMock).toHaveBeenCalledTimes(2));
+    expect(ptyWriteMock).toHaveBeenNthCalledWith(1, sessionId, "echo ");
+    expect(ptyWriteMock).toHaveBeenNthCalledWith(2, sessionId, "ready\r");
+    terminalDataHandler?.("next\r");
+    await vi.waitFor(() => expect(ptyWriteMock).toHaveBeenLastCalledWith(sessionId, "next\r"));
+    useAppStore.getState().updateSession(sessionId, { exited: true });
+    terminalDataHandler?.("ignored\r");
+    expect(ptyWriteMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("preserves binary mouse reports and their order with ordinary input", async () => {
+    let resolveSpawn!: (pid: number) => void;
+    let finishFirstWrite!: () => void;
+    spawnMock.mockImplementationOnce(() => new Promise<number>((resolve) => { resolveSpawn = resolve; }));
+    ptyWriteMock.mockImplementationOnce(() => new Promise<void>((resolve) => { finishFirstWrite = resolve; }));
+    const { result } = renderHook(() => useSessions());
+    const creating = result.current.createSession();
+    terminalDataHandler?.("a");
+    terminalBinaryHandler?.("\x1b[Má\xff");
+    terminalDataHandler?.("b");
+    resolveSpawn(1234);
+    const sessionId = await creating;
+    await vi.waitFor(() => expect(ptyWriteMock).toHaveBeenCalledWith(sessionId, "a"));
+    expect(ptyWriteBytesMock).not.toHaveBeenCalled();
+    finishFirstWrite();
+    await vi.waitFor(() => expect(ptyWriteMock).toHaveBeenCalledWith(sessionId, "b"));
+    expect(ptyWriteBytesMock).toHaveBeenCalledWith(sessionId, [27, 91, 77, 225, 255]);
+    expect(ptyWriteMock.mock.invocationCallOrder[0]).toBeLessThan(ptyWriteBytesMock.mock.invocationCallOrder[0]);
+    expect(ptyWriteBytesMock.mock.invocationCallOrder[0]).toBeLessThan(ptyWriteMock.mock.invocationCallOrder[1]);
+  });
+
+  it("reconciles a pane fit that occurs while its PTY is still spawning", async () => {
+    let resolveSpawn!: (pid: number) => void;
+    spawnMock.mockImplementationOnce(() => new Promise<number>((resolve) => { resolveSpawn = resolve; }));
+    const { result } = renderHook(() => useSessions());
+    const creating = result.current.createSession();
+    expect(spawnMock).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ cols: 144, rows: 36 }), expect.any(Function), expect.any(Function));
+    fakeTerm.cols = 100;
+    fakeTerm.rows = 28;
+    expect(ptyResizeMock).not.toHaveBeenCalled();
+    resolveSpawn(1234);
+    const sessionId = await creating;
+    expect(ptyResizeMock).toHaveBeenCalledOnce();
+    expect(ptyResizeMock).toHaveBeenCalledWith(sessionId, 100, 28);
   });
 
   it("refuses to add or spawn a terminal after durable update saving begins", async () => {

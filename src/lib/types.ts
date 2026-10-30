@@ -353,9 +353,8 @@ export type StreamEvent =
       error?: string;
     }
   | { type: "McpServerProblem"; server_id: string; message: string }
-  /** The loop appended these queued steering messages to the transcript. This is
-   *  the ONLY thing that clears a message's "queued" badge — one that never gets
-   *  a SteerDelivered is one the model never saw. */
+  /** A provider round containing these steers completed successfully. This is
+   *  the only event that clears the queued badge; without it delivery is unconfirmed. */
   | { type: "SteerDelivered"; ids: string[] }
   /** Storage-safe model history emitted only at stable round boundaries. It has
    *  tool-call ids/results needed for continuation, but no system prompt or
@@ -984,6 +983,7 @@ export interface ArchivedMessage {
   kind: "text" | "literal" | "command" | "compaction";
   content: string;
   thinking: string | null;
+  steer_undelivered?: boolean;
   command: {
     command: string;
     output: string;
@@ -1056,6 +1056,7 @@ export interface ArchiveMessageInput {
   kind: "text" | "literal" | "command" | "compaction" | null;
   content: string;
   thinking: string | null;
+  steer_undelivered?: boolean;
   command: {
     command: string;
     output: string;

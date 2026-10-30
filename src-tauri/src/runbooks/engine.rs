@@ -60,6 +60,12 @@ const MAX_MODEL_ATTEMPTS: usize = 20;
 const MAX_MODEL_TEXT_CHARS: usize = 1_024;
 const CLEAN_ENV_PREFIX: &str = "/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C";
 const TERMINAL_GUARD_PREFIX: &str = "/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C PAGER=cat GIT_PAGER=cat SYSTEMD_PAGER=cat SYSTEMD_PAGELESS=1 LESS=FRX DEBIAN_FRONTEND=noninteractive /bin/sh -c ";
+// Evaluate this allowlist on the target, never in the desktop application's
+// environment. The extra POSIX shell also keeps the line valid in fish. Keep
+// unset Docker variables absent: setting an empty TLS/context value can change
+// how a client resolves its configuration. Loader and shell startup variables
+// are deliberately excluded from the command's environment.
+const TARGET_TERMINAL_GUARD_PREFIX: &str = r#"/bin/sh -c 'exec /usr/bin/env -i PATH="${PATH:-/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin}" ${HOME+HOME="$HOME"} ${DOCKER_HOST+DOCKER_HOST="$DOCKER_HOST"} ${DOCKER_CONTEXT+DOCKER_CONTEXT="$DOCKER_CONTEXT"} ${DOCKER_CONFIG+DOCKER_CONFIG="$DOCKER_CONFIG"} ${DOCKER_TLS_VERIFY+DOCKER_TLS_VERIFY="$DOCKER_TLS_VERIFY"} ${DOCKER_CERT_PATH+DOCKER_CERT_PATH="$DOCKER_CERT_PATH"} ${DOCKER_API_VERSION+DOCKER_API_VERSION="$DOCKER_API_VERSION"} LANG=C LC_ALL=C PAGER=cat GIT_PAGER=cat SYSTEMD_PAGER=cat SYSTEMD_PAGELESS=1 LESS=FRX DEBIAN_FRONTEND=noninteractive /bin/sh -c "$1"' vrun "#;
 const TERMINAL_GUARD_SUFFIX: &str = " < /dev/null";
 const MAX_TERMINAL_INSTRUMENTATION_CHARS: usize = 96;
 const MAX_ANSIBLE_STREAM_BYTES: usize = 1024 * 1024;
@@ -83,6 +89,10 @@ pub trait TargetObserver: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
+    /// Interactive, freshly approved commands may use the target's executable
+    /// search path, home and Docker client context. Captured unattended callers
+    /// retain the fixed environment required by automatic read-only policy.
+    pub preserve_target_environment: bool,
     pub command_timeout_secs: u64,
     pub response_timeout_secs: u64,
     pub agent_max_iterations: u32,
@@ -98,6 +108,7 @@ pub struct EngineConfig {
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
+            preserve_target_environment: false,
             command_timeout_secs: 120,
             response_timeout_secs: MAX_OPERATOR_WAIT_SECS,
             agent_max_iterations: 100,
@@ -1858,8 +1869,15 @@ impl<'a> EngineRunner<'a> {
         explanation: &str,
         accepted_exit_codes: &[i32],
     ) -> Result<CommandDispatch, String> {
-        let semantic_command = command_with_runbook_environment(proposed_command, &environment)?;
-        let proposed_command = command_with_terminal_guards(&semantic_command)?;
+        let semantic_command = command_with_runbook_environment_mode(
+            proposed_command,
+            &environment,
+            self.context.config.preserve_target_environment,
+        )?;
+        let proposed_command = command_with_terminal_guards_mode(
+            &semantic_command,
+            self.context.config.preserve_target_environment,
+        )?;
         validate_runtime_command(&proposed_command)?;
         if !self.ensure_target(index, step)? {
             return Ok(CommandDispatch::Paused(
@@ -4722,9 +4740,18 @@ fn quote_posix_shell(value: &str) -> String {
 /// Temporary assignment prefixes are intentionally avoided: the parent shell
 /// expands command arguments before those assignments take effect, and shell
 /// keywords cannot follow an assignment prefix.
+#[cfg(test)]
 fn command_with_runbook_environment(
     command: &str,
     environment: &HashMap<String, String>,
+) -> Result<String, String> {
+    command_with_runbook_environment_mode(command, environment, false)
+}
+
+fn command_with_runbook_environment_mode(
+    command: &str,
+    environment: &HashMap<String, String>,
+    preserve_target_environment: bool,
 ) -> Result<String, String> {
     if environment.is_empty() {
         return Ok(command.to_string());
@@ -4748,8 +4775,15 @@ fn command_with_runbook_environment(
         }
         assignments.push(format!("{name}={}", quote_posix_shell(value)));
     }
+    // The interactive outer guard already filtered the environment. A second
+    // reset here would discard HOME and Docker context whenever inputs exist.
+    let prefix = if preserve_target_environment {
+        "/usr/bin/env"
+    } else {
+        CLEAN_ENV_PREFIX
+    };
     let wrapped = format!(
-        "{CLEAN_ENV_PREFIX} {} /bin/sh -c {}",
+        "{prefix} {} /bin/sh -c {}",
         assignments.join(" "),
         quote_posix_shell(command)
     );
@@ -4760,9 +4794,22 @@ fn command_with_runbook_environment(
 /// Build the complete semantic line the visible terminal executes. The browser
 /// may append only its exit-code observation sentinel; it must not add pager,
 /// stdin, or input wrappers that would make the durable audit record inaccurate.
+#[cfg(test)]
 fn command_with_terminal_guards(command: &str) -> Result<String, String> {
+    command_with_terminal_guards_mode(command, false)
+}
+
+fn command_with_terminal_guards_mode(
+    command: &str,
+    preserve_target_environment: bool,
+) -> Result<String, String> {
+    let prefix = if preserve_target_environment {
+        TARGET_TERMINAL_GUARD_PREFIX
+    } else {
+        TERMINAL_GUARD_PREFIX
+    };
     let wrapped = format!(
-        "{TERMINAL_GUARD_PREFIX}{}{TERMINAL_GUARD_SUFFIX}",
+        "{prefix}{}{TERMINAL_GUARD_SUFFIX}",
         quote_posix_shell(command)
     );
     validate_runtime_command(&wrapped)?;
@@ -4777,9 +4824,12 @@ fn command_with_terminal_guards(command: &str) -> Result<String, String> {
 /// Classify only the exact executable command. Definition declarations are
 /// preflight preview metadata and intentionally never widen or narrow this result.
 pub(crate) fn classify_runtime_command(command: &str) -> RuntimeCommandClass {
-    let unwrapped = unwrap_terminal_guards(command);
+    let unwrapped = unwrap_terminal_guards(command)
+        .or_else(|| unwrap_terminal_guards_prefix(command, TARGET_TERMINAL_GUARD_PREFIX));
     let semantic = unwrapped.as_deref().unwrap_or(command);
-    let subject = unwrap_runbook_environment(semantic).unwrap_or_else(|| semantic.to_string());
+    let subject = unwrap_runbook_environment_mode(semantic, true)
+        .or_else(|| unwrap_runbook_environment(semantic))
+        .unwrap_or_else(|| semantic.to_string());
     let shared = crate::agent::policy::classify(&subject);
     // A visible interactive shell is not an attested execution environment:
     // aliases, functions, PATH shims and loader variables can change even a
@@ -4799,8 +4849,12 @@ pub(crate) fn classify_runtime_command(command: &str) -> RuntimeCommandClass {
 }
 
 fn unwrap_terminal_guards(command: &str) -> Option<String> {
+    unwrap_terminal_guards_prefix(command, TERMINAL_GUARD_PREFIX)
+}
+
+fn unwrap_terminal_guards_prefix(command: &str, prefix: &str) -> Option<String> {
     let encoded = command
-        .strip_prefix(TERMINAL_GUARD_PREFIX)?
+        .strip_prefix(prefix)?
         .strip_suffix(TERMINAL_GUARD_SUFFIX)?;
     let inner = encoded.strip_prefix('\'')?.strip_suffix('\'')?;
     let decoded = inner.replace("'\"'\"'", "'");
@@ -4808,20 +4862,31 @@ fn unwrap_terminal_guards(command: &str) -> Option<String> {
 }
 
 fn unwrap_runbook_environment(command: &str) -> Option<String> {
+    unwrap_runbook_environment_mode(command, false)
+}
+
+fn unwrap_runbook_environment_mode(
+    command: &str,
+    preserve_target_environment: bool,
+) -> Option<String> {
     let words = shlex::split(command)?;
-    let clean_prefix = [
-        "/usr/bin/env",
-        "-i",
-        "PATH=/usr/bin:/bin:/usr/sbin:/sbin",
-        "LANG=C",
-        "LC_ALL=C",
-    ];
+    let clean_prefix: &[&str] = if preserve_target_environment {
+        &["/usr/bin/env"]
+    } else {
+        &[
+            "/usr/bin/env",
+            "-i",
+            "PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+            "LANG=C",
+            "LC_ALL=C",
+        ]
+    };
     if words.len() < clean_prefix.len() + 4
         || !words
             .iter()
             .take(clean_prefix.len())
             .map(String::as_str)
-            .eq(clean_prefix)
+            .eq(clean_prefix.iter().copied())
         || words.get(words.len() - 3).map(String::as_str) != Some("/bin/sh")
         || words.get(words.len() - 2).map(String::as_str) != Some("-c")
         || !words[clean_prefix.len()..words.len() - 3]
@@ -5665,6 +5730,110 @@ spec:
         assert!(wrapped.contains("/bin/sh -c 'printf '"));
         assert!(wrapped.ends_with(" < /dev/null"));
         assert!(validate_runtime_command(&wrapped).is_ok());
+    }
+
+    #[test]
+    fn target_environment_wrapper_never_receives_captured_read_grants() {
+        assert!(!EngineConfig::default().preserve_target_environment);
+        let guarded = command_with_terminal_guards_mode("df -h", true).unwrap();
+        // The target-environment wrapper must not be confused with the fixed
+        // environment guard or grant a read-only classification.
+        assert!(unwrap_terminal_guards(&guarded).is_none());
+        assert!(!classify_runtime_command(&guarded).read_only);
+
+        let inputs = HashMap::from([("VRUN_MODE".into(), "safe".into())]);
+        let semantic = command_with_runbook_environment_mode(
+            "sudo curl https://example.invalid",
+            &inputs,
+            true,
+        )
+        .unwrap();
+        let guarded = command_with_terminal_guards_mode(&semantic, true).unwrap();
+        let class = classify_runtime_command(&guarded);
+        assert!(class.network && class.privileged && class.opaque);
+        assert!(!class.read_only);
+        let docker = command_with_terminal_guards_mode("docker info", true).unwrap();
+        assert!(classify_runtime_command(&docker).network);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn target_environment_preserves_docker_lookup_and_context_with_input_mappings() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("user bin");
+        std::fs::create_dir(&bin).unwrap();
+        let docker = bin.join("docker");
+        // This is a stub executable: no Docker daemon or cleanup is invoked.
+        std::fs::write(
+            &docker,
+            r##"#!/bin/sh
+printf '%s\n' "$PATH" "$HOME" "$DOCKER_CONTEXT" "$DOCKER_HOST" "$DOCKER_CONFIG" "$DOCKER_TLS_VERIFY" "$DOCKER_CERT_PATH" "$DOCKER_API_VERSION" "${VRUN_MODE-unset}" "${UNRELATED_RUNBOOK_SECRET-unset}" "${BASH_ENV-unset}"
+"##,
+        )
+        .unwrap();
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let home = root.path().join("home with ' quotes");
+        let values = [
+            ("HOME", home.to_str().unwrap()),
+            ("DOCKER_CONTEXT", "orbstack"),
+            ("DOCKER_HOST", "unix:///tmp/docker socket"),
+            ("DOCKER_CONFIG", "config with ' quotes; $literal"),
+            ("DOCKER_TLS_VERIFY", "1"),
+            ("DOCKER_CERT_PATH", "cert path"),
+            ("DOCKER_API_VERSION", "1.47"),
+        ];
+        for mapped in [false, true] {
+            let inputs = if mapped {
+                HashMap::from([("VRUN_MODE".into(), "safe".into())])
+            } else {
+                HashMap::new()
+            };
+            let semantic =
+                command_with_runbook_environment_mode("docker info", &inputs, true).unwrap();
+            let guarded = command_with_terminal_guards_mode(&semantic, true).unwrap();
+            let output = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(&guarded)
+                .env_clear()
+                .env("PATH", &bin)
+                .envs(values)
+                .env("UNRELATED_RUNBOOK_SECRET", "must not reach the action")
+                .env("BASH_ENV", "/nonexistent/runbook-startup-file")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let mut expected = vec![bin.to_str().unwrap()];
+            expected.extend(values.iter().map(|(_, value)| *value));
+            expected.extend([if mapped { "safe" } else { "unset" }, "unset", "unset"]);
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap(),
+                format!("{}\n", expected.join("\n"))
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn target_environment_does_not_invent_unset_docker_settings() {
+        let command = r#"test "${DOCKER_CONTEXT+set}" != set && test "${DOCKER_TLS_VERIFY+set}" != set && test "$PAGER" = cat && test "$LC_ALL" = C"#;
+        let guarded = command_with_terminal_guards_mode(command, true).unwrap();
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(guarded)
+            .env_clear()
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

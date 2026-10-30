@@ -226,6 +226,7 @@ mod tests {
                 kind: None,
                 content: "image".into(),
                 thinking: None,
+                steer_undelivered: false,
                 command: None,
                 attachments: Some(vec![archive::ArchiveAttachmentInput {
                     kind: "image".into(),

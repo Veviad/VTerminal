@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Hourglass, LockKeyhole, Play, ServerCog, SkipForward, Square, Terminal } from "lucide-react";
 import { S } from "../../lib/strings";
 import type { OutputPolicy } from "../../lib/types";
+import { subscribeTerm } from "../../lib/termRegistry";
 
 export function CommandApprovalCard({
   command,
@@ -14,6 +15,9 @@ export function CommandApprovalCard({
   askedBecause = null,
   onRemember,
   onRespond,
+  remoteSessionId,
+  onConfirmPrompt,
+  targetChanged = false,
 }: {
   command: string;
   explanation: string;
@@ -33,12 +37,25 @@ export function CommandApprovalCard({
    *  to be visible — otherwise it reads as the app ignoring them. */
   queuedSteers?: number;
   onRespond: (decision: "run" | "skip" | "stop", editedCommand?: string) => void;
+  remoteSessionId?: string;
+  onConfirmPrompt?: (confirmed: boolean) => boolean;
+  targetChanged?: boolean;
 }) {
   const [editing, setEditing] = useState(false);
   const [edited, setEdited] = useState(command);
   // One response per card — the backend oneshot is consumed by the first one,
   // so later clicks would silently fail and desync the UI.
   const [responded, setResponded] = useState(false);
+  const [remotePromptConfirmed, setRemotePromptConfirmed] = useState(false);
+  useEffect(() => {
+    if (!remoteSessionId || !remotePromptConfirmed) return;
+    return subscribeTerm(remoteSessionId, (event) => {
+      if (event.type === "userInput" || event.type === "data" || event.type === "bufferChange" || event.type === "disposed") {
+        onConfirmPrompt?.(false);
+        setRemotePromptConfirmed(false);
+      }
+    });
+  }, [remoteSessionId, remotePromptConfirmed, onConfirmPrompt]);
   const changed = edited.trim() !== command.trim();
   const empty = edited.trim() === "";
   const targetLabel = target ?? (targetRole === "remote" ? "remote shell" : S.aiPanel.localShell);
@@ -80,6 +97,11 @@ export function CommandApprovalCard({
           {askedBecause === "writes" ? S.aiPanel.askedBecause.writes : `asking: ${askedBecause}`}
         </p>
       )}
+      {targetChanged && (
+        <p role="alert" className="mb-2 text-[11px] text-error">
+          The terminal target changed since this command was proposed. Skip it and request a new command.
+        </p>
+      )}
       {outputPolicy === "private" && (
         <div className="mb-2 flex items-start gap-1.5 rounded bg-accent/10 px-2 py-1 text-[10px] text-accent">
           <LockKeyhole size={11} className="mt-0.5 shrink-0" />
@@ -113,10 +135,24 @@ export function CommandApprovalCard({
         </button>
       )}
       {explanation && <p className="mt-1.5 text-[11px] text-text-muted">{explanation}</p>}
+      {targetRole === "remote" && (
+        <label className="mt-2 flex items-start gap-2 text-[11px] text-text-secondary">
+          <input
+            type="checkbox"
+            checked={remotePromptConfirmed}
+            onChange={(e) => {
+              const checked = e.target.checked;
+              setRemotePromptConfirmed(onConfirmPrompt ? onConfirmPrompt(checked) && checked : checked);
+            }}
+            disabled={responded || targetChanged}
+          />
+          <span>I checked that the remote terminal is at an empty shell prompt, with no program waiting for input.</span>
+        </label>
+      )}
       <div className="mt-2 flex items-center gap-2">
         <button
           onClick={() => respond("run", changed ? edited : undefined)}
-          disabled={responded || empty}
+          disabled={responded || empty || targetChanged || (targetRole === "remote" && !remotePromptConfirmed)}
           title={empty ? "Command is empty — nothing to run" : undefined}
           className="flex items-center gap-1.5 rounded-md bg-accent px-3 py-1 text-[12px] font-medium text-bg-primary transition-colors duration-150 hover:bg-accent-hover disabled:opacity-60"
         >

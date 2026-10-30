@@ -233,6 +233,11 @@ export function getOrCreateTerm(
       entry.lastUserInputAt = Date.now();
       emitTerm(sessionId, { type: "userInput" });
     }),
+    term.onBinary(() => {
+      cancelPtyEcho(term);
+      entry.lastUserInputAt = Date.now();
+      emitTerm(sessionId, { type: "userInput" });
+    }),
     // vim/less/top seizing the alternate screen is the ONE unambiguous "the
     // agent's command hung" signal: the pre-flight gate proved we were at a
     // shell prompt, so whatever took the screen came from the line we typed.

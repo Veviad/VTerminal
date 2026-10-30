@@ -4,16 +4,39 @@ import { useAppStore } from "../../stores/appStore";
 import { getTerm } from "../../lib/termRegistry";
 import { cssVar } from "../../lib/xtermTheme";
 import { S } from "../../lib/strings";
+import type { IBufferRange } from "@xterm/xterm";
 
 export function TerminalSearchBar({ sessionId }: { sessionId: string }) {
   const open = useAppStore((s) => s.sessionUi[sessionId]?.searchOpen ?? false);
   const updateSessionUi = useAppStore((s) => s.updateSessionUi);
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const searchSelection = useRef<{ sessionId: string; range: IBufferRange } | null>(null);
+
+  const clearSearch = () => {
+    const entry = getTerm(sessionId);
+    if (!entry) return;
+    entry.search.clearDecorations();
+    const range = entry.term.getSelectionPosition();
+    const owned = searchSelection.current;
+    // clearDecorations removes highlights but xterm's search addon keeps its
+    // active match selected. Do not erase a selection the user made afterward.
+    if (owned?.sessionId === sessionId && range &&
+        range.start.x === owned.range.start.x && range.start.y === owned.range.start.y &&
+        range.end.x === owned.range.end.x && range.end.y === owned.range.end.y) {
+      entry.term.clearSelection();
+    }
+    searchSelection.current = null;
+  };
+
+  const recordSelection = (found: boolean, entry: NonNullable<ReturnType<typeof getTerm>>) => {
+    const range = found ? entry.term.getSelectionPosition() : undefined;
+    searchSelection.current = range ? { sessionId, range } : null;
+  };
 
   useEffect(() => {
     if (open) inputRef.current?.focus();
-    else getTerm(sessionId)?.search.clearDecorations();
+    else clearSearch();
   }, [open, sessionId]);
 
   if (!open) return null;
@@ -30,10 +53,12 @@ export function TerminalSearchBar({ sessionId }: { sessionId: string }) {
   };
 
   const findNext = () => {
-    if (query) getTerm(sessionId)?.search.findNext(query, searchOpts);
+    const entry = getTerm(sessionId);
+    if (query && entry) recordSelection(entry.search.findNext(query, searchOpts), entry);
   };
   const findPrev = () => {
-    if (query) getTerm(sessionId)?.search.findPrevious(query, searchOpts);
+    const entry = getTerm(sessionId);
+    if (query && entry) recordSelection(entry.search.findPrevious(query, searchOpts), entry);
   };
   const close = () => {
     updateSessionUi(sessionId, { searchOpen: false });
@@ -47,7 +72,9 @@ export function TerminalSearchBar({ sessionId }: { sessionId: string }) {
         value={query}
         onChange={(e) => {
           setQuery(e.target.value);
-          if (e.target.value) getTerm(sessionId)?.search.findNext(e.target.value, { ...searchOpts, incremental: true });
+          const entry = getTerm(sessionId);
+          if (e.target.value && entry) recordSelection(entry.search.findNext(e.target.value, { ...searchOpts, incremental: true }), entry);
+          else if (!e.target.value) clearSearch();
         }}
         onKeyDown={(e) => {
           if (e.key === "Enter" && e.shiftKey) findPrev();

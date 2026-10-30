@@ -128,6 +128,15 @@ fn redact_literal_tokens(input: &str, lower: &str, spans: &mut Vec<(usize, usize
         let mut cursor = 0usize;
         while let Some(relative) = lower[cursor..].find(prefix) {
             let start = cursor + relative;
+            // A token prefix inside an ordinary word is not a credential:
+            // `disk-usage-before` contains `sk-`, for example.
+            if start > 0
+                && (input.as_bytes()[start - 1].is_ascii_alphanumeric()
+                    || matches!(input.as_bytes()[start - 1], b'_' | b'-'))
+            {
+                cursor = start + prefix.len();
+                continue;
+            }
             let end = token_end(input, start);
             let minimum = match prefix {
                 "akia" => 20,
@@ -194,6 +203,7 @@ fn redact_curl_user(input: &str, lower: &str, spans: &mut Vec<(usize, usize)>) {
             let after = lower[flag_start + flag.len()..].bytes().next();
             if before.is_some_and(|byte| !byte.is_ascii_whitespace())
                 || after.is_some_and(|byte| !byte.is_ascii_whitespace() && byte != b'=')
+                || !curl_user_flag_context(&lower[..flag_start], 0)
             {
                 cursor = flag_start + flag.len();
                 continue;
@@ -229,6 +239,83 @@ fn redact_curl_user(input: &str, lower: &str, spans: &mut Vec<(usize, usize)>) {
             }
         }
     }
+}
+
+/// `-u` is also a normal flag for date, sort and many other tools. Only treat
+/// its argument as curl credentials when curl occurs in the current command.
+/// Decode quoted command strings recursively so `sh -c 'curl -u ...'` and JSON
+/// command fields retain the same protection. This is deliberately conservative
+/// about wrappers: sudo/env/command may precede the curl executable.
+fn curl_user_flag_context(prefix: &str, depth: usize) -> bool {
+    if depth > 8 {
+        // Malformed or deeply nested evidence remains conservative.
+        return true;
+    }
+    let mut chars = prefix.chars().peekable();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut quote_word_start = 0;
+    let mut curl_seen = false;
+    let mut groups = Vec::new();
+    while let Some(ch) = chars.next() {
+        if let Some(delimiter) = quote {
+            if ch == delimiter {
+                quote = None;
+            } else if ch == '\\' && delimiter != '\'' {
+                if let Some(next) = chars.next() {
+                    if delimiter == '"' && !matches!(next, '$' | '`' | '"' | '\\' | '\n') {
+                        word.push('\\');
+                    }
+                    word.push(next);
+                }
+            } else {
+                word.push(ch);
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' | '`' => {
+                quote = Some(ch);
+                quote_word_start = word.len();
+            }
+            '\\' => {
+                if let Some(next) = chars.next() {
+                    word.push(next);
+                }
+            }
+            '(' => {
+                finish_curl_word(&mut word, &mut curl_seen);
+                groups.push(curl_seen);
+                curl_seen = false;
+            }
+            ')' => {
+                word.clear();
+                curl_seen = groups.pop().unwrap_or(false);
+            }
+            ';' | '|' | '&' | '\n' | '\r' => {
+                word.clear();
+                curl_seen = false;
+            }
+            ch if ch.is_ascii_whitespace() => finish_curl_word(&mut word, &mut curl_seen),
+            _ => word.push(ch),
+        }
+    }
+    if quote.is_some() {
+        // The prefix stops immediately before the flag, often inside an outer
+        // shell or JSON string. The whole decoded word preserves shell quote
+        // splices; its unfinished quoted fragment handles JSON's `key:"curl`.
+        return curl_user_flag_context(&word, depth + 1)
+            || curl_user_flag_context(&word[quote_word_start..], depth + 1);
+    }
+    finish_curl_word(&mut word, &mut curl_seen);
+    curl_seen
+}
+
+fn finish_curl_word(word: &mut String, curl_seen: &mut bool) {
+    if word.rsplit('/').next() == Some("curl") {
+        *curl_seen = true;
+    }
+    word.clear();
 }
 
 pub fn sanitize_output_tail(input: &str) -> SanitizedEvidence {
@@ -474,6 +561,67 @@ mod tests {
             "admin:password",
         ] {
             assert!(!actual.contains(secret), "leaked {secret}: {actual}");
+        }
+    }
+
+    #[test]
+    fn curl_user_redaction_does_not_reject_unrelated_u_flags() {
+        for command in [
+            "/bin/date -j -u -f '%Y-%m-%d' 2026-10-30 +%s",
+            "sort -u /tmp/docker-space-before",
+            "curl https://example.invalid | sort -u /tmp/output",
+            "/bin/sh -c 'curl https://example.invalid; sort -u /tmp/output'",
+            "curl https://example.invalid && /bin/date -j -u -f '%Y' 2026 +%s",
+        ] {
+            let (actual, changed) = redact_sensitive(command);
+            assert!(!changed, "unexpected redaction: {actual}");
+            assert_eq!(actual, command);
+            let json = serde_json::json!({ "command": command }).to_string();
+            let (actual, changed) = redact_sensitive(&json);
+            assert!(!changed, "unexpected JSON redaction: {actual}");
+            assert_eq!(actual, json);
+        }
+    }
+
+    #[test]
+    fn curl_user_credentials_remain_redacted_in_wrappers_and_chains() {
+        for command in [
+            "curl -u operator:pa55word https://example.invalid",
+            "sudo /usr/bin/curl --user=operator:pa55word https://example.invalid",
+            "env LANG=C command curl --user 'operator:pa55word' https://example.invalid",
+            "/bin/sh -c 'curl -u operator:pa55word https://example.invalid'",
+            "'/usr/bin/curl' -u operator:pa55word https://example.invalid",
+            "date -u; curl -H 'X-Note: a;b' -u operator:pa55word https://example.invalid",
+            "curl -H \"it's a note\" -u operator:pa55word https://example.invalid",
+            "curl \"$(hostname)\" -u operator:pa55word https://example.invalid",
+            "curl -u operator:pa55word https://example.invalid | sort -u /tmp/output",
+        ] {
+            for input in [
+                command.to_string(),
+                serde_json::json!({ "command": command }).to_string(),
+            ] {
+                let (actual, changed) = redact_sensitive(&input);
+                assert!(changed, "credential not detected: {input}");
+                assert!(!actual.contains("pa55word"), "credential leaked: {actual}");
+            }
+        }
+    }
+
+    #[test]
+    fn literal_api_key_prefixes_require_a_token_boundary() {
+        let ordinary =
+            "disk-usage-before disk-usage-after task-build-output mask-validation-results";
+        assert_eq!(redact_sensitive(ordinary), (ordinary.to_string(), false));
+        let key = ["sk", "-", "1234567890abcdefghijklmnop"].concat();
+        for input in [
+            key.clone(),
+            format!("OPENAI={key}"),
+            format!("\"{key}\""),
+            format!("'{key}'"),
+        ] {
+            let (actual, changed) = redact_sensitive(&input);
+            assert!(changed);
+            assert!(!actual.contains(&key));
         }
     }
 

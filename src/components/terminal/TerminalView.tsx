@@ -1,6 +1,5 @@
 import { useEffect, useRef } from "react";
 import { acquireWebgl, getTerm, releaseWebgl } from "../../lib/termRegistry";
-import { ptyResize } from "../../lib/tauri";
 import { isPanelResizing } from "../../lib/aiPanel";
 import { useAppStore } from "../../stores/appStore";
 
@@ -47,15 +46,14 @@ export function TerminalView({
     let t: ReturnType<typeof setTimeout> | null = null;
     const ro = new ResizeObserver(() => {
       if (t) clearTimeout(t);
-      // This is the only place that resizes the PTY, so the debounce doubles as
-      // the rate limit on SIGWINCH. Dragging the AI panel's splitter changes our
+      // Fitting triggers xterm's onResize, which useSessions forwards to the
+      // PTY. Dragging the AI panel's splitter changes our
       // width every frame; 16ms there would mean ~60 resizes a second at the
       // shell, so a live drag gets a slacker one.
       t = setTimeout(
         () => {
           if (entry.disposed || !host.offsetParent) return;
           safeFit();
-          void ptyResize(sessionId, entry.term.cols, entry.term.rows);
         },
         isPanelResizing() ? 120 : 16,
       );

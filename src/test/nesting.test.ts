@@ -20,6 +20,11 @@ describe("detectNesting", () => {
     expect(detectNesting("LC_ALL=C sudo ssh bastion")).toEqual({ kind: "ssh", target: "bastion" });
   });
 
+  it("detects an ssh session launched through the shell command builtin", () => {
+    expect(detectNesting("command ssh deploy@host")).toEqual({ kind: "ssh", target: "deploy@host" });
+    expect(detectNesting("command -v ssh")).toBeNull();
+  });
+
   it("handles absolute paths to the binary", () => {
     expect(detectNesting("/usr/bin/ssh host")?.kind).toBe("ssh");
   });

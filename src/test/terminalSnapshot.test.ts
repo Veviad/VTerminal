@@ -1,6 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { Terminal } from "@xterm/xterm";
 
-import { utf8Tail } from "../lib/terminalSnapshot";
+const state = vi.hoisted(() => ({ entry: null as null | { disposed: boolean; term: Terminal } }));
+vi.mock("../lib/termRegistry", () => ({ getTerm: () => state.entry }));
+import { readLineRangeResult, utf8Tail } from "../lib/terminalSnapshot";
+
+afterEach(() => {
+  state.entry?.term.dispose();
+  state.entry = null;
+});
 
 describe("utf8Tail", () => {
   it("caps UTF-8 bytes without splitting a multibyte character", () => {
@@ -18,5 +26,18 @@ describe("utf8Tail", () => {
       capturedBytes: 2,
       truncated: false,
     });
+  });
+});
+
+describe("terminal text snapshots", () => {
+  it.each([
+    ["123456789 XYZ", "123456789 XYZ"],
+    ["123456789界XYZ", "123456789界XYZ"],
+    ["12345678  XYZ", "12345678  XYZ"],
+  ])("preserves wrapped terminal text %j", async (input, expected) => {
+    const term = new Terminal({ cols: 10, rows: 5 });
+    state.entry = { term, disposed: false };
+    await new Promise<void>((resolve) => term.write(input, resolve));
+    expect(readLineRangeResult("test", 0, term.buffer.active.cursorY, { limit: 100 }).text).toBe(expected);
   });
 });

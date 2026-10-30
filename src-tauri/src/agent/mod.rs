@@ -344,10 +344,8 @@ pub enum StreamEvent {
         server_id: String,
         message: String,
     },
-    /// The loop just appended these queued steering messages to the transcript.
-    /// The frontend clears its "queued" badge on this and on nothing else — a
-    /// message that never gets one is a message the model never saw, and the
-    /// user has to be able to tell those two apart.
+    /// A provider round containing these queued messages completed successfully.
+    /// Without this event, the frontend must treat delivery as unconfirmed.
     SteerDelivered {
         ids: Vec<String>,
     },
@@ -598,6 +596,7 @@ impl AiState {
 pub struct Steer {
     pub id: String,
     pub text: String,
+    pub images: Vec<crate::provider::ImagePart>,
 }
 
 /// A single steer may not exceed this. A pasted logfile would evict the run's
@@ -623,6 +622,7 @@ const MAX_STEERS_PENDING: usize = 8;
 #[derive(Default)]
 pub struct SteerState {
     pub pending: Mutex<HashMap<String, Vec<Steer>>>,
+    vision: Mutex<HashMap<String, bool>>,
 }
 
 #[cfg_attr(not(feature = "local-llm"), allow(dead_code))]
@@ -631,14 +631,34 @@ impl SteerState {
     /// what turns "steered a run that already ended" into a definite error
     /// instead of an entry nothing ever removes.
     pub fn register(&self, request_id: &str) {
+        if let Ok(mut map) = self.vision.lock() {
+            map.remove(request_id);
+        }
         if let Ok(mut map) = self.pending.lock() {
             map.insert(request_id.to_string(), Vec::new());
         }
     }
 
+    pub fn set_vision(&self, request_id: &str, supports_vision: bool) {
+        if let Ok(mut map) = self.vision.lock() {
+            map.insert(request_id.to_string(), supports_vision);
+        }
+    }
+
     pub fn push(&self, request_id: &str, id: String, text: String) -> Result<(), String> {
+        self.push_with_attachments(request_id, id, text, String::new(), Vec::new())
+    }
+
+    pub fn push_with_attachments(
+        &self,
+        request_id: &str,
+        id: String,
+        text: String,
+        attachment_text: String,
+        images: Vec<crate::provider::ImagePart>,
+    ) -> Result<(), String> {
         let text = text.trim().to_string();
-        if text.is_empty() {
+        if text.is_empty() && attachment_text.trim().is_empty() {
             return Err("empty message".to_string());
         }
         if text.chars().count() > MAX_STEER_CHARS {
@@ -646,6 +666,33 @@ impl SteerState {
                 "message too long (max {MAX_STEER_CHARS} characters)"
             ));
         }
+        if attachment_text.len() > 1024 * 1024
+            || images.len() > 6
+            || images.iter().any(|image| {
+                image.data.len() > 6 * 1024 * 1024
+                    || !crate::provider::ALLOWED_IMAGE_TYPES.contains(&image.media_type.as_str())
+            })
+        {
+            return Err("steering attachments exceed supported limits".into());
+        }
+        if !images.is_empty()
+            && !self
+                .vision
+                .lock()
+                .map_err(|_| "steer state poisoned")?
+                .get(request_id)
+                .copied()
+                .unwrap_or(false)
+        {
+            return Err("the running model cannot accept images yet".into());
+        }
+        let text = if attachment_text.trim().is_empty() {
+            text
+        } else if text.is_empty() {
+            attachment_text
+        } else {
+            format!("{text}\n\n{attachment_text}")
+        };
         let mut map = self.pending.lock().map_err(|_| "steer state poisoned")?;
         let queue = map
             .get_mut(request_id)
@@ -655,7 +702,7 @@ impl SteerState {
                 "too many queued messages — wait for the agent to pick them up".to_string(),
             );
         }
-        queue.push(Steer { id, text });
+        queue.push(Steer { id, text, images });
         Ok(())
     }
 
@@ -681,6 +728,9 @@ impl SteerState {
     }
 
     pub fn drain_for_request(&self, request_id: &str) {
+        if let Ok(mut map) = self.vision.lock() {
+            map.remove(request_id);
+        }
         if let Ok(mut map) = self.pending.lock() {
             map.remove(request_id);
         }
@@ -763,6 +813,48 @@ mod steer_tests {
 
         assert!(state.push("req-1", "s1".into(), "hi".into()).is_err());
         assert!(state.push("req-2", "s2".into(), "hi".into()).is_ok());
+    }
+
+    #[test]
+    fn steering_attachments_follow_the_running_model_and_mailbox() {
+        let state = SteerState::default();
+        state.register("req-1");
+        let image = crate::provider::ImagePart {
+            media_type: "image/png".into(),
+            data: "AAAA".into(),
+        };
+        assert!(state
+            .push_with_attachments(
+                "req-1",
+                "s1".into(),
+                "look".into(),
+                String::new(),
+                vec![image.clone()]
+            )
+            .is_err());
+        state.set_vision("req-1", true);
+        state
+            .push_with_attachments(
+                "req-1",
+                "s1".into(),
+                "look".into(),
+                "Attached file — log:\n```\nhello\n```".into(),
+                vec![image],
+            )
+            .unwrap();
+        let queued = state.drain("req-1");
+        assert!(queued[0].text.contains("hello"));
+        assert_eq!(queued[0].images[0].data, "AAAA");
+        state.drain_for_request("req-1");
+        assert!(state
+            .push_with_attachments(
+                "req-1",
+                "s2".into(),
+                "look".into(),
+                String::new(),
+                Vec::new()
+            )
+            .is_err());
     }
 
     #[test]

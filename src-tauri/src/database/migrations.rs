@@ -79,9 +79,19 @@ pub fn run(conn: &Connection) -> Result<(), String> {
     if version < 21 {
         migrate_v21(conn)?;
     }
+    if version < 22 {
+        migrate_v22(conn)?;
+    }
     crate::runbooks::db::ensure_v6_runtime_indexes(conn)?;
 
     Ok(())
+}
+
+fn migrate_v22(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "BEGIN; ALTER TABLE archived_messages ADD COLUMN steer_undelivered INTEGER NOT NULL DEFAULT 0 CHECK (steer_undelivered IN (0, 1)); INSERT INTO schema_version(version) VALUES (22); COMMIT;",
+    )
+    .map_err(|e| format!("migration v22 failed: {e}"))
 }
 
 fn migrate_v1(conn: &Connection) -> Result<(), String> {
@@ -754,6 +764,7 @@ mod tests {
             .unwrap();
         conn.execute_batch(
             "ALTER TABLE session_snapshots DROP COLUMN ai_mode;
+             ALTER TABLE archived_messages DROP COLUMN steer_undelivered;
              DROP TABLE scheduled_events;
              DROP TABLE scheduled_step_attempts;
              DROP TABLE scheduled_runs;
@@ -765,7 +776,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 21);
+        assert_eq!(version(&conn), 22);
         // Pre-existing rows survive.
         let hosts: i64 = conn
             .query_row("SELECT COUNT(*) FROM ssh_hosts", [], |r| r.get(0))
@@ -797,7 +808,7 @@ mod tests {
         let first = version(&conn);
         super::run(&conn).unwrap();
         assert_eq!(version(&conn), first);
-        assert_eq!(first, 21);
+        assert_eq!(first, 22);
     }
 
     #[test]
@@ -806,7 +817,8 @@ mod tests {
         super::run(&conn).unwrap();
         conn.execute_batch(
             "ALTER TABLE session_snapshots DROP COLUMN ai_mode;
-             DELETE FROM schema_version WHERE version = 21;
+             ALTER TABLE archived_messages DROP COLUMN steer_undelivered;
+             DELETE FROM schema_version WHERE version >= 21;
              INSERT INTO session_snapshots
                 (session_id, generation, tab_index, title, shell, cwd, scrollback,
                  scrollback_lines, created_at, updated_at)
@@ -821,7 +833,7 @@ mod tests {
         super::run(&conn).unwrap();
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 21);
+        assert_eq!(version(&conn), 22);
         let snapshot: (String, String, i64, Option<String>, String, String) = conn
             .query_row(
                 "SELECT title, scrollback, scrollback_lines, ai_mode, created_at, updated_at
@@ -1062,7 +1074,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 21);
+        assert_eq!(version(&conn), 22);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'chat_%' ORDER BY name")
             .unwrap()
@@ -1099,7 +1111,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 21);
+        assert_eq!(version(&conn), 22);
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(archived_sessions)")
             .unwrap()
@@ -1183,7 +1195,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 21);
+        assert_eq!(version(&conn), 22);
         let imported: (String, String, i64, i64) = conn
             .query_row(
                 "SELECT model_label, provider, input_tokens, output_tokens
@@ -1239,7 +1251,7 @@ mod tests {
         .unwrap();
 
         super::run(&conn).unwrap();
-        assert_eq!(version(&conn), 21);
+        assert_eq!(version(&conn), 22);
         let migrated: (String, Option<String>, Option<String>) = conn
             .query_row(
                 "SELECT cmd_command, cmd_target_role, cmd_target_label
@@ -1352,7 +1364,7 @@ mod tests {
         )
         .unwrap();
         super::run(&conn).unwrap();
-        assert_eq!(version(&conn), 21);
+        assert_eq!(version(&conn), 22);
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM command_history", [], |r| r.get(0))
             .unwrap();
@@ -1385,7 +1397,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 21);
+        assert_eq!(version(&conn), 22);
         let migrated: (String, i64, Option<i64>, String, String) = conn
             .query_row(
                 "SELECT source_kind, hidden, builtin_order, created_at, updated_at
@@ -1426,7 +1438,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 21);
+        assert_eq!(version(&conn), 22);
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(runbook_drafts)")
             .unwrap()
@@ -1460,7 +1472,7 @@ mod tests {
         super::run(&conn).unwrap();
 
         // Upgrades run the whole chain, so this lands on the current head.
-        assert_eq!(version(&conn), 21);
+        assert_eq!(version(&conn), 22);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()
@@ -1506,7 +1518,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 21);
+        assert_eq!(version(&conn), 22);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()
@@ -1622,7 +1634,7 @@ mod tests {
 
         super::run(&conn).unwrap();
 
-        assert_eq!(version(&conn), 21);
+        assert_eq!(version(&conn), 22);
         let has_password: bool = conn
             .query_row(
                 "SELECT has_password FROM ssh_hosts WHERE id = 'h1'",

@@ -220,6 +220,7 @@ pub fn run() {
             // pty
             commands::pty::pty_spawn,
             commands::pty::pty_write,
+            commands::pty::pty_write_bytes,
             commands::pty::pty_resize,
             commands::pty::pty_ack,
             commands::pty::pty_kill,

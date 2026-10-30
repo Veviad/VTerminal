@@ -25,6 +25,7 @@ export function RunbookApprovalCard({
   onApproveAll,
   onCancelApproveAll,
   autoApproving,
+  remoteTarget = false,
 }: {
   approval: RunbookApprovalRequest;
   busy: boolean;
@@ -36,6 +37,7 @@ export function RunbookApprovalCard({
   onApproveAll?: (command: string | null) => void;
   onCancelApproveAll?: () => void;
   autoApproving?: boolean;
+  remoteTarget?: boolean;
 }) {
   const [command, setCommand] = useState(approval.command);
 
@@ -164,10 +166,12 @@ export function RunbookApprovalCard({
                 ? "Commands must be one non-empty line of at most 4,096 characters."
                 : edited
                   ? "Edited command — the original and executed form will both appear in the report."
-                  : "Approve when the visible terminal row is the bound target. The command is used once."}
+                  : "The command is used once."}
             </span>
             <span className="block text-[9px] leading-relaxed text-text-muted">
-              Approving runs this in <strong>{targetLabel}</strong>. Your click
+              Approve only when <strong>{targetLabel}</strong> shows an empty shell
+              prompt, with no partially typed command or program waiting for input.
+              Your click
               is bound to the terminal row visible right now; the session&apos;s
               shell, functions, aliases and PATH are inside that target and are
               not independently verified.
@@ -217,7 +221,12 @@ export function RunbookApprovalCard({
           )}
         </div>
 
-        {!autoApproving && onApproveAll && !ansibleController && (
+        {remoteTarget && !ansibleController && (
+          <p className="text-[9px] leading-relaxed text-text-muted">
+            Remote commands require individual approval at an empty shell prompt.
+          </p>
+        )}
+        {!autoApproving && onApproveAll && !ansibleController && !remoteTarget && (
           <div className="space-y-1">
             <button
               onClick={() => {

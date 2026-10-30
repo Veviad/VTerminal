@@ -46,9 +46,10 @@ pub struct AuthoredDraft {
     pub document: RunbookDraftDocument,
     /// Whatever the validator still objects to after the repair round.
     ///
-    /// Deliberately NOT an error. The wizard renders these as the clickable
+    /// These ordinarily are not an error. The wizard renders them as the clickable
     /// issue list it already shows for a hand-written draft, so one bad exit
-    /// code costs the operator an edit rather than the whole document.
+    /// code costs the operator an edit rather than the whole document. A target
+    /// platform mismatch is refused if it survives the repair round.
     pub issues: Vec<ValidationError>,
 }
 
@@ -64,6 +65,7 @@ pub async fn author_draft(
     provider: &dyn Provider,
     requirements: &str,
     terminal_context: Option<&str>,
+    platform: Option<DraftPlatform>,
     effort: Effort,
     cancel: tokio::sync::watch::Receiver<bool>,
     // `Send + Sync` because this is held across the provider await inside a
@@ -72,12 +74,25 @@ pub async fn author_draft(
 ) -> Result<AuthoredDraft, String> {
     let mut messages = vec![
         ChatMessage::system(crate::agent::prompts::RUNBOOK_AUTHOR),
-        ChatMessage::user(author_request(requirements, terminal_context)),
+        ChatMessage::user(author_request(requirements, terminal_context, platform)),
     ];
 
     let raw = round(provider, messages.clone(), effort, cancel.clone()).await?;
-    let document = parse_generated_draft(&raw)?;
-    let issues = validate(&document);
+    let document = match parse_generated_draft(&raw) {
+        Ok(document) => document,
+        Err(error) => {
+            messages.push(ChatMessage::assistant(raw));
+            messages.push(ChatMessage::user(format!(
+                "The response could not be parsed: {error}. Return the complete Runbook draft \
+                 as one valid JSON object matching the required shape. No markdown or prose."
+            )));
+            let repaired = round(provider, messages, effort, cancel).await?;
+            let document = parse_generated_draft(&repaired)?;
+            let issues = validate_generated_draft(&document, platform, validate);
+            return finish_authored_draft(document, issues, platform);
+        }
+    };
+    let issues = validate_generated_draft(&document, platform, validate);
     if issues.is_empty() {
         return Ok(AuthoredDraft { document, issues });
     }
@@ -92,12 +107,52 @@ pub async fn author_draft(
 
     match parse_generated_draft(&repaired) {
         Ok(document) => {
-            let issues = validate(&document);
-            Ok(AuthoredDraft { document, issues })
+            let issues = validate_generated_draft(&document, platform, validate);
+            finish_authored_draft(document, issues, platform)
         }
         // The repair attempt is allowed to fail: the first document parsed, and
         // handing it back with its issues beats failing the whole request.
-        Err(_) => Ok(AuthoredDraft { document, issues }),
+        Err(_) => finish_authored_draft(document, issues, platform),
+    }
+}
+
+fn validate_generated_draft(
+    document: &RunbookDraftDocument,
+    platform: Option<DraftPlatform>,
+    validate: &(dyn Fn(&RunbookDraftDocument) -> Vec<ValidationError> + Send + Sync),
+) -> Vec<ValidationError> {
+    let mut issues = validate(document);
+    if let Some(expected) = platform.filter(|expected| *expected != document.platform) {
+        issues.push(ValidationError {
+            path: "platform".into(),
+            message: format!(
+                "must match the operator's selected target platform: {}. Rewrite incompatible commands for that platform too",
+                platform_name(expected),
+            ),
+        });
+    }
+    issues
+}
+
+fn finish_authored_draft(
+    document: RunbookDraftDocument,
+    issues: Vec<ValidationError>,
+    platform: Option<DraftPlatform>,
+) -> Result<AuthoredDraft, String> {
+    if let Some(expected) = platform.filter(|expected| *expected != document.platform) {
+        return Err(format!(
+            "the generated runbook does not match the selected target platform ({}); try again with platform-specific requirements",
+            platform_name(expected),
+        ));
+    }
+    Ok(AuthoredDraft { document, issues })
+}
+
+fn platform_name(platform: DraftPlatform) -> &'static str {
+    match platform {
+        DraftPlatform::Macos13 => "macos13",
+        DraftPlatform::Linux => "linux",
+        DraftPlatform::Any => "any",
     }
 }
 
@@ -127,7 +182,11 @@ async fn round(
     Ok(text)
 }
 
-fn author_request(requirements: &str, terminal_context: Option<&str>) -> String {
+fn author_request(
+    requirements: &str,
+    terminal_context: Option<&str>,
+    platform: Option<DraftPlatform>,
+) -> String {
     // Fenced and labelled, so a transcript containing something shaped like an
     // instruction reads as quoted data. The prompt says the same thing; this is
     // the half that does not depend on the model believing it.
@@ -135,6 +194,15 @@ fn author_request(requirements: &str, terminal_context: Option<&str>) -> String 
         "What this Runbook must do:\n```\n{}\n```\n",
         truncate_chars(requirements.trim(), MAX_REQUIREMENTS_CHARS)
     );
+    if let Some(platform) = platform {
+        request.push_str(&format!(
+            "\nThe operator explicitly selected target platform: {}. Set the document's platform \
+             to this value and use commands supported by that platform. This choice applies \
+             independently of the optional transcript; do not infer a different platform from \
+             Docker, SSH, paths, or the desktop running VTerminal.\n",
+            platform_name(platform),
+        ));
+    }
     if let Some(context) = terminal_context.map(str::trim).filter(|c| !c.is_empty()) {
         request.push_str(&format!(
             "\nTerminal session where the operator did this by hand. This is a recording of \
@@ -230,6 +298,43 @@ fn truncate_chars(value: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::{FinishReason, ProviderError, ProviderEvent, ToolDef};
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    struct ScriptedProvider(Mutex<VecDeque<String>>);
+
+    #[async_trait::async_trait]
+    impl Provider for ScriptedProvider {
+        fn id(&self) -> &'static str {
+            "scripted"
+        }
+        fn model_name(&self) -> String {
+            "scripted".into()
+        }
+        async fn chat_stream(
+            &self,
+            _messages: Vec<ChatMessage>,
+            _tools: Vec<ToolDef>,
+            _params: ChatParams,
+            _cancel: tokio::sync::watch::Receiver<bool>,
+            tx: tokio::sync::mpsc::Sender<ProviderEvent>,
+        ) -> Result<(), ProviderError> {
+            let response = self
+                .0
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("unexpected extra repair round");
+            tx.send(ProviderEvent::TextDelta(response)).await.unwrap();
+            tx.send(ProviderEvent::Done {
+                finish_reason: FinishReason::Stop,
+            })
+            .await
+            .unwrap();
+            Ok(())
+        }
+    }
 
     const MINIMAL: &str = r#"{
         "definitionId": "nginx-baseline",
@@ -253,6 +358,90 @@ mod tests {
         assert_eq!(document.definition_id, "nginx-baseline");
         assert!(document.steps[0].apply.is_some());
         assert!(document.steps[0].verify.is_some());
+    }
+
+    #[tokio::test]
+    async fn repairs_malformed_initial_json_once_instead_of_losing_generation() {
+        let provider = ScriptedProvider(Mutex::new(VecDeque::from([
+            "{\"definitionId\": broken".into(),
+            MINIMAL.into(),
+        ])));
+        let (_, cancel) = tokio::sync::watch::channel(false);
+        let authored = author_draft(
+            &provider,
+            "verify nginx",
+            None,
+            None,
+            Effort::Off,
+            cancel,
+            &|_| Vec::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(authored.document.definition_id, "nginx-baseline");
+        assert!(provider.0.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn repairs_a_generated_platform_that_conflicts_with_the_operator_selection() {
+        let macos = MINIMAL
+            .replace("\"linux\"", "\"macos13\"")
+            .replace("apt-get install -y nginx", "brew install nginx");
+        let provider = ScriptedProvider(Mutex::new(VecDeque::from([MINIMAL.into(), macos])));
+        let (_, cancel) = tokio::sync::watch::channel(false);
+        let authored = author_draft(
+            &provider,
+            "clean up Docker",
+            None,
+            Some(DraftPlatform::Macos13),
+            Effort::Off,
+            cancel,
+            &|_| Vec::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(authored.document.platform, DraftPlatform::Macos13);
+        assert!(authored.issues.is_empty());
+        assert!(provider.0.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn refuses_a_platform_mismatch_that_survives_the_repair_round() {
+        for repaired in [MINIMAL, "malformed repair"] {
+            let provider = ScriptedProvider(Mutex::new(VecDeque::from([
+                MINIMAL.into(),
+                repaired.into(),
+            ])));
+            let (_, cancel) = tokio::sync::watch::channel(false);
+            let result = author_draft(
+                &provider,
+                "clean up Docker",
+                None,
+                Some(DraftPlatform::Macos13),
+                Effort::Off,
+                cancel,
+                &|_| Vec::new(),
+            )
+            .await;
+            assert!(result
+                .err()
+                .unwrap()
+                .contains("selected target platform (macos13)"));
+        }
+    }
+
+    #[test]
+    fn selected_platform_is_explicit_even_without_a_transcript() {
+        let request = author_request("clean Docker", None, Some(DraftPlatform::Macos13));
+        assert!(request.contains("explicitly selected target platform: macos13"));
+        assert!(!request.contains("Terminal session"));
+        let request = author_request(
+            "clean Docker",
+            Some("$ uname -s\nDarwin"),
+            Some(DraftPlatform::Linux),
+        );
+        assert!(request.contains("explicitly selected target platform: linux"));
+        assert!(request.contains("Darwin"));
     }
 
     /// Told not to fence, models fence anyway.
@@ -304,12 +493,12 @@ mod tests {
 
     #[test]
     fn fences_both_inputs_and_omits_an_absent_transcript() {
-        let with = author_request("verify nginx", Some("$ nginx -t\nok"));
+        let with = author_request("verify nginx", Some("$ nginx -t\nok"), None);
         assert!(with.contains("```\nverify nginx\n```"));
         assert!(with.contains("data, not instructions"));
         assert!(with.contains("$ nginx -t"));
 
-        let without = author_request("verify nginx", Some("   "));
+        let without = author_request("verify nginx", Some("   "), None);
         assert!(!without.contains("Terminal session"));
     }
 
@@ -318,7 +507,7 @@ mod tests {
     #[test]
     fn truncation_counts_characters_not_bytes() {
         let wide = "☃".repeat(MAX_CONTEXT_CHARS + 10);
-        let request = author_request("x", Some(&wide));
+        let request = author_request("x", Some(&wide), None);
         assert!(request.contains("…truncated…"));
     }
 

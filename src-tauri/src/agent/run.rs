@@ -1337,29 +1337,13 @@ pub async fn run_agent(
             );
         }
 
-        // THE ONLY LEGAL PLACE TO APPEND A USER TURN — see `append_steers`.
-        // Every arm of `process_tool_calls` either terminates or pushes a
-        // tool_result, so `messages` is tool-pair-complete here.
-        //
-        // Ahead of the step check, not after it, so a message typed during the
-        // last round still buys the round that acts on it. But only when the
-        // extension genuinely gains ground: past the hard cap, draining would
-        // clear the user's "queued" badge on a message the model never saw, so
-        // the steer is deliberately left in the mailbox to surface as
-        // undelivered.
+        // A pending steer may extend the run's budget. Leave it in the mailbox
+        // until the compaction and context guards below have allowed a round:
+        // otherwise a pause could claim the message was delivered without ever
+        // sending it to the model.
         let extended = extended_budget(iteration, config.max_iterations, hard_cap);
-        if extended > iteration {
-            let queued = steers.drain(&config.request_id);
-            if !queued.is_empty() {
-                let ids: Vec<String> = queued.iter().map(|s| s.id.clone()).collect();
-                append_steers(&mut messages, &queued);
-                checkpoints.mark_changed();
-                budget = extended;
-                let _ = on_event.send(StreamEvent::SteerDelivered { ids });
-            }
-        }
-
-        if iteration >= budget {
+        if iteration >= budget && !(extended > iteration && steers.has_pending(&config.request_id))
+        {
             pause_reason = PauseReason::StepLimit;
             break;
         }
@@ -1445,6 +1429,28 @@ pub async fn run_agent(
             break;
         }
 
+        // Every prior tool call has a result here, so adding a user message is
+        // valid for every provider. Keep the old transcript until the provider
+        // completes: an error or cancellation must leave the steer undelivered
+        // and must not add an unseen message to the persisted model transcript.
+        let queued = if extended > iteration {
+            steers.drain(&config.request_id)
+        } else {
+            Vec::new()
+        };
+        let before_steers = if queued.is_empty() {
+            None
+        } else {
+            budget = extended;
+            let before = messages.clone();
+            append_steers(&mut messages, &queued);
+            Some(before)
+        };
+        if iteration >= budget {
+            pause_reason = PauseReason::StepLimit;
+            break;
+        }
+
         let params = ChatParams {
             temperature: config.temperature,
             max_tokens: Some(round_max_tokens),
@@ -1475,6 +1481,9 @@ pub async fn run_agent(
         } = match round {
             Ok(round) => round,
             Err(ProviderError::Cancelled) => {
+                if let Some(before) = before_steers {
+                    messages = before;
+                }
                 return finish_outcome(
                     messages,
                     AgentTermination::Cancelled,
@@ -1486,6 +1495,9 @@ pub async fn run_agent(
                 );
             }
             Err(error) => {
+                if let Some(before) = before_steers {
+                    messages = before;
+                }
                 return finish_outcome(
                     messages,
                     AgentTermination::Failed {
@@ -1500,6 +1512,11 @@ pub async fn run_agent(
                 );
             }
         };
+        if !queued.is_empty() {
+            checkpoints.mark_changed();
+            let ids = queued.iter().map(|s| s.id.clone()).collect();
+            let _ = on_event.send(StreamEvent::SteerDelivered { ids });
+        }
         stats.tool_calls = stats.tool_calls.saturating_add(calls.len() as u32);
         // Each round is billed its own input tokens, so this is a sum. Taking
         // the max here under-reported a 10-round run by roughly 5x.
@@ -1674,16 +1691,25 @@ fn append_steers(messages: &mut Vec<ChatMessage>, steers: &[Steer]) {
     if joined.trim().is_empty() {
         return;
     }
+    let images: Vec<_> = steers
+        .iter()
+        .flat_map(|s| s.images.iter().cloned())
+        .collect();
+    let longest = joined.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest.max(2) + 1);
     let body = format!(
         "The user sent this while you were working. Take it into account and keep going — \
-         it may redirect the goal, add to it, or answer a question you had.\n\n```\n{joined}\n```"
+         it may redirect the goal, add to it, or answer a question you had.\n\n{fence}\n{joined}\n{fence}"
     );
     match messages.last_mut() {
         Some(last) if last.role == Role::User => {
             last.content.push_str("\n\n");
             last.content.push_str(&body);
+            if !images.is_empty() {
+                last.images.get_or_insert_with(Vec::new).extend(images);
+            }
         }
-        _ => messages.push(ChatMessage::user(body)),
+        _ => messages.push(ChatMessage::user_with_images(body, images)),
     }
 }
 
@@ -1793,6 +1819,117 @@ mod tests {
 
     struct SmartProvider {
         behavior: SmartProviderBehavior,
+    }
+
+    struct SteerAuditProvider {
+        fail: bool,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<ChatMessage>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for SteerAuditProvider {
+        fn id(&self) -> &'static str {
+            "steer-audit"
+        }
+        fn model_name(&self) -> String {
+            "steer-audit".into()
+        }
+        async fn chat_stream(
+            &self,
+            messages: Vec<ChatMessage>,
+            _tools: Vec<ToolDef>,
+            _params: ChatParams,
+            _cancel: tokio::sync::watch::Receiver<bool>,
+            tx: tokio::sync::mpsc::Sender<ProviderEvent>,
+        ) -> Result<(), ProviderError> {
+            *self.seen.lock().unwrap() = messages;
+            if self.fail {
+                return Err(ProviderError::Inference("offline".into()));
+            }
+            tx.send(ProviderEvent::TextDelta("acknowledged".into()))
+                .await
+                .unwrap();
+            tx.send(ProviderEvent::Done {
+                finish_reason: FinishReason::Stop,
+            })
+            .await
+            .unwrap();
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn steers_are_acknowledged_only_after_a_successful_provider_round() {
+        use tauri::ipc::InvokeResponseBody;
+        for fail in [false, true] {
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let captured = events.clone();
+            let channel = Channel::new(move |body: InvokeResponseBody| {
+                if let InvokeResponseBody::Json(body) = body {
+                    captured
+                        .lock()
+                        .unwrap()
+                        .push(serde_json::from_str::<serde_json::Value>(&body).unwrap());
+                }
+                Ok(())
+            });
+            let steers = SteerState::default();
+            steers.register("test");
+            steers.set_vision("test", true);
+            steers
+                .push_with_attachments(
+                    "test",
+                    "s1".into(),
+                    "please inspect".into(),
+                    "file content".into(),
+                    vec![crate::provider::ImagePart {
+                        media_type: "image/png".into(),
+                        data: "AAAA".into(),
+                    }],
+                )
+                .unwrap();
+            let (_, cancel) = tokio::sync::watch::channel(false);
+            let outcome = run_agent(
+                &SteerAuditProvider {
+                    fail,
+                    seen: seen.clone(),
+                },
+                config_with_buckets(vec![]),
+                "system".into(),
+                "goal".into(),
+                vec![],
+                vec![],
+                &ApprovalState::default(),
+                None,
+                &PtyExecState::default(),
+                &steers,
+                None,
+                None,
+                None,
+                cancel,
+                &channel,
+            )
+            .await;
+            let requests = seen.lock().unwrap();
+            assert!(requests.iter().any(|m| m.content.contains("file content")
+                && m.images
+                    .as_ref()
+                    .is_some_and(|images| images[0].data == "AAAA")));
+            let acknowledged = events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| e["type"] == "SteerDelivered");
+            assert_eq!(acknowledged, !fail);
+            assert_eq!(
+                outcome
+                    .transcript
+                    .iter()
+                    .any(|m| m.content.contains("file content")),
+                !fail
+            );
+        }
     }
 
     #[async_trait::async_trait]
@@ -2216,7 +2353,21 @@ mod tests {
         Steer {
             id: id.to_string(),
             text: text.to_string(),
+            images: Vec::new(),
         }
+    }
+
+    #[test]
+    fn steer_images_reach_the_next_user_turn_and_preserve_nested_fences() {
+        let mut messages = vec![ChatMessage::user("goal")];
+        let mut update = steer("s1", "Attached file — log:\n```\nhello\n```");
+        update.images.push(crate::provider::ImagePart {
+            media_type: "image/png".into(),
+            data: "AAAA".into(),
+        });
+        append_steers(&mut messages, &[update]);
+        assert_eq!(messages[0].images.as_ref().unwrap()[0].data, "AAAA");
+        assert!(messages[0].content.contains("````\nAttached file"));
     }
 
     fn assistant_call(id: &str) -> ChatMessage {

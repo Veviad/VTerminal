@@ -399,8 +399,38 @@ export function useSessions() {
       // tracker suspension inside replayScrollback is defence in depth.
       if (spec.replay) await replayScrollback(sessionId, spec.replay);
 
-      // Keystrokes → PTY
-      entry.term.onData((d) => void api.ptyWrite(sessionId, d));
+      // xterm can accept input as soon as its pane is visible, even while the
+      // native PTY is still spawning. Hold those keystrokes until the session
+      // exists instead of losing them to a rejected "no session" write.
+      let inputReady = false;
+      type InputChunk = { kind: "text"; data: string } | { kind: "bytes"; data: number[] };
+      const pendingInput: InputChunk[] = [];
+      let inputDispatch = Promise.resolve();
+      const sendInput = (chunk: InputChunk) => {
+        // Asynchronous IPC must not reorder keystrokes and binary mouse reports.
+        inputDispatch = inputDispatch.then(async () => {
+          const live = useAppStore.getState().sessions.find((s) => s.id === sessionId);
+          if (!live || live.exited || entry.disposed) return;
+          if (chunk.kind === "text") await api.ptyWrite(sessionId, chunk.data);
+          else await api.ptyWriteBytes(sessionId, chunk.data);
+        }).catch((error) => {
+          const live = useAppStore.getState().sessions.find((s) => s.id === sessionId);
+          if (live && !live.exited) console.error(`PTY input failed (${sessionId}):`, error);
+        });
+      };
+      const acceptInput = (chunk: InputChunk) => {
+        const live = useAppStore.getState().sessions.find((s) => s.id === sessionId);
+        if (!live || live.exited || entry.disposed) return;
+        if (inputReady) sendInput(chunk);
+        else pendingInput.push(chunk);
+      };
+      entry.term.onData((data) => acceptInput({ kind: "text", data }));
+      // xterm's onBinary string contains byte values, not Unicode text. UTF-8
+      // encoding would corrupt values above 127 in legacy mouse reports.
+      entry.term.onBinary((data) => acceptInput({
+        kind: "bytes",
+        data: Array.from(data, (character) => character.charCodeAt(0) & 0xff),
+      }));
 
       // Copy-on-select (checked live so the setting applies without recreating)
       entry.term.onSelectionChange(() => {
@@ -411,12 +441,14 @@ export function useSessions() {
       });
 
       // PTY output → xterm, with write-callback ack flow control (~256 KB)
+      const spawnCols = entry.term.cols;
+      const spawnRows = entry.term.rows;
       try {
         await api.ptySpawn(
           sessionId,
           {
-            cols: entry.term.cols,
-            rows: entry.term.rows,
+            cols: spawnCols,
+            rows: spawnRows,
             cwd: spec.cwd ?? null,
             shell,
             shellScope,
@@ -455,6 +487,7 @@ export function useSessions() {
           },
         );
       } catch (err) {
+        pendingInput.length = 0;
         // Spawn failed (bad shell path etc.) — keep the tab visible but mark it
         // exited with the error written into the terminal, instead of leaving a
         // silent zombie.
@@ -468,6 +501,13 @@ export function useSessions() {
         return sessionId;
       }
 
+      const liveSession = useAppStore.getState().sessions.find((s) => s.id === sessionId);
+      if (!entry.disposed && liveSession && !liveSession.exited) {
+        inputReady = true;
+        for (const chunk of pendingInput) sendInput(chunk);
+      }
+      pendingInput.length = 0;
+
       // Resize forwarding is wired only AFTER the spawn — the seed resize above
       // would otherwise fire pty_resize at a session Rust has never heard of.
       entry.term.onResize(({ cols, rows }) => {
@@ -476,6 +516,11 @@ export function useSessions() {
           useAppStore.getState().setTermDims(cols, rows);
         }
       });
+      // A visible pane can fit while ptySpawn is in flight, before onResize
+      // exists. Reconcile the dimensions once the new PTY is registered.
+      if (entry.term.cols !== spawnCols || entry.term.rows !== spawnRows) {
+        void api.ptyResize(sessionId, entry.term.cols, entry.term.rows).catch(() => {});
+      }
 
       // An initial command is user-authored (a saved host, a Reconnect click) and
       // still goes through the same gate the agent's commands use — one chokepoint

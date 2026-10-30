@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { CommandApprovalCard } from "../components/ai/CommandApprovalCard";
@@ -9,6 +9,8 @@ import {
 import { SidecarReplacementPopover } from "../components/sidecar/SidecarReplacementPopover";
 import type { AgentTargetRole } from "../lib/sidecar";
 import { S } from "../lib/strings";
+import * as terminalRegistry from "../lib/termRegistry";
+import type { TermEvent } from "../lib/termRegistry";
 
 const localChoices: readonly SidecarTerminalChoice[] = [
   { id: "local-1", label: "Project", detail: "~/code/project" },
@@ -210,6 +212,35 @@ describe("SidecarReplacementPopover", () => {
 });
 
 describe("CommandApprovalCard Sidecar destinations", () => {
+  it("keeps the proposed remote destination and disables Run after its target changes", () => {
+    render(<CommandApprovalCard command="pwd" explanation="" target="ssh prod-01" remote
+      targetChanged outputPolicy="normal" onRespond={vi.fn()} />);
+    expect(screen.getByLabelText("Remote command approval for ssh prod-01")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("terminal target changed");
+    expect(screen.getByRole("button", { name: "Run on prod-01" })).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: /empty shell prompt/i })).toBeDisabled();
+  });
+  it("clears remote prompt confirmation when the terminal receives input", () => {
+    let listener!: (event: TermEvent) => void;
+    const subscription = vi.spyOn(terminalRegistry, "subscribeTerm").mockImplementation((_id, callback) => {
+      listener = callback;
+      return () => {};
+    });
+    const onConfirm = vi.fn(() => true);
+    render(<CommandApprovalCard command="pwd" explanation="" target="ssh host" remote
+      outputPolicy="normal" remoteSessionId="remote-1" onConfirmPrompt={onConfirm} onRespond={vi.fn()} />);
+    const checkbox = screen.getByRole("checkbox", { name: /empty shell prompt/i });
+    const run = screen.getByRole("button", { name: "Run on host" });
+    fireEvent.click(checkbox);
+    expect(checkbox).toBeChecked();
+    expect(run).toBeEnabled();
+    act(() => listener({ type: "userInput" }));
+    expect(checkbox).not.toBeChecked();
+    expect(run).toBeDisabled();
+    expect(onConfirm).toHaveBeenLastCalledWith(false);
+    subscription.mockRestore();
+  });
+
   it("announces and labels a remote command with its exact destination", () => {
     const onRespond = vi.fn();
     render(
@@ -231,9 +262,10 @@ describe("CommandApprovalCard Sidecar destinations", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("ssh deploy@prod-01")).toBeInTheDocument();
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "Run on deploy@prod-01" }),
-    );
+    const run = screen.getByRole("button", { name: "Run on deploy@prod-01" });
+    expect(run).toBeDisabled();
+    fireEvent.click(screen.getByRole("checkbox", { name: /empty shell prompt/i }));
+    fireEvent.click(run);
     expect(onRespond).toHaveBeenCalledWith("run", undefined);
   });
 

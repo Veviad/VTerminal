@@ -93,6 +93,19 @@ pub fn pty_write(
 }
 
 #[tauri::command]
+pub fn pty_write_bytes(
+    state: State<'_, PtyManager>,
+    session_id: String,
+    data: Vec<u8>,
+) -> Result<(), String> {
+    let sessions = state.sessions.lock().map_err(|_| "pty state poisoned")?;
+    let session = sessions
+        .get(&session_id)
+        .ok_or_else(|| format!("no session {session_id}"))?;
+    session.write_bytes(&data)
+}
+
+#[tauri::command]
 pub fn pty_resize(
     state: State<'_, PtyManager>,
     session_id: String,

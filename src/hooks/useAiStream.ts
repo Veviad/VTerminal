@@ -5,6 +5,8 @@ import { getTerm } from "../lib/termRegistry";
 import { readLineRange, readScreenTail } from "../lib/terminalSnapshot";
 import {
   abortSession,
+  captureApprovalPromptBinding,
+  releaseApprovalPromptBinding,
   runInTerminal,
   type PtyExecOutcome,
 } from "../lib/ptyExec";
@@ -26,6 +28,7 @@ import {
 import { S } from "../lib/strings";
 import type {
   AgentTargetRole,
+  Attachment,
   AiMessage,
   Block,
   SettledCommandStatus,
@@ -40,6 +43,7 @@ import { sessionIdForRole } from "../lib/sidecar";
 import { collapseHome, resolveSessionTitle } from "../lib/sessionTitle";
 import { isTerminalOutputProtected } from "../lib/runbookTerminalPrivacy";
 import { PRIVATE_OUTPUT_NOTICE } from "../lib/types";
+import { describeRemote } from "../lib/nesting";
 
 let requestCounter = 1;
 
@@ -48,6 +52,41 @@ function newRequestId(): string {
 }
 
 let steerCounter = 1;
+const steerDispatches = new Map<string, Promise<void>>();
+/** Operator attestations are one-shot and tied to a particular approval. */
+const agentPromptBindings = new Map<string, string>();
+type AgentTargetEpoch = {
+  sessionId: string;
+  remote: { kind: string; target: string | null; hostId: string | null } | null;
+  nestedBlockId: string | null;
+  savedHostId: string | null;
+};
+const agentProposalTargets = new Map<string, AgentTargetEpoch>();
+
+function snapshotAgentTarget(sessionId: string): AgentTargetEpoch {
+  const ui = useAppStore.getState().sessionUi[sessionId];
+  return {
+    sessionId,
+    remote: ui?.remote ? {
+      kind: ui.remote.kind,
+      target: ui.remote.target,
+      hostId: ui.remote.host_id ?? null,
+    } : null,
+    nestedBlockId: ui?.nestedBlockId ?? null,
+    savedHostId: ui?.remoteHost?.id ?? null,
+  };
+}
+
+function matchesAgentTarget(expected: AgentTargetEpoch, sessionId: string): boolean {
+  const current = snapshotAgentTarget(sessionId);
+  return expected.sessionId === current.sessionId
+    && expected.nestedBlockId === current.nestedBlockId
+    && expected.savedHostId === current.savedHostId
+    && expected.remote?.kind === current.remote?.kind
+    && expected.remote?.target === current.remote?.target
+    && expected.remote?.hostId === current.remote?.hostId
+    && !!expected.remote === !!current.remote;
+}
 
 function newSteerId(): string {
   return `st-${Date.now()}-${steerCounter++}`;
@@ -374,7 +413,7 @@ export function useAiStream() {
     });
     // Only now, once the files are on the outgoing message: clearing any earlier
     // would let a send that never starts eat them.
-    if (staged.length > 0) store.clearPendingAttachments(sessionId);
+    for (const attachment of staged) store.detachFileFromAi(sessionId, attachment.id);
     try {
       await api.aiAsk(
         requestId,
@@ -397,7 +436,7 @@ export function useAiStream() {
 
   /** Agent mode: the model proposes commands one at a time; each is gated by
    *  a Run/Skip/Stop card (or auto-accepted when the toggle is armed). */
-  const startAgent = useCallback(async (sessionId: string, goal: string) => {
+  const startAgent = useCallback(async (sessionId: string, goal: string, retryAttachments?: Attachment[]) => {
     const store = useAppStore.getState();
     const ownerSessionId = store.resolveAiOwner(sessionId);
     if (isSessionBusy(ownerSessionId)) return;
@@ -415,8 +454,7 @@ export function useAiStream() {
     try {
       staged = await persistAttachments(
         ownerSessionId,
-        ownRecordValue(store.aiStreams, ownerSessionId)?.pendingAttachments ??
-          [],
+        retryAttachments ?? ownRecordValue(store.aiStreams, ownerSessionId)?.pendingAttachments ?? [],
       );
     } catch (err) {
       if (ownsActiveRequest(ownerSessionId, requestId)) {
@@ -460,7 +498,20 @@ export function useAiStream() {
       return;
     }
 
-    const outgoing = buildOutgoing(goal, staged);
+    let outgoing = buildOutgoing(goal, staged);
+    if (outgoing.images.length !== staged.filter((a) => a.kind === "image").length) {
+      liveStore.finishAiStream(ownerSessionId, S.vision.readFailed, undefined, requestId);
+      return;
+    }
+    if (outgoing.images.length > 0 && !store.catalog.find((m) => m.id === store.activeModelId)?.supports_vision) {
+      const folded = ocrAvailable() ? await transcribeImages(requestId, outgoing.prompt, staged) : null;
+      if (!ownsActiveRequest(ownerSessionId, requestId)) return;
+      if (folded === null) {
+        liveStore.finishAiStream(ownerSessionId, S.vision.readFailed, undefined, requestId);
+        return;
+      }
+      outgoing = { prompt: folded, images: [] };
+    }
     liveStore.pushAiMessage(ownerSessionId, {
       id: `msg-${Date.now()}`,
       role: "user",
@@ -468,7 +519,9 @@ export function useAiStream() {
       attachments: staged.length > 0 ? staged : undefined,
       createdAt: new Date().toISOString(),
     });
-    if (staged.length > 0) liveStore.clearPendingAttachments(ownerSessionId);
+    if (!retryAttachments) {
+      for (const attachment of staged) liveStore.detachFileFromAi(ownerSessionId, attachment.id);
+    }
     // Read at dispatch time, not captured earlier: a reopened session's archived
     // transcript is written into the store asynchronously, and this is what turns
     // agent mode from single-shot into an actual conversation.
@@ -568,10 +621,11 @@ export function useAiStream() {
   const steer = useCallback(
     async (sessionId: string, text: string) => {
       const body = text.trim();
-      if (!body) return;
       const initialStore = useAppStore.getState();
       const ownerSessionId = initialStore.resolveAiOwner(sessionId);
       const stream = ownRecordValue(initialStore.aiStreams, ownerSessionId);
+      const attachments = stream?.pendingAttachments ?? [];
+      if (!body && !attachments.some((a) => a.kind === "text" && a.text?.trim())) return;
       // Nothing to steer — this is an ordinary Send. Covers the race where the
       // run ended between the panel rendering and the user hitting Enter.
       if (!stream?.requestId || stream.mode !== "agent") {
@@ -579,21 +633,83 @@ export function useAiStream() {
         return;
       }
       const steerId = newSteerId();
+      const requestId = stream.requestId;
       const generationId = stream.generationId;
-      useAppStore.getState().queueSteer(ownerSessionId, steerId, body);
-      try {
-        await api.agentSteer(stream.requestId, steerId, body);
-      } catch {
-        // The run ended between the check and the call, or the backend refused
-        // it (too long, too many queued). The message stays in the transcript
-        // flagged undelivered with its own Send button, rather than vanishing.
-        if (generationId && ownsGeneration(ownerSessionId, generationId)) {
-          useAppStore.getState().markSteerUndelivered(ownerSessionId, steerId);
+      // The archive stores text attachment contents in the message body, not
+      // in the attachment metadata. Preserve that invariant even on failure.
+      useAppStore.getState().queueSteer(ownerSessionId, steerId, buildOutgoing(body, attachments).prompt, attachments);
+      for (const attachment of attachments) initialStore.detachFileFromAi(ownerSessionId, attachment.id);
+      markTranscriptDirty(ownerSessionId);
+      const dispatchKey = `${ownerSessionId}:${requestId}`;
+      const previous = steerDispatches.get(dispatchKey) ?? Promise.resolve();
+      const dispatch = previous.catch(() => {}).then(async () => {
+        try {
+          const staged = await persistAttachments(ownerSessionId, attachments);
+          // The run may finish while the attachment is being saved. The
+          // message can still exist as undelivered, even in a newer generation.
+          // Its globally unique id prevents this update touching another turn.
+          useAppStore.getState().setSteerAttachments(ownerSessionId, steerId, staged);
+          markTranscriptDirty(ownerSessionId);
+          let outgoing = buildOutgoing("", staged);
+          if (outgoing.images.length !== staged.filter((a) => a.kind === "image").length) {
+            throw new Error("Image data unavailable");
+          }
+          if (outgoing.images.length && !initialStore.catalog.find((m) => m.id === initialStore.activeModelId)?.supports_vision) {
+            const folded = ocrAvailable() ? await transcribeImages(newRequestId(), outgoing.prompt, staged) : null;
+            if (folded === null) throw new Error(S.vision.readFailed);
+            outgoing = { prompt: folded, images: [] };
+          }
+          if (!ownsActiveRequest(ownerSessionId, requestId)) throw new Error("Agent run ended");
+          await api.agentSteer(requestId, steerId, body, outgoing.prompt, outgoing.images);
+        } catch {
+          // Keep the message and files together for an explicit retry.
+          if (generationId && ownsGeneration(ownerSessionId, generationId)) {
+            useAppStore.getState().markSteerUndelivered(ownerSessionId, steerId);
+          }
         }
+      });
+      steerDispatches.set(dispatchKey, dispatch);
+      try {
+        await dispatch;
+      } finally {
+        if (steerDispatches.get(dispatchKey) === dispatch) steerDispatches.delete(dispatchKey);
       }
     },
     [startAgent],
   );
+
+  const attestProposalPrompt = useCallback((sessionId: string, confirmed: boolean): boolean => {
+    const store = useAppStore.getState();
+    const ownerSessionId = store.resolveAiOwner(sessionId);
+    const proposal = ownRecordValue(store.aiStreams, ownerSessionId)?.pendingProposal;
+    if (!proposal) return false;
+    const previous = agentPromptBindings.get(proposal.approvalId);
+    if (previous) releaseApprovalPromptBinding(previous);
+    agentPromptBindings.delete(proposal.approvalId);
+    if (!confirmed) return true;
+    const targetSessionId = proposal.targetSessionId ?? ownerSessionId;
+    const proposedTarget = agentProposalTargets.get(proposal.approvalId);
+    if (!proposedTarget || !matchesAgentTarget(proposedTarget, targetSessionId)) return false;
+    const binding = captureApprovalPromptBinding(targetSessionId);
+    if (!binding) return false;
+    agentPromptBindings.set(proposal.approvalId, binding);
+    setTimeout(() => {
+      if (agentPromptBindings.get(proposal.approvalId) === binding) {
+        agentPromptBindings.delete(proposal.approvalId);
+        releaseApprovalPromptBinding(binding);
+      }
+    }, 31_000);
+    return true;
+  }, []);
+
+  const proposalTargetIsCurrent = useCallback((sessionId: string): boolean => {
+    const store = useAppStore.getState();
+    const ownerSessionId = store.resolveAiOwner(sessionId);
+    const proposal = ownRecordValue(store.aiStreams, ownerSessionId)?.pendingProposal;
+    if (!proposal) return false;
+    const target = agentProposalTargets.get(proposal.approvalId);
+    return !!target && matchesAgentTarget(target, proposal.targetSessionId ?? ownerSessionId);
+  }, []);
 
   const respondToProposal = useCallback(
     async (
@@ -606,6 +722,25 @@ export function useAiStream() {
       const stream = ownRecordValue(initialStore.aiStreams, ownerSessionId);
       const proposal = stream?.pendingProposal;
       if (!proposal) return;
+      const targetSessionId = proposal.targetSessionId ?? ownerSessionId;
+      const proposedTarget = agentProposalTargets.get(proposal.approvalId);
+      if (decision === "run" && (!proposedTarget || !matchesAgentTarget(proposedTarget, targetSessionId))) {
+        agentProposalTargets.delete(proposal.approvalId);
+        const binding = agentPromptBindings.get(proposal.approvalId);
+        agentPromptBindings.delete(proposal.approvalId);
+        if (binding) releaseApprovalPromptBinding(binding);
+        initialStore.setPendingProposal(ownerSessionId, null, "streaming");
+        initialStore.noteBlockedCommand(ownerSessionId, proposal.command,
+          "Nothing was executed: the terminal target changed after this command was proposed.");
+        await api.respondToApproval(proposal.approvalId, "skip").catch(() => {});
+        return;
+      }
+      if (decision !== "run") agentProposalTargets.delete(proposal.approvalId);
+      if (decision !== "run") {
+        const binding = agentPromptBindings.get(proposal.approvalId);
+        agentPromptBindings.delete(proposal.approvalId);
+        if (binding) releaseApprovalPromptBinding(binding);
+      }
       if (decision === "skip") {
         useAppStore
           .getState()
@@ -683,6 +818,8 @@ export function useAiStream() {
     startAgent,
     continueRun,
     steer,
+    attestProposalPrompt,
+    proposalTargetIsCurrent,
     respondToProposal,
     respondToMcpProposal,
     cancel,
@@ -870,9 +1007,9 @@ function dispatchPanelEvent(
       store.appendAiDelta(sessionId, e.content);
       break;
     case "SteerDelivered":
-      // The only thing that clears a "queued" badge: the loop has appended
-      // these to the transcript, so the model is about to see them.
+      // The provider completed the round containing these messages.
       store.markSteersDelivered(sessionId, e.ids);
+      markTranscriptDirty(sessionId);
       break;
     case "Checkpoint":
       // Rust has already removed system messages/images and repaired tool pairs.
@@ -896,6 +1033,9 @@ function dispatchPanelEvent(
         rejectTargetedRun(sessionId, requestId, target.reason, e.approval_id);
         break;
       }
+      agentProposalTargets.set(e.approval_id, snapshotAgentTarget(target.sessionId));
+      setTimeout(() => agentProposalTargets.delete(e.approval_id), 30 * 60_000);
+      const proposalUi = store.sessionUi[target.sessionId];
       // The backend owns auto-dispatch. Any command that reaches this event has
       // already been evaluated as requiring a real operator decision; the
       // frontend must never reinterpret the fields and auto-click the gate.
@@ -908,6 +1048,8 @@ function dispatchPanelEvent(
           readOnly: e.read_only,
           network: e.network,
           outputPolicy: e.output_policy,
+          proposedRemote: target.meta ? target.meta.role === "remote" : !!proposalUi?.remote,
+          proposedTargetLabel: target.meta?.label ?? describeRemote(proposalUi?.remote ?? null) ?? proposalUi?.cwd ?? null,
           ...(e.assessment ? { assessment: e.assessment } : {}),
           ...(e.ask_reason ? { askReason: e.ask_reason } : {}),
           ...(target.meta
@@ -955,6 +1097,16 @@ function dispatchPanelEvent(
         rejectTerminalDispatch(sessionId, requestId, e.approval_id, reason);
         break;
       }
+      const proposedTarget = agentProposalTargets.get(e.approval_id);
+      agentProposalTargets.delete(e.approval_id);
+      if (proposedTarget && !matchesAgentTarget(proposedTarget, target.sessionId)) {
+        const binding = agentPromptBindings.get(e.approval_id);
+        agentPromptBindings.delete(e.approval_id);
+        if (binding) releaseApprovalPromptBinding(binding);
+        rejectTerminalDispatch(sessionId, requestId, e.approval_id,
+          "The terminal target changed after the command was approved.");
+        break;
+      }
       store.beginCommand(
         sessionId,
         e.approval_id,
@@ -963,12 +1115,16 @@ function dispatchPanelEvent(
         target.meta,
         e.output_policy,
       );
+      const approvalPromptBinding = agentPromptBindings.get(e.approval_id);
+      agentPromptBindings.delete(e.approval_id);
       // Fire-and-forget: this dispatcher is the Channel callback and must return
       // synchronously. The command is awaited on its own timeline and reported
       // back through submitCommandResult exactly once.
       void runInTerminal(target.sessionId, e.approval_id, e.command, {
         timeoutMs: e.timeout_secs * 1000,
         outputPolicy: e.output_policy,
+        approvalPromptBinding,
+        requireRemotePromptAttestation: true,
         // Revalidate after prompt probing and immediately before the one PTY
         // write. Pane focus is deliberately irrelevant; immutable session ids
         // and the live binding are the authority.

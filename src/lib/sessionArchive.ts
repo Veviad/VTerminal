@@ -136,6 +136,7 @@ export function toArchiveMessages(
       ? `${m.mcp.serverName} · ${m.mcp.toolName} (${m.mcp.status})\n\nArguments:\n${JSON.stringify(m.mcp.arguments, null, 2)}${m.mcp.result?.model_text ? `\n\nResult:\n${m.mcp.result.model_text}` : ""}${m.mcp.error ? `\n\nError: ${m.mcp.error}` : ""}`
       : m.content,
     thinking: m.thinking ?? null,
+    ...(m.steer ? { steer_undelivered: true } : {}),
     command: m.command
       ? {
           command: m.command.command,

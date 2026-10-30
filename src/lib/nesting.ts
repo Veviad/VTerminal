@@ -45,7 +45,7 @@ export function detectNesting(command: string): RemoteContext | null {
 
   // Skip leading env assignments (`FOO=bar ssh host`) and `sudo`/`command`.
   let i = 0;
-  while (i < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i]) || words[i] === "sudo")) {
+  while (i < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i]) || words[i] === "sudo" || words[i] === "command")) {
     i++;
   }
   if (i >= words.length) return null;

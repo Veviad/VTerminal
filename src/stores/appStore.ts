@@ -167,6 +167,10 @@ export interface AiStreamState {
     askReason?: string;
     targetRole?: AgentTargetRole;
     targetSessionId?: string;
+    /** Destination displayed at proposal time; it must not change with a
+     * later SSH disconnect or session replacement. */
+    proposedRemote?: boolean;
+    proposedTargetLabel?: string | null;
   } | null;
   pendingMcpProposal: {
     approvalId: string;
@@ -446,7 +450,8 @@ export interface AppState {
     target?: CommandTargetMeta,
   ): void;
   /** Record a message typed mid-run, pending backend confirmation. */
-  queueSteer(sessionId: string, id: string, text: string): void;
+  queueSteer(sessionId: string, id: string, text: string, attachments?: Attachment[]): void;
+  setSteerAttachments(sessionId: string, id: string, attachments: Attachment[]): void;
   /** The loop appended these — clear their badges and drop them from the queue. */
   markSteersDelivered(sessionId: string, ids: string[]): void;
   /** The backend refused this one (run already over, too long, too many). */
@@ -1661,7 +1666,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       }),
     ),
 
-  queueSteer: (sessionId, id, text) =>
+  queueSteer: (sessionId, id, text, attachments) =>
     set((state) =>
       withAiStream(state, sessionId, (s) => {
         // Flush FIRST, exactly as beginCommand does. The assistant paragraph that
@@ -1678,6 +1683,7 @@ export const useAppStore = create<AppState>((set, get) => ({
               id: `msg-steer-${id}`,
               role: "user" as const,
               content: text,
+              attachments: attachments?.length ? attachments : undefined,
               createdAt: new Date().toISOString(),
               steer: "queued" as const,
             },
@@ -1685,6 +1691,12 @@ export const useAppStore = create<AppState>((set, get) => ({
         };
       }),
     ),
+
+  setSteerAttachments: (sessionId, id, attachments) =>
+    set((state) => withAiStream(state, sessionId, (s) => ({
+      ...s,
+      messages: s.messages.map((m) => m.id === `msg-steer-${id}` ? { ...m, attachments } : m),
+    }))),
 
   markSteersDelivered: (sessionId, ids) =>
     set((state) =>

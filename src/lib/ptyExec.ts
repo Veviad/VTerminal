@@ -269,7 +269,8 @@ export function awaitApprovalPromptBinding(
       const now = Date.now();
       if (
         now - entry.lastDataAt >= quiescenceMs &&
-        now - entry.lastUserInputAt >= quiescenceMs
+        now - entry.lastUserInputAt >= quiescenceMs &&
+        entry.tracker.isAtEmptyPrompt()
       ) {
         resolve(captureApprovalPromptBinding(sessionId));
         return;
@@ -372,6 +373,9 @@ export interface RunOptions {
   nonceCompletion?: boolean;
   /** One-shot terminal epoch captured by the operator's Runbook approval. */
   approvalPromptBinding?: string;
+  /** SSH agent commands need an operator-attested prompt before the first
+   * shell probe. A subsequently proven, untouched shell can reuse its proof. */
+  requireRemotePromptAttestation?: boolean;
   /** Discard stdout and stderr before either can be harvested into app state. */
   outputPolicy?: OutputPolicy;
 }
@@ -485,6 +489,17 @@ async function runReservedInTerminal({
     };
   }
 
+  if (opts.requireRemotePromptAttestation && remoteAtStart && !approvedPrompt && !reusableShellProof(sessionId, remoteAtStart)) {
+    return {
+      exitCode: null,
+      output: "",
+      durationMs: Date.now() - startedAt,
+      mode: null,
+      error: "terminal_busy",
+      note: "Nothing was executed: verify that the SSH terminal is at an empty shell prompt and approve the remote command. Automatic execution cannot establish a safe prompt on its own.",
+    };
+  }
+
   const acquireDispatchAuthorization = async (): Promise<boolean> => {
     if (!opts.beforeWrite) return false;
     const remaining = remainingCommandMs();
@@ -556,12 +571,14 @@ async function runReservedInTerminal({
   }
 
   // 1. Wait for the terminal to be safe to type into (never inject blind).
-  // Local Runbooks can use the integrated prompt gate directly. Remote
-  // Runbooks took their lease above and now perform the same fresh probe as any
-  // other remote command.
+  // Local runbooks use the integrated prompt gate. Remote runbooks claim
+  // authorization before the fresh capability probe.
+  const attestedPromptWasProbed = !!approvedPrompt
+    && !!remoteAtStart
+    && !reusableShellProof(sessionId, remoteAtStart);
   const resolvedMode = opts.nonceCompletion && !authorizedRemoteProbe
     ? await resolveSentinelPrompt(sessionId, idleWaitMs, remoteAtStart, commandDeadlineAt)
-    : await resolveMode(sessionId, idleWaitMs, remoteAtStart, commandDeadlineAt);
+    : await resolveMode(sessionId, idleWaitMs, remoteAtStart, commandDeadlineAt, approvedPrompt, !!opts.requireRemotePromptAttestation);
   if (resolvedMode === "closed") return closedOutcome(startedAt, null);
   if (resolvedMode === "busy") {
     // Without any local integration events, a missing prompt is an unknown
@@ -679,7 +696,7 @@ async function runReservedInTerminal({
   const dispatchEntry = getTerm(sessionId);
   const dispatchBuffer = dispatchEntry?.term.buffer.active;
   const approvedEpochStillBound = !approvedPrompt || (
-    authorizedRemoteProbe
+    attestedPromptWasProbed
       ? dispatchEntry === approvedPrompt.entry
         && !dispatchEntry?.disposed
         && dispatchBuffer?.type === approvedPrompt.bufferType
@@ -811,7 +828,32 @@ async function runReservedInTerminal({
           return 0;
         }
       }
-      return captureStartLine() + 1;
+      // A long echoed command can occupy several physical rows. Skip its
+      // wrapped continuations as well as the dispatch row before harvesting.
+      const buffer = getTerm(sessionId)?.term.buffer.active;
+      const anchor = captureStartLine();
+      // Once the dispatch marker is lost, row zero is retained terminal
+      // evidence, even if it happens to be a wrapped continuation of output.
+      // There is no longer a command row that can be safely skipped.
+      if (anchor < 0) return 0;
+      if (mode === "sentinel" && buffer) {
+        // ZLE can redraw long input using CR instead of terminal soft wraps;
+        // those continuation rows do not have isWrapped set. Strip them only
+        // when their complete rendered text exactly matches our dispatched
+        // nonce-bearing line, so ordinary output can never be mistaken for an
+        // echo based on a partial match.
+        let rendered = "";
+        for (let row = anchor; row < buffer.length; row++) {
+          const part = buffer.getLine(row);
+          if (!part) break;
+          rendered += part.translateToString(true, row === anchor ? promptSnapshot.cursorX : 0);
+          if (!line.startsWith(rendered)) break;
+          if (rendered === line) return row + 1;
+        }
+      }
+      let first = anchor + 1;
+      while (buffer && first < buffer.length && buffer.getLine(first)?.isWrapped) first++;
+      return first;
     };
 
     const harvest = (
@@ -1418,6 +1460,8 @@ async function resolveMode(
   idleWaitMs: number,
   expectedRemote: RemoteContext | null,
   commandDeadlineAt: number,
+  approvedPrompt: ApprovalPromptSnapshot | null = null,
+  requireRemotePromptAttestation = false,
 ): Promise<ModeResolution> {
   if (!remoteIdentityMatches(sessionId, expectedRemote)) return "target_changed";
 
@@ -1447,6 +1491,14 @@ async function resolveMode(
   // for `idleWaitMs`, and a keystroke during it must invalidate the proof.
   const proven = reusableShellProof(sessionId, expectedRemote);
   if (proven) return { mode: "sentinel", dialect: proven.dialect };
+  if (requireRemotePromptAttestation && expectedRemote && !approvedPrompt) return "busy";
+
+  // A quiet row alone cannot distinguish a prompt from partially typed input.
+  // Recheck the operator's exact attestation immediately before the probe;
+  // never append the probe to input typed while the prompt gate was waiting.
+  if (approvedPrompt && !promptMatchesApproval(approvedPrompt)) return "target_changed";
+  const probeEntry = getTerm(sessionId);
+  const probeInputAt = probeEntry?.lastUserInputAt;
 
   // A fresh capability proves that this exact probe, rather than a cached or
   // delayed token, was executed by the current foreground shell. A missing
@@ -1462,6 +1514,7 @@ async function resolveMode(
   );
   if (!probe) return "not_a_shell";
   if (!remoteIdentityMatches(sessionId, expectedRemote)) return "target_changed";
+  if (!probeEntry || getTerm(sessionId) !== probeEntry || probeEntry.lastUserInputAt !== probeInputAt) return "target_changed";
   // RP is printed before the interactive shell redraws its prompt. Bind the
   // eventual command only after that prompt is visible and quiet, otherwise the
   // snapshot below can accidentally describe the probe's output row.
@@ -1472,6 +1525,7 @@ async function resolveMode(
   );
   if (promptReady !== "ok") return promptReady;
   if (!remoteIdentityMatches(sessionId, expectedRemote)) return "target_changed";
+  if (getTerm(sessionId) !== probeEntry || probeEntry.lastUserInputAt !== probeInputAt) return "target_changed";
   const dialect = dialectFromProbe(probe);
   // Recorded only now, so the keyboard-quiet snapshot is taken as late as
   // possible: anything the user typed while the prompt redrew is already in it.

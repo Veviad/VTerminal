@@ -105,6 +105,20 @@ function getRunById(runId: string): RunbookRun | null {
   return useRunbookStore.getState().getRunById(runId);
 }
 
+/** A quiet SSH or container terminal is not proof that its input row is an
+ * empty shell prompt. Automatic approvals must never turn silence into an
+ * operator attestation, even if the saved target and live UI briefly differ. */
+function hasRemoteTarget(run: RunbookRun): boolean {
+  if (run.target.kind !== "active-terminal") return false;
+  return Boolean(
+    run.target.remote_kind ||
+      useAppStore.getState().sessionUi[run.target.session_id]?.remote,
+  );
+}
+
+const REMOTE_AUTO_APPROVAL_ERROR =
+  "Auto-approve is unavailable for remote terminals. Check that the remote shell is at an empty prompt and approve each command individually.";
+
 /** Disarms run-level auto-approve and explains why. The reason is the operator's
  *  only account of a step they did not see, so it is never overwritten by a
  *  later, vaguer message. */
@@ -126,8 +140,12 @@ function invalidCommandText(command: string): boolean {
 }
 
 async function refreshRunById(runId: string): Promise<void> {
+  // A fast local command can request its next approval while this snapshot is
+  // in flight. Do not let the older read erase that new actionable event.
+  const issuedAtRevision = useRunbookStore.getState().runRevisions.get(runId) ?? 0;
   try {
-    useRunbookStore.getState().upsertRun(await api.runbooksGet(runId));
+    const run = await api.runbooksGet(runId);
+    useRunbookStore.getState().upsertRun(run, issuedAtRevision);
   } catch (error) {
     useRunbookStore.getState().setError(String(error));
   }
@@ -186,6 +204,9 @@ async function submitApproval(args: {
   if (acknowledgement === "pre_authorized" && nativeAnsible) {
     return fail("Auto-approve is unavailable for native Ansible controller actions.");
   }
+  if (acknowledgement === "pre_authorized" && hasRemoteTarget(run)) {
+    return fail(REMOTE_AUTO_APPROVAL_ERROR);
+  }
   if (nativeAnsible && command !== null) {
     return fail("Native Ansible controller commands cannot be edited.");
   }
@@ -218,7 +239,8 @@ async function submitApproval(args: {
     if (
       useAppStore.getState().activeSessionId !== sessionId ||
       !latestRun ||
-      latestRun.pending_approval?.approval_id !== approvalId
+      latestRun.pending_approval?.approval_id !== approvalId ||
+      (acknowledgement === "pre_authorized" && hasRemoteTarget(latestRun))
     ) {
       releaseApprovalPromptBinding(promptBinding);
       return fail(
@@ -285,6 +307,10 @@ async function autoApproveArmedApproval(
       runId,
       "Auto-approve is unavailable for native Ansible controller actions.",
     );
+    return;
+  }
+  if (hasRemoteTarget(run)) {
+    disarmAutoApprove(runId, REMOTE_AUTO_APPROVAL_ERROR);
     return;
   }
   if (useAppStore.getState().activeSessionId !== run.target.session_id) {
@@ -385,13 +411,7 @@ async function installLibrarySources(sources: RunbookSource[]): Promise<void> {
 const approvalPromptBindings = new Map<string, string>();
 
 export function useRunbooks() {
-  const refreshRun = useCallback(async (runId: string) => {
-    try {
-      useRunbookStore.getState().upsertRun(await api.runbooksGet(runId));
-    } catch (error) {
-      useRunbookStore.getState().setError(String(error));
-    }
-  }, []);
+  const refreshRun = useCallback(refreshRunById, []);
 
   const loadHistory = useCallback(async () => {
     const store = useRunbookStore.getState();
@@ -1116,6 +1136,10 @@ export function useRunbooks() {
         useRunbookStore
           .getState()
           .setError("Auto-approve is unavailable for native Ansible controller actions.");
+        return;
+      }
+      if (hasRemoteTarget(run)) {
+        useRunbookStore.getState().setError(REMOTE_AUTO_APPROVAL_ERROR);
         return;
       }
       const modelInvocation = approval.command.startsWith(

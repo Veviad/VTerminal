@@ -14,6 +14,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 }));
 
 import {
+  runbooksAiGenerate,
   runbooksDelete,
   runbooksDraftPublish,
   runbooksDraftSave,
@@ -28,6 +29,17 @@ import {
 beforeEach(() => invokeMock.mockReset());
 
 describe("runbooks API", () => {
+  it("sends the intended platform separately from optional terminal context", async () => {
+    invokeMock.mockResolvedValue({});
+    await runbooksAiGenerate("generation-1", "clean Docker", null, "macos13");
+    expect(invokeMock).toHaveBeenCalledWith("runbooks_ai_generate", {
+      request_id: "generation-1",
+      requirements: "clean Docker",
+      terminal_context: null,
+      platform: "macos13",
+    });
+  });
+
   it("sends the approval acknowledgement expected by the backend", async () => {
     invokeMock.mockResolvedValue(undefined);
 

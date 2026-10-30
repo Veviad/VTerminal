@@ -83,6 +83,12 @@ beforeEach(() => {
 });
 
 describe("toArchiveMessages", () => {
+  it("preserves queued and undelivered steers as unconfirmed for restore", () => {
+    const queued = { ...textMsg("queued", "user"), steer: "queued" as const };
+    const undelivered = { ...textMsg("undelivered", "user"), steer: "undelivered" as const };
+    const archived = toArchiveMessages([queued, undelivered, textMsg("delivered", "user")]);
+    expect(archived.map((m) => m.steer_undelivered ?? false)).toEqual([true, true, false]);
+  });
   it("maps text turns to the display shape", () => {
     const out = toArchiveMessages([textMsg("m1", "user"), textMsg("m2", "assistant")]);
     expect(out).toEqual([
