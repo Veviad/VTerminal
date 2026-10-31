@@ -1451,6 +1451,11 @@ pub async fn run_agent(
             break;
         }
 
+        if !queued.is_empty() {
+            let ids = queued.iter().map(|s| s.id.clone()).collect();
+            let _ = on_event.send(StreamEvent::SteerProcessing { ids });
+        }
+
         let params = ChatParams {
             temperature: config.temperature,
             max_tokens: Some(round_max_tokens),
@@ -1821,8 +1826,15 @@ mod tests {
         behavior: SmartProviderBehavior,
     }
 
+    #[derive(Clone, Copy, Debug)]
+    enum SteerAuditBehavior {
+        Success,
+        Failure,
+        Cancelled,
+    }
+
     struct SteerAuditProvider {
-        fail: bool,
+        behavior: SteerAuditBehavior,
         seen: std::sync::Arc<std::sync::Mutex<Vec<ChatMessage>>>,
     }
 
@@ -1843,8 +1855,12 @@ mod tests {
             tx: tokio::sync::mpsc::Sender<ProviderEvent>,
         ) -> Result<(), ProviderError> {
             *self.seen.lock().unwrap() = messages;
-            if self.fail {
-                return Err(ProviderError::Inference("offline".into()));
+            match self.behavior {
+                SteerAuditBehavior::Failure => {
+                    return Err(ProviderError::Inference("offline".into()))
+                }
+                SteerAuditBehavior::Cancelled => return Err(ProviderError::Cancelled),
+                SteerAuditBehavior::Success => {}
             }
             tx.send(ProviderEvent::TextDelta("acknowledged".into()))
                 .await
@@ -1861,7 +1877,11 @@ mod tests {
     #[tokio::test]
     async fn steers_are_acknowledged_only_after_a_successful_provider_round() {
         use tauri::ipc::InvokeResponseBody;
-        for fail in [false, true] {
+        for behavior in [
+            SteerAuditBehavior::Success,
+            SteerAuditBehavior::Failure,
+            SteerAuditBehavior::Cancelled,
+        ] {
             let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let captured = events.clone();
@@ -1892,7 +1912,7 @@ mod tests {
             let (_, cancel) = tokio::sync::watch::channel(false);
             let outcome = run_agent(
                 &SteerAuditProvider {
-                    fail,
+                    behavior,
                     seen: seen.clone(),
                 },
                 config_with_buckets(vec![]),
@@ -1916,18 +1936,27 @@ mod tests {
                 && m.images
                     .as_ref()
                     .is_some_and(|images| images[0].data == "AAAA")));
-            let acknowledged = events
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|e| e["type"] == "SteerDelivered");
-            assert_eq!(acknowledged, !fail);
+            let events = events.lock().unwrap();
+            let processing = events.iter().position(|e| e["type"] == "SteerProcessing");
+            let delta = events.iter().position(|e| e["type"] == "Delta");
+            let delivered = events.iter().position(|e| e["type"] == "SteerDelivered");
+            assert!(
+                processing.is_some(),
+                "the preceding response needs a display boundary"
+            );
+            let successful = matches!(behavior, SteerAuditBehavior::Success);
+            if successful {
+                assert!(processing < delta && delta < delivered);
+            }
+            let acknowledged = delivered.is_some();
+            assert_eq!(acknowledged, successful, "{behavior:?}");
             assert_eq!(
                 outcome
                     .transcript
                     .iter()
                     .any(|m| m.content.contains("file content")),
-                !fail
+                successful,
+                "{behavior:?}"
             );
         }
     }

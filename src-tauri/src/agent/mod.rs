@@ -344,6 +344,11 @@ pub enum StreamEvent {
         server_id: String,
         message: String,
     },
+    /// The next provider round will include these queued messages. This marks
+    /// a display boundary, not confirmation that delivery succeeded.
+    SteerProcessing {
+        ids: Vec<String>,
+    },
     /// A provider round containing these queued messages completed successfully.
     /// Without this event, the frontend must treat delivery as unconfirmed.
     SteerDelivered {

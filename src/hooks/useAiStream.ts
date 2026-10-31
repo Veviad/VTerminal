@@ -1006,6 +1006,12 @@ function dispatchPanelEvent(
     case "Delta":
       store.appendAiDelta(sessionId, e.content);
       break;
+    case "SteerProcessing":
+      // The previous response may have continued streaming after the queued
+      // message was displayed. Close it before this round starts to stream.
+      // Delivery remains unconfirmed until SteerDelivered arrives.
+      store.flushAiStreaming(sessionId);
+      break;
     case "SteerDelivered":
       // The provider completed the round containing these messages.
       store.markSteersDelivered(sessionId, e.ids);

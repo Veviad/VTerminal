@@ -139,6 +139,81 @@ beforeEach(() => {
 });
 
 describe("steering with attachments", () => {
+  it("separates the next response from the rest of the previous response while delivery is pending", async () => {
+    const agent = deferred<ChatMessage[]>();
+    let onEvent!: (event: StreamEvent) => void;
+    api.agentStart.mockImplementationOnce((...args: unknown[]) => {
+      onEvent = args[6] as (event: StreamEvent) => void;
+      return agent.promise;
+    });
+    const { result } = renderHook(() => useAiStream());
+    let run!: Promise<void>;
+    act(() => { run = result.current.startAgent(SID, "original question"); });
+    await flushPreflight();
+    act(() => onEvent({ type: "Delta", content: "first part " }));
+    act(() => { useAppStore.getState().attachFilesToAi(SID, [pastedText("TOKEN-73Q9")]); });
+    await act(async () => result.current.steer(SID, "read attachment"));
+    const steerId = useAppStore.getState().aiStreams[SID].steerQueue[0].id;
+    act(() => onEvent({ type: "Delta", content: "remaining first response" }));
+    act(() => onEvent({ type: "SteerProcessing", ids: [steerId] }));
+    expect(useAppStore.getState().aiStreams[SID].steerQueue).toHaveLength(1);
+    expect(useAppStore.getState().aiStreams[SID].messages.find((m) => m.steer)?.steer).toBe("queued");
+    act(() => onEvent({ type: "Delta", content: "TOKEN-73Q9" }));
+    act(() => onEvent({ type: "SteerDelivered", ids: [steerId] }));
+    const stream = useAppStore.getState().aiStreams[SID];
+    expect(stream.steerQueue).toHaveLength(0);
+    expect(stream.messages.map((m) => [m.role, m.content])).toEqual([
+      ["user", "original question"],
+      ["assistant", "first part "],
+      ["user", expect.stringContaining("read attachment")],
+      ["assistant", "remaining first response"],
+      ["assistant", "TOKEN-73Q9"],
+    ]);
+    agent.resolve([]);
+    await act(async () => run);
+  });
+
+  it.each(["failure", "cancellation"] as const)(
+    "keeps a processed attachment retryable after %s",
+    async (termination) => {
+      const agent = deferred<ChatMessage[]>();
+      let onEvent!: (event: StreamEvent) => void;
+      api.agentStart.mockImplementationOnce((...args: unknown[]) => {
+        onEvent = args[6] as (event: StreamEvent) => void;
+        return agent.promise;
+      });
+      const { result } = renderHook(() => useAiStream());
+      let run!: Promise<void>;
+      act(() => { run = result.current.startAgent(SID, "original question"); });
+      await flushPreflight();
+      act(() => onEvent({ type: "Delta", content: "prior answer" }));
+      const file = pastedText("RETRY-CONTENT-42");
+      act(() => { useAppStore.getState().attachFilesToAi(SID, [file]); });
+      await act(async () => result.current.steer(SID, "inspect this"));
+      const id = useAppStore.getState().aiStreams[SID].steerQueue[0].id;
+      act(() => onEvent({ type: "SteerProcessing", ids: [id] }));
+      if (termination === "failure") {
+        act(() => onEvent({ type: "Error", message: "provider failed" }));
+      } else {
+        await act(async () => result.current.cancel(SID));
+      }
+      agent.resolve([]);
+      await act(async () => run);
+      const message = useAppStore.getState().aiStreams[SID].messages.find((m) => m.steer);
+      expect(message?.steer).toBe("undelivered");
+      expect(message?.attachments).toEqual([file]);
+      expect(message?.content).toContain("RETRY-CONTENT-42");
+      expect(useAppStore.getState().aiStreams[SID].messages.some(
+        (m) => m.role === "assistant" && m.content === "prior answer",
+      )).toBe(true);
+
+      // SteerBadge retries the preserved folded text as a new run.
+      await act(async () => result.current.startAgent(SID, message!.content, []));
+      expect(api.agentStart).toHaveBeenCalledTimes(2);
+      expect(api.agentStart.mock.calls[1][1]).toContain("RETRY-CONTENT-42");
+    },
+  );
+
   it("keeps newly staged files when the opening agent turn finishes saving its image", async () => {
     useAppStore.setState({ catalog: [{ id: "test-model", supports_vision: true } as never] });
     const write = deferred<{ path: string }>();

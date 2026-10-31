@@ -64,6 +64,38 @@ export function TerminalSearchBar({ sessionId }: { sessionId: string }) {
     updateSessionUi(sessionId, { searchOpen: false });
     getTerm(sessionId)?.term.focus();
   };
+  const closeOnEscape = (event: React.KeyboardEvent<HTMLElement>) => {
+    // Keep focus out of xterm until the physical Escape is released. Moving
+    // focus during keydown can forward that same key to the shell, leaving an
+    // invisible Meta-key prefix that consumes the next command's first byte.
+    event.preventDefault();
+    event.stopPropagation();
+    const control = event.currentTarget;
+    const cancel = () => {
+      window.removeEventListener("keyup", onKeyUp, true);
+      window.removeEventListener("blur", cancel);
+      window.clearTimeout(timeout);
+    };
+    const onKeyUp = (keyEvent: KeyboardEvent) => {
+      if (keyEvent.key !== "Escape") return;
+      cancel();
+      const state = useAppStore.getState();
+      const focused = document.activeElement;
+      if (state.activeSessionId === sessionId && !state.sessionUi[sessionId]?.searchOpen &&
+          (focused === document.body || focused === control)) {
+        getTerm(sessionId)?.term.focus();
+      }
+    };
+    window.addEventListener("keyup", onKeyUp, true);
+    // If focus leaves the window or a keyup never arrives, remove listeners
+    // without unexpectedly focusing a terminal the user may have left.
+    window.addEventListener("blur", cancel);
+    const timeout = window.setTimeout(cancel, 5_000);
+    updateSessionUi(sessionId, { searchOpen: false });
+  };
+  const onButtonKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === "Escape") closeOnEscape(event);
+  };
 
   return (
     <div className="absolute right-3 top-2 z-20 flex items-center gap-1 rounded-lg border border-border-subtle bg-bg-card p-1 shadow-lg">
@@ -79,28 +111,28 @@ export function TerminalSearchBar({ sessionId }: { sessionId: string }) {
         onKeyDown={(e) => {
           if (e.key === "Enter" && e.shiftKey) findPrev();
           else if (e.key === "Enter") findNext();
-          else if (e.key === "Escape") {
-            e.stopPropagation(); // keep the window handler from closing the composer too
-            close();
-          }
+          else if (e.key === "Escape") closeOnEscape(e);
         }}
         placeholder={S.terminal.searchPlaceholder}
         className="w-48 bg-transparent px-2 py-1 text-[12px] text-text-primary placeholder:text-text-muted focus:outline-none"
       />
       <button
         onClick={findPrev}
+        onKeyDown={onButtonKeyDown}
         className="rounded-md p-1 text-text-muted transition-colors duration-100 hover:bg-bg-hover hover:text-text-secondary"
       >
         <ChevronUp size={13} />
       </button>
       <button
         onClick={findNext}
+        onKeyDown={onButtonKeyDown}
         className="rounded-md p-1 text-text-muted transition-colors duration-100 hover:bg-bg-hover hover:text-text-secondary"
       >
         <ChevronDown size={13} />
       </button>
       <button
         onClick={close}
+        onKeyDown={onButtonKeyDown}
         className="rounded-md p-1 text-text-muted transition-colors duration-100 hover:bg-bg-hover hover:text-text-secondary"
       >
         <X size={13} />
