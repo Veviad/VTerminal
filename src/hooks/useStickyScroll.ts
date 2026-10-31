@@ -38,7 +38,9 @@ export function useStickyScroll(identity: unknown, revision: unknown) {
     });
     if (scrollRef.current) observer.observe(scrollRef.current);
     if (contentRef.current) observer.observe(contentRef.current);
-    return () => observer.disconnect();
+    return () => {
+      observer.disconnect();
+    };
   }, [identity, jumpToLatest]);
   return { scrollRef, contentRef, onScroll, showJump, jumpToLatest };
 }

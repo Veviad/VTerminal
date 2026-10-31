@@ -634,9 +634,15 @@ impl PtySession {
                 .as_raw_fd()
                 .ok_or("terminal mode is unavailable")?;
             let mut mode = std::mem::MaybeUninit::<libc::termios>::uninit();
+            // SAFETY: self.master owns fd for this borrow, and mode provides
+            // aligned, writable storage for one termios. Check success before
+            // reading the initialized structure below.
+            // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
             if unsafe { libc::tcgetattr(fd, mode.as_mut_ptr()) } != 0 {
                 return Err("terminal mode is unavailable".into());
             }
+            // SAFETY: tcgetattr returned success, initializing mode in full.
+            // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
             let flags = unsafe { mode.assume_init() }.c_lflag;
             if !ssh_password_terminal_mode(flags) {
                 return Err("terminal is not in an SSH password input mode".into());
@@ -765,6 +771,10 @@ fn foreground_is_expected_ssh(pid: u32, expected: &[String]) -> bool {
             fn proc_pidpath(pid: libc::c_int, buffer: *mut libc::c_void, size: u32) -> libc::c_int;
         }
         let mut buffer = [0u8; 4096];
+        // SAFETY: buffer is writable for the exact length supplied and remains
+        // live throughout this synchronous libproc call; no pointer escapes.
+        // The caller obtained the positive pid from the PTY foreground group.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         let length = unsafe {
             proc_pidpath(
                 pid as libc::c_int,

@@ -329,7 +329,6 @@ export function useScheduledActions() {
         getTerm(remembered) !== undefined &&
         scheduleOwnerOf(remembered) === null &&
         // A shell can change directories, so an explicit cwd needs a new tab.
-        fire.target_host_id === null &&
         fire.target_cwd === null &&
         !ownRecordValue(app.sessionUi, remembered)?.remote;
 
@@ -453,7 +452,9 @@ export function useScheduledActions() {
         // create two tabs.
         void enqueue(`action:${fire.action_id}`, () => drive(fire))
           .catch((error) => finish(fire.run_id, "failed", String(error)))
-          .finally(() => clearScheduleRunRevocation(fire.run_id));
+          .finally(() => {
+            clearScheduleRunRevocation(fire.run_id);
+          });
       })
       .then((unlisten) => {
         if (disposed) unlisten();

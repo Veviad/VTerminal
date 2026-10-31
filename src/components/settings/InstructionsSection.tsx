@@ -100,7 +100,9 @@ function InstructionsEditor({
     try {
       await saving;
       if (generation === saveGeneration.current && draftRef.current === next) {
-        const stored = FIELDS.find((field) => field.key === fieldKey)!.select(useAppStore.getState());
+        const field = FIELDS.find((entry) => entry.key === fieldKey);
+        if (!field) return;
+        const stored = field.select(useAppStore.getState());
         draftRef.current = stored;
         setDraft(stored);
         setSaved(true);
