@@ -1470,6 +1470,60 @@ describe("useRunbooks recovery and deletion", () => {
     expect(useRunbookStore.getState().loadingReport).toBe(false);
   });
 
+  it("does not reopen an earlier live run after the user selects a different report", async () => {
+    let resolveLive!: (value: RunbookRun) => void;
+    mocks.get.mockImplementationOnce(() => new Promise<RunbookRun>((resolve) => { resolveLive = resolve; }));
+    mocks.report.mockResolvedValue({ run_id: "run-done" } as RunbookReport);
+    useRunbookStore.getState().setHistory([
+      historyEntry("run-live", "running", "t"),
+      historyEntry("run-done", "succeeded", "t"),
+    ]);
+    useRunbookStore.getState().setView("history");
+    const { result } = renderHook(() => useRunbooks());
+    let first!: Promise<void>;
+    await act(async () => {
+      first = result.current.openHistoryRun("run-live");
+      await result.current.openHistoryRun("run-done");
+    });
+    await act(async () => { resolveLive(run("run-live", "running")); await first; });
+    expect(useRunbookStore.getState().selectedHistoryRunId).toBe("run-done");
+    expect(useRunbookStore.getState().report?.run_id).toBe("run-done");
+    expect(useRunbookStore.getState().view).toBe("history");
+  });
+
+  it("does not overwrite a live approval with an older history snapshot", async () => {
+    let resolveLive!: (value: RunbookRun) => void;
+    mocks.get.mockImplementationOnce(() => new Promise<RunbookRun>((resolve) => { resolveLive = resolve; }));
+    useRunbookStore.getState().setHistory([historyEntry("run-live", "running", "t")]);
+    useRunbookStore.getState().setActiveRun(run("run-live", "running"));
+    const { result } = renderHook(() => useRunbooks());
+    let opening!: Promise<void>;
+    act(() => { opening = result.current.openHistoryRun("run-live"); });
+    act(() => {
+      useRunbookStore.getState().dispatchEvent({
+        type: "ApprovalRequested",
+        ...waitingApprovalRun("run-live", "approval-new", "printf approved").pending_approval!,
+      });
+    });
+    await act(async () => { resolveLive(run("run-live", "running")); await opening; });
+    expect(useRunbookStore.getState().activeRun?.status).toBe("waiting_approval");
+    expect(useRunbookStore.getState().activeRun?.pending_approval_id).toBe("approval-new");
+  });
+
+  it("does not restore deleted history rows from an older pending refresh", async () => {
+    let resolveFirst!: (value: RunbookHistoryEntry[]) => void;
+    mocks.history.mockImplementationOnce(() => new Promise<RunbookHistoryEntry[]>((resolve) => { resolveFirst = resolve; }));
+    mocks.history.mockResolvedValueOnce([]);
+    const { result } = renderHook(() => useRunbooks());
+    let first!: Promise<RunbookHistoryEntry[]>;
+    await act(async () => {
+      first = result.current.loadHistory();
+      await result.current.loadHistory();
+    });
+    await act(async () => { resolveFirst([historyEntry("deleted-run", "succeeded", "t")]); await first; });
+    expect(useRunbookStore.getState().history).toEqual([]);
+  });
+
   it("does not replace the selected history report when another run finishes", async () => {
     useRunbookStore.getState().selectHistoryRun("run-selected");
     useRunbookStore.getState().setReport({ run_id: "run-selected" } as RunbookReport);

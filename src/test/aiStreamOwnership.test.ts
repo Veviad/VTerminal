@@ -16,6 +16,7 @@ const api = vi.hoisted(() => ({
   agentStart: vi.fn(),
   agentSteer: vi.fn(),
   respondToApproval: vi.fn(),
+  respondToMcpApproval: vi.fn(),
   aiCancel: vi.fn(),
   submitCommandResult: vi.fn(),
   attachmentPut: vi.fn(),
@@ -113,6 +114,7 @@ beforeEach(() => {
   api.agentStart.mockResolvedValue([]);
   api.agentSteer.mockResolvedValue(undefined);
   api.respondToApproval.mockResolvedValue(undefined);
+  api.respondToMcpApproval.mockResolvedValue(undefined);
   api.aiCancel.mockResolvedValue(undefined);
   api.submitCommandResult.mockResolvedValue(undefined);
   api.attachmentPut.mockResolvedValue({ path: "/tmp/attachment" });
@@ -139,6 +141,56 @@ beforeEach(() => {
 });
 
 describe("steering with attachments", () => {
+  it.each(["allow_once", "deny"] as const)("restores a pending MCP %s decision for retry when submission fails", async (decision) => {
+    let emit!: (event: StreamEvent) => void;
+    api.agentStart.mockImplementationOnce((...args: unknown[]) => {
+      emit = args[6] as (event: StreamEvent) => void;
+      return Promise.resolve([]);
+    });
+    api.respondToMcpApproval.mockRejectedValueOnce(new Error("IPC unavailable"));
+    const { result } = renderHook(() => useAiStream());
+    await act(async () => result.current.startAgent(SID, "Read calendar"));
+    act(() => emit({ type: "McpToolProposal", approval_id: "retry-mcp", server_id: "calendar", server_name: "Calendar",
+      tool_name: "list_events", arguments: {}, schema_hash: "schema" }));
+
+    await act(async () => result.current.respondToMcpProposal(SID, decision));
+
+    const failed = useAppStore.getState().aiStreams[SID];
+    expect(failed.pendingMcpProposal?.approvalId).toBe("retry-mcp");
+    expect(failed.status).toBe("awaiting_approval");
+    expect(failed.messages.find((message) => message.mcp?.approvalId === "retry-mcp")?.mcp?.status).toBe("awaiting");
+    expect(failed.lastError).toContain("IPC unavailable");
+    await act(async () => result.current.respondToMcpProposal(SID, decision));
+    expect(api.respondToMcpApproval).toHaveBeenCalledTimes(2);
+    expect(useAppStore.getState().aiStreams[SID].pendingMcpProposal).toBeNull();
+  });
+
+  it.each(["cancelled", "started", "next-proposal"] as const)("does not restore a failed MCP decision after the request has %s", async (progress) => {
+    let emit!: (event: StreamEvent) => void;
+    api.agentStart.mockImplementationOnce((...args: unknown[]) => {
+      emit = args[6] as (event: StreamEvent) => void;
+      return Promise.resolve([]);
+    });
+    const submission = deferred<void>();
+    api.respondToMcpApproval.mockImplementationOnce(() => submission.promise);
+    const { result } = renderHook(() => useAiStream());
+    await act(async () => result.current.startAgent(SID, "Read calendar"));
+    const proposal: StreamEvent = { type: "McpToolProposal", approval_id: "old-mcp", server_id: "calendar", server_name: "Calendar",
+      tool_name: "list_events", arguments: {}, schema_hash: "schema" };
+    act(() => emit(proposal));
+    let responding!: Promise<void>;
+    act(() => { responding = result.current.respondToMcpProposal(SID, "allow_once"); });
+    if (progress === "cancelled") await act(async () => result.current.cancel(SID));
+    else if (progress === "started") act(() => emit({ type: "McpToolStarted", approval_id: "old-mcp", server_id: "calendar", server_name: "Calendar", tool_name: "list_events", arguments: {} }));
+    else act(() => emit({ ...proposal, approval_id: "new-mcp" }));
+    await act(async () => { submission.reject(new Error("Already resolved")); await responding; });
+
+    const live = useAppStore.getState().aiStreams[SID];
+    expect(live.pendingMcpProposal?.approvalId ?? null).toBe(progress === "next-proposal" ? "new-mcp" : null);
+    expect(live.lastError).toBeNull();
+    if (progress === "started") expect(live.messages.find((message) => message.mcp?.approvalId === "old-mcp")?.mcp?.status).toBe("running");
+  });
+
   it.each(["done", "error", "cancelled"] as const)("streams activity and final text before completion and settles %s truthfully", async (outcome) => {
     const agent = deferred<ChatMessage[]>();
     let onEvent!: (event: StreamEvent) => void;

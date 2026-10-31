@@ -246,30 +246,43 @@ fn is_privileged(command: &str) -> bool {
 }
 
 fn is_sensitive_read(command: &str) -> bool {
-    let Some(segments) = split_segments(command) else {
-        return false; // Opaque commands retain their separate approval gate.
+    let Some(segments) = split_segments(command).filter(|_| !is_opaque(command)) else {
+        // Opaque syntax still needs its approval gate, but that must not erase
+        // an obvious secret read. Inspect candidate words conservatively only
+        // for privacy: nested/quoted commands can print secrets too. This sweep
+        // never grants execution or claims to resolve dynamic shell syntax.
+        let words: Vec<String> = command
+            .split(|ch: char| ch.is_whitespace() || "\"'`$();|&".contains(ch))
+            .filter(|word| !word.is_empty())
+            .map(str::to_ascii_lowercase)
+            .collect();
+        return mentions_sensitive_path(&words)
+            || (0..words.len()).any(|index| sensitive_command_at(&words, index));
     };
     segments.iter().any(|segment| {
         let lower: Vec<String> = tokenize(&segment.text)
             .iter()
             .map(|word| word.to_ascii_lowercase())
             .collect();
-        let sensitive_path = lower.iter().any(|word| {
-            let filename = word
-                .rsplit('/')
-                .next()
-                .unwrap_or(word)
-                .trim_start_matches(['<', '>']);
-            filename == ".env"
-                || filename.starts_with(".env.")
-                || filename == ".envrc"
-                || word.contains(".ssh/id_")
-                || word.contains("credentials")
-                || word.contains("keychain")
-                || word.contains(".netrc")
-                || word.contains(".npmrc")
-        });
-        sensitive_path || sensitive_command_output(&lower)
+        mentions_sensitive_path(&lower) || sensitive_command_output(&lower)
+    })
+}
+
+fn mentions_sensitive_path(words: &[String]) -> bool {
+    words.iter().any(|word| {
+        let filename = word
+            .rsplit('/')
+            .next()
+            .unwrap_or(word)
+            .trim_start_matches(['<', '>']);
+        filename == ".env"
+            || filename.starts_with(".env.")
+            || filename == ".envrc"
+            || word.contains(".ssh/id_")
+            || word.contains("credentials")
+            || word.contains("keychain")
+            || word.contains(".netrc")
+            || word.contains(".npmrc")
     })
 }
 
@@ -293,27 +306,29 @@ fn sensitive_command_output(words: &[String]) -> bool {
     // This may conservatively protect a literal argument under an ambiguous
     // wrapper; it never grants execution or weakens the read-only classifier.
     let end = if wrapped { words.len() } else { first + 1 };
-    (first..end).any(|index| {
-        let args = &words[index + 1..];
-        match basename(&words[index]).as_str() {
-            "env" | "printenv" => true,
-            "gh" => {
-                args.iter().any(|word| word == "auth")
-                    && args
-                        .iter()
-                        .any(|word| matches!(word.as_str(), "token" | "--show-token" | "-t"))
-            }
-            "security" => {
-                args.iter().any(|word| {
-                    matches!(
-                        word.as_str(),
-                        "find-generic-password" | "find-internet-password"
-                    )
-                }) && args.iter().any(|word| word == "-w" || word == "-g")
-            }
-            _ => false,
+    (first..end).any(|index| sensitive_command_at(words, index))
+}
+
+fn sensitive_command_at(words: &[String], index: usize) -> bool {
+    let args = &words[index + 1..];
+    match words[index].rsplit('/').next().unwrap_or(&words[index]) {
+        "env" | "printenv" => true,
+        "gh" => {
+            args.iter().any(|word| word == "auth")
+                && args
+                    .iter()
+                    .any(|word| matches!(word.as_str(), "token" | "--show-token" | "-t"))
         }
-    })
+        "security" => {
+            args.iter().any(|word| {
+                matches!(
+                    word.as_str(),
+                    "find-generic-password" | "find-internet-password"
+                )
+            }) && args.iter().any(|word| word == "-w" || word == "-g")
+        }
+        _ => false,
+    }
 }
 
 fn is_known_state_change(command: &str) -> bool {
@@ -976,6 +991,12 @@ fn split_segments(command: &str) -> Option<Vec<Segment>> {
                 }
                 continue;
             }
+            // Double quotes preserve command substitution. Treat it as opaque
+            // just as outside quotes, before the quoted span hides its syntax
+            // from read-only, privacy, network and saved-rule classification.
+            if q == '"' && (ch == '`' || (ch == '$' && chars.peek() == Some(&'('))) {
+                return None;
+            }
             if ch == q {
                 quote = None;
             }
@@ -1017,7 +1038,11 @@ fn split_segments(command: &str) -> Option<Vec<Segment>> {
                 }
                 boundary!();
             }
-            ';' => boundary!(),
+            // Native sidecar commands run through shell -lc and may contain
+            // line breaks, unlike typed PTY commands. A bare newline executes
+            // another command, while quoted/escaped newlines stay in the
+            // preceding branches. CRLF is covered by its LF separator.
+            ';' | '\n' => boundary!(),
             _ => {
                 text.push(ch);
                 bare.push(ch);
@@ -2015,6 +2040,101 @@ mod tests {
             assess("acme inspect project").effect,
             CommandEffect::Unknown
         );
+    }
+
+    #[test]
+    fn newlines_classify_each_executed_command() {
+        for newline in ["\n", "\r\n"] {
+            let mutation = format!("pwd{newline}touch audit-fixture");
+            assert!(!classify(&mutation).read_only, "{mutation:?}");
+            assert_eq!(assess(&mutation).effect, CommandEffect::StateChange);
+            assert_eq!(
+                assess(&format!("printf ok{newline}printenv")).effect,
+                CommandEffect::SensitiveRead
+            );
+            assert!(classify(&format!("pwd{newline}curl example.test")).network);
+            assert!(is_environment_transition(&format!(
+                "pwd{newline}ssh test-host"
+            )));
+            assert_eq!(
+                exact_argv_patterns(&format!("pwd{newline}whoami")).unwrap(),
+                vec![vec!["pwd".to_string()], vec!["whoami".to_string()]]
+            );
+        }
+    }
+
+    #[test]
+    fn quoted_newlines_are_literal_but_quoted_substitutions_remain_opaque() {
+        for command in [
+            "printf 'first\nprintenv'",
+            "printf \"first\nprintenv\"",
+            "printf '%s' '$(touch audit-fixture)'",
+            "printf '%s' '`touch audit-fixture`'",
+            r#"printf '%s' "\$(touch audit-fixture)""#,
+        ] {
+            assert!(classify(command).read_only, "{command:?}");
+            assert!(!assess(command).opaque, "{command:?}");
+        }
+        for command in [
+            r#"printf '%s' "$(touch audit-fixture)""#,
+            "printf '%s' \"`touch audit-fixture`\"",
+            "printf '%s' \"$(pwd\nprintenv)\"",
+            "printf '%s' \"$(printf 'nested')\"",
+            "pwd\n(touch audit-fixture)",
+        ] {
+            assert!(!classify(command).read_only, "{command:?}");
+            if command.starts_with("printf") {
+                assert!(assess(command).opaque, "{command:?}");
+                assert!(exact_argv_patterns(command).is_err(), "{command:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_saved_allow_for_one_line_cannot_authorize_a_later_line() {
+        let rule = CommandPolicyRule {
+            id: "allow-pwd".into(),
+            effect: PolicyRuleEffect::Allow,
+            scope: "local".into(),
+            argv: vec!["pwd".into(), "**".into()],
+            enabled: true,
+            description: String::new(),
+        };
+        assert_eq!(
+            evaluate_rules("pwd\ntouch audit-fixture", "local", &[rule]).0,
+            RuleDecision::None
+        );
+    }
+
+    #[test]
+    fn opaque_shell_forms_cannot_downgrade_known_sensitive_output() {
+        for command in [
+            r#"cat .env.production "$(pwd)""#,
+            r#"printenv "$(printf HOME)""#,
+            r#"printf '%s' "$(printenv)""#,
+            r#"printf '%s' "$(/usr/bin/printenv HOME)""#,
+            r#"printf '%s' "$(command -- printenv HOME)""#,
+            "printf '%s' \"`printenv HOME`\"",
+            "printf '%s' $(gh auth token)",
+            "printf '%s' $(security find-generic-password -w)",
+            "sh -c 'printenv HOME'",
+        ] {
+            assert!(assess(command).opaque, "{command:?}");
+            assert_eq!(
+                assess(command).effect,
+                CommandEffect::SensitiveRead,
+                "{command:?}"
+            );
+            assert!(!assess(command).read_only(), "{command:?}");
+        }
+        for command in [r#"printf '%s' "$(pwd)""#, "sh -c 'pwd'"] {
+            assert!(assess(command).opaque, "{command:?}");
+            assert_ne!(
+                assess(command).effect,
+                CommandEffect::SensitiveRead,
+                "{command:?}"
+            );
+        }
     }
 
     #[test]

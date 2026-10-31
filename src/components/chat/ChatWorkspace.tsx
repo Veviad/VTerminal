@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   BookOpen,
   ChevronDown,
@@ -58,9 +58,10 @@ export function ChatWorkspace() {
   const activeModelId = useAppStore((state) => state.activeModelId);
   const [composer, setComposer] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
+  const timelineRevision = useMemo(() => [current?.messages, stream], [current?.messages, stream]);
   const { scrollRef, contentRef, onScroll, showJump, jumpToLatest } = useStickyScroll(
     current?.summary.id,
-    [current?.messages, stream],
+    timelineRevision,
   );
   const archived = Boolean(current?.summary.archived_at);
   const activeTool = stream.activities.some((activity) => activity.status === "running")
@@ -240,7 +241,7 @@ export function ChatWorkspace() {
   );
 }
 
-function ChatSidebar() {
+const ChatSidebar = memo(function ChatSidebar() {
   const summaries = useChatStore((state) => state.summaries);
   const currentId = useChatStore((state) => state.current?.summary.id ?? null);
   const query = useChatStore((state) => state.search);
@@ -273,7 +274,7 @@ function ChatSidebar() {
       </nav>
     </aside>
   );
-}
+});
 
 function ChatRow({ chat, selected }: { chat: ChatSummary; selected: boolean }) {
   return (
@@ -293,58 +294,65 @@ function ChatRow({ chat, selected }: { chat: ChatSummary; selected: boolean }) {
   );
 }
 
-function ChatToolbar() {
-  const detail = useChatStore((state) => state.current);
-  const stream = useChatStore((state) => state.stream);
-  const app = useAppStore();
-  if (!detail) return <div className="h-11 border-b border-border-subtle" />;
-  const model = app.catalog.find((entry) => entry.id === app.activeModelId);
-  const effort = app.modelEffort[app.activeModelId] ?? model?.default_effort ?? "off";
+const ChatToolbar = memo(function ChatToolbar() {
+  const summary = useChatStore((state) => state.current?.summary);
+  const mcpSelection = useChatStore((state) => state.current?.mcp_selection);
+  const knowledgeCount = useChatStore((state) => state.current?.attached_bucket_refs.length ?? 0);
+  const busy = useChatStore((state) => chatIsBusy(state.stream));
+  const streamModel = useChatStore((state) => state.stream.model);
+  const streamError = useChatStore((state) => state.stream.lastError);
+  const model = useAppStore((state) => state.catalog.find((entry) => entry.id === state.activeModelId));
+  const selectedEffort = useAppStore((state) => state.modelEffort[state.activeModelId]);
+  const webAccess = useAppStore((state) => state.aiWebAccess);
+  const setModelEffortLocal = useAppStore((state) => state.setModelEffortLocal);
+  if (!summary || !mcpSelection) return <div className="h-11 border-b border-border-subtle" />;
+  const effort = selectedEffort ?? model?.default_effort ?? "off";
   const providerRejectedWeb = Boolean(
-    stream.lastError &&
-      /web[_ ](?:search|fetch)/i.test(stream.lastError) &&
-      /disabled|not enabled|organization|permission|unsupported/i.test(stream.lastError),
+    streamError &&
+      /web[_ ](?:search|fetch)/i.test(streamError) &&
+      /disabled|not enabled|organization|permission|unsupported/i.test(streamError),
   );
-  const web = !app.aiWebAccess
+  const web = !webAccess
     ? "Web off"
     : providerRejectedWeb
       ? "Web unavailable for provider"
       : model?.native_web_search && model.native_web_fetch
         ? "Web search + fetch"
         : "Web unsupported";
-  const busy = chatIsBusy(stream);
   return (
     <div className="flex h-11 shrink-0 items-center justify-between border-b border-border-subtle px-4">
       <div className="min-w-0">
-        <h2 className="truncate text-xs font-medium text-text-primary">{detail.summary.title}</h2>
+        <h2 className="truncate text-xs font-medium text-text-primary">{summary.title}</h2>
         <p className="mt-0.5 flex items-center gap-2 text-[9px] text-text-muted">
-          <span>{stream.model ?? model?.label ?? "No model"}</span>
+          <span>{streamModel ?? model?.label ?? "No model"}</span>
           <GenerationModeBadge verbose />
           <span className="flex items-center gap-1"><Globe2 size={9} /> {web}</span>
-          <span className="flex items-center gap-1"><BookOpen size={9} /> {detail.attached_bucket_refs.length ? `${detail.attached_bucket_refs.length} Knowledge` : "No Knowledge"}</span>
+          <span className="flex items-center gap-1"><BookOpen size={9} /> {knowledgeCount ? `${knowledgeCount} Knowledge` : "No Knowledge"}</span>
         </p>
       </div>
       <div className="flex items-center gap-2">
         <McpPicker
-          conversationId={detail.summary.id}
-          selection={detail.mcp_selection}
-          disabled={busy || Boolean(detail.summary.archived_at)}
+          conversationId={summary.id}
+          selection={mcpSelection}
+          disabled={busy || Boolean(summary.archived_at)}
           onSelectionChange={(selection) =>
             void useChatStore.getState().setMcpSelection(selection)
           }
         />
         {model && <EffortPicker value={effort} available={model.efforts} layout="dropdown" size="sm" disabled={busy} onChange={(value) => {
-          void api.setModelEffort(model.id, value).then(() => app.setModelEffortLocal(model.id, value));
+          void api.setModelEffort(model.id, value).then(() => setModelEffortLocal(model.id, value));
         }} />}
-        <ChatActions chat={detail.summary} placement="toolbar" />
+        <ChatActions chat={summary} placement="toolbar" />
       </div>
     </div>
   );
-}
+});
 
 function KnowledgePicker() {
   const enabled = useAppStore((state) => state.docsEnabled);
   const buckets = useAppStore((state) => state.knowledgeBuckets);
+  const disabled = useChatStore((state) => !state.current || Boolean(state.current.summary.archived_at)
+    || chatIsBusy(state.stream) || chatHasMutation(state));
   // `ChatWorkspace` mounts before the asynchronous Chat restore completes.
   // Keep the selector result stable while `current` is null: Zustand 5 passes
   // it through useSyncExternalStore, where allocating `[]` for every snapshot
@@ -357,17 +365,17 @@ function KnowledgePicker() {
   const dismiss = useCallback(() => setOpen(false), []);
   useDismissibleLayer(ref, dismiss, open);
   useEffect(() => { if (enabled && buckets.length === 0) void refreshKnowledgeBuckets(); }, [enabled, buckets.length]);
-  useEffect(() => { if (!enabled) setOpen(false); }, [enabled]);
+  useEffect(() => { if (!enabled || disabled) setOpen(false); }, [enabled, disabled]);
   const attachable = useMemo(() => buckets.filter((bucket) => bucket.attachable), [buckets]);
   if (!enabled) return null;
   return (
     <div ref={ref} className="relative">
-      <button type="button" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)} className={`flex items-center gap-1 rounded-md px-1.5 py-1 text-[10px] ${attached.length ? "bg-accent/10 text-accent" : "text-text-muted hover:bg-bg-hover"}`}><BookOpen size={13} />{attached.length || "Knowledge"}</button>
+      <button type="button" disabled={disabled} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)} className={`flex items-center gap-1 rounded-md px-1.5 py-1 text-[10px] disabled:opacity-40 ${attached.length ? "bg-accent/10 text-accent" : "text-text-muted hover:bg-bg-hover"}`}><BookOpen size={13} />{attached.length || "Knowledge"}</button>
       {open && <div role="menu" aria-label="Knowledge sources" className="absolute bottom-8 left-0 z-30 max-h-64 w-72 overflow-y-auto rounded-md border border-border-subtle bg-bg-card p-1 shadow-lg">
         {attachable.length === 0 ? <p className="p-2 text-xs text-text-muted">No searchable Knowledge sources.</p> : attachable.map((bucket) => {
           const selected = attached.some((ref) => sameKnowledgeBucket(ref, bucket.ref));
           return <label key={knowledgeBucketKey(bucket.ref)} className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-xs text-text-secondary hover:bg-bg-hover">
-            <input type="checkbox" checked={selected} onChange={() => selected ? void useChatStore.getState().detachBucket(bucket.ref) : void useChatStore.getState().attachBuckets(bucket.ref)} />
+            <input type="checkbox" disabled={disabled} checked={selected} onChange={() => selected ? void useChatStore.getState().detachBucket(bucket.ref) : void useChatStore.getState().attachBuckets(bucket.ref)} />
             <span className="min-w-0 flex-1 truncate">{bucket.label}</span><span className="text-[9px] text-text-muted">{bucket.chunk_count}</span>
           </label>;
         })}
@@ -376,7 +384,7 @@ function KnowledgePicker() {
   );
 }
 
-function Message({ message }: { message: ChatDisplayMessage }) {
+const Message = memo(function Message({ message }: { message: ChatDisplayMessage }) {
   const user = message.role === "user";
   const displayed = user ? splitFoldedBlocks(message.content) : { prompt: message.content, blocks: [] };
   const attachments = message.attachments.map(attachmentForChatDisplay);
@@ -396,7 +404,7 @@ function Message({ message }: { message: ChatDisplayMessage }) {
       {!user && message.model && <p className="mt-2 text-[9px] text-text-muted">{message.model}{message.prompt_tokens !== null || message.completion_tokens !== null ? ` · ${(message.prompt_tokens ?? 0).toLocaleString()} in / ${(message.completion_tokens ?? 0).toLocaleString()} out` : ""}</p>}
     </article>
   );
-}
+});
 
 function Sources({ citations }: { citations: WebCitation[] }) {
   if (!citations.length) return null;

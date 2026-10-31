@@ -186,3 +186,13 @@ describe("AiMessageView origin", () => {
     expect(container).toHaveTextContent("</cite>");
   });
 });
+
+
+it("keeps streamed code readable and highlights it once the answer completes", () => {
+  const content = "```javascript\nconst answer = 42;\n```";
+  const view = render(<AiMessageView content={content} origin="model" streaming />);
+  expect(view.container.querySelector("pre code")?.textContent).toContain("const answer = 42;");
+  expect(view.container.querySelector(".hljs-keyword")).toBeNull();
+  view.rerender(<AiMessageView content={content} origin="model" />);
+  expect(view.container.querySelector(".hljs-keyword")?.textContent).toBe("const");
+});

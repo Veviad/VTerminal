@@ -77,7 +77,7 @@ vi.mock("../hooks/useAiStream", () => ({
 }));
 
 import { useScheduledActions } from "../hooks/useScheduledActions";
-import { emptyScheduleInput, type ScheduleAction, type ScheduleFireEvent } from "../lib/schedules";
+import { emptyScheduleInput, type ScheduleAction, type ScheduleFireEvent, type ScheduleRunNotice } from "../lib/schedules";
 import {
   recallActionSession,
   resetScheduleLiveJobsForTests,
@@ -228,6 +228,25 @@ beforeEach(() => {
 });
 
 describe("scheduled actions driver", () => {
+  it("does not repopulate actions from a terminal notice after the scheduler is reset", async () => {
+    let noticeHandler!: (notice: ScheduleRunNotice) => void;
+    let resolveActions!: (actions: ScheduleAction[]) => void;
+    mocks.onScheduleRunNotice.mockImplementation(async (handler: typeof noticeHandler) => {
+      noticeHandler = handler;
+      return () => {};
+    });
+    await mount();
+    mocks.schedulesList.mockImplementationOnce(() => new Promise<ScheduleAction[]>((resolve) => {
+      resolveActions = resolve;
+    }));
+    act(() => {
+      noticeHandler({ run_id: "r1", action_id: "a1", status: "succeeded" });
+      useScheduleStore.getState().reset();
+    });
+    await act(async () => { resolveActions([action()]); await Promise.resolve(); });
+    expect(useScheduleStore.getState().actions).toEqual([]);
+  });
+
   it("installs no subscription while the feature is off", async () => {
     useAppStore.setState({ schedulesEnabled: false });
     await mount();

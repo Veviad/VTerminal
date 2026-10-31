@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import * as api from "../lib/tauri";
-import { useAppStore, type CommandTargetMeta } from "../stores/appStore";
+import { useAppStore, type AiStreamState, type CommandTargetMeta } from "../stores/appStore";
 import { getTerm } from "../lib/termRegistry";
 import { readLineRange, readScreenTail } from "../lib/terminalSnapshot";
 import {
@@ -37,7 +37,7 @@ import type {
   TerminalContext,
 } from "../lib/types";
 import { normalizeKnowledgeBucketRef } from "../lib/knowledge";
-import { ownRecordValue } from "../lib/records";
+import { ownRecordValue, withRecordValue } from "../lib/records";
 import { defaultShell, localOsLabel } from "../lib/platform";
 import { sessionIdForRole } from "../lib/sidecar";
 import { collapseHome, resolveSessionTitle } from "../lib/sessionTitle";
@@ -775,11 +775,9 @@ export function useAiStream() {
     ) => {
       const state = useAppStore.getState();
       const ownerSessionId = state.resolveAiOwner(sessionId);
-      const proposal = ownRecordValue(
-        state.aiStreams,
-        ownerSessionId,
-      )?.pendingMcpProposal;
-      if (!proposal) return;
+      const stream = ownRecordValue(state.aiStreams, ownerSessionId);
+      const proposal = stream?.pendingMcpProposal;
+      if (!proposal || !stream.requestId) return;
       state.setPendingMcpProposal(ownerSessionId, null);
       if (decision === "deny") {
         state.finishMcpTool(
@@ -789,9 +787,30 @@ export function useAiStream() {
           "Denied by user",
         );
       }
+      const awaitingMessage = ownRecordValue(useAppStore.getState().aiStreams, ownerSessionId)
+        ?.messages.find((message) => message.mcp?.approvalId === proposal.approvalId);
       await api
         .respondToMcpApproval(proposal.approvalId, decision)
-        .catch(() => {});
+        .catch((error) => {
+          useAppStore.setState((current) => {
+            const live = ownRecordValue(current.aiStreams, ownerSessionId);
+            // An IPC failure must keep the decision retryable, but cannot
+            // revive an approval after native progress or request retirement.
+            if (!live || live.requestId !== stream.requestId || live.pendingMcpProposal
+              || !awaitingMessage || !live.messages.includes(awaitingMessage)) return {};
+            return {
+              aiStreams: withRecordValue<AiStreamState>(current.aiStreams, ownerSessionId, {
+                ...live,
+                pendingMcpProposal: proposal,
+                status: "awaiting_approval",
+                lastError: String(error),
+                messages: live.messages.map((message) => message === awaitingMessage && message.mcp
+                  ? { ...message, mcp: { ...message.mcp, status: "awaiting" as const, error: undefined } }
+                  : message),
+              }),
+            };
+          });
+        });
     },
     [],
   );

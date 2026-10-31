@@ -276,6 +276,68 @@ describe("Chat workspace store", () => {
     expect(useChatStore.getState().mutatingChatIds).toEqual([]);
   });
 
+  it.each(["archive", "delete"] as const)("finishes queued metadata saves before %s so they cannot restore an obsolete chat snapshot", async (operation) => {
+    const active = summary(`pending-${operation}`);
+    const next = summary("keep-current");
+    const saving = deferred<void>();
+    const database = new Map<string, ChatSaveInput>([[active.id, {
+      id: active.id, title: active.title, title_source: active.title_source,
+      created_at: active.created_at, updated_at: active.updated_at, archived_at: null,
+      messages: [], model_transcript: [], model_transcript_version: 1,
+      attached_bucket_refs: [], mcp_selection: { server_ids: [], disabled_tools: {} },
+    }]]);
+    mocks.chatSave.mockImplementationOnce(async (input: ChatSaveInput) => {
+      await saving.promise;
+      database.set(input.id, input);
+    }).mockImplementation(async (input: ChatSaveInput) => { database.set(input.id, input); });
+    mocks.chatSetArchived.mockImplementation(async (chatId: string, archivedAt: string) => {
+      const saved = database.get(chatId);
+      if (!saved) throw new Error("chat no longer exists");
+      database.set(chatId, { ...saved, archived_at: archivedAt });
+    });
+    mocks.chatDelete.mockImplementation(async (chatId: string) => { database.delete(chatId); });
+    mocks.chatGet.mockResolvedValue(detail(next));
+    useChatStore.setState({ current: detail(active), summaries: [active, next] });
+    const firstSave = useChatStore.getState().attachBuckets({ source: "local", bucket_id: "docs" });
+    await waitFor(() => expect(mocks.chatSave).toHaveBeenCalledTimes(1));
+    const secondSave = useChatStore.getState().setMcpSelection({ server_ids: ["calendar"], disabled_tools: {} });
+    const mutation = operation === "archive"
+      ? useChatStore.getState().archive(true)
+      : useChatStore.getState().deleteChat();
+    saving.resolve();
+    await Promise.all([firstSave, secondSave, mutation]);
+
+    if (operation === "archive") {
+      expect(database.get(active.id)?.archived_at).not.toBeNull();
+      expect(database.get(active.id)?.mcp_selection.server_ids).toEqual(["calendar"]);
+    } else {
+      expect(database.has(active.id)).toBe(false);
+    }
+    expect(useChatStore.getState().mutatingChatIds).toEqual([]);
+  });
+
+  it.each(["attach", "detach"] as const)("does not %s Knowledge sources while a response owns its source snapshot", async (operation) => {
+    const active = detail(summary(`knowledge-${operation}`));
+    const ref = { source: "local" as const, bucket_id: "docs" };
+    active.attached_bucket_refs = operation === "detach" ? [ref] : [];
+    const provider = deferred<ChatMessage[]>();
+    mocks.chatStart.mockImplementationOnce(() => provider.promise);
+    useChatStore.setState({ current: active, summaries: [active.summary] });
+    const run = useChatStore.getState().send("Use the selected sources");
+    await waitFor(() => expect(mocks.chatStart).toHaveBeenCalledTimes(1));
+    const savedBeforeEdit = mocks.chatSave.mock.calls.length;
+    if (operation === "attach") await useChatStore.getState().attachBuckets(ref);
+    else await useChatStore.getState().detachBucket(ref);
+    const selectedDuringResponse = useChatStore.getState().current!.attached_bucket_refs;
+    const savedAfterEdit = mocks.chatSave.mock.calls.length;
+    provider.resolve([]);
+    await run;
+
+    expect(selectedDuringResponse).toEqual(active.attached_bucket_refs);
+    expect(savedAfterEdit).toBe(savedBeforeEdit);
+    expect(useChatStore.getState().current!.attached_bucket_refs).toEqual(active.attached_bucket_refs);
+  });
+
   it("fences a cancelled preflight so its delayed save cannot start a provider or reset a retry", async () => {
     const active = summary("preflight-cancel", false, 0);
     const saving = deferred<void>();
@@ -677,6 +739,100 @@ describe("Chat workspace store", () => {
     });
     expect(final.model_transcript).toBe(transcript);
     expect(useChatStore.getState().stream.status).toBe("idle");
+  });
+
+  it("keeps the latest completed tool checkpoint after a later provider failure and supplies it on retry", async () => {
+    const active = summary("checkpoint-failure");
+    const checkpoint: ChatMessage[] = [
+      { role: "user", content: "Create an event" },
+      { role: "assistant", content: "", tool_calls: [{ id: "created-event", name: "create_event", arguments: "{}" }] },
+      { role: "tool", content: "Event created successfully", tool_call_id: "created-event" },
+    ];
+    useChatStore.setState({ current: detail(active), summaries: [active] });
+    mocks.chatStart.mockImplementationOnce(async (...args: unknown[]) => {
+      const onEvent = args[7] as (event: StreamEvent) => void;
+      onEvent({ type: "Checkpoint", sequence: 1, transcript: checkpoint.slice(0, 1) });
+      onEvent({ type: "Checkpoint", sequence: 2, transcript: checkpoint });
+      onEvent({ type: "Error", message: "Provider disconnected" });
+      throw new Error("Provider disconnected");
+    }).mockImplementationOnce(async (...args: unknown[]) => args[3] as ChatMessage[]);
+
+    await useChatStore.getState().send("Create an event");
+    const finalSave = mocks.chatSave.mock.calls[mocks.chatSave.mock.calls.length - 1][0] as ChatSaveInput;
+    const savedTranscript = useChatStore.getState().current!.model_transcript;
+    await useChatStore.getState().send("Continue without creating another event");
+
+    expect(savedTranscript).toEqual(checkpoint);
+    expect(finalSave.model_transcript).toEqual(checkpoint);
+    expect(mocks.chatStart.mock.calls[1][3]).toEqual(checkpoint);
+  });
+
+  it.each(["settled", "started", "next-proposal"] as const)("does not restore an obsolete MCP approval after its response fails when the request has %s", async (progress) => {
+    const active = summary(`approval-${progress}`);
+    const provider = deferred<ChatMessage[]>();
+    const approval = deferred<void>();
+    let emit!: (event: StreamEvent) => void;
+    const proposal: StreamEvent = {
+      type: "McpToolProposal", approval_id: "approval-first", server_id: "calendar",
+      server_name: "Calendar", tool_name: "list_events", title: "List events", description: "",
+      arguments: {}, schema_hash: "schema",
+    };
+    mocks.chatStart.mockImplementationOnce((...args: unknown[]) => {
+      emit = args[7] as (event: StreamEvent) => void;
+      emit(proposal);
+      return provider.promise;
+    });
+    mocks.respondToMcpApproval.mockImplementationOnce(() => approval.promise);
+    useChatStore.setState({ current: detail(active), summaries: [active] });
+    const run = useChatStore.getState().send("Check events");
+    await waitFor(() => expect(useChatStore.getState().stream.pendingMcpProposal).not.toBeNull());
+    const responding = useChatStore.getState().respondToMcpProposal("allow_once");
+    if (progress === "settled") {
+      provider.resolve([]);
+      await run;
+      const next = detail(summary("next-chat"));
+      mocks.chatGet.mockResolvedValue(next);
+      await useChatStore.getState().selectChat(next.summary.id);
+    } else if (progress === "started") {
+      emit({ type: "McpToolStarted", approval_id: "approval-first", server_id: "calendar", server_name: "Calendar", tool_name: "list_events", arguments: {} });
+    } else {
+      emit({ ...proposal, approval_id: "approval-second" });
+    }
+    approval.reject(new Error("Approval already resolved"));
+    await responding;
+    const afterFailure = useChatStore.getState().stream;
+    if (progress !== "settled") {
+      provider.resolve([]);
+      await run;
+    }
+
+    expect(afterFailure.pendingMcpProposal?.approvalId ?? null).toBe(progress === "next-proposal" ? "approval-second" : null);
+    expect(afterFailure.lastError).toBeNull();
+    if (progress === "started") expect(afterFailure.mcpCalls[0].status).toBe("running");
+  });
+
+  it.each(["allow_once", "deny"] as const)("keeps a still-pending MCP %s decision retryable after submission fails", async (decision) => {
+    const active = summary(`retry-approval-${decision}`);
+    const provider = deferred<ChatMessage[]>();
+    mocks.chatStart.mockImplementationOnce((...args: unknown[]) => {
+      (args[7] as (event: StreamEvent) => void)({
+        type: "McpToolProposal", approval_id: "retry-approval", server_id: "calendar", server_name: "Calendar",
+        tool_name: "list_events", title: "List events", description: "", arguments: {}, schema_hash: "schema",
+      });
+      return provider.promise;
+    });
+    mocks.respondToMcpApproval.mockRejectedValueOnce(new Error("IPC unavailable"));
+    useChatStore.setState({ current: detail(active), summaries: [active] });
+    const run = useChatStore.getState().send("Check events");
+    await waitFor(() => expect(useChatStore.getState().stream.pendingMcpProposal).not.toBeNull());
+    await useChatStore.getState().respondToMcpProposal(decision);
+    const afterFailure = useChatStore.getState().stream;
+    provider.resolve([]);
+    await run;
+
+    expect(afterFailure.pendingMcpProposal?.approvalId).toBe("retry-approval");
+    expect(afterFailure.mcpCalls[0].status).toBe("awaiting");
+    expect(afterFailure.lastError).toContain("IPC unavailable");
   });
 
   it.each(["done", "error", "cancelled", "interrupted"] as const)("persists native activity as %s and streams text before the provider completes", async (status) => {

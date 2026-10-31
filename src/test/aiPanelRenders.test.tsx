@@ -161,7 +161,7 @@ describe("AiPanel renders", () => {
     expect(scrollTo).toHaveBeenCalledWith({ top: 1000, behavior: "auto" });
   });
 
-  it("follows live reasoning inside its bounded viewport and lets readers scroll back", () => {
+  it("follows live reasoning inside its bounded viewport and lets readers scroll back", async () => {
     seedReadyPanel({ status: "streaming", requestId: "r", thinkingContent: "First reasoning" });
     render(<AiPanel sessionId="s1" />);
     const viewport = screen.getByText("First reasoning").parentElement!;
@@ -173,7 +173,7 @@ describe("AiPanel renders", () => {
     const scrollTo = Element.prototype.scrollTo as ReturnType<typeof vi.fn>;
     scrollTo.mockClear();
     act(() => useAppStore.getState().appendThinking("s1", " next"));
-    expect(scrollTo).toHaveBeenCalledWith({ top: 900, behavior: "auto" });
+    await waitFor(() => expect(scrollTo).toHaveBeenCalledWith({ top: 900, behavior: "auto" }));
     viewport.scrollTop = 40;
     fireEvent.scroll(viewport);
     scrollTo.mockClear();

@@ -21,6 +21,8 @@ export type SchedulesView = "list" | "editor" | "runs";
 /** The editor's working copy. Never the store's `actions` entry: a half-typed
  *  recurrence must not become the thing the backend fires on. */
 export interface ScheduleDraft {
+  /** Stable for this editing session, including edits made while saving. */
+  editorId: number;
   /** null while creating. */
   actionId: string | null;
   input: ScheduleActionInput;
@@ -31,6 +33,7 @@ export interface ScheduleDraft {
 }
 
 export interface ScheduleStoreState {
+  resetGeneration: number;
   workspaceOpen: boolean;
   view: SchedulesView;
 
@@ -62,6 +65,9 @@ export interface ScheduleStoreState {
    *  A `Map` rather than a record: the key is a backend id, and a plain object
    *  indexed by one is both a lint sink and reachable by `__proto__`. */
   runRevisions: ReadonlyMap<string, number>;
+  /** Notices can precede the first history snapshot for a run. Retain their
+   *  status so that snapshot can establish membership without undoing it. */
+  runNoticeStatuses: ReadonlyMap<string, ScheduleRunNotice["status"]>;
   history: ScheduleRun[];
   loadingHistory: boolean;
 
@@ -86,12 +92,13 @@ export interface ScheduleStoreState {
   moveStep(from: number, to: number): void;
   setIssues(issues: ScheduleValidationIssue[]): void;
   discardDraft(): void;
+  finishDraftSave(draft: ScheduleDraft, saved: ScheduleAction): void;
 
   upsertRun(run: ScheduleRun, issuedAtRevision?: number): void;
   revisionOf(runId: string): number;
   noteRunEvent(notice: ScheduleRunNotice): void;
   selectRun(runId: string | null): void;
-  setHistory(runs: ScheduleRun[]): void;
+  setHistory(runs: ScheduleRun[], issuedAtRevisions?: ReadonlyMap<string, number>): void;
   setLoadingHistory(loading: boolean): void;
 
   setBusyAction(action: string | null): void;
@@ -110,6 +117,7 @@ function bump(
 }
 
 const initial = {
+  resetGeneration: 0,
   workspaceOpen: false,
   view: "list" as SchedulesView,
   actions: [] as ScheduleAction[],
@@ -121,12 +129,17 @@ const initial = {
   runsById: {} as Record<string, ScheduleRun>,
   activeRunId: null as string | null,
   runRevisions: new Map<string, number>() as ReadonlyMap<string, number>,
+  runNoticeStatuses: new Map<string, ScheduleRunNotice["status"]>() as ReadonlyMap<string, ScheduleRunNotice["status"]>,
   history: [] as ScheduleRun[],
   loadingHistory: false,
   busyAction: null as string | null,
   error: null as string | null,
   notice: null as string | null,
 };
+
+// Never reset: an IPC response from before feature teardown must not own a new
+// editor opened after the store was reset.
+let nextEditorId = 0;
 
 export const useScheduleStore = create<ScheduleStoreState>((set, get) => ({
   ...initial,
@@ -158,6 +171,7 @@ export const useScheduleStore = create<ScheduleStoreState>((set, get) => ({
   beginDraft: (action) =>
     set({
       draft: {
+        editorId: ++nextEditorId,
         actionId: action?.id ?? null,
         input: action ? toScheduleInput(action) : emptyScheduleInput(),
         storedPermissionMode: action?.permission_mode ?? null,
@@ -235,6 +249,30 @@ export const useScheduleStore = create<ScheduleStoreState>((set, get) => ({
     }),
   setIssues: (issues) => set({ issues }),
   discardDraft: () => set({ draft: null, draftDirty: false, issues: [] }),
+  finishDraftSave: (draft, saved) =>
+    set((state) => {
+      if (state.draft?.editorId !== draft.editorId) return {};
+      if (state.draft !== draft) {
+        // A create has acquired an id, but the user has already typed more.
+        // Preserve those edits and make the next Save update the created row.
+        return {
+          draft: {
+            ...state.draft,
+            actionId: saved.id,
+            storedPermissionMode: saved.permission_mode,
+            storedStepsSha256: saved.steps_sha256,
+          },
+        };
+      }
+      return {
+        draft: null,
+        draftDirty: false,
+        issues: [],
+        selectedActionId: saved.id,
+        view: state.view === "editor" ? "list" : state.view,
+        notice: null,
+      };
+    }),
 
   upsertRun: (run, issuedAtRevision) =>
     set((state) => {
@@ -254,6 +292,7 @@ export const useScheduleStore = create<ScheduleStoreState>((set, get) => ({
       const existing = state.runsById[notice.run_id];
       return {
         runRevisions: bump(state.runRevisions, notice.run_id),
+        runNoticeStatuses: new Map(state.runNoticeStatuses).set(notice.run_id, notice.status),
         runsById: existing
           ? {
               ...state.runsById,
@@ -263,20 +302,41 @@ export const useScheduleStore = create<ScheduleStoreState>((set, get) => ({
       };
     }),
   selectRun: (activeRunId) => set({ activeRunId, view: "runs" }),
-  setHistory: (history) =>
+  setHistory: (history, issuedAtRevisions) =>
     set((state) => {
       // Merge into the durable registry too, so opening a run from history and
       // then receiving a notice for it does not have to re-fetch.
       const runsById = { ...state.runsById };
-      for (const run of history) runsById[run.id] = run;
-      return { history, runsById };
+      const currentHistory: ScheduleRun[] = [];
+      for (const run of history) {
+        if (
+          issuedAtRevisions !== undefined &&
+          (issuedAtRevisions.get(run.id) ?? 0) < (state.runRevisions.get(run.id) ?? 0)
+        ) {
+          const newer = ownRecordValue(runsById, run.id) ?? {
+            ...run,
+            status: state.runNoticeStatuses.get(run.id) ?? run.status,
+          };
+          runsById[run.id] = newer;
+          currentHistory.push(newer);
+          continue;
+        }
+        runsById[run.id] = run;
+        currentHistory.push(run);
+      }
+      return { history: currentHistory, runsById };
     }),
   setLoadingHistory: (loadingHistory) => set({ loadingHistory }),
 
   setBusyAction: (busyAction) => set({ busyAction }),
   setError: (error) => set({ error }),
   setNotice: (notice) => set({ notice }),
-  reset: () => set({ ...initial, runRevisions: new Map() }),
+  reset: () => set((state) => ({
+    ...initial,
+    resetGeneration: state.resetGeneration + 1,
+    runRevisions: new Map(),
+    runNoticeStatuses: new Map(),
+  })),
 }));
 
 /** Runs that are genuinely still going. Membership in `runsById` is not

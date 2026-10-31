@@ -169,7 +169,13 @@ pub async fn chat_start(
     mcp_selection: Option<crate::mcp::config::McpChatSelection>,
     on_event: Channel<StreamEvent>,
 ) -> Result<Vec<ChatMessage>, String> {
-    let resolved = match resolve_provider(&app).await {
+    let request = ai_state.request(&request_id);
+    let cancel = request.receiver();
+    let Some(resolved) = request.prepare(resolve_provider(&app)).await else {
+        let _ = on_event.send(StreamEvent::Cancelled);
+        return Ok(history.unwrap_or_default());
+    };
+    let resolved = match resolved {
         Ok(resolved) => resolved,
         Err(message) => {
             let _ = on_event.send(StreamEvent::Error {
@@ -197,17 +203,23 @@ pub async fn chat_start(
         Vec::new()
     };
     let mcp_selection = mcp_selection.unwrap_or_default();
-    let mcp_context = crate::agent::prepare_mcp_context(
-        &app,
-        &mcp_manager,
-        &mcp_approvals,
-        &request_id,
-        &conversation_id,
-        &mcp_selection,
-        resolved.model,
-        &on_event,
-    )
-    .await?;
+    let Some(mcp_context) = request
+        .prepare(crate::agent::prepare_mcp_context(
+            &app,
+            &mcp_manager,
+            &mcp_approvals,
+            &request_id,
+            &conversation_id,
+            &mcp_selection,
+            resolved.model,
+            &on_event,
+        ))
+        .await
+    else {
+        let _ = on_event.send(StreamEvent::Cancelled);
+        return Ok(history.unwrap_or_default());
+    };
+    let mcp_context = mcp_context?;
     let available_tools = chat_tools(
         supports_tools,
         &buckets,
@@ -215,7 +227,6 @@ pub async fn chat_start(
             .as_ref()
             .map_or_else(Vec::new, |mcp| mcp.tool_defs()),
     );
-    let cancel = ai_state.register(&request_id);
 
     // The Chat workspace shares the `Chat` surface with Ask: neither executes
     // anything, and a user who asks for German answers in one means both.
@@ -267,7 +278,6 @@ pub async fn chat_start(
     for round in 0..=MAX_CLIENT_TOOL_ROUNDS {
         if *cancel.borrow() {
             let _ = on_event.send(StreamEvent::Cancelled);
-            ai_state.finish(&request_id);
             mcp_approvals.drain_for_request(&request_id);
             return Ok(history::storage_snapshot_with(
                 &messages,
@@ -355,7 +365,6 @@ pub async fn chat_start(
             Ok(value) => value,
             Err(ProviderError::Cancelled) => {
                 let _ = on_event.send(StreamEvent::Cancelled);
-                ai_state.finish(&request_id);
                 mcp_approvals.drain_for_request(&request_id);
                 return Ok(history::storage_snapshot_with(
                     &messages,
@@ -367,7 +376,6 @@ pub async fn chat_start(
                 let _ = on_event.send(StreamEvent::Error {
                     message: message.clone(),
                 });
-                ai_state.finish(&request_id);
                 mcp_approvals.drain_for_request(&request_id);
                 return Err(message);
             }
@@ -402,7 +410,6 @@ pub async fn chat_start(
                 prompt_tokens: total_usage.0,
                 completion_tokens: total_usage.1,
             });
-            ai_state.finish(&request_id);
             mcp_approvals.drain_for_request(&request_id);
             return Ok(snapshot);
         }
@@ -443,7 +450,6 @@ pub async fn chat_start(
         });
     }
 
-    ai_state.finish(&request_id);
     mcp_approvals.drain_for_request(&request_id);
     Err(format!("{model_id} did not produce a final answer"))
 }
@@ -459,7 +465,11 @@ pub async fn ai_name_chat(
 ) -> Result<String, String> {
     use crate::provider::Effort;
 
-    let resolved = resolve_provider(&app).await?;
+    let request = ai_state.request(&request_id);
+    let resolved = request
+        .prepare(resolve_provider(&app))
+        .await
+        .ok_or_else(|| "cancelled".to_string())??;
     let provider = resolved.provider;
     let replacement = current_title
         .as_deref()
@@ -482,7 +492,7 @@ pub async fn ai_name_chat(
             answer.trim()
         )),
     ];
-    let cancel = ai_state.register(&request_id);
+    let cancel = request.receiver();
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
     let task = tokio::spawn(async move {
         provider
@@ -512,7 +522,6 @@ pub async fn ai_name_chat(
     let result = task
         .await
         .map_err(|error| format!("naming task panicked: {error}"))?;
-    ai_state.finish(&request_id);
     result.map_err(|error| error.to_string())?;
     sanitize_replacement_title(&title, replacement)
 }

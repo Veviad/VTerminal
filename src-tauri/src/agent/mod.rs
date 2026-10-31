@@ -615,10 +615,29 @@ impl AiState {
     }
 
     pub fn cancel(&self, request_id: &str) {
-        if let Ok(mut map) = self.cancel.lock() {
-            if let Some(tx) = map.remove(request_id) {
+        if let Ok(map) = self.cancel.lock() {
+            if let Some(tx) = map.get(request_id) {
+                // The request is still running until its owner finishes. In
+                // particular, shutdown must not mistake a stop signal for idle.
                 let _ = tx.send(true);
             }
+        }
+    }
+
+    /// Register before the first await and remove the entry on every exit,
+    /// including setup errors and a dropped command future.
+    pub fn request(&self, request_id: &str) -> AiRequest<'_> {
+        let (sender, receiver) = tokio::sync::watch::channel(false);
+        if let Ok(mut map) = self.cancel.lock() {
+            if let Some(previous) = map.insert(request_id.to_owned(), sender.clone()) {
+                let _ = previous.send(true);
+            }
+        }
+        AiRequest {
+            state: self,
+            id: request_id.to_owned(),
+            sender,
+            receiver,
         }
     }
 
@@ -645,6 +664,51 @@ impl AiState {
             .lock()
             .map(|map| map.is_empty())
             .unwrap_or(false)
+    }
+}
+
+/// Owns one request's cancellation registration through asynchronous setup.
+pub struct AiRequest<'a> {
+    state: &'a AiState,
+    id: String,
+    sender: tokio::sync::watch::Sender<bool>,
+    receiver: tokio::sync::watch::Receiver<bool>,
+}
+
+impl AiRequest<'_> {
+    pub fn receiver(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.receiver.clone()
+    }
+
+    /// Stop provider/MCP setup promptly. The cancelled future is dropped, so
+    /// it cannot resume later and issue a provider request after Stop.
+    pub async fn prepare<T>(&self, future: impl std::future::Future<Output = T>) -> Option<T> {
+        let mut cancel = self.receiver();
+        if *cancel.borrow() {
+            return None;
+        }
+        tokio::select! {
+            biased;
+            _ = cancel.wait_for(|cancelled| *cancelled) => None,
+            result = future => Some(result),
+        }
+    }
+}
+
+impl Drop for AiRequest<'_> {
+    fn drop(&mut self) {
+        // Detached naming/local-provider work must also observe an aborted
+        // command future, even when no explicit Stop command was delivered.
+        let _ = self.sender.send(true);
+        if let Ok(mut map) = self.state.cancel.lock() {
+            // A replaced request must not remove its successor's registration.
+            if map
+                .get(&self.id)
+                .is_some_and(|sender| sender.same_channel(&self.sender))
+            {
+                map.remove(&self.id);
+            }
+        }
     }
 }
 
@@ -963,5 +1027,120 @@ mod steer_tests {
         assert!(state
             .push("req-1", "overflow".into(), "msg".into())
             .is_err());
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test]
+    async fn stop_during_setup_drops_setup_and_never_starts_provider() {
+        let state = AiState::default();
+        let setup_started = tokio::sync::Notify::new();
+        let setup_completed = AtomicBool::new(false);
+        let provider_started = AtomicBool::new(false);
+        let request = state.request("ask");
+        let setup = async {
+            setup_started.notify_one();
+            std::future::pending::<()>().await;
+            setup_completed.store(true, Ordering::SeqCst);
+        };
+        let run = async {
+            if request.prepare(setup).await.is_some() {
+                provider_started.store(true, Ordering::SeqCst);
+            }
+        };
+        let stop = async {
+            setup_started.notified().await;
+            state.cancel("ask");
+            assert!(!state.is_idle(), "Stop is not provider completion");
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            tokio::join!(run, stop);
+        })
+        .await
+        .expect("Stop must interrupt pending setup");
+        assert!(!setup_completed.load(Ordering::SeqCst));
+        assert!(!provider_started.load(Ordering::SeqCst));
+        drop(request);
+        assert!(state.is_idle());
+    }
+
+    #[tokio::test]
+    async fn stop_between_provider_resolution_and_mcp_discovery_is_not_reset() {
+        let state = AiState::default();
+        let request = state.request("chat");
+        assert_eq!(
+            request.prepare(async { "provider" }).await,
+            Some("provider")
+        );
+        state.cancel("chat");
+        let polled = AtomicBool::new(false);
+        assert_eq!(
+            request
+                .prepare(async {
+                    polled.store(true, Ordering::SeqCst);
+                })
+                .await,
+            None
+        );
+        assert!(!polled.load(Ordering::SeqCst));
+        assert!(*request.receiver().borrow());
+        drop(request);
+        assert!(state.is_idle());
+    }
+
+    #[tokio::test]
+    async fn setup_error_and_aborted_request_release_the_registry() {
+        let state = AiState::default();
+        async fn fail(state: &AiState) -> Result<(), &'static str> {
+            let request = state.request("error");
+            request
+                .prepare(async { Err("setup failed") })
+                .await
+                .unwrap()?;
+            Ok(())
+        }
+        assert_eq!(fail(&state).await, Err("setup failed"));
+        assert!(state.is_idle());
+        let mut future = Box::pin(async {
+            let request = state.request("aborted");
+            request.prepare(std::future::pending::<()>()).await;
+        });
+        tokio::select! {
+            biased;
+            _ = &mut future => panic!("setup should still be pending"),
+            _ = async {} => {},
+        }
+        assert!(!state.is_idle());
+        drop(future);
+        assert!(state.is_idle());
+    }
+
+    #[test]
+    fn replaced_request_cannot_remove_its_successor() {
+        let state = AiState::default();
+        let first = state.request("same-id");
+        let next = state.request("same-id");
+        assert!(*first.receiver().borrow());
+        drop(first);
+        assert!(!state.is_idle());
+        state.cancel_all();
+        assert!(*next.receiver().borrow());
+        drop(next);
+        assert!(state.is_idle());
+    }
+
+    #[test]
+    fn cancel_keeps_legacy_request_registered_until_finished() {
+        let state = AiState::default();
+        let cancel = state.register("agent");
+        state.cancel("agent");
+        assert!(*cancel.borrow());
+        assert!(!state.is_idle());
+        state.finish("agent");
+        assert!(state.is_idle());
     }
 }

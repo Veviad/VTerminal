@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import { useEffect, useState } from "react";
 import { useAppStore } from "../../stores/appStore";
 import { useSettings } from "../../hooks/useSettings";
@@ -74,7 +75,15 @@ function RuleArgvInput({
 }
 
 export function AgentSection() {
-  const s = useAppStore();
+  const s = useAppStore(useShallow((state) => ({
+    defaultAiMode: state.defaultAiMode,
+    agentMaxIterations: state.agentMaxIterations,
+    agentCommandTimeoutSecs: state.agentCommandTimeoutSecs,
+    aiWebAccess: state.aiWebAccess,
+    autoCompactEnabled: state.autoCompactEnabled,
+    autoCompactThresholdPercent: state.autoCompactThresholdPercent,
+    agentCommandPolicyRules: state.agentCommandPolicyRules,
+  })));
   const { save } = useSettings();
   const [savingMode, setSavingMode] = useState(false);
   const [modeSaveError, setModeSaveError] = useState(false);

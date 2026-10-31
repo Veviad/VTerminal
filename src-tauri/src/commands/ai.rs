@@ -501,34 +501,47 @@ pub async fn ai_ask(
         )
         .await;
     }
-    let resolved = resolve_provider(&app).await?;
-    let context = crate::agent::prepare_mcp_context(
-        &app,
-        &mcp_manager,
-        &mcp_approvals,
-        &request_id,
-        &context.session_id,
-        &mcp_selection,
-        resolved.model,
-        &on_event,
-    )
-    .await?;
-    let Some(context) = context else {
-        return run_chat(
+    let request = ai_state.request(&request_id);
+    let Some(resolved) = request.prepare(resolve_provider(&app)).await else {
+        let _ = on_event.send(StreamEvent::Cancelled);
+        return Ok(());
+    };
+    let resolved = resolved?;
+    let Some(context) = request
+        .prepare(crate::agent::prepare_mcp_context(
             &app,
-            &ai_state,
+            &mcp_manager,
+            &mcp_approvals,
+            &request_id,
+            &context.session_id,
+            &mcp_selection,
+            resolved.model,
+            &on_event,
+        ))
+        .await
+    else {
+        let _ = on_event.send(StreamEvent::Cancelled);
+        return Ok(());
+    };
+    // An unsupported/empty MCP selection still uses the already resolved
+    // provider and the same cancellation receiver.
+    let Some(context) = context? else {
+        return run_resolved_chat(
+            &app,
             request_id,
             messages,
             on_event,
             Some(2048),
             None,
             true,
+            resolved,
+            request.receiver(),
         )
         .await;
     };
     run_chat_with_mcp(
         &app,
-        &ai_state,
+        request.receiver(),
         &mcp_approvals,
         request_id,
         messages,
@@ -599,7 +612,11 @@ pub async fn ai_name_session(
 ) -> Result<String, String> {
     use crate::provider::{ProviderError, ProviderEvent};
 
-    let resolved = resolve_provider(&app).await?;
+    let request = ai_state.request(&request_id);
+    let resolved = request
+        .prepare(resolve_provider(&app))
+        .await
+        .ok_or_else(|| "cancelled".to_string())??;
     let provider = resolved.provider;
 
     let messages = vec![
@@ -612,7 +629,7 @@ pub async fn ai_name_session(
         )),
     ];
 
-    let cancel_rx = ai_state.register(&request_id);
+    let cancel_rx = request.receiver();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<ProviderEvent>(16);
     // Naming is cosmetic: thinking off and a hard token ceiling, so it can never
     // become the slow thing in the app.
@@ -646,7 +663,6 @@ pub async fn ai_name_session(
     let result = stream_task
         .await
         .map_err(|e| format!("naming task panicked: {e}"))?;
-    ai_state.finish(&request_id);
 
     match result {
         Ok(()) => sanitize_title(&out),
@@ -1300,9 +1316,12 @@ async fn run_chat(
     // ceiling rather than a demand.
     allow_web: bool,
 ) -> Result<(), String> {
-    use crate::provider::ProviderError;
-
-    let resolved = match resolve_provider(app).await {
+    let request = ai_state.request(&request_id);
+    let Some(resolved) = request.prepare(resolve_provider(app)).await else {
+        let _ = on_event.send(StreamEvent::Cancelled);
+        return Ok(());
+    };
+    let resolved = match resolved {
         Ok(r) => r,
         Err(message) => {
             let _ = on_event.send(StreamEvent::Error {
@@ -1311,13 +1330,40 @@ async fn run_chat(
             return Err(message);
         }
     };
+    run_resolved_chat(
+        app,
+        request_id,
+        messages,
+        on_event,
+        max_tokens,
+        effort_override,
+        allow_web,
+        resolved,
+        request.receiver(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_resolved_chat(
+    app: &tauri::AppHandle<Wry>,
+    request_id: String,
+    messages: Vec<ChatMessage>,
+    on_event: Channel<StreamEvent>,
+    max_tokens: Option<u32>,
+    effort_override: Option<Effort>,
+    allow_web: bool,
+    resolved: Resolved,
+    cancel_rx: tokio::sync::watch::Receiver<bool>,
+) -> Result<(), String> {
+    use crate::provider::ProviderError;
+
     let label = resolved.model.label.to_string();
     let web_model = resolved.model.native_web_fetch;
     let provider = resolved.provider;
     let effort = effort_override.unwrap_or(resolved.effort);
 
     let temperature = crate::commands::settings::read_f64_opt(app, "temperature").map(|t| t as f32);
-    let cancel_rx = ai_state.register(&request_id);
 
     let _ = on_event.send(StreamEvent::Started {
         request_id: request_id.clone(),
@@ -1354,8 +1400,6 @@ async fn run_chat(
         let _ = on_event.send(StreamEvent::Delta { content: tail });
     }
 
-    ai_state.finish(&request_id);
-
     match result {
         Ok(output) => {
             let _ = on_event.send(StreamEvent::Done {
@@ -1383,7 +1427,7 @@ async fn run_chat(
 #[allow(clippy::too_many_arguments)]
 async fn run_chat_with_mcp(
     app: &tauri::AppHandle<Wry>,
-    ai_state: &AiState,
+    cancel: tokio::sync::watch::Receiver<bool>,
     mcp_approvals: &crate::mcp::approval::McpApprovalState,
     request_id: String,
     mut messages: Vec<ChatMessage>,
@@ -1400,7 +1444,6 @@ async fn run_chat_with_mcp(
     let provider = resolved.provider;
     let tools = mcp.tool_defs();
     let temperature = crate::commands::settings::read_f64_opt(app, "temperature").map(|t| t as f32);
-    let cancel = ai_state.register(&request_id);
     let _ = on_event.send(StreamEvent::Started {
         request_id: request_id.clone(),
         model: model.label.to_string(),
@@ -1409,7 +1452,6 @@ async fn run_chat_with_mcp(
 
     for _round in 0..MAX_ASK_MCP_ROUNDS {
         if *cancel.borrow() {
-            ai_state.finish(&request_id);
             mcp_approvals.drain_for_request(&request_id);
             let _ = on_event.send(StreamEvent::Cancelled);
             return Ok(());
@@ -1451,14 +1493,12 @@ async fn run_chat_with_mcp(
         let output = match result {
             Ok(output) => output,
             Err(ProviderError::Cancelled) => {
-                ai_state.finish(&request_id);
                 mcp_approvals.drain_for_request(&request_id);
                 let _ = on_event.send(StreamEvent::Cancelled);
                 return Ok(());
             }
             Err(error) => {
                 let message = error.to_string();
-                ai_state.finish(&request_id);
                 mcp_approvals.drain_for_request(&request_id);
                 let _ = on_event.send(StreamEvent::Error {
                     message: message.clone(),
@@ -1476,7 +1516,6 @@ async fn run_chat_with_mcp(
         usage.0 = usage.0.saturating_add(round_usage.0);
         usage.1 = usage.1.saturating_add(round_usage.1);
         if calls.is_empty() {
-            ai_state.finish(&request_id);
             mcp_approvals.drain_for_request(&request_id);
             if finish == FinishReason::Length && text.trim().is_empty() {
                 let message =
@@ -1527,7 +1566,6 @@ async fn run_chat_with_mcp(
             });
         }
     }
-    ai_state.finish(&request_id);
     mcp_approvals.drain_for_request(&request_id);
     let message = format!("Ask stopped after {MAX_ASK_MCP_ROUNDS} MCP model rounds");
     let _ = on_event.send(StreamEvent::Error {

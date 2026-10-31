@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import { useAppStore } from "../../stores/appStore";
 import { useSettings } from "../../hooks/useSettings";
 import * as api from "../../lib/tauri";
@@ -6,7 +7,24 @@ import { isWindows } from "../../lib/platform";
 import { Row, Stepper, Toggle } from "../ui/Row";
 
 export function TerminalSection() {
-  const s = useAppStore();
+  const s = useAppStore(useShallow((state) => ({
+    fontSize: state.fontSize,
+    scrollbackLines: state.scrollbackLines,
+    cursorStyle: state.cursorStyle,
+    cursorBlink: state.cursorBlink,
+    copyOnSelect: state.copyOnSelect,
+    clearTerminalOnNewChat: state.clearTerminalOnNewChat,
+    shellPath: state.shellPath,
+    shellIntegrationEnabled: state.shellIntegrationEnabled,
+    restoreSessionsOnStart: state.restoreSessionsOnStart,
+    restoreScrollbackLines: state.restoreScrollbackLines,
+    archiveEnabled: state.archiveEnabled,
+    archiveMaxSessions: state.archiveMaxSessions,
+    archiveMaxAgeDays: state.archiveMaxAgeDays,
+    historyEnabled: state.historyEnabled,
+    sendContextToAi: state.sendContextToAi,
+    aiSessionNaming: state.aiSessionNaming,
+  })));
   const { save } = useSettings();
 
   /**

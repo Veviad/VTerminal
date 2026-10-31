@@ -692,9 +692,18 @@ function attachActivitySources(scheduleInitialWrite: boolean): void {
   lastFingerprint = fingerprint(initial);
   lastActiveId = initial.activeSessionId;
 
-  unsubscribeStore = useAppStore.subscribe((state) => {
+  unsubscribeStore = useAppStore.subscribe((state, previous) => {
     if (!persistenceActive()) return;
-    const next = fingerprint(state);
+    // Stream content and terminal block updates are frequent, but metadata is
+    // not. Avoid rebuilding/allocating every tab's packed metadata for each
+    // token; only a selected-mode change within aiStreams affects the snapshot.
+    const metadataChanged = state.sessions !== previous.sessions
+      || state.defaultAiMode !== previous.defaultAiMode
+      || state.lastAiMode !== previous.lastAiMode
+      || (state.aiStreams !== previous.aiStreams && state.sessions.some(({ id }) =>
+        (state.aiStreams[id]?.selectedMode ?? defaultAiModeFor(state))
+          !== (previous.aiStreams[id]?.selectedMode ?? defaultAiModeFor(previous))));
+    const next = metadataChanged ? fingerprint(state) : lastFingerprint;
     const nextActive = state.activeSessionId;
     const tabsChanged = next !== lastFingerprint;
     const activeChanged = nextActive !== lastActiveId;
