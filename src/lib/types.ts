@@ -353,6 +353,8 @@ export type StreamEvent =
       error?: string;
     }
   | { type: "McpServerProblem"; server_id: string; message: string }
+  /** The next round will include these steers; delivery remains unconfirmed. */
+  | { type: "SteerProcessing"; ids: string[] }
   /** A provider round containing these steers completed successfully. This is
    *  the only event that clears the queued badge; without it delivery is unconfirmed. */
   | { type: "SteerDelivered"; ids: string[] }

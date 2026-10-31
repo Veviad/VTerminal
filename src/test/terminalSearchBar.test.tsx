@@ -25,6 +25,7 @@ beforeEach(() => {
   mocks.getSelectionPosition.mockReturnValue({ start: { x: 0, y: 2 }, end: { x: 7, y: 2 } });
   useAppStore.setState({
     sessions: [{ id: "local" } as never],
+    activeSessionId: "local",
     sessionUi: { local: { searchOpen: true } as never },
   });
 });
@@ -54,6 +55,7 @@ describe("terminal search", () => {
     render(<TerminalSearchBar sessionId="local" />);
     fireEvent.keyDown(screen.getByRole("textbox"), { key: "Escape" });
     expect(mocks.clearSelection).not.toHaveBeenCalled();
+    fireEvent.keyUp(window, { key: "Escape" });
   });
 
   it("searches in either direction and returns focus to the terminal on escape", () => {
@@ -64,9 +66,38 @@ describe("terminal search", () => {
     expect(mocks.findPrevious).toHaveBeenCalledWith("status", expect.any(Object));
     fireEvent.keyDown(input, { key: "Enter" });
     expect(mocks.findNext).toHaveBeenLastCalledWith("status", expect.not.objectContaining({ incremental: true }));
-    fireEvent.keyDown(input, { key: "Escape" });
+    const escape = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    fireEvent(input, escape);
+    expect(escape.defaultPrevented).toBe(true);
+    expect(mocks.focus).not.toHaveBeenCalled();
+    fireEvent.keyUp(window, { key: "Escape" });
     expect(mocks.focus).toHaveBeenCalledOnce();
     expect(mocks.clearSelection).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("textbox")).toBeNull();
+  });
+
+  it("does not steal focus if the user leaves the terminal before releasing Escape", () => {
+    render(<TerminalSearchBar sessionId="local" />);
+    const input = screen.getByRole("textbox");
+    const other = document.createElement("input");
+    document.body.appendChild(other);
+    fireEvent.keyDown(input, { key: "Escape" });
+    other.focus();
+    fireEvent.keyUp(window, { key: "Escape" });
+    expect(mocks.focus).not.toHaveBeenCalled();
+    other.remove();
+  });
+
+  it("consumes Escape from search controls before returning focus", () => {
+    render(<TerminalSearchBar sessionId="local" />);
+    const button = screen.getAllByRole("button")[0];
+    button.focus();
+    const escape = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    fireEvent(button, escape);
+    expect(escape.defaultPrevented).toBe(true);
+    expect(mocks.focus).not.toHaveBeenCalled();
+    fireEvent.keyUp(window, { key: "Escape" });
+    expect(mocks.focus).toHaveBeenCalledOnce();
     expect(screen.queryByRole("textbox")).toBeNull();
   });
 });

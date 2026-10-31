@@ -156,8 +156,60 @@ export function useGlobalShortcuts(): void {
       }
     };
 
+    // The fallback handler above runs in the bubble phase, after xterm has
+    // already forwarded keyboard input to the PTY. When the search bar is open
+    // but the terminal itself has focus, intercept Escape before xterm can send
+    // it to the shell. Otherwise zsh can retain ESC as a Meta-key prefix and
+    // consume the first character of the next command.
+    let searchEscapeHeld = false;
+    let searchEscapeTimeout: number | undefined;
+    const releaseSearchEscape = () => {
+      searchEscapeHeld = false;
+      window.clearTimeout(searchEscapeTimeout);
+      searchEscapeTimeout = undefined;
+    };
+    const keepSearchEscapeHeld = () => {
+      searchEscapeHeld = true;
+      window.clearTimeout(searchEscapeTimeout);
+      // Recover if a keyup is lost; repeats refresh the timer while held.
+      searchEscapeTimeout = window.setTimeout(releaseSearchEscape, 5_000);
+    };
+    const onSearchEscapeCapture = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      // The search is already closed after the first keydown. Continue to
+      // consume auto-repeat until keyup rather than forwarding a bare Escape
+      // to the shell while the physical key remains held.
+      if (searchEscapeHeld) {
+        e.preventDefault();
+        e.stopPropagation();
+        keepSearchEscapeHeld();
+        return;
+      }
+      const s = useAppStore.getState();
+      const id = s.activeSessionId;
+      if (!id || s.paletteOpen || s.sessionBrowserOpen || !s.sessionUi[id]?.searchOpen) return;
+      if (getTerm(id)?.term.textarea !== e.target) return;
+      e.preventDefault();
+      e.stopPropagation();
+      keepSearchEscapeHeld();
+      s.updateSessionUi(id, { searchOpen: false });
+      refocusTerm();
+    };
+    const onSearchEscapeKeyUp = (e: KeyboardEvent) => {
+      if (e.key === "Escape") releaseSearchEscape();
+    };
+
+    window.addEventListener("keydown", onSearchEscapeCapture, true);
+    window.addEventListener("keyup", onSearchEscapeKeyUp, true);
+    window.addEventListener("blur", releaseSearchEscape);
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    return () => {
+      releaseSearchEscape();
+      window.removeEventListener("keydown", onSearchEscapeCapture, true);
+      window.removeEventListener("keyup", onSearchEscapeKeyUp, true);
+      window.removeEventListener("blur", releaseSearchEscape);
+      window.removeEventListener("keydown", onKeyDown);
+    };
   }, [createSession, closeSession, save]);
 }
 
