@@ -32,6 +32,7 @@ const pty = vi.hoisted(() => ({
   abortSession: vi.fn(),
   runInTerminal: vi.fn(),
   captureApprovalPromptBinding: vi.fn(() => "prompt-binding"),
+  hasReusableRemoteShellProof: vi.fn(() => false),
   releaseApprovalPromptBinding: vi.fn(),
 }));
 const terminalRegistry = vi.hoisted(() => ({
@@ -127,6 +128,7 @@ beforeEach(() => {
     mode: "integrated",
   });
   terminalRegistry.entries.clear();
+  pty.hasReusableRemoteShellProof.mockReturnValue(false);
 
   useAppStore.setState({
     sessions: [],
@@ -856,6 +858,108 @@ describe("AI generation ownership", () => {
     expect(stream.status).toBe("idle");
     expect(stream.lastError).toBeNull();
     expect(stream.messages[stream.messages.length - 1]?.content).toBe("fresh");
+  });
+});
+
+describe("native terminal readiness gates", () => {
+  const check: Extract<StreamEvent, { type: "TerminalPromptCheck" }> = {
+    type: "TerminalPromptCheck", approval_id: "readiness", command: "pwd",
+    explanation: "Inspect the working directory", read_only: true, network: false,
+    output_policy: "normal", ask_reason: "the remote shell prompt needs confirmation",
+  };
+
+  async function start(remote = true) {
+    if (remote) useAppStore.getState().updateSessionUi(SID, {
+      remote: { kind: "ssh", target: "audit-host" }, nestedBlockId: "ssh-readiness",
+    });
+    let emit!: (event: StreamEvent) => void;
+    api.agentStart.mockImplementationOnce((...args: unknown[]) => {
+      emit = args[6] as (event: StreamEvent) => void;
+      return Promise.resolve([]);
+    });
+    const hook = renderHook(() => useAiStream());
+    await act(async () => hook.result.current.startAgent(SID, "inspect the shell"));
+    return { ...hook, emit };
+  }
+
+  it.each(["full", "auto_all", "auto_read", "auto_smart"] as const)(
+    "shows an unverified SSH prompt confirmation in %s without attempting execution", async (mode) => {
+      const { emit } = await start();
+      act(() => useAppStore.getState().setPermissionMode(SID, mode));
+      act(() => emit({ ...check, approval_id: `readiness-${mode}` }));
+      expect(useAppStore.getState().aiStreams[SID]).toMatchObject({
+        status: "awaiting_approval", pendingProposal: {
+          approvalId: `readiness-${mode}`, proposedRemote: true,
+          proposedTargetLabel: "ssh audit-host",
+        },
+      });
+      expect(api.respondToApproval).not.toHaveBeenCalled();
+      expect(pty.runInTerminal).not.toHaveBeenCalled();
+      expect(api.submitCommandResult).not.toHaveBeenCalled();
+    },
+  );
+
+  it("carries the operator's one-use prompt binding into the original command", async () => {
+    const { emit, result } = await start();
+    act(() => emit({ ...check, approval_id: "readiness-confirmed" }));
+    act(() => expect(result.current.attestProposalPrompt(SID, true)).toBe(true));
+    await act(async () => result.current.respondToProposal(SID, "run"));
+    expect(api.respondToApproval).toHaveBeenCalledWith("readiness-confirmed", "run", undefined);
+    await act(async () => emit({
+      type: "RunInTerminal", approval_id: "readiness-confirmed", session_id: SID,
+      command: "pwd", explanation: check.explanation, timeout_secs: 30, output_policy: "normal",
+    }));
+    expect(pty.runInTerminal).toHaveBeenCalledTimes(1);
+    expect(pty.runInTerminal).toHaveBeenCalledWith(SID, "readiness-confirmed", "pwd",
+      expect.objectContaining({ approvalPromptBinding: "prompt-binding", requireRemotePromptAttestation: true }));
+  });
+
+  it.each([false, true])("acknowledges native readiness for a local or proven remote shell (remote=%s)", async (remote) => {
+    const { emit } = await start(remote);
+    pty.hasReusableRemoteShellProof.mockReturnValue(remote);
+    await act(async () => emit({ ...check, approval_id: `readiness-ready-${remote}` }));
+    expect(api.respondToApproval).toHaveBeenCalledWith(`readiness-ready-${remote}`, "run");
+    expect(useAppStore.getState().aiStreams[SID].pendingProposal).toBeNull();
+    expect(pty.captureApprovalPromptBinding).not.toHaveBeenCalled();
+    expect(pty.runInTerminal).not.toHaveBeenCalled();
+  });
+
+  it("never treats an ordinary permission proposal as a readiness check", async () => {
+    const { emit } = await start();
+    pty.hasReusableRemoteShellProof.mockReturnValue(true);
+    act(() => useAppStore.getState().setPermissionMode(SID, "full"));
+    act(() => emit({ ...check, type: "CommandProposal", approval_id: "permission-required", output_policy: "private" }));
+    expect(api.respondToApproval).not.toHaveBeenCalled();
+    expect(useAppStore.getState().aiStreams[SID].pendingProposal?.approvalId).toBe("permission-required");
+  });
+
+  it.each(["skip", "stop"] as const)("settles a prompt check with %s without a terminal write", async (decision) => {
+    const { emit, result } = await start();
+    act(() => emit({ ...check, approval_id: `readiness-${decision}` }));
+    await act(async () => result.current.respondToProposal(SID, decision));
+    expect(api.respondToApproval).toHaveBeenCalledWith(`readiness-${decision}`, decision, undefined);
+    expect(pty.runInTerminal).not.toHaveBeenCalled();
+  });
+
+  it("rechecks target identity after a readiness acknowledgement", async () => {
+    const { emit } = await start();
+    pty.hasReusableRemoteShellProof.mockReturnValue(true);
+    await act(async () => emit({ ...check, approval_id: "readiness-target" }));
+    act(() => useAppStore.getState().updateSessionUi(SID, { remote: null, nestedBlockId: null }));
+    act(() => emit({ type: "RunInTerminal", approval_id: "readiness-target", session_id: SID,
+      command: "pwd", explanation: check.explanation, timeout_secs: 30, output_policy: "normal" }));
+    expect(pty.runInTerminal).not.toHaveBeenCalled();
+    expect(api.submitCommandResult).toHaveBeenCalledWith("readiness-target", null,
+      expect.stringContaining("target changed"), 0, "target_changed");
+  });
+
+  it("fences a failed readiness acknowledgement instead of leaving an invisible waiter", async () => {
+    const { emit } = await start(false);
+    api.respondToApproval.mockRejectedValueOnce(new Error("IPC closed"));
+    await act(async () => emit({ ...check, approval_id: "readiness-ipc" }));
+    expect(useAppStore.getState().aiStreams[SID].lastError).toContain("Could not confirm terminal readiness");
+    expect(api.aiCancel).toHaveBeenCalled();
+    expect(pty.runInTerminal).not.toHaveBeenCalled();
   });
 });
 

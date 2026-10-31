@@ -1379,6 +1379,16 @@ const shellProofs = new Map<string, ShellProof>();
  */
 const PROOF_TTL_MS = 5 * 60_000;
 
+/** Read-only readiness check: never types a probe or creates an attestation.
+ * Execution revalidates the same proof immediately before writing. */
+export function hasReusableRemoteShellProof(sessionId: string): boolean {
+  const remote = useAppStore.getState().sessionUi[sessionId]?.remote ?? null;
+  const entry = getTerm(sessionId);
+  return !!remote && !!entry && !entry.disposed
+    && entry.term.buffer.active.type === "normal"
+    && !isBusy(sessionId) && !!reusableShellProof(sessionId, remote);
+}
+
 /**
  * The live proof for this session, or null when one must be taken.
  *

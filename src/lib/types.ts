@@ -281,6 +281,22 @@ export type StreamEvent =
       target_role?: AgentTargetRole;
       target_session_id?: string;
     }
+  /** Native policy already permits this PTY command. The frontend may settle
+   *  this readiness gate only for a local target or an unchanged, proven remote
+   *  shell; otherwise it must ask the operator to confirm the remote prompt. */
+  | {
+      type: "TerminalPromptCheck";
+      approval_id: string;
+      command: string;
+      explanation: string;
+      read_only: boolean;
+      network: boolean;
+      output_policy: OutputPolicy;
+      assessment?: CommandAssessment;
+      ask_reason?: string;
+      target_role?: AgentTargetRole;
+      target_session_id?: string;
+    }
   /** Policy refused a command outright: never proposed, never run, no approval
    *  gate to settle. Rendered through the existing `"blocked"` command status. */
   | {

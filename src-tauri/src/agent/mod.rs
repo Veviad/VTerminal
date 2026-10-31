@@ -297,6 +297,25 @@ pub enum StreamEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         target_session_id: Option<String>,
     },
+    /// The native command policy permits automatic execution, but the frontend
+    /// must verify that the selected terminal is ready before dispatch starts.
+    /// Local terminals and already-proven remote prompts may acknowledge this
+    /// read-only check automatically. An unverified remote prompt requires the
+    /// normal operator confirmation; CommandProposal must never be auto-acked.
+    TerminalPromptCheck {
+        approval_id: String,
+        command: String,
+        explanation: String,
+        read_only: bool,
+        network: bool,
+        output_policy: OutputPolicy,
+        assessment: policy::CommandAssessment,
+        ask_reason: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_role: Option<AgentTargetRole>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_session_id: Option<String>,
+    },
     /// Policy refused a command outright — it was never proposed and never ran.
     ///
     /// Distinct from a skipped proposal: there was no approval gate, so there is

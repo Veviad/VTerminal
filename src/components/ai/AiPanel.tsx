@@ -323,6 +323,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const pendingMcpProposal = stream?.pendingMcpProposal ?? null;
   const permissionMode = stream?.permissionMode ?? "ask";
   const proposalRole = pendingProposal?.targetRole ?? null;
+  const proposalRemote = pendingProposal?.proposedRemote ?? (proposalRole ? proposalRole === "remote" : !!remote);
   const proposalPermissionMode =
     sidecar && proposalRole
       ? proposalRole === "local"
@@ -355,14 +356,16 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const hasChat = streamHasConversation(stream);
 
   /** Change the standing mode and, when Full is selected, release the exact
-   *  approval already on screen. That release is part of the user's Full-mode
-   *  gesture. CommandProposal events themselves remain backend-owned and are
+   *  local approval already on screen. Remote commands still need the separate
+   *  empty-prompt confirmation; selecting Full cannot supply it.
+   *  CommandProposal events themselves remain backend-owned and are
    *  never auto-clicked by classification logic in the frontend. */
   const changePermissionMode = (next: (typeof PERMISSION_OPTIONS)[number]["value"], role?: AgentTargetRole) => {
     if (!sessionId) return;
     const proposalToRelease =
       next === "full" &&
       pendingProposal &&
+      !proposalRemote &&
       (role === undefined || pendingProposal.targetRole === role)
         ? pendingProposal.approvalId
         : null;
@@ -916,7 +919,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             key={pendingProposal.approvalId}
             command={pendingProposal.command}
             explanation={pendingProposal.explanation}
-            remote={pendingProposal.proposedRemote ?? (proposalRole ? proposalRole === "remote" : !!remote)}
+            remote={proposalRemote}
             targetRole={proposalRole ?? undefined}
             targetChanged={proposedTargetChanged}
             remoteSessionId={pendingProposal.targetSessionId ?? sessionId}

@@ -6,6 +6,7 @@ import { readLineRange, readScreenTail } from "../lib/terminalSnapshot";
 import {
   abortSession,
   captureApprovalPromptBinding,
+  hasReusableRemoteShellProof,
   releaseApprovalPromptBinding,
   runInTerminal,
   type PtyExecOutcome,
@@ -1066,7 +1067,8 @@ function dispatchPanelEvent(
       // idle while the loop kept running.
       store.noteCompaction(sessionId, e.removed_messages, e.after_tokens, requestId);
       break;
-    case "CommandProposal": {
+    case "CommandProposal":
+    case "TerminalPromptCheck": {
       const target = resolveCommandTarget(sessionId, e);
       if (!target.ok) {
         rejectTargetedRun(sessionId, requestId, target.reason, e.approval_id);
@@ -1075,9 +1077,18 @@ function dispatchPanelEvent(
       agentProposalTargets.set(e.approval_id, snapshotAgentTarget(target.sessionId));
       setTimeout(() => agentProposalTargets.delete(e.approval_id), 30 * 60_000);
       const proposalUi = store.sessionUi[target.sessionId];
-      // The backend owns auto-dispatch. Any command that reaches this event has
-      // already been evaluated as requiring a real operator decision; the
-      // frontend must never reinterpret the fields and auto-click the gate.
+      const proposedRemote = target.meta ? target.meta.role === "remote" : !!proposalUi?.remote;
+      // Only this distinct native event carries prior command authorization.
+      // Ordinary CommandProposal events always need an operator decision,
+      // regardless of the selected permission mode or any live shell proof.
+      if (e.type === "TerminalPromptCheck"
+        && (!proposedRemote || hasReusableRemoteShellProof(target.sessionId))) {
+        void api.respondToApproval(e.approval_id, "run").catch(() => {
+          stopAgentAfterTerminalFailure(sessionId, requestId,
+            "Could not confirm terminal readiness. Retry the Agent request.");
+        });
+        break;
+      }
       store.setPendingProposal(
         sessionId,
         {
@@ -1087,7 +1098,7 @@ function dispatchPanelEvent(
           readOnly: e.read_only,
           network: e.network,
           outputPolicy: e.output_policy,
-          proposedRemote: target.meta ? target.meta.role === "remote" : !!proposalUi?.remote,
+          proposedRemote,
           proposedTargetLabel: target.meta?.label ?? describeRemote(proposalUi?.remote ?? null) ?? proposalUi?.cwd ?? null,
           ...(e.assessment ? { assessment: e.assessment } : {}),
           ...(e.ask_reason ? { askReason: e.ask_reason } : {}),

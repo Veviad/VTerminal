@@ -371,17 +371,19 @@ describe("AiPanel renders", () => {
     });
     render(<AiPanel sessionId="s1" />);
     expect(screen.getByText(/Auto mode is ON/i)).toBeTruthy();
-    expect(screen.getByText(/protected commands still require approval/i)).toBeTruthy();
+    expect(screen.getByText(/protected commands require approval/i)).toBeTruthy();
+    expect(screen.getByText(/SSH may need an empty-prompt confirmation/i)).toBeTruthy();
   });
 
-  it("banners Full mode with the no-approval warning", () => {
+  it("banners Full mode with terminal-readiness and SSH confirmation requirements", () => {
     useAppStore.setState({
       sessions: [session("s1")],
       aiStreams: { s1: { ...emptyAiStream(), mode: "agent", permissionMode: "full" } },
     });
     render(<AiPanel sessionId="s1" />);
     expect(screen.getByText(/Full access is ON/i)).toBeTruthy();
-    expect(screen.getByText(/without approval/i)).toBeTruthy();
+    expect(screen.getByText(/commands run automatically when the terminal is ready/i)).toBeTruthy();
+    expect(screen.getByText(/SSH may still need an empty-prompt confirmation/i)).toBeTruthy();
   });
 
   it("refuses an approval without its original target snapshot when Full is selected", async () => {
@@ -419,6 +421,25 @@ describe("AiPanel renders", () => {
       expect(setMode).toHaveBeenCalledWith("req-full", "full", undefined);
       expect(approve).toHaveBeenCalledWith("approval-full", "skip");
     });
+  });
+
+  it("keeps the remote prompt confirmation pending when Full is selected", async () => {
+    const setMode = vi.spyOn(api, "agentSetPermissionMode").mockResolvedValue(undefined);
+    const approve = vi.spyOn(api, "respondToApproval").mockResolvedValue(undefined);
+    useAppStore.setState({ sessions: [session("s1")], aiStreams: { s1: {
+      ...emptyAiStream(), mode: "agent", status: "awaiting_approval", requestId: "req-remote-full",
+      pendingProposal: { approvalId: "remote-full", command: "pwd", explanation: "Inspect remote directory",
+        readOnly: true, network: false, outputPolicy: "normal", proposedRemote: true,
+        proposedTargetLabel: "ssh audit-host" },
+    } } });
+    render(<AiPanel sessionId="s1" />);
+    fireEvent.click(screen.getByRole("button", { name: S.aiPanel.permissionLabel }));
+    fireEvent.click(screen.getByRole("option", {
+      name: (name) => name.startsWith(S.aiPanel.permission.full),
+    }));
+    await waitFor(() => expect(setMode).toHaveBeenCalledWith("req-remote-full", "full", undefined));
+    expect(approve).not.toHaveBeenCalled();
+    expect(useAppStore.getState().aiStreams.s1.pendingProposal?.approvalId).toBe("remote-full");
   });
 
   /** A card standing while "Reads" is armed has to say why, or the mode reads as
