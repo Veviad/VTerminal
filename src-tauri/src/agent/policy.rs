@@ -246,37 +246,74 @@ fn is_privileged(command: &str) -> bool {
 }
 
 fn is_sensitive_read(command: &str) -> bool {
-    let words = split_segments(command)
-        .map(|segments| {
-            segments
-                .into_iter()
-                .flat_map(|s| tokenize(&s.text))
-                .collect::<Vec<_>>()
+    let Some(segments) = split_segments(command) else {
+        return false; // Opaque commands retain their separate approval gate.
+    };
+    segments.iter().any(|segment| {
+        let lower: Vec<String> = tokenize(&segment.text)
+            .iter()
+            .map(|word| word.to_ascii_lowercase())
+            .collect();
+        let sensitive_path = lower.iter().any(|word| {
+            let filename = word
+                .rsplit('/')
+                .next()
+                .unwrap_or(word)
+                .trim_start_matches(['<', '>']);
+            filename == ".env"
+                || filename.starts_with(".env.")
+                || filename == ".envrc"
+                || word.contains(".ssh/id_")
+                || word.contains("credentials")
+                || word.contains("keychain")
+                || word.contains(".netrc")
+                || word.contains(".npmrc")
+        });
+        sensitive_path || sensitive_command_output(&lower)
+    })
+}
+
+fn sensitive_command_output(words: &[String]) -> bool {
+    let first = words.iter().position(|word| {
+        !word.split_once('=').is_some_and(|(name, _)| {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
         })
-        .unwrap_or_default();
-    let lower = words
-        .iter()
-        .map(|w| w.to_ascii_lowercase())
-        .collect::<Vec<_>>();
-    let sensitive_path = lower.iter().any(|word| {
-        word == ".env"
-            || word.ends_with("/.env")
-            || word.contains("/.ssh/id_")
-            || word.contains("credentials")
-            || word.contains("keychain")
-            || word.contains(".netrc")
-            || word.contains(".npmrc")
     });
-    let secret_output = lower.windows(2).any(|w| {
-        matches!(
-            (w[0].as_str(), w[1].as_str()),
-            ("gh", "auth") | ("security", "find-generic-password")
-        )
-    }) && lower.iter().any(|w| w == "token" || w == "-w");
-    let environment_dump = lower
-        .first()
-        .is_some_and(|w| matches!(w.as_str(), "env" | "printenv"));
-    sensitive_path || secret_output || environment_dump
+    let Some(first) = first else {
+        return false;
+    };
+    let basename = |word: &String| word.rsplit('/').next().unwrap_or(word).to_string();
+    let wrapped = WRAPPERS.contains(&basename(&words[first]).as_str());
+    // Wrapper options have different value grammars (`sudo -u user`, `timeout
+    // 5`, `command --`). Sweep their possible executable positions for secret
+    // producers instead of accidentally treating an option as the command.
+    // This may conservatively protect a literal argument under an ambiguous
+    // wrapper; it never grants execution or weakens the read-only classifier.
+    let end = if wrapped { words.len() } else { first + 1 };
+    (first..end).any(|index| {
+        let args = &words[index + 1..];
+        match basename(&words[index]).as_str() {
+            "env" | "printenv" => true,
+            "gh" => {
+                args.iter().any(|word| word == "auth")
+                    && args
+                        .iter()
+                        .any(|word| matches!(word.as_str(), "token" | "--show-token" | "-t"))
+            }
+            "security" => {
+                args.iter().any(|word| {
+                    matches!(
+                        word.as_str(),
+                        "find-generic-password" | "find-internet-password"
+                    )
+                }) && args.iter().any(|word| word == "-w" || word == "-g")
+            }
+            _ => false,
+        }
+    })
 }
 
 fn is_known_state_change(command: &str) -> bool {
@@ -1978,6 +2015,46 @@ mod tests {
             assess("acme inspect project").effect,
             CommandEffect::Unknown
         );
+    }
+
+    #[test]
+    fn sensitive_reads_remain_private_across_segments_wrappers_and_paths() {
+        for command in [
+            "printf ok; printenv",
+            "true && /usr/bin/printenv",
+            "command printenv | sort",
+            "command -- /usr/bin/printenv",
+            "command -- gh auth token",
+            "sudo -n security find-generic-password -w",
+            "sudo -n env",
+            "LANG=C sudo -u root /usr/bin/gh auth token",
+            "sudo -n printenv",
+            "timeout 5 /usr/bin/printenv",
+            "LANG=C /usr/bin/printenv",
+            "/usr/bin/env",
+            "command /usr/bin/env -0",
+            "cat .env.production",
+            "cat '/tmp/app/.env.local'",
+            "cat <.env.production",
+            "cat .envrc",
+            "cat .ssh/id_ed25519",
+            "/usr/bin/gh auth token",
+            "command gh auth status --show-token",
+            "/usr/bin/security find-internet-password -w",
+        ] {
+            assert_eq!(
+                assess(command).effect,
+                CommandEffect::SensitiveRead,
+                "{command}"
+            );
+        }
+        for command in ["printf printenv", "cat environment.md", "gh auth status"] {
+            assert_ne!(
+                assess(command).effect,
+                CommandEffect::SensitiveRead,
+                "{command}"
+            );
+        }
     }
 
     #[test]

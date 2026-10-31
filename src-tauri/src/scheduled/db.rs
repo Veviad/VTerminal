@@ -693,6 +693,23 @@ pub fn set_next_fire(
     .map(|_| ())
 }
 
+/// Move a wall-clock schedule to the current machine timezone atomically with
+/// its recomputed next occurrence.
+pub fn set_next_fire_and_timezone(
+    conn: &Connection,
+    id: &str,
+    next_fire_at: Option<&str>,
+    timezone: &str,
+    now: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE scheduled_actions SET next_fire_at = ?2, timezone = ?3, updated_at = ?4 WHERE id = ?1",
+        params![id, next_fire_at, timezone, now],
+    )
+    .map_err(|e| e.to_string())
+    .map(|_| ())
+}
+
 pub fn delete_action(conn: &Connection, id: &str) -> Result<(), String> {
     conn.execute("DELETE FROM scheduled_actions WHERE id = ?1", params![id])
         .map_err(|e| e.to_string())
@@ -826,18 +843,34 @@ pub fn set_run_status(
     status: ScheduledRunStatus,
     error: Option<&str>,
     now: &str,
-) -> Result<(), String> {
-    conn.execute(
+) -> Result<bool, String> {
+    let changed = conn.execute(
         "UPDATE scheduled_runs SET
             status = ?2,
             error = COALESCE(?3, error),
             started_at = CASE WHEN ?2 = 'running' AND started_at IS NULL THEN ?4 ELSE started_at END,
             finished_at = CASE WHEN ?5 = 1 THEN ?4 ELSE finished_at END,
             updated_at = ?4
-         WHERE id = ?1",
+         WHERE id = ?1 AND status IN ('pending','awaiting_target','running')",
         params![run_id, status.as_str(), error, now, status.is_terminal() as i64],
     )
     .map_err(|e| e.to_string())?;
+    if changed == 0 {
+        return Ok(false);
+    }
+    if status.is_terminal() {
+        // The frontend may disappear or lose its IPC gate while a step is in
+        // flight. Preserve that it may have executed instead of leaving a
+        // permanently running attempt on a terminal run.
+        conn.execute(
+            "UPDATE scheduled_step_attempts SET status = 'unknown',
+                error = COALESCE(error, 'the run ended before this step reported its result'),
+                finished_at = COALESCE(finished_at, ?2)
+             WHERE run_id = ?1 AND status IN ('pending','running')",
+            params![run_id, now],
+        )
+        .map_err(|e| e.to_string())?;
+    }
     // Keep the action's projection in step so the list view never disagrees with
     // the run it points at.
     conn.execute(
@@ -846,7 +879,7 @@ pub fn set_run_status(
         params![run_id, status.as_str(), error, now],
     )
     .map_err(|e| e.to_string())?;
-    Ok(())
+    Ok(true)
 }
 
 pub fn set_run_target(
@@ -1115,6 +1148,129 @@ pub fn plan_json_for_run(conn: &Connection, run_id: &str) -> Result<Option<Strin
     )
     .optional()
     .map_err(|e| e.to_string())
+}
+
+/// Lease only the next step of the immutable plan, after every preceding step
+/// has settled and only when its failure policy allows the run to continue.
+pub fn validate_step_intent(
+    conn: &Connection,
+    run_id: &str,
+    step_id: &str,
+    sort_order: u32,
+    kind: StepKind,
+    title: &str,
+) -> Result<(), String> {
+    let run = get_run(conn, run_id)?.ok_or("no such run")?;
+    if run.status != ScheduledRunStatus::Running || run.execution_mode != ExecutionMode::Tab {
+        return Err("that run is not executing in a terminal".into());
+    }
+    let json = plan_json_for_run(conn, run_id)?.ok_or("the scheduled run plan is missing")?;
+    if plan_fingerprint(&json) != run.plan_sha256 {
+        return Err("the scheduled run plan does not match its fingerprint".into());
+    }
+    let plan: ScheduledActionInput = serde_json::from_str(&json)
+        .map_err(|e| format!("the scheduled run plan could not be read: {e}"))?;
+    if sort_order as usize != run.attempts.len() {
+        return Err("scheduled steps must run in their saved order".into());
+    }
+    let step = plan
+        .steps
+        .get(sort_order as usize)
+        .ok_or("no such scheduled step")?;
+    if step.sort_order != sort_order
+        || step.id != step_id
+        || step.kind != kind
+        || step.title != title
+    {
+        return Err("the requested step does not match the scheduled plan".into());
+    }
+    for (index, attempt) in run.attempts.iter().enumerate() {
+        let previous = plan
+            .steps
+            .get(index)
+            .ok_or("the run contains an unexpected step")?;
+        if previous.sort_order as usize != index
+            || attempt.sort_order as usize != index
+            || attempt.step_id != previous.id
+            || attempt.kind != previous.kind
+            || attempt.title != previous.title
+        {
+            return Err("a previous step does not match the scheduled plan".into());
+        }
+        match attempt.status {
+            StepAttemptStatus::Succeeded | StepAttemptStatus::Skipped => {}
+            StepAttemptStatus::Failed | StepAttemptStatus::Blocked | StepAttemptStatus::Unknown
+                if previous.continue_on_failure => {}
+            _ => return Err("the previous step is still active or stopped the run".into()),
+        }
+    }
+    Ok(())
+}
+
+/// Resolve a tab Agent turn against its immutable, currently executing run.
+/// A caller that supplies a run id must never fall back to an ordinary turn.
+pub fn scheduled_agent_plan(
+    conn: &Connection,
+    requested_run: Option<&str>,
+    session_id: &str,
+    remote_host_id: Option<&str>,
+    is_remote: bool,
+    sidecar: bool,
+    goal: &str,
+) -> Result<Option<(String, ScheduledActionInput)>, String> {
+    type ActiveAgentRow = (
+        String,
+        String,
+        String,
+        Option<String>,
+        String,
+        String,
+        Option<String>,
+    );
+    let row: Option<ActiveAgentRow> = if let Some(id) = requested_run {
+        conn.query_row("SELECT id, status, execution_mode, session_id, plan_json, plan_sha256, target_host_id FROM scheduled_runs WHERE id = ?1", params![id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?))).optional()
+    } else {
+        conn.query_row("SELECT id, status, execution_mode, session_id, plan_json, plan_sha256, target_host_id FROM scheduled_runs WHERE session_id = ?1 AND status = 'running' ORDER BY created_at DESC LIMIT 1", params![session_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?))).optional()
+    }.map_err(|e| format!("could not read scheduled run: {e}"))?;
+    let Some((id, status, mode, bound_session, json, sha, bound_host)) = row else {
+        return if requested_run.is_some() {
+            Err("the scheduled run no longer exists".into())
+        } else {
+            Ok(None)
+        };
+    };
+    if status != "running" || mode != "tab" || bound_session.as_deref() != Some(session_id) {
+        return Err("the scheduled run is no longer active in this terminal".into());
+    }
+    if sidecar || plan_fingerprint(&json) != sha {
+        return Err("the scheduled run plan or terminal targets are invalid".into());
+    }
+    let plan: ScheduledActionInput = serde_json::from_str(&json)
+        .map_err(|e| format!("the scheduled run plan could not be read: {e}"))?;
+    if plan.target.host_id().is_some() {
+        return Err("unattended SSH tab runs cannot safely verify authentication; use a key-authenticated headless schedule".into());
+    }
+    let target_matches = match &plan.target {
+        ScheduledTarget::LocalShell { .. } => !is_remote && bound_host.is_none(),
+        // Context sharing may be disabled, in which case the remote metadata is
+        // deliberately omitted. The attached run still records the validated host.
+        ScheduledTarget::SshHost { host_id } => {
+            bound_host.as_deref() == Some(host_id.as_str())
+                && (!is_remote || remote_host_id == Some(host_id.as_str()))
+        }
+    };
+    if plan.execution_mode != ExecutionMode::Tab || !target_matches {
+        return Err("the terminal does not match the scheduled target".into());
+    }
+    let order: Option<u32> = conn.query_row("SELECT sort_order FROM scheduled_step_attempts WHERE run_id = ?1 AND kind = 'prompt' AND status = 'running'", params![id], |row| row.get(0)).optional().map_err(|e| e.to_string())?;
+    if !order.is_some_and(|order| {
+        plan.steps.iter().any(|step| {
+            step.sort_order == order && step.kind == StepKind::Prompt && step.text == goal
+        })
+    }) {
+        return Err("the prompt does not match the scheduled step".into());
+    }
+    Ok(Some((id, plan)))
 }
 
 pub fn in_flight_run_ids(conn: &Connection) -> Result<Vec<String>, String> {
@@ -1409,6 +1565,209 @@ mod tests {
             get_action(&conn, "a1").unwrap().unwrap().input.steps.len(),
             1
         );
+    }
+
+    #[test]
+    fn timezone_change_persists_the_new_zone_and_next_fire_together() {
+        let mut conn = memory_db();
+        save(
+            &mut conn,
+            "a1",
+            &input("nightly", ScheduledTarget::LocalShell { cwd: None }),
+        );
+        set_next_fire_and_timezone(
+            &conn,
+            "a1",
+            Some("2026-06-02T18:00:00Z"),
+            "Asia/Tokyo",
+            "2026-06-01T00:00:00Z",
+        )
+        .unwrap();
+        let action = get_action(&conn, "a1").unwrap().unwrap();
+        assert_eq!(action.input.timezone, "Asia/Tokyo");
+        assert_eq!(action.next_fire_at.as_deref(), Some("2026-06-02T18:00:00Z"));
+    }
+
+    #[test]
+    fn late_completion_cannot_overwrite_a_cancelled_run_or_its_projection() {
+        let mut conn = memory_db();
+        save(
+            &mut conn,
+            "a1",
+            &input("nightly", ScheduledTarget::LocalShell { cwd: None }),
+        );
+        commit_for(&mut conn, "r1", "a1", ScheduledRunStatus::Pending);
+        assert!(set_run_status(
+            &conn,
+            "r1",
+            ScheduledRunStatus::Cancelled,
+            Some("cancelled"),
+            "t1"
+        )
+        .unwrap());
+        assert!(!set_run_status(&conn, "r1", ScheduledRunStatus::Succeeded, None, "t2").unwrap());
+        assert_eq!(
+            get_run(&conn, "r1").unwrap().unwrap().status,
+            ScheduledRunStatus::Cancelled
+        );
+        assert_eq!(
+            get_action(&conn, "a1").unwrap().unwrap().last_status,
+            Some(ScheduledRunStatus::Cancelled)
+        );
+    }
+
+    #[test]
+    fn ending_a_run_marks_an_unfinished_attempt_unknown() {
+        let mut conn = memory_db();
+        save(
+            &mut conn,
+            "a1",
+            &input("nightly", ScheduledTarget::LocalShell { cwd: None }),
+        );
+        commit_for(&mut conn, "r1", "a1", ScheduledRunStatus::Running);
+        conn.execute("INSERT INTO scheduled_step_attempts (id, run_id, step_id, sort_order, kind, title, status, intent_at) VALUES ('att1','r1','s1',0,'command','step','running','t')", []).unwrap();
+        set_run_status(&conn, "r1", ScheduledRunStatus::Cancelled, None, "done").unwrap();
+        let attempt = get_run(&conn, "r1").unwrap().unwrap().attempts.remove(0);
+        assert_eq!(attempt.status, StepAttemptStatus::Unknown);
+        assert_eq!(attempt.finished_at.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn scheduled_agent_requires_the_running_committed_prompt_and_exact_terminal() {
+        let mut conn = memory_db();
+        assert!(
+            scheduled_agent_plan(&conn, None, "human", None, false, false, "anything")
+                .unwrap()
+                .is_none()
+        );
+        let mut original = input("nightly", ScheduledTarget::LocalShell { cwd: None });
+        original.execution_mode = ExecutionMode::Tab;
+        original.steps = vec![step("s1", StepKind::Prompt, "inspect")];
+        save(&mut conn, "a1", &original);
+        commit_for(&mut conn, "r1", "a1", ScheduledRunStatus::Running);
+        set_run_target(&conn, "r1", "tab1", 80, 24, "t").unwrap();
+        conn.execute("INSERT INTO scheduled_step_attempts (id, run_id, step_id, sort_order, kind, title, status, intent_at) VALUES ('att1','r1','s1',0,'prompt','step','running','t')", []).unwrap();
+        let mut edited = original.clone();
+        edited.web_access = true;
+        edited.steps[0].text = "edited".into();
+        save(&mut conn, "a1", &edited);
+        let (_, snapshot) =
+            scheduled_agent_plan(&conn, Some("r1"), "tab1", None, false, false, "inspect")
+                .unwrap()
+                .unwrap();
+        assert!(!snapshot.web_access);
+        assert_eq!(snapshot.steps[0].text, "inspect");
+        assert!(
+            scheduled_agent_plan(&conn, None, "tab1", None, false, false, "inspect")
+                .unwrap()
+                .is_some()
+        );
+        assert!(scheduled_agent_plan(
+            &conn,
+            Some("r1"),
+            "wrong-tab",
+            None,
+            false,
+            false,
+            "inspect"
+        )
+        .is_err());
+        assert!(
+            scheduled_agent_plan(&conn, Some("r1"), "tab1", None, false, true, "inspect").is_err()
+        );
+        assert!(
+            scheduled_agent_plan(&conn, Some("r1"), "tab1", None, false, false, "edited").is_err()
+        );
+        assert!(scheduled_agent_plan(
+            &conn,
+            Some("missing"),
+            "tab1",
+            None,
+            false,
+            false,
+            "inspect"
+        )
+        .is_err());
+        conn.execute(
+            "UPDATE scheduled_runs SET plan_json = '{}', plan_sha256 = ?1 WHERE id = 'r1'",
+            params![plan_fingerprint("{}")],
+        )
+        .unwrap();
+        assert!(
+            scheduled_agent_plan(&conn, Some("r1"), "tab1", None, false, false, "inspect").is_err()
+        );
+    }
+
+    #[test]
+    fn scheduled_step_leases_require_exact_metadata_and_sequential_settled_steps() {
+        let mut conn = memory_db();
+        let mut spec = input("nightly", ScheduledTarget::LocalShell { cwd: None });
+        spec.execution_mode = ExecutionMode::Tab;
+        spec.steps.push(ScheduledStep {
+            sort_order: 1,
+            ..step("s2", StepKind::Prompt, "inspect")
+        });
+        save(&mut conn, "a1", &spec);
+        commit_for(&mut conn, "r1", "a1", ScheduledRunStatus::Running);
+        let check =
+            |id, order, kind, title| validate_step_intent(&conn, "r1", id, order, kind, title);
+        assert!(check("s1", 0, StepKind::Command, "step s1").is_ok());
+        assert!(check("s2", 1, StepKind::Prompt, "step s2").is_err());
+        assert!(check("forged", 0, StepKind::Command, "step s1").is_err());
+        assert!(check("s1", 0, StepKind::Prompt, "step s1").is_err());
+        assert!(check("s1", 0, StepKind::Command, "forged").is_err());
+        conn.execute("INSERT INTO scheduled_step_attempts (id, run_id, step_id, sort_order, kind, title, status, intent_at) VALUES ('att1','r1','s1',0,'command','step s1','running','t')", []).unwrap();
+        assert!(check("s2", 1, StepKind::Prompt, "step s2").is_err());
+        conn.execute(
+            "UPDATE scheduled_step_attempts SET status = 'failed' WHERE id = 'att1'",
+            [],
+        )
+        .unwrap();
+        assert!(check("s2", 1, StepKind::Prompt, "step s2").is_err());
+        conn.execute(
+            "UPDATE scheduled_step_attempts SET status = 'skipped' WHERE id = 'att1'",
+            [],
+        )
+        .unwrap();
+        assert!(check("s2", 1, StepKind::Prompt, "step s2").is_ok());
+        assert!(check("s1", 0, StepKind::Command, "step s1").is_err());
+    }
+
+    #[test]
+    fn scheduled_step_failure_continues_only_when_the_saved_plan_allows_it() {
+        let mut conn = memory_db();
+        let mut spec = input("nightly", ScheduledTarget::LocalShell { cwd: None });
+        spec.execution_mode = ExecutionMode::Tab;
+        spec.steps[0].continue_on_failure = true;
+        spec.steps.push(ScheduledStep {
+            sort_order: 1,
+            ..step("s2", StepKind::Prompt, "inspect")
+        });
+        save(&mut conn, "a1", &spec);
+        commit_for(&mut conn, "r1", "a1", ScheduledRunStatus::Running);
+        conn.execute("INSERT INTO scheduled_step_attempts (id, run_id, step_id, sort_order, kind, title, status, intent_at) VALUES ('att1','r1','s1',0,'command','step s1','failed','t')", []).unwrap();
+        for status in ["failed", "blocked", "unknown", "succeeded", "skipped"] {
+            conn.execute(
+                "UPDATE scheduled_step_attempts SET status = ?1 WHERE id = 'att1'",
+                params![status],
+            )
+            .unwrap();
+            assert!(
+                validate_step_intent(&conn, "r1", "s2", 1, StepKind::Prompt, "step s2").is_ok(),
+                "{status}"
+            );
+        }
+        for status in ["cancelled", "running", "pending"] {
+            conn.execute(
+                "UPDATE scheduled_step_attempts SET status = ?1 WHERE id = 'att1'",
+                params![status],
+            )
+            .unwrap();
+            assert!(
+                validate_step_intent(&conn, "r1", "s2", 1, StepKind::Prompt, "step s2").is_err(),
+                "{status}"
+            );
+        }
     }
 
     #[test]

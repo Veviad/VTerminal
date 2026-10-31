@@ -252,10 +252,18 @@ export interface CommandPolicyRule {
   description: string;
 }
 
+/** Safe provider status only; never contains tool arguments or private results. */
+export interface ProviderActivity {
+  id: string;
+  kind: "web_search" | "web_fetch";
+  status: "running" | "done" | "error" | "cancelled" | "interrupted";
+}
+
 export type StreamEvent =
   | { type: "Started"; request_id: string; model: string }
   | { type: "Delta"; content: string }
   | { type: "ThinkingDelta"; content: string }
+  | { type: "Activity"; activity: ProviderActivity }
   | { type: "WebCitation"; url: string; title: string; cited_text: string }
   /** The backend has already applied mode, rules, and classification. Receiving
    *  this event means a real operator decision is required. */
@@ -311,6 +319,8 @@ export type StreamEvent =
       type: "CommandOutput";
       approval_id: string;
       chunk: string;
+      /** Captured terminal snapshots replace CR/backspace-overwritten output. */
+      replace?: boolean;
       is_stderr: boolean;
     }
   /** exit_code is null when no authoritative completion was observed. The
@@ -527,7 +537,8 @@ export interface AiMessage {
   attachments?: Attachment[];
   /** "command" messages render as terminal-output cards in agent transcripts.
    *  "literal" is archived display data that must not receive model cleanup. */
-  kind?: "text" | "literal" | "command" | "mcp_tool";
+  kind?: "text" | "literal" | "command" | "mcp_tool" | "activity";
+  activity?: ProviderActivity;
   mcp?: {
     approvalId: string;
     serverId: string;
@@ -655,7 +666,7 @@ export type BuiltInProviderId = "local" | "anthropic" | "openai" | "mistral";
  *  is what stops the settings UI from growing an empty section per kind. */
 export type ProviderId = BuiltInProviderId | "remote";
 
-/** Quality level. Every provider offers exactly one model per tier. */
+/** Broad speed/quality category; providers may offer multiple models per tier. */
 export type Tier = "fast" | "balanced" | "max";
 
 export type LocalFamily = "qwen" | "gemma";
@@ -1143,6 +1154,7 @@ export interface ChatDisplayMessage {
   completion_tokens: number | null;
   citations: WebCitation[];
   mcp_calls: ChatMcpCall[];
+  activities?: ProviderActivity[];
   attachments: ChatAttachment[];
   created_at: string;
 }
@@ -1216,6 +1228,7 @@ export interface ChatStreamState {
   model: string | null;
   citations: WebCitation[];
   mcpCalls: ChatMcpCall[];
+  activities: ProviderActivity[];
   pendingMcpProposal: {
     approvalId: string;
     serverId: string;

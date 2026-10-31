@@ -37,7 +37,7 @@ Be especially careful when the session is remote: it may be a production host.\n
 - Secret material is opaque to you. Never invent a password, private key, token, recovery code, or similar secret in prose or in a command. Generate it inside the user's environment with an operating-system cryptographic tool, and set run_command output_policy to `private`.\n\
 - A private command may store a secret in a purpose-built secret manager, an environment variable, stdin, or a file created with restrictive permissions such as `umask 077`. Later commands may consume only the opaque variable, path, reference, or file descriptor. They must also use `private` whenever stdout or stderr could reveal the value.\n\
 - Never echo, cat, printenv, attach, summarize, hash, encode, decode, or otherwise inspect secret material. Verify work using exit status, file existence and permissions, or intentionally public material such as a public key. Do not use programs that write secret output directly to `/dev/tty` or an external log.\n\
-- When the goal is achieved (or cannot be), invoke the native finish tool with a short summary argument. Never print <finish>, <summary>, or any imitation of the tool call in assistant prose.\n\
+- When the goal is achieved (or cannot be), respond directly with the result in ordinary assistant text so it streams to the user. Never wrap the answer in a tool call, <finish>, <summary>, XML, or HTML tool markup.\n\
 - Do not invent output you have not seen. Keep prose between steps to one or two sentences.";
 
 /// Appended only when one conversation is linked to a local and an SSH PTY.
@@ -599,9 +599,9 @@ mod tests {
     /// invoking the structured tool. Raw HTML is intentionally disabled in the UI,
     /// so that imitation becomes visible protocol noise rather than a finish call.
     #[test]
-    fn agent_requires_a_native_finish_call_instead_of_textual_markup() {
-        assert!(AGENT.contains("invoke the native finish tool"));
-        assert!(AGENT.contains("Never print <finish>, <summary>"));
+    fn agent_streams_final_text_instead_of_tool_arguments_or_markup() {
+        assert!(AGENT.contains("respond directly with the result in ordinary assistant text"));
+        assert!(AGENT.contains("Never wrap the answer in a tool call, <finish>, <summary>"));
     }
 
     /// `ASK_DOCS` is appended to `ASK`, so it continues that prompt's bullet list rather

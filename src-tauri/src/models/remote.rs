@@ -202,9 +202,8 @@ fn intern(spec: Spec) -> &'static CatalogModel {
     let model: &'static CatalogModel = Box::leak(Box::new(CatalogModel {
         id: spec.id.leak(),
         provider: ProviderId::Remote,
-        // Meaningless here, and never read for a remote entry: `tier` exists so
-        // the catalog can offer one model per provider per tier, and the user
-        // picked this exact model. The settings UI hides the badge.
+        // Meaningless here: built-in tiers are broad categories, but the user
+        // picked this exact remote model. The settings UI hides the badge.
         tier: Tier::Balanced,
         label: spec.label.leak(),
         description: spec.description.leak(),

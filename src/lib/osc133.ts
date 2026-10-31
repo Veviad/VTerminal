@@ -1,4 +1,5 @@
 import type { IDisposable, IMarker, Terminal } from "@xterm/xterm";
+import { isTerminalReply } from "./terminalUserInput";
 
 // Block detection uses semantic-prompt sequences emitted by the injected local
 // shell. Its private scoped copies distinguish these from remote integrations;
@@ -149,7 +150,7 @@ export class BlockTracker {
       // writes after this terminal has carried any Runbook output.
       this.term.parser.registerOscHandler(52, () => this.runbookClipboardIsolation),
       this.term.onData(() => {
-        if (this.phase === "input") this.inputPristine = false;
+        if (this.phase === "input" && !isTerminalReply(this.term)) this.inputPristine = false;
       }),
     );
   }

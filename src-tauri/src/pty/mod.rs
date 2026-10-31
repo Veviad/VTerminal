@@ -1,4 +1,8 @@
 pub mod session;
+// Windows/WSL cannot verify the native SSH foreground process and therefore
+// uses manual password entry; its Unix-only autofill state remains uncalled.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+pub mod ssh_autofill;
 
 use serde::Serialize;
 use std::collections::HashMap;
@@ -222,23 +226,6 @@ impl PtyManager {
             .lock()
             .map(|s| s.keys().cloned().collect())
             .unwrap_or_default()
-    }
-
-    /// Write a credential directly from the backend vault into a PTY. The
-    /// frontend requests the action but never receives the secret bytes.
-    pub fn write_secret_line(
-        &self,
-        session_id: &str,
-        secret: &crate::credentials::Secret,
-    ) -> Result<(), String> {
-        let sessions = self
-            .sessions
-            .lock()
-            .map_err(|_| "pty state poisoned".to_string())?;
-        let session = sessions
-            .get(session_id)
-            .ok_or_else(|| format!("no session {session_id}"))?;
-        session.write_secret_line(secret)
     }
 
     /// Close one PTY without losing the only cleanup handle on a verification

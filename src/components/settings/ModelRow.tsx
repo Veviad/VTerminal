@@ -143,9 +143,8 @@ export function ModelRow({ entry }: { entry: CatalogEntry }) {
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <span className="text-[12px] font-medium text-text-primary">{entry.label}</span>
-            {/* Tier ranks one model per provider per tier. A remote model was
-                picked by name, so there is nothing to rank — the backend still
-                has to send SOME tier for the type to hold. */}
+            {/* Tiers describe broad categories; a provider can offer multiple
+                choices within one. Remote models are picked by name instead. */}
             {!entry.remote && (
               <span className="rounded bg-bg-elevated px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-text-secondary">
                 {S.settings.models.tier[entry.tier]}

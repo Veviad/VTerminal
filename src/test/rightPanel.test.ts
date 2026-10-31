@@ -1,4 +1,6 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("../lib/tauri", () => ({ saveSettings: vi.fn(async () => {}) }));
 
 import {
   openRightPanel,
@@ -9,10 +11,12 @@ import {
 import { useAppStore } from "../stores/appStore";
 import { useRunbookStore } from "../stores/runbookStore";
 import { useScheduleStore } from "../stores/scheduleStore";
+import { useChatStore } from "../stores/chatStore";
 
 describe("right panel resolution", () => {
   beforeEach(() => {
     useAppStore.setState({ runbooksEnabled: true, schedulesEnabled: true });
+    useChatStore.setState({ workspaceMode: "terminal" });
     useRunbookStore.getState().setWorkspaceOpen(false);
     useScheduleStore.getState().setWorkspaceOpen(false);
   });
@@ -90,5 +94,15 @@ describe("right panel resolution", () => {
     expect(useScheduleStore.getState().workspaceOpen).toBe(true);
     toggleRightPanel("schedules");
     expect(useScheduleStore.getState().workspaceOpen).toBe(false);
+  });
+
+  it.each(["runbooks", "schedules"] as const)("reveals %s when opened from Chat", (panel) => {
+    openRightPanel(panel);
+    useChatStore.setState({ workspaceMode: "chat" });
+    const currentChat = useChatStore.getState().current;
+    toggleRightPanel(panel);
+    expect(useChatStore.getState().workspaceMode).toBe("terminal");
+    expect(useChatStore.getState().current).toBe(currentChat);
+    expect(panel === "runbooks" ? useRunbookStore.getState().workspaceOpen : useScheduleStore.getState().workspaceOpen).toBe(true);
   });
 });

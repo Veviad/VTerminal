@@ -130,8 +130,8 @@ export async function ptySpawn(
   }
 }
 
-export const ptyWrite = (sessionId: string, data: string) =>
-  invoke<void>("pty_write", { sessionId, data });
+export const ptyWrite = (sessionId: string, data: string, sshAttemptId?: string) =>
+  invoke<void>("pty_write", { sessionId, data, ...(sshAttemptId ? { sshAttemptId } : {}) });
 
 /** xterm binary input (e.g. legacy mouse reports) is bytes, not UTF-8 text. */
 export const ptyWriteBytes = (sessionId: string, data: number[]) =>
@@ -285,6 +285,7 @@ export async function agentStart(
     remote: "ask",
   },
   mcpSelection: McpChatSelection = { server_ids: [], disabled_tools: {} },
+  scheduleRunId?: string,
 ): Promise<ChatMessage[]> {
   const channel = new Channel<StreamEvent>();
   channel.onmessage = onEvent;
@@ -303,6 +304,7 @@ export async function agentStart(
       permissionModes,
       mcpSelection,
       sidecarTargets: sidecarTargets ?? null,
+      scheduleRunId: scheduleRunId ?? null,
       onEvent: channel,
     });
   } finally {
@@ -684,8 +686,12 @@ export const sshHostsSetPassword = (id: string, password: string) =>
   invoke<void>("ssh_hosts_set_password", { id, password });
 
 /** Resolve a saved password in the backend and submit it directly to this PTY. */
-export const sshHostsWritePassword = (id: string, sessionId: string) =>
-  invoke<void>("ssh_hosts_write_password", { id, sessionId });
+export const sshHostsBeginPassword = (id: string, sessionId: string, command: string) =>
+  invoke<string>("ssh_hosts_begin_password", { id, sessionId, command });
+export const sshHostsCancelPassword = (sessionId: string, attemptId: string) =>
+  invoke<void>("ssh_hosts_cancel_password", { sessionId, attemptId });
+export const sshHostsWritePassword = (attemptId: string, sessionId: string) =>
+  invoke<void>("ssh_hosts_write_password", { attemptId, sessionId });
 
 export const sshHostsDelete = (id: string) => invoke<void>("ssh_hosts_delete", { id });
 

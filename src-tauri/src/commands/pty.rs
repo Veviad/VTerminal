@@ -84,12 +84,16 @@ pub fn pty_write(
     state: State<'_, PtyManager>,
     session_id: String,
     data: String,
+    ssh_attempt_id: Option<String>,
 ) -> Result<(), String> {
     let sessions = state.sessions.lock().map_err(|_| "pty state poisoned")?;
     let session = sessions
         .get(&session_id)
         .ok_or_else(|| format!("no session {session_id}"))?;
-    session.write(&data)
+    match ssh_attempt_id {
+        Some(token) => session.write_ssh_launch(&data, &token),
+        None => session.write(&data),
+    }
 }
 
 #[tauri::command]

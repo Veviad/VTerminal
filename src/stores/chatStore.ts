@@ -26,6 +26,7 @@ import type {
   WebCitation,
   WorkspaceMode,
 } from "../lib/types";
+import { settleActivities, updateActivity } from "../lib/activity";
 import { sameKnowledgeBucket } from "../lib/knowledge";
 import { useAppStore } from "./appStore";
 
@@ -40,6 +41,7 @@ export const idleStream = (): ChatStreamState => ({
   model: null,
   citations: [],
   mcpCalls: [],
+  activities: [],
   pendingMcpProposal: null,
   compaction: null,
   lastError: null,
@@ -163,6 +165,7 @@ interface ChatState {
   archivedOpen: boolean;
   stream: ChatStreamState;
   pendingAttachments: Attachment[];
+  mutatingChatIds: string[];
   attachError: string | null;
   attachStatus: string | null;
   knowledgeWarning: string | null;
@@ -170,8 +173,8 @@ interface ChatState {
   setWorkspaceMode(mode: WorkspaceMode): Promise<void>;
   setSearch(search: string): void;
   setArchivedOpen(open: boolean): void;
-  createChat(): Promise<void>;
-  selectChat(chatId: string): Promise<void>;
+  createChat(preserveDraft?: boolean): Promise<void>;
+  selectChat(chatId: string, preserveDraft?: boolean): Promise<void>;
   rename(title: string, chatId?: string): Promise<void>;
   regenerateTitle(chatId?: string, allowManualOverride?: boolean): Promise<void>;
   archive(archived: boolean, chatId?: string): Promise<void>;
@@ -189,6 +192,25 @@ interface ChatState {
 }
 
 const persistQueues = new Map<string, Promise<void>>();
+const preparingRequests = new Set<string>();
+let selectionGeneration = 0;
+let selectionPreferenceWrite: Promise<void> = Promise.resolve();
+
+async function rememberSelection(chatId: string): Promise<void> {
+  const write = selectionPreferenceWrite.then(async () => {
+    if (useChatStore.getState().current?.summary.id === chatId) await api.saveSettings({ active_chat_id: chatId });
+  });
+  selectionPreferenceWrite = write.catch(() => {});
+  await write;
+}
+
+export function chatHasMutation(state: Pick<ChatState, "mutatingChatIds" | "current">, chatId = state.current?.summary.id): boolean {
+  return chatId !== undefined && state.mutatingChatIds.includes(chatId);
+}
+
+export function chatIsBusy(stream: ChatStreamState): boolean {
+  return stream.requestId !== null || stream.status === "streaming";
+}
 
 async function persist(detail: ChatDetail): Promise<void> {
   const previous = persistQueues.get(detail.summary.id) ?? Promise.resolve();
@@ -404,7 +426,7 @@ function handleMcpStreamEvent(event: StreamEvent, set: ChatSet): boolean {
             ? {
                 ...call,
                 status:
-                  event.error || event.result.is_error
+                  event.error === "Denied by user" ? ("denied" as const) : event.error || event.result.is_error
                     ? ("error" as const)
                     : ("done" as const),
                 result: event.result,
@@ -453,6 +475,9 @@ async function streamTurn(
         if (event.type === "Delta") {
           set((state) => ({ stream: { ...state.stream, content: state.stream.content + event.content } }));
         }
+        if (event.type === "Activity") {
+          set((state) => ({ stream: { ...state.stream, activities: updateActivity(state.stream.activities, event.activity) } }));
+        }
         if (event.type === "ThinkingDelta") {
           set((state) => ({ stream: { ...state.stream, thinking: state.stream.thinking + event.content } }));
         }
@@ -499,6 +524,7 @@ async function streamTurn(
               ...state.stream,
               status: "error",
               pendingMcpProposal: null,
+              activities: settleActivities(state.stream.activities, "error"),
               mcpCalls: state.stream.mcpCalls.map((call) =>
                 call.status === "awaiting" || call.status === "running"
                   ? { ...call, status: "error" as const, error: event.message }
@@ -513,6 +539,7 @@ async function streamTurn(
             stream: {
               ...state.stream,
               pendingMcpProposal: null,
+              activities: settleActivities(state.stream.activities, "cancelled"),
               mcpCalls: state.stream.mcpCalls.map((call) =>
                 call.status === "awaiting" || call.status === "running"
                   ? { ...call, status: "error" as const, error: "Cancelled" }
@@ -524,8 +551,14 @@ async function streamTurn(
       },
     );
   } catch (error) {
+    if (get().stream.requestId !== requestId) return { detail, transcript, usage };
     set((state) => ({
-      stream: { ...state.stream, status: "error", lastError: String(error) },
+      stream: { ...state.stream, status: "error", lastError: String(error),
+        activities: settleActivities(state.stream.activities, "error"),
+        pendingMcpProposal: null,
+        mcpCalls: state.stream.mcpCalls.map((call) => call.status === "running" || call.status === "awaiting"
+          ? { ...call, status: "error" as const, error: "Run failed" } : call),
+      },
     }));
   }
   return { detail, transcript, usage };
@@ -537,7 +570,7 @@ function completeTurn(
   transcript: ChatDetail["model_transcript"],
   usage: { prompt: number; completion: number },
 ): ChatDetail {
-  if (!stream.content && !stream.thinking && stream.mcpCalls.length === 0) {
+  if (!stream.content && !stream.thinking && stream.mcpCalls.length === 0 && stream.activities.length === 0) {
     return { ...detail, model_transcript: transcript };
   }
   const finished = new Date().toISOString();
@@ -551,7 +584,9 @@ function completeTurn(
     prompt_tokens: usage.prompt,
     completion_tokens: usage.completion,
     citations: stream.citations,
-    mcp_calls: stream.mcpCalls,
+    mcp_calls: stream.mcpCalls.map((call) => call.status === "running" || call.status === "awaiting"
+      ? { ...call, status: "error" as const, error: "Interrupted" } : call),
+    activities: settleActivities(stream.activities),
     attachments: [],
     created_at: finished,
   };
@@ -576,11 +611,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   archivedOpen: false,
   stream: idleStream(),
   pendingAttachments: [],
+  mutatingChatIds: [],
   attachError: null,
   attachStatus: null,
   knowledgeWarning: null,
 
   initialize: async (workspaceMode, rememberedId) => {
+    const generation = ++selectionGeneration;
     const summaries = await api.chatList();
     const remembered = rememberedId ? summaries.find((chat) => chat.id === rememberedId) : null;
     const selected = remembered ?? summaries.find((chat) => !chat.archived_at) ?? null;
@@ -607,9 +644,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         knowledgeWarning = "Attached Knowledge sources could not be checked during restore.";
       }
     }
+    if (generation !== selectionGeneration || chatIsBusy(get().stream)) return;
     const nextSummaries = selected ? summaries : [detail.summary, ...summaries];
     set({ initialized: true, workspaceMode, summaries: nextSummaries, current: detail, knowledgeWarning });
-    await api.saveSettings({ active_chat_id: detail.summary.id });
+    await rememberSelection(detail.summary.id);
   },
 
   setWorkspaceMode: async (workspaceMode) => {
@@ -619,27 +657,33 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setSearch: (search) => set({ search }),
   setArchivedOpen: (archivedOpen) => set({ archivedOpen }),
 
-  createChat: async () => {
+  createChat: async (preserveDraft = false) => {
     const state = get();
-    const empty = state.summaries.find((chat) => !chat.archived_at && chat.message_count === 0);
-    if (empty) return state.selectChat(empty.id);
+    if (chatIsBusy(state.stream)) return;
+    const empty = state.summaries.find((chat) => !chat.archived_at && chat.message_count === 0 && !chatHasMutation(state, chat.id));
+    if (empty) return state.selectChat(empty.id, preserveDraft);
+    const generation = ++selectionGeneration;
     const detail = blankChat();
     await persist(detail);
+    if (generation !== selectionGeneration || chatIsBusy(get().stream)) return;
     set((current) => ({
       summaries: [detail.summary, ...current.summaries],
       current: detail,
-      pendingAttachments: [],
+      pendingAttachments: preserveDraft ? current.pendingAttachments : [],
       stream: idleStream(),
     }));
-    await api.saveSettings({ active_chat_id: detail.summary.id });
+    await rememberSelection(detail.summary.id);
   },
 
-  selectChat: async (chatId) => {
-    if (get().stream.status === "streaming") return;
+  selectChat: async (chatId, preserveDraft = false) => {
+    if (chatIsBusy(get().stream) || chatHasMutation(get(), chatId)) return;
+    const generation = ++selectionGeneration;
     const detail = await api.chatGet(chatId);
-    if (!detail) return;
-    set({ current: await hydrateImages(detail), pendingAttachments: [], stream: idleStream() });
-    await api.saveSettings({ active_chat_id: chatId });
+    if (!detail || generation !== selectionGeneration || chatIsBusy(get().stream) || chatHasMutation(get(), chatId)) return;
+    const hydrated = await hydrateImages(detail);
+    if (generation !== selectionGeneration || chatIsBusy(get().stream) || chatHasMutation(get(), chatId)) return;
+    set((state) => ({ current: hydrated, pendingAttachments: preserveDraft ? state.pendingAttachments : [], stream: idleStream() }));
+    await rememberSelection(chatId);
   },
 
   rename: async (title, chatId) => {
@@ -647,7 +691,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const targetId = chatId ?? state.current?.summary.id;
     const clean = title.trim();
     const existing = state.summaries.find((chat) => chat.id === targetId);
-    if (!targetId || !existing || !clean) return;
+    if (!targetId || !existing || !clean || chatHasMutation(state, targetId)) return;
     await api.chatUpdateTitle(targetId, clean, "manual");
     const summary = { ...existing, title: clean, title_source: "manual" as ChatTitleSource, updated_at: new Date().toISOString() };
     set((state) => updateCurrentSummary(state, summary));
@@ -656,7 +700,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   regenerateTitle: async (chatId, allowManualOverride = false) => {
     const state = get();
     const targetId = chatId ?? state.current?.summary.id;
-    if (!targetId || state.stream.status === "streaming") return;
+    if (!targetId || chatIsBusy(state.stream) || chatHasMutation(state, targetId)) return;
     const detail = state.current?.summary.id === targetId
       ? state.current
       : await api.chatGet(targetId);
@@ -702,34 +746,46 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const state = get();
     const targetId = chatId ?? state.current?.summary.id;
     const existing = state.summaries.find((chat) => chat.id === targetId);
-    if (!targetId || !existing || (state.current?.summary.id === targetId && state.stream.status === "streaming")) return;
-    const archivedAt = archived ? new Date().toISOString() : null;
-    await api.chatSetArchived(targetId, archivedAt);
-    if (archived) void api.mcpDisconnect(targetId).catch(() => {});
-    const summary = { ...existing, archived_at: archivedAt, updated_at: new Date().toISOString() };
-    set((state) => updateCurrentSummary(state, summary));
+    if (!targetId || !existing || chatHasMutation(state, targetId) || (state.current?.summary.id === targetId && chatIsBusy(state.stream))) return;
+    set((current) => ({ mutatingChatIds: [...current.mutatingChatIds, targetId] }));
+    try {
+      const archivedAt = archived ? new Date().toISOString() : null;
+      await api.chatSetArchived(targetId, archivedAt);
+      if (archived) void api.mcpDisconnect(targetId).catch(() => {});
+      const latest = get().summaries.find((chat) => chat.id === targetId) ?? existing;
+      const summary = { ...latest, archived_at: archivedAt, updated_at: new Date().toISOString() };
+      set((current) => updateCurrentSummary(current, summary));
+    } finally {
+      set((current) => ({ mutatingChatIds: current.mutatingChatIds.filter((id) => id !== targetId) }));
+    }
   },
 
   deleteChat: async (chatId) => {
     const state = get();
     const targetId = chatId ?? state.current?.summary.id;
-    if (!targetId || (state.current?.summary.id === targetId && state.stream.status === "streaming")) return;
-    await api.chatDelete(targetId);
-    void api.mcpDisconnect(targetId).catch(() => {});
-    const remaining = get().summaries.filter((chat) => chat.id !== targetId);
-    if (state.current?.summary.id !== targetId) {
-      set({ summaries: remaining });
-      return;
+    if (!targetId || chatHasMutation(state, targetId) || (state.current?.summary.id === targetId && chatIsBusy(state.stream))) return;
+    set((current) => ({ mutatingChatIds: [...current.mutatingChatIds, targetId] }));
+    try {
+      await api.chatDelete(targetId);
+      void api.mcpDisconnect(targetId).catch(() => {});
+      const remaining = get().summaries.filter((chat) => chat.id !== targetId);
+      if (get().current?.summary.id !== targetId) {
+        set({ summaries: remaining });
+        return;
+      }
+      // An unsent draft belongs to the composer, not the deleted transcript.
+      set({ summaries: remaining, current: null });
+      const next = remaining.find((chat) => !chat.archived_at);
+      if (next) await get().selectChat(next.id, true);
+      else await get().createChat(true);
+    } finally {
+      set((current) => ({ mutatingChatIds: current.mutatingChatIds.filter((id) => id !== targetId) }));
     }
-    set({ summaries: remaining, current: null, pendingAttachments: [] });
-    const next = remaining.find((chat) => !chat.archived_at);
-    if (next) await get().selectChat(next.id);
-    else await get().createChat();
   },
 
   attachBuckets: async (ref) => {
     const detail = get().current;
-    if (!detail || detail.summary.archived_at) return;
+    if (!detail || detail.summary.archived_at || chatHasMutation(get())) return;
     if (detail.attached_bucket_refs.some((candidate) => sameKnowledgeBucket(candidate, ref))) return;
     const next = { ...detail, attached_bucket_refs: [...detail.attached_bucket_refs, ref] };
     set({ current: next });
@@ -737,7 +793,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
   detachBucket: async (ref) => {
     const detail = get().current;
-    if (!detail || detail.summary.archived_at) return;
+    if (!detail || detail.summary.archived_at || chatHasMutation(get())) return;
     const next = {
       ...detail,
       attached_bucket_refs: detail.attached_bucket_refs.filter((candidate) => !sameKnowledgeBucket(candidate, ref)),
@@ -749,7 +805,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setMcpSelection: async (selection) => {
     const state = get();
     const detail = state.current;
-    if (!detail || detail.summary.archived_at || state.stream.status === "streaming") return;
+    if (!detail || detail.summary.archived_at || chatIsBusy(state.stream) || chatHasMutation(state)) return;
     const server_ids = selection.server_ids.filter(
       (serverId, index, all) => all.indexOf(serverId) === index,
     );
@@ -818,76 +874,78 @@ export const useChatStore = create<ChatState>((set, get) => ({
   send: async (rawPrompt) => {
     const detail = get().current;
     const prompt = rawPrompt.trim();
-    if (!detail || detail.summary.archived_at || get().stream.status === "streaming") return;
+    if (!detail || detail.summary.archived_at || chatIsBusy(get().stream) || chatHasMutation(get())) return;
     const pending = get().pendingAttachments;
     if (!prompt && pending.length === 0) return;
 
+    // A send also supersedes any earlier in-flight chat selection.
+    selectionGeneration += 1;
+    // Reserve before the first await: attachment staging and persistence can be
+    // slow, and a second click must not create a competing request.
     const requestId = id("chat-request");
-    let prepared: PreparedTurn;
+    const ownsRequest = () => get().stream.requestId === requestId
+      && get().current?.summary.id === detail.summary.id;
+    preparingRequests.add(requestId);
+    set({ stream: { ...idleStream(), status: "streaming", requestId } });
     try {
-      prepared = await prepareTurn(detail, prompt, pending, requestId);
-    } catch (error) {
-      set({
-        knowledgeWarning: null,
-        stream: {
-          ...idleStream(),
-          status: "error",
-          lastError: error instanceof Error ? error.message : String(error),
-        },
-      });
-      return;
-    }
-    set({ knowledgeWarning: prepared.knowledgeWarning });
-    const appended = appendUserTurn(detail, prompt, prepared);
-    let live = appended.detail;
-    await persist(live);
-    set((state) => ({
-      current: live,
-      pendingAttachments: [],
-      stream: { ...idleStream(), status: "streaming", requestId },
-      summaries: ordered(state.summaries.map((chat) => chat.id === live.summary.id ? live.summary : chat)),
-    }));
+      const prepared = await prepareTurn(detail, prompt, pending, requestId);
+      if (!ownsRequest()) return;
+      const appended = appendUserTurn(detail, prompt, prepared);
+      let live = appended.detail;
+      await persist(live);
+      if (!ownsRequest()) return;
+      const sentIds = new Set(pending.map((attachment) => attachment.id));
+      set((state) => ({
+        current: live,
+        knowledgeWarning: prepared.knowledgeWarning,
+        pendingAttachments: state.pendingAttachments.filter((attachment) => !sentIds.has(attachment.id)),
+        summaries: ordered(state.summaries.map((chat) => chat.id === live.summary.id ? live.summary : chat)),
+      }));
+      preparingRequests.delete(requestId);
 
-    const streamed = await streamTurn(requestId, prepared.outgoing, live, get, set);
-    live = completeTurn(streamed.detail, get().stream, streamed.transcript, streamed.usage);
-    await persist(live);
-    set((state) => {
-      const summary = state.current?.summary.id === live.summary.id && state.current.summary.title_source === "manual"
-        ? state.current.summary
-        : live.summary;
-      return {
-        current: { ...live, summary },
-        summaries: ordered(state.summaries.map((chat) => chat.id === summary.id ? summary : chat)),
-      };
-    });
-    // `lastError` and `compaction` outlive the stream that produced them, for the
-    // same reason: both describe the answer now sitting above them, and the user
-    // reads that answer after the turn has settled.
-    set((state) => ({
-      stream: {
-        ...idleStream(),
-        lastError: state.stream.lastError,
-        compaction: state.stream.compaction,
-      },
-    }));
-    if (useAppStore.getState().activeModelId.startsWith("local/")) {
-      void api.modelStatus().then((status) => {
-        useAppStore.getState().setModelStatus(
-          status.loaded,
-          status.state,
-          status.available,
-          status.acceleration,
-        );
-      }).catch(() => {});
-    }
-    if (appended.isFirst && live.summary.title_source === "fallback" && live.messages.some((message) => message.role === "assistant")) {
-      void get().regenerateTitle(live.summary.id).catch(() => {});
+      const streamed = await streamTurn(requestId, prepared.outgoing, live, get, set);
+      if (!ownsRequest()) return;
+      live = completeTurn(streamed.detail, get().stream, streamed.transcript, streamed.usage);
+      await persist(live);
+      if (!ownsRequest()) return;
+      set((state) => {
+        const summary = state.current?.summary.id === live.summary.id && state.current.summary.title_source === "manual"
+          ? state.current.summary : live.summary;
+        return {
+          current: { ...live, summary },
+          summaries: ordered(state.summaries.map((chat) => chat.id === summary.id ? summary : chat)),
+          stream: { ...idleStream(), lastError: state.stream.lastError, compaction: state.stream.compaction },
+        };
+      });
+      if (useAppStore.getState().activeModelId.startsWith("local/")) {
+        void api.modelStatus().then((status) => {
+          useAppStore.getState().setModelStatus(status.loaded, status.state, status.available, status.acceleration);
+        }).catch(() => {});
+      }
+      if (appended.isFirst && live.summary.title_source === "fallback" && live.messages.some((message) => message.role === "assistant")) {
+        void get().regenerateTitle(live.summary.id).catch(() => {});
+      }
+    } catch (error) {
+      if (!ownsRequest()) return;
+      set((state) => ({
+        stream: { ...state.stream, requestId: null, status: "error", lastError: String(error),
+          activities: settleActivities(state.stream.activities, "error"), pendingMcpProposal: null },
+      }));
+    } finally {
+      preparingRequests.delete(requestId);
     }
   },
 
   stop: async () => {
     const requestId = get().stream.requestId;
-    if (requestId) await api.aiCancel(requestId);
+    if (!requestId) return;
+    // There may be no provider operation to cancel yet. Fence preparation now,
+    // including any delayed attachment/save continuation, before asking native.
+    if (preparingRequests.has(requestId)) {
+      preparingRequests.delete(requestId);
+      set({ stream: idleStream() });
+    }
+    await api.aiCancel(requestId);
   },
 }));
 

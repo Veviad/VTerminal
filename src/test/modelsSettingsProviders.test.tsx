@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { CatalogEntry } from "../lib/types";
 import { S } from "../lib/strings";
 
@@ -130,6 +130,25 @@ describe("ModelsSettings provider sections", () => {
 
     fireEvent.blur(fields[1], { target: { value: "sk-test-key" } });
     await waitFor(() => expect(saved).toHaveBeenCalledWith({ openai_api_key: "sk-test-key" }));
+  });
+
+  it("selects GPT-6.1 Terra independently of the existing Sol model", async () => {
+    const terra = cloudEntry("openai", "openai/gpt-6.1-terra", "GPT-6.1 Terra", "gpt-6.1-terra");
+    terra.efforts = ["off", "low", "medium", "high", "max"];
+    catalog.mockResolvedValue([
+      ...CLOUD.map(([p, id, label, wire]) => cloudEntry(p, id, label, wire)),
+      terra,
+    ]);
+    useAppStore.setState({ hasApiKey: { openai: true }, activeModelId: "openai/gpt-5.6-terra" });
+    render(<ModelsSettings />);
+
+    const row = (await screen.findByText("GPT-6.1 Terra")).closest(".rounded-lg");
+    expect(row).not.toBeNull();
+    expect(within(row as HTMLElement).getByText(S.effort.off)).toBeInTheDocument();
+    fireEvent.click(within(row as HTMLElement).getByRole("button", { name: S.settings.models.select }));
+    await waitFor(() => expect(saved).toHaveBeenCalledWith({ active_model_id: "openai/gpt-6.1-terra" }));
+    expect(useAppStore.getState().activeModelId).toBe("openai/gpt-6.1-terra");
+    expect(screen.getByText("GPT-6.1 Sol")).toBeInTheDocument();
   });
 
   it("reads OpenAI's stored-key flag under the same string the wire sends", async () => {

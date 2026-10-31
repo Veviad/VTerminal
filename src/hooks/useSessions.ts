@@ -18,7 +18,7 @@ import {
   observeSshPasswordPrompt,
   takePendingConnect,
 } from "../lib/sshConnect";
-import { replayScrollback, subscribeTerm } from "../lib/termRegistry";
+import { replayScrollback } from "../lib/termRegistry";
 import { markTranscriptDirty, trackSession } from "../lib/sessionPersistence";
 import { archiveOnClose } from "../lib/sessionArchive";
 import { trackArchiveMutation } from "../lib/archiveWriteTracker";
@@ -33,6 +33,7 @@ import { ownRecordValue } from "../lib/records";
 import { nextOrdinal, shortenCommand } from "../lib/sessionTitle";
 import { defaultShell, isWindows } from "../lib/platform";
 import { cancelNaming } from "../lib/sessionNaming";
+import { waitForFirstPrompt } from "../lib/terminalReady";
 import { isUpdateExitBarrier, useUpdateStore } from "../stores/updateStore";
 import type {
   Block,
@@ -133,29 +134,6 @@ function cancelLinkedSessionWork(
 
   if (cancellations.length === 0) return null;
   return Promise.allSettled(cancellations).then(() => undefined);
-}
-
-/** Resolve once the shell reaches its input phase (OSC 133;B), or on timeout /
- *  teardown. Never rejects — a missed prompt must not sink the tab. */
-function waitForFirstPrompt(
-  sessionId: string,
-  timeoutMs: number,
-): Promise<void> {
-  return new Promise((resolve) => {
-    let done = false;
-    const finish = () => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      unsubscribe();
-      resolve();
-    };
-    const timer = setTimeout(finish, timeoutMs);
-    const unsubscribe = subscribeTerm(sessionId, (e) => {
-      if (e.type === "disposed" || (e.type === "phase" && e.phase === "input"))
-        finish();
-    });
-  });
 }
 
 // Session creation wires everything together exactly once (NOT per React
@@ -302,6 +280,7 @@ export function useSessions() {
             // trustworthy again and the remote shell proof describes a shell
             // that no longer exists.
             if (s.sessionUi[sessionId]?.nestedBlockId === blockId) {
+              clearPendingConnect(sessionId);
               // The SSH role stopped being SSH. Cancel before publishing the
               // identity transition so no hidden Sidecar continues generating.
               if (s.sidecarForSession(sessionId)) {
@@ -470,6 +449,7 @@ export function useSessions() {
           },
           (event) => {
             if (event.type === "Exit") {
+              clearPendingConnect(sessionId);
               cancelPtyEcho(entry.term);
               // Cancel the SHARED owner before marking either target unavailable.
               // updateSession below then degrades (or removes) the binding.

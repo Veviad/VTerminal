@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.13
+
+- Stream final Agent answers and show native web-search and MCP activity; preserve reading position during output.
+- Show requested commands without execution wrappers and improve terminal control-sequence, progress, and Unicode handling.
+- Preserve instruction edits across overlapping saves and retries; strengthen sensitive-output detection and bind SSH password autofill to one validated connection attempt, with manual entry for ambiguous authentication.
+- Add GPT-6.1 Terra and fix runbook validation and history selection races.
+- Keep schedules bound to their saved plan, target, working directory, and permission limits; improve cancellation and timezone handling and reject unattended SSH terminal execution without verified authentication.
+
 ## 0.6.12
 
 - Prevent Escape from terminal search reaching the shell and altering the next command.

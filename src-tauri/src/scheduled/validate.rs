@@ -326,6 +326,12 @@ fn validate_target(
             }
         }
         ScheduledTarget::SshHost { host_id } => {
+            if input.execution_mode == ExecutionMode::Tab {
+                issues.push(ScheduledValidationIssue::blocking(
+                    "execution_mode",
+                    "Unattended SSH tab runs cannot safely verify that authentication has completed. Use a key-authenticated headless schedule, or connect interactively.",
+                ));
+            }
             let Some(host) = host else {
                 issues.push(ScheduledValidationIssue::blocking(
                     "target",
@@ -346,7 +352,7 @@ fn validate_target(
                         format!(
                             "Headless runs authenticate with keys only, and “{}” has a saved \
                              password but no identity file. Add an identity file to the host, or \
-                             set this action to run in a Tab.",
+                             connect interactively instead.",
                             host.label
                         ),
                     ));
@@ -526,7 +532,7 @@ mod tests {
     }
 
     #[test]
-    fn headless_refuses_a_password_only_ssh_host_and_names_tab_mode() {
+    fn headless_refuses_a_password_only_ssh_host_and_names_safe_alternatives() {
         let host = HostFacts {
             has_password: true,
             has_identity_file: false,
@@ -545,7 +551,7 @@ mod tests {
             .clone();
         assert!(message.contains("prod-01"), "{message}");
         assert!(
-            message.contains("Tab"),
+            message.contains("identity file") && message.contains("interactively"),
             "the refusal must name the alternative"
         );
     }
@@ -579,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_mode_allows_a_password_only_host_because_autofill_still_works() {
+    fn tab_mode_refuses_ssh_without_a_passive_authenticated_prompt_proof() {
         let host = HostFacts {
             has_password: true,
             has_identity_file: false,
@@ -589,7 +595,7 @@ mod tests {
             host_id: "h1".into(),
         });
         input.execution_mode = ExecutionMode::Tab;
-        assert!(blocking(&validate(&input, Some(&host))).is_empty());
+        assert!(blocking(&validate(&input, Some(&host))).contains(&"execution_mode"));
     }
 
     #[test]

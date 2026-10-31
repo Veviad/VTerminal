@@ -47,6 +47,9 @@ pub struct ScheduledFire {
     pub target_label: String,
     pub target_host_id: Option<String>,
     pub target_cwd: Option<String>,
+    /// Exactly the action whose plan was committed to this run. The editor's
+    /// mutable store may have changed while this run waited for its slot.
+    pub action: ScheduledAction,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -137,14 +140,28 @@ fn commit_due_decisions(
             DueDecision::Reschedule {
                 next_fire_at,
                 reason,
+                timezone,
             } => {
                 let next = next_fire_at.map(|dt| dt.to_utc().to_rfc3339());
-                if next.as_deref() != action.next_fire_at.as_deref() {
+                if timezone.is_some() || next.as_deref() != action.next_fire_at.as_deref() {
                     log::info!(
                         "scheduled actions: rescheduling {} — {reason}",
                         action.input.name
                     );
-                    let _ = db::set_next_fire(&conn, &action.id, next.as_deref(), &now_iso);
+                    let result = if let Some(timezone) = timezone.as_deref() {
+                        db::set_next_fire_and_timezone(
+                            &conn,
+                            &action.id,
+                            next.as_deref(),
+                            timezone,
+                            &now_iso,
+                        )
+                    } else {
+                        db::set_next_fire(&conn, &action.id, next.as_deref(), &now_iso)
+                    };
+                    if let Err(error) = result {
+                        log::warn!("scheduled actions: could not reschedule: {error}");
+                    }
                 }
             }
             DueDecision::Skip {
@@ -352,21 +369,25 @@ pub fn spawn_run(
     state: &std::sync::Arc<SchedulerState>,
     pending: PendingRun,
 ) {
+    // Register before waiting for the global slot. Queued runs must be
+    // cancellable too, including when the feature is switched off.
+    let mut cancel = state.register_cancel(&pending.run_id);
     let app = app.clone();
     let state = state.clone();
     tauri::async_runtime::spawn(async move {
-        let permit = scheduler::acquire_run_permit(&state).await;
-        if permit.is_none() {
+        let permit = scheduler::acquire_run_permit(&state, &mut cancel).await;
+        if permit.is_none() || !scheduler::gate_open(&app) || *cancel.borrow() {
             finish_run(
                 &app,
                 &pending.run_id,
                 Some(pending.action.id.clone()),
-                ScheduledRunStatus::Failed,
-                Some("the scheduler could not take a run slot"),
+                ScheduledRunStatus::Cancelled,
+                Some("the run was cancelled before it started"),
             );
+            state.release_cancel(&pending.run_id);
+            state.wake();
             return;
         }
-        let cancel = state.register_cancel(&pending.run_id);
         if pending.action.input.execution_mode == ExecutionMode::Tab {
             let fire = ScheduledFire {
                 run_id: pending.run_id.clone(),
@@ -382,6 +403,7 @@ pub fn spawn_run(
                     .target
                     .local_cwd()
                     .map(|s| s.to_string()),
+                action: pending.action.clone(),
             };
             if let Err(e) = app.emit(FIRE_EVENT, fire) {
                 log::warn!("scheduled actions: could not emit the fire event: {e}");
@@ -448,6 +470,13 @@ async fn watch_tab_run(
     loop {
         tokio::time::sleep(Duration::from_secs(2)).await;
         if state.is_cancelled(&pending.run_id) {
+            finish_run(
+                app,
+                &pending.run_id,
+                Some(pending.action.id.clone()),
+                ScheduledRunStatus::Cancelled,
+                Some("the run was cancelled; any command already running in the terminal was left alone"),
+            );
             return;
         }
         let now = tokio::time::Instant::now();
@@ -513,8 +542,13 @@ pub fn finish_run(
     if let Some(db) = app.try_state::<DbState>() {
         if let Ok(conn) = db.0.lock() {
             let now = db::now_rfc3339();
-            if let Err(e) = db::set_run_status(&conn, run_id, status, error, &now) {
-                log::warn!("scheduled actions: could not record run status: {e}");
+            match db::set_run_status(&conn, run_id, status, error, &now) {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(e) => {
+                    log::warn!("scheduled actions: could not record run status: {e}");
+                    return;
+                }
             }
         }
     }

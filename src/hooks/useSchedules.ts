@@ -2,7 +2,10 @@ import { useCallback } from "react";
 
 import * as api from "../lib/schedules";
 import { S } from "../lib/strings";
+import { abortSession, interruptJob } from "../lib/ptyExec";
+import { revokeScheduleRun, scheduleAgentOwnsRequest } from "../lib/scheduleLiveJobs";
 import { useScheduleStore } from "../stores/scheduleStore";
+import { useAiStream } from "./useAiStream";
 import type { ScheduleActionInput, ScheduleRecurrence } from "../lib/schedules";
 
 /**
@@ -15,6 +18,7 @@ import type { ScheduleActionInput, ScheduleRecurrence } from "../lib/schedules";
  */
 export function useSchedules() {
   const store = useScheduleStore;
+  const { cancel: cancelAgent } = useAiStream();
 
   const refreshActions = useCallback(async () => {
     store.getState().setLoadingActions(true);
@@ -154,6 +158,12 @@ export function useSchedules() {
     async (runId: string) => {
       store.getState().setBusyAction(`cancel:${runId}`);
       try {
+        // Revoke before the IPC can yield, including an in-flight agent turn.
+        for (const job of revokeScheduleRun(runId)) {
+          interruptJob(job.sessionId, job.attemptId);
+          abortSession(job.sessionId, "cancelled", job.attemptId);
+          if (scheduleAgentOwnsRequest(job)) void cancelAgent(job.sessionId);
+        }
         await api.scheduleRunCancel(runId);
       } catch (error) {
         store.getState().setError(String(error));
@@ -161,7 +171,7 @@ export function useSchedules() {
         store.getState().setBusyAction(null);
       }
     },
-    [store],
+    [cancelAgent, store],
   );
 
   /** Re-read one run, guarding against a stale snapshot.

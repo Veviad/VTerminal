@@ -8,6 +8,8 @@ interface PendingEcho {
   bytes: Uint8Array;
   acknowledgments: Array<() => void>;
   timer: ReturnType<typeof setTimeout>;
+  protocol: { kind: "osc" | "dcs"; escaped: boolean; prefix: string } | null;
+  forwardedBytes: number;
 }
 
 const pending = new WeakMap<EchoTerminal, PendingEcho>();
@@ -16,7 +18,7 @@ const decoder = new TextDecoder();
 const MAX_ECHO_BYTES = 65_536;
 const ECHO_WAIT_MS = 2_000;
 
-/** Only arm for an exact, nonce-bearing line that the executor is about to
+/** Only arm for an exact line that the executor is about to
  * write. Ordinary terminal output never goes through a protocol-text regex. */
 export function expectPtyEcho(
   term: EchoTerminal,
@@ -30,6 +32,8 @@ export function expectPtyEcho(
     bytes: new Uint8Array(),
     acknowledgments: [],
     timer: setTimeout(() => cancelPtyEcho(term), ECHO_WAIT_MS),
+    protocol: null,
+    forwardedBytes: 0,
   };
   pending.set(term, echo);
   return () => {
@@ -67,10 +71,32 @@ export function writePtyOutput(
     return;
   }
   if (onParsed) echo.acknowledgments.push(onParsed);
-  const held = new Uint8Array(echo.bytes.length + bytes.length);
+  let held = new Uint8Array(echo.bytes.length + bytes.length);
   held.set(echo.bytes);
   held.set(bytes, echo.bytes.length);
   echo.bytes = held;
+
+  // Shell titles, cwd notifications and terminal queries can precede the
+  // input echo. Forward those bytes now (a query may be waiting for a reply),
+  // but keep the exact match armed for the following line. Only peel leading
+  // controls: once printable input is held, forwarding a query ahead of it
+  // would change the cursor position reported to the shell, so fail open.
+  const prefix = leadingProtocol(echo, held);
+  if (prefix.length) {
+    echo.forwardedBytes += prefix.length;
+    if (prefix.endsExpectation || echo.forwardedBytes > MAX_ECHO_BYTES) {
+      pending.delete(term);
+      clearTimeout(echo.timer);
+      writeEcho(term, echo, held);
+      return;
+    }
+    echo.bytes = held = held.subarray(prefix.length);
+    if (!held.length) {
+      writeEcho(term, echo, prefix.bytes);
+      return;
+    }
+    term.write(prefix.bytes);
+  }
 
   const newline = held.indexOf(10);
   // Only line-editor decorations may be held. OSC completion/prompt signals,
@@ -98,7 +124,7 @@ export function writePtyOutput(
   }
 
   // Probe: clear the existing prompt row so the shell's next prompt replaces
-  // it. Command: keep the approved/hardened text, without the private suffix.
+  // it. Command: show the approved text; execution modifiers stay in details.
   // Mode changes (especially bracketed paste) still belong to the real shell.
   // When ZLE erased a right prompt, clear it before drawing the shorter line.
   const replacement = encoder.encode(
@@ -112,6 +138,49 @@ export function writePtyOutput(
   writeEcho(term, echo, output);
 }
 
+/** Forward strings incrementally without buffering their payloads. A shell
+ * start/completion signal ends the expectation: a later identical line could
+ * be genuine command output, especially with terminal echo disabled. */
+function leadingProtocol(echo: PendingEcho, bytes: Uint8Array): {
+  length: number; bytes: Uint8Array; endsExpectation: boolean;
+} {
+  let i = 0;
+  let endsExpectation = false;
+  while (i < bytes.length) {
+    if (echo.protocol) {
+      const protocol = echo.protocol;
+      const byte = bytes[i++];
+      if (protocol.prefix.length < 256) protocol.prefix += String.fromCharCode(byte);
+      if ((protocol.kind === "osc" && byte === 7) || (protocol.escaped && byte === 92) ||
+          byte === 24 || byte === 26) {
+        endsExpectation = protocol.kind === "osc" &&
+          /^(?:133;[ACD](?:;|\x07|\x1b|$)|6973;)/.test(protocol.prefix);
+        echo.protocol = null;
+        if (endsExpectation) break;
+      } else {
+        protocol.escaped = byte === 27;
+      }
+      continue;
+    }
+    if (bytes[i] !== 27 || i + 1 === bytes.length) break;
+    const next = bytes[i + 1];
+    if (next === 93 || next === 80) {
+      echo.protocol = { kind: next === 93 ? "osc" : "dcs", escaped: false, prefix: "" };
+      i += 2;
+      continue;
+    }
+    if (next !== 91) break;
+    let end = i + 2;
+    while (end < bytes.length && bytes[end] >= 0x20 && bytes[end] <= 0x3f) end++;
+    if (end === bytes.length) break;
+    const sequence = decoder.decode(bytes.subarray(i, end + 1));
+    const query = /^\x1b\[(?:\??[56]n|[>=]?\d*c|\??\d+\$p)$/.test(sequence);
+    if (!query && !echoCsiKind(sequence)) break;
+    i = end + 1;
+  }
+  return { length: i, bytes: bytes.subarray(0, i), endsExpectation };
+}
+
 function writeEcho(term: EchoTerminal, echo: PendingEcho, bytes: Uint8Array): void {
   const acknowledgments = echo.acknowledgments.splice(0);
   term.write(bytes, () => {
@@ -121,7 +190,7 @@ function writeEcho(term: EchoTerminal, echo: PendingEcho, bytes: Uint8Array): vo
 
 function echoCsiKind(sequence: string): "mode" | "decoration" | null {
   // An alternate-screen transition is program output, never an input echo.
-  if (/^\x1b\[\?[\d;]*\b(?:47|1047|1049)\b[\d;]*[hl]$/.test(sequence)) return null;
+  if (/^\x1b\[\?(?:\d+;)*(?:47|1047|1049)(?:;\d+)*[hl]$/.test(sequence)) return null;
   if (/^\x1b\[\??[\d;]+[hl]$/.test(sequence)) return "mode";
   if (/^\x1b\[[\d;:]*m$/.test(sequence) || /^\x1b\[\d*[CDGK]$/.test(sequence)) {
     return "decoration";
@@ -152,9 +221,21 @@ function hasNonEchoControl(bytes: Uint8Array): boolean {
 function normalizeEcho(raw: string): { text: string; modes: string; clearToEnd: boolean } | null {
   let modes = "";
   let clearToEnd = false;
+  // Bound the aggregate expansion, including the original printable text.
+  // Many individually valid cursor advances must not multiply held bytes.
+  let paddingBudget = Math.max(0, MAX_ECHO_BYTES - raw.length);
   let text = raw.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, (sequence) => {
     if (echoCsiKind(sequence) === "mode") modes += sequence;
     if (sequence.endsWith("K")) clearToEnd = true;
+    // ZLE may advance over a blank with CUF instead of echoing a literal
+    // space, especially when PTY reads split a redraw. Reconstruct only
+    // bounded horizontal blanks, then still require exact command equality.
+    if (/^\x1b\[\d*C$/.test(sequence)) {
+      const count = Number(sequence.slice(2, -1)) || 1;
+      if (count > paddingBudget) return "\x1b";
+      paddingBudget -= count;
+      return " ".repeat(count);
+    }
     return "";
   });
   // Unrecognized control sequences are not command echo we know how to edit.

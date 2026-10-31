@@ -667,7 +667,7 @@ mod tests {
             .filter(|model| model.provider == catalog::ProviderId::OpenAi)
         {
             let allowed: &[&str] = match model.wire_model {
-                "gpt-6-luna" => &["none", "low", "medium", "high", "max"],
+                "gpt-6-luna" | "gpt-6.1-terra" => &["none", "low", "medium", "high", "max"],
                 "gpt-6.1-sol" | "gpt-6-astra" => &["low", "medium", "high", "max"],
                 other => panic!("add the verified reasoning ladder for {other}"),
             };
@@ -679,7 +679,9 @@ mod tests {
                 Effort::Max,
             ] {
                 let expected = match effort {
-                    Effort::Off if model.wire_model == "gpt-6-luna" => "none",
+                    Effort::Off if matches!(model.wire_model, "gpt-6-luna" | "gpt-6.1-terra") => {
+                        "none"
+                    }
                     Effort::Off | Effort::Low => "low",
                     Effort::Medium => "medium",
                     Effort::High => "high",
@@ -703,7 +705,7 @@ mod tests {
             }
             checked += 1;
         }
-        assert_eq!(checked, 3);
+        assert_eq!(checked, 4);
         let body = build_body(model(), vec![], vec![], &params()).unwrap();
         assert!(body.get("tools").is_none());
         assert!(body.get("tool_choice").is_none());

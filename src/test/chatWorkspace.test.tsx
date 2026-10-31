@@ -56,6 +56,7 @@ describe("Chat workspace autoscroll", () => {
       current: detail,
       stream: { ...idleStream(), status: "streaming", requestId: "request-a" },
       pendingAttachments: [],
+      mutatingChatIds: [],
       attachError: null,
       attachStatus: null,
       knowledgeWarning: null,
@@ -63,6 +64,61 @@ describe("Chat workspace autoscroll", () => {
   });
 
   afterEach(() => vi.restoreAllMocks());
+
+  it("preserves composer text while deletion or initial loading has no selected chat", () => {
+    useChatStore.setState({ stream: idleStream() });
+    render(<ChatWorkspace />);
+    const composer = screen.getByPlaceholderText("Message VTerminal Chat…");
+    fireEvent.change(composer, { target: { value: "Keep this draft" } });
+    act(() => useChatStore.setState({ current: null }));
+    expect(composer).toBeDisabled();
+    expect(screen.getByTitle("Send")).toBeDisabled();
+    fireEvent.keyDown(composer, { key: "Enter" });
+    expect(composer).toHaveValue("Keep this draft");
+    act(() => useChatStore.setState({ current: detail }));
+    expect(composer).not.toBeDisabled();
+    expect(composer).toHaveValue("Keep this draft");
+  });
+
+  it("keeps composer text and staged files while a destructive metadata change blocks Send", () => {
+    render(<ChatWorkspace />);
+    const composer = screen.getByPlaceholderText("Message VTerminal Chat…");
+    act(() => useChatStore.setState({ stream: idleStream() }));
+    fireEvent.change(composer, { target: { value: "Unsent draft" } });
+    act(() => useChatStore.setState({ mutatingChatIds: [detail.summary.id], pendingAttachments: [{
+      id: "pending", kind: "text", name: "draft.txt", mediaType: "text/plain", bytes: 5, text: "draft",
+    }] }));
+    expect(composer).toBeDisabled();
+    expect(screen.getByTitle("Send")).toBeDisabled();
+    fireEvent.click(screen.getByTitle("Send"));
+    expect(composer).toHaveValue("Unsent draft");
+    expect(screen.getByText("draft.txt")).toBeVisible();
+    act(() => useChatStore.setState({ mutatingChatIds: [] }));
+    expect(composer).not.toBeDisabled();
+    expect(composer).toHaveValue("Unsent draft");
+  });
+
+  it("keeps a failed request busy until the provider settles instead of accepting an overlapping send", () => {
+    useChatStore.setState((state) => ({ stream: { ...state.stream, status: "error", lastError: "Provider failed" } }));
+    render(<ChatWorkspace />);
+    expect(screen.getByTitle("Stop response")).toBeVisible();
+    expect(screen.queryByTitle("Send")).not.toBeInTheDocument();
+    expect(screen.queryByText("Thinking…")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Chat list actions for Autoscroll test" }));
+    expect(screen.getByRole("menuitem", { name: "Rename" })).toBeDisabled();
+  });
+
+  it("shows the actual running tool without a misleading thinking placeholder", () => {
+    useChatStore.setState((state) => ({ stream: { ...state.stream, mcpCalls: [{
+      approval_id: "mcp", server_id: "server", server_name: "Test MCP", tool_name: "read_items",
+      arguments: { token: "PRIVATE-ARGUMENT" }, status: "running",
+    }] } }));
+    render(<ChatWorkspace />);
+    expect(screen.getByText("Test MCP · read_items")).toBeVisible();
+    expect(screen.getByText("Running")).toBeVisible();
+    expect(screen.queryByText("Thinking…")).not.toBeInTheDocument();
+    expect(screen.queryByText(/PRIVATE-ARGUMENT/)).not.toBeInTheDocument();
+  });
 
   it("classifies only viewports within the bottom threshold as sticky", () => {
     expect(isNearChatBottom({ scrollHeight: 1_000, clientHeight: 300, scrollTop: 652 })).toBe(true);

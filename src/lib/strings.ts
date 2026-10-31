@@ -929,7 +929,7 @@ export const S = {
     executionHeadless: "In the background",
     executionTab: "In a terminal tab",
     executionHint:
-      "Background runs need no terminal and keep going while the window is minimised. A tab run types into a real terminal you can watch, but the timers driving it are throttled when VTerminal is not in front — which is usually when a schedule fires.",
+      "Background runs need no terminal and keep going while the window is minimised. A tab run types into a real terminal you can watch, but its timers are throttled when VTerminal is not in front. SSH schedules require background mode and key authentication.",
     tabExecutionOff:
       "Tab runs are switched off. Enable them in Settings → Schedules, or leave this action in the background.",
     target: "Target",
@@ -937,7 +937,7 @@ export const S = {
     targetHost: "Saved SSH host",
     targetCwd: "Working directory",
     targetCwdHint: "Absolute path. Leave empty for the shell's own default.",
-    targetCommandPreview: "This is the command that will be typed:",
+    targetCommandPreview: "Saved SSH connection:",
     permission: "Commands the AI proposes",
     permissionHint:
       "This is a standing authorization: it applies at 03:00 with nobody watching. Anything it does not cover is skipped immediately and recorded, never run silently.",

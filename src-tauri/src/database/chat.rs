@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::knowledge::KnowledgeBucketRef;
 use crate::mcp::client::McpToolResultView;
 use crate::mcp::config::McpChatSelection;
-use crate::provider::{ChatMessage, WebCitation};
+use crate::provider::{ActivityStatus, ChatMessage, ProviderActivity, WebCitation};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatSummary {
@@ -48,6 +48,7 @@ pub struct ChatDisplayMessage {
     pub completion_tokens: Option<i64>,
     pub citations: Vec<WebCitation>,
     pub mcp_calls: Vec<ChatMcpCall>,
+    pub activities: Vec<ProviderActivity>,
     pub attachments: Vec<ChatAttachment>,
     pub created_at: String,
 }
@@ -62,6 +63,40 @@ pub struct ChatMcpCall {
     pub status: String,
     pub result: Option<McpToolResultView>,
     pub error: Option<String>,
+}
+
+/// The existing JSON column can carry optional activity without migrating SQL.
+/// Old rows containing a bare MCP array remain readable.
+#[derive(Default, Serialize, Deserialize)]
+struct StoredToolActivity {
+    #[serde(default)]
+    mcp_calls: Vec<ChatMcpCall>,
+    #[serde(default)]
+    activities: Vec<ProviderActivity>,
+}
+
+fn decode_tool_activity(raw: &str) -> StoredToolActivity {
+    let mut stored =
+        serde_json::from_str::<StoredToolActivity>(raw).unwrap_or_else(|_| StoredToolActivity {
+            mcp_calls: serde_json::from_str(raw).unwrap_or_default(),
+            activities: vec![],
+        });
+    settle_tool_activity(&mut stored);
+    stored
+}
+
+fn settle_tool_activity(stored: &mut StoredToolActivity) {
+    for activity in &mut stored.activities {
+        if activity.status == ActivityStatus::Running {
+            activity.status = ActivityStatus::Interrupted;
+        }
+    }
+    for call in &mut stored.mcp_calls {
+        if call.status == "running" || call.status == "awaiting" {
+            call.status = "error".into();
+            call.error = Some("Interrupted".into());
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -87,6 +122,8 @@ pub struct ChatMessageInput {
     pub citations: Vec<WebCitation>,
     #[serde(default)]
     pub mcp_calls: Vec<ChatMcpCall>,
+    #[serde(default)]
+    pub activities: Vec<ProviderActivity>,
     #[serde(default)]
     pub attachments: Vec<ChatAttachment>,
     pub created_at: String,
@@ -232,6 +269,7 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<ChatDetail>, String> {
             .map_err(|e| e.to_string())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
+        let activity = decode_tool_activity(&row.9);
         messages.push(ChatDisplayMessage {
             id: row.0,
             sort_order: row.1,
@@ -242,7 +280,8 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<ChatDetail>, String> {
             prompt_tokens: row.6,
             completion_tokens: row.7,
             citations: serde_json::from_str(&row.8).unwrap_or_default(),
-            mcp_calls: serde_json::from_str(&row.9).unwrap_or_default(),
+            mcp_calls: activity.mcp_calls,
+            activities: activity.activities,
             attachments,
             created_at: row.10,
         });
@@ -300,7 +339,18 @@ fn replace_messages(tx: &Transaction<'_>, input: &ChatSaveInput) -> Result<(), S
     .map_err(|e| format!("clear chat messages: {e}"))?;
     for (index, message) in input.messages.iter().enumerate() {
         let citations = serde_json::to_string(&message.citations).map_err(|e| e.to_string())?;
-        let mcp_calls = serde_json::to_string(&message.mcp_calls).map_err(|e| e.to_string())?;
+        let mut activity = StoredToolActivity {
+            mcp_calls: message.mcp_calls.clone(),
+            activities: message.activities.clone(),
+        };
+        settle_tool_activity(&mut activity);
+        // Keep writing the legacy shape when no native activity is present.
+        let mcp_calls = if activity.activities.is_empty() {
+            serde_json::to_string(&activity.mcp_calls)
+        } else {
+            serde_json::to_string(&activity)
+        }
+        .map_err(|e| e.to_string())?;
         tx.execute(
             "INSERT INTO chat_messages \
                (id, chat_id, sort_order, role, content, thinking, model, prompt_tokens, \
@@ -504,6 +554,7 @@ mod tests {
                 completion_tokens: None,
                 citations: vec![],
                 mcp_calls: vec![],
+                activities: vec![],
                 attachments: vec![],
                 created_at: "2026-08-23T10:00:00Z".into(),
             }],
@@ -532,6 +583,38 @@ mod tests {
         )
         .unwrap();
         assert!(get(&conn, "chat-a").unwrap().is_some());
+    }
+
+    #[test]
+    fn optional_activity_round_trips_and_old_arrays_stay_readable() {
+        let mut conn = db();
+        let mut value = input("activity", "answer");
+        value.messages[0].activities = vec![
+            ProviderActivity {
+                id: "web-1".into(),
+                kind: crate::provider::ActivityKind::WebSearch,
+                status: ActivityStatus::Running,
+            },
+            ProviderActivity {
+                id: "web-2".into(),
+                kind: crate::provider::ActivityKind::WebFetch,
+                status: ActivityStatus::Done,
+            },
+        ];
+        save(&mut conn, &value).unwrap();
+        let saved = get(&conn, "activity").unwrap().unwrap();
+        assert_eq!(
+            saved.messages[0].activities[0].status,
+            ActivityStatus::Interrupted
+        );
+        assert_eq!(saved.messages[0].activities[1].status, ActivityStatus::Done);
+        let legacy = decode_tool_activity(
+            r#"[{"approval_id":"a","server_id":"s","server_name":"MCP","tool_name":"read","arguments":{},"status":"running","result":null,"error":null}]"#,
+        );
+        assert!(legacy.activities.is_empty());
+        assert_eq!(legacy.mcp_calls[0].status, "error");
+        assert_eq!(legacy.mcp_calls[0].error.as_deref(), Some("Interrupted"));
+        assert!(decode_tool_activity("[]").activities.is_empty());
     }
 
     #[test]

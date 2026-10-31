@@ -75,6 +75,7 @@ import type {
   RunbookSource,
   RunbookStartRequest,
   RunbookRunState,
+  RunbookReport,
 } from "../lib/runbooks";
 
 function historyEntry(
@@ -1446,6 +1447,53 @@ describe("useRunbooks recovery and deletion", () => {
     expect(mocks.report).not.toHaveBeenCalled();
     expect(useRunbookStore.getState().activeRun?.status).toBe("interrupted");
     expect(useRunbookStore.getState().view).toBe("run");
+  });
+
+  it("keeps the most recently requested report when earlier requests finish later", async () => {
+    let resolveFirst!: (report: RunbookReport) => void;
+    mocks.report.mockImplementationOnce(() => new Promise<RunbookReport>((resolve) => {
+      resolveFirst = resolve;
+    }));
+    mocks.report.mockResolvedValueOnce({ run_id: "run-second" } as RunbookReport);
+    const { result } = renderHook(() => useRunbooks());
+    let first!: Promise<void>;
+    await act(async () => {
+      first = result.current.loadReport("run-first");
+      await result.current.loadReport("run-second");
+    });
+    await act(async () => {
+      resolveFirst({ run_id: "run-first" } as RunbookReport);
+      await first;
+    });
+    expect(useRunbookStore.getState().selectedHistoryRunId).toBe("run-second");
+    expect(useRunbookStore.getState().report?.run_id).toBe("run-second");
+    expect(useRunbookStore.getState().loadingReport).toBe(false);
+  });
+
+  it("does not replace the selected history report when another run finishes", async () => {
+    useRunbookStore.getState().selectHistoryRun("run-selected");
+    useRunbookStore.getState().setReport({ run_id: "run-selected" } as RunbookReport);
+    useRunbookStore.getState().setActiveRun(run("run-other", "running"));
+    mocks.get.mockResolvedValue(run("run-other", "succeeded"));
+    const { result } = renderHook(() => useRunbooks());
+    await act(async () => {
+      await result.current.handleRunbookEvent({ type: "ReportReady", run_id: "run-other" });
+      await result.current.handleRunbookEvent({ type: "RunFinished", run_id: "run-other", state: "succeeded" });
+    });
+    expect(mocks.report).not.toHaveBeenCalled();
+    expect(useRunbookStore.getState().selectedHistoryRunId).toBe("run-selected");
+    expect(useRunbookStore.getState().report?.run_id).toBe("run-selected");
+  });
+
+  it("automatically loads the report when the selected history run finishes", async () => {
+    useRunbookStore.getState().selectHistoryRun("run-selected");
+    mocks.report.mockResolvedValue({ run_id: "run-selected" } as RunbookReport);
+    const { result } = renderHook(() => useRunbooks());
+    await act(async () => {
+      await result.current.handleRunbookEvent({ type: "ReportReady", run_id: "run-selected" });
+    });
+    expect(mocks.report).toHaveBeenCalledWith("run-selected");
+    await waitFor(() => expect(useRunbookStore.getState().report?.run_id).toBe("run-selected"));
   });
 
   it("reports partial evidence cleanup and refreshes history after deletion", async () => {

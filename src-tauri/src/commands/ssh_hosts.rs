@@ -405,28 +405,141 @@ pub fn ssh_hosts_set_password(
     Ok(())
 }
 
-/// Resolve and submit a saved password without ever serializing it through IPC.
-/// The frontend calls this once after observing a matching SSH password prompt.
+/// Only the simple direct OpenSSH shape is eligible. Rich saved-host commands
+/// remain available with manual authentication; no guessed destination/user.
+fn password_launch(
+    host: &queries::SshHost,
+    command: &str,
+) -> Result<(Vec<String>, String), String> {
+    let manual = "this SSH connection requires manual password entry";
+    let user = host
+        .username
+        .as_deref()
+        .filter(|user| valid_username(user))
+        .ok_or(manual)?;
+    if !host.has_password
+        || !valid_hostname(&host.hostname)
+        || [
+            &host.identity_file,
+            &host.jump_host,
+            &host.extra_args,
+            &host.remote_dir,
+            &host.post_connect,
+            &host.config_alias,
+        ]
+        .into_iter()
+        .any(|value| value.as_ref().is_some_and(|v| !v.trim().is_empty()))
+    {
+        return Err(manual.into());
+    }
+    let mut argv = vec!["ssh".to_string()];
+    if let Some(port) = host.port {
+        argv.extend(["-p".into(), port.to_string()]);
+    }
+    argv.push(format!("{user}@{}", host.hostname));
+    if has_control_chars(command)
+        || shlex::split(command).as_ref() != Some(&argv)
+        || command.contains([';', '|', '&', '`', '$', '<', '>'])
+    {
+        return Err(
+            "SSH launch does not match the saved destination; enter the password manually".into(),
+        );
+    }
+    Ok((argv, format!("{user}@{}'s password:", host.hostname)))
+}
+
 #[tauri::command]
-pub fn ssh_hosts_write_password(
-    app: tauri::AppHandle<Wry>,
+pub fn ssh_hosts_begin_password(
     db: State<'_, DbState>,
     pty: State<'_, PtyManager>,
     id: String,
     session_id: String,
-) -> Result<(), String> {
+    command: String,
+) -> Result<String, String> {
     let host = {
         let conn = db.0.lock().map_err(|_| "db poisoned")?;
         queries::get_ssh_host(&conn, &id)?.ok_or_else(|| format!("no ssh host {id}"))?
     };
-    if !host.has_password {
-        return Err(format!("no SSH password is stored for {}", host.label));
+    let (argv, prompt) = password_launch(&host, &command)?;
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (argv, prompt, pty, session_id);
+        Err("automatic password entry is unavailable for this terminal; enter it manually".into())
     }
-    let credential = saved_host_credential_id(&host);
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        let sessions = pty.sessions.lock().map_err(|_| "pty state poisoned")?;
+        let session = sessions
+            .get(&session_id)
+            .ok_or("terminal no longer exists")?;
+        if session.exited.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("terminal has exited".into());
+        }
+        let result = session
+            .ssh_autofill
+            .lock()
+            .map_err(|_| "SSH autofill state poisoned")?
+            .arm(command, prompt, argv, saved_host_credential_id(&host));
+        result
+    }
+}
+
+#[tauri::command]
+pub fn ssh_hosts_cancel_password(
+    pty: State<'_, PtyManager>,
+    session_id: String,
+    attempt_id: String,
+) -> Result<(), String> {
+    let sessions = pty.sessions.lock().map_err(|_| "pty state poisoned")?;
+    if let Some(session) = sessions.get(&session_id) {
+        session
+            .ssh_autofill
+            .lock()
+            .map_err(|_| "SSH autofill state poisoned")?
+            .cancel_token(&attempt_id);
+    }
+    Ok(())
+}
+
+/// The token selects a native host/PTY-instance binding. Neither a host ID nor
+/// a frontend password-prompt assertion can grant a credential write.
+#[tauri::command]
+pub fn ssh_hosts_write_password(
+    app: tauri::AppHandle<Wry>,
+    pty: State<'_, PtyManager>,
+    attempt_id: String,
+    session_id: String,
+) -> Result<(), String> {
+    let (grant, foreground, instance) = {
+        let sessions = pty.sessions.lock().map_err(|_| "pty state poisoned")?;
+        let session = sessions
+            .get(&session_id)
+            .ok_or("terminal no longer exists")?;
+        let grant = session
+            .ssh_autofill
+            .lock()
+            .map_err(|_| "SSH autofill state poisoned")?
+            .consume(&attempt_id)?;
+        let foreground = session.verify_ssh_authentication(&grant.argv)?;
+        (
+            grant,
+            foreground,
+            std::sync::Arc::clone(&session.ssh_autofill),
+        )
+    };
+    // A vault may prompt or block. Keep terminal input/close available while
+    // it resolves, then revalidate the exact PTY instance and native revision.
     let secret = crate::credentials::state(&app)
-        .get(&credential)?
-        .ok_or_else(|| format!("no SSH password is stored for {}", host.label))?;
-    pty.write_secret_line(&session_id, &secret)
+        .get(&grant.credential)?
+        .ok_or("the saved SSH password is no longer available")?;
+    let sessions = pty.sessions.lock().map_err(|_| "pty state poisoned")?;
+    let session = sessions
+        .get(&session_id)
+        .ok_or("terminal no longer exists")?;
+    if !std::sync::Arc::ptr_eq(&instance, &session.ssh_autofill) {
+        return Err("terminal was replaced; enter the password manually".into());
+    }
+    session.write_ssh_password(&grant, foreground, &secret)
 }
 
 #[tauri::command]
@@ -680,6 +793,48 @@ pub fn ssh_hosts_import(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn password_launch_is_bound_to_the_saved_user_host_and_options() {
+        let mut saved = queries::SshHost {
+            id: "fixture".into(),
+            label: "Fixture".into(),
+            hostname: "prod-01".into(),
+            username: Some("deploy".into()),
+            port: None,
+            identity_file: None,
+            jump_host: None,
+            extra_args: None,
+            remote_dir: None,
+            post_connect: None,
+            tag: None,
+            color: None,
+            source: "manual".into(),
+            config_alias: None,
+            use_count: 0,
+            last_used_at: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+            has_password: true,
+        };
+        assert!(password_launch(&saved, "ssh deploy@prod-01").is_ok());
+        for command in [
+            "ssh root@prod-01",
+            "ssh deploy@other",
+            "ssh deploy@prod-01; true",
+            "ssh -J bastion deploy@prod-01",
+        ] {
+            assert!(password_launch(&saved, command).is_err(), "{command}");
+        }
+        saved.jump_host = Some("bastion".into());
+        assert!(password_launch(&saved, "ssh deploy@prod-01").is_err());
+        saved.jump_host = None;
+        saved.port = Some(2222);
+        assert!(password_launch(&saved, "ssh deploy@prod-01").is_err());
+        assert!(password_launch(&saved, "ssh -p 2222 deploy@prod-01").is_ok());
+        saved.username = None;
+        assert!(password_launch(&saved, "ssh prod-01").is_err());
+    }
 
     fn host(label: &str, hostname: &str) -> queries::SshHostInput {
         queries::SshHostInput {

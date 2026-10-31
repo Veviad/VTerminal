@@ -1,6 +1,7 @@
 import { useAppStore } from "../stores/appStore";
 import { useRunbookStore } from "../stores/runbookStore";
 import { useScheduleStore } from "../stores/scheduleStore";
+import { useChatStore } from "../stores/chatStore";
 
 /**
  * Which surface owns the right-hand slot of the terminal workspace.
@@ -49,11 +50,21 @@ export function currentRightPanel(): RightPanel {
 export function openRightPanel(panel: RightPanel): void {
   useRunbookStore.getState().setWorkspaceOpen(panel === "runbooks");
   useScheduleStore.getState().setWorkspaceOpen(panel === "schedules");
-  if (panel !== "ai") useAppStore.getState().setSettingsOpen(false);
+  if (panel !== "ai") {
+    useAppStore.getState().setSettingsOpen(false);
+    // These panels live beside the terminal. Opening one from Chat must also
+    // reveal that workspace, while the chat and any active response stay mounted.
+    if (useChatStore.getState().workspaceMode !== "terminal") {
+      void useChatStore.getState().setWorkspaceMode("terminal").catch((error) => {
+        console.error("Could not save the terminal workspace selection:", error);
+      });
+    }
+  }
 }
 
 export function toggleRightPanel(panel: Exclude<RightPanel, "ai">): void {
-  openRightPanel(currentRightPanel() === panel ? "ai" : panel);
+  const visible = useChatStore.getState().workspaceMode === "terminal";
+  openRightPanel(visible && currentRightPanel() === panel ? "ai" : panel);
 }
 
 /** Subscribing hook. Reads both stores so a change in either re-renders the

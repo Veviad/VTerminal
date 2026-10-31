@@ -83,6 +83,23 @@ beforeEach(() => {
 });
 
 describe("toArchiveMessages", () => {
+  it.each(["awaiting", "running"] as const)("archives %s MCP work as interrupted", (status) => {
+    const archived = toArchiveMessages([{
+      ...textMsg("mcp", "assistant"), kind: "mcp_tool",
+      mcp: { approvalId: "a", serverId: "s", serverName: "Server", toolName: "tool", arguments: {}, status },
+    }]);
+    expect(archived[0].content).toContain("(interrupted)");
+    expect(archived[0].content).not.toContain(`(${status})`);
+  });
+  it("stores safe literal activity summaries without metadata or stale running states", () => {
+    const archived = toArchiveMessages([{
+      ...textMsg("activity", "assistant"), kind: "activity",
+      activity: { id: "private-id", kind: "web_search", status: "running" },
+    }]);
+    expect(archived[0]).toMatchObject({ kind: "literal", content: "Web search · Interrupted" });
+    expect(JSON.stringify(archived)).not.toContain("private-id");
+    expect(toArchiveMessages([])).toEqual([]);
+  });
   it("preserves queued and undelivered steers as unconfirmed for restore", () => {
     const queued = { ...textMsg("queued", "user"), steer: "queued" as const };
     const undelivered = { ...textMsg("undelivered", "user"), steer: "undelivered" as const };

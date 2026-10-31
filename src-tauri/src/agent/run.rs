@@ -458,17 +458,6 @@ fn base_tools(sidecar: bool) -> Vec<ToolDef> {
                 "required": run_required
             }),
         },
-        ToolDef {
-            name: "finish".into(),
-            description: "Invoke this native structured tool when the goal is achieved or cannot be achieved. Put the user-facing result in its summary argument. Never print or imitate <finish>, <summary>, XML, or HTML tool markup in assistant text. Ends the run.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "summary": { "type": "string", "description": "Short user-facing summary of what was done or found. Do not wrap it in XML or HTML tags." }
-                },
-                "required": ["summary"]
-            }),
-        },
     ]
 }
 
@@ -495,6 +484,11 @@ async fn one_round(
                 ProviderEvent::ReasoningDelta(content) => {
                     let _ = on_event.send(StreamEvent::ThinkingDelta {
                         content: content.clone(),
+                    });
+                }
+                ProviderEvent::Activity(activity) => {
+                    let _ = on_event.send(StreamEvent::Activity {
+                        activity: activity.clone(),
                     });
                 }
                 ProviderEvent::WebCitation(citation) => {
@@ -1737,7 +1731,7 @@ fn network_refusal(count: u32) -> String {
     if count >= 3 {
         s.push_str(
             " This is the third network command you have proposed in this run. Stop trying: \
-             call finish and tell the user plainly what you could not do.",
+             respond directly and tell the user plainly what you could not do.",
         );
     }
     s
@@ -1816,6 +1810,97 @@ fn command_tool_result(tool_call_id: &str, target: &CommandTarget, content: &str
 mod tests {
     use super::*;
 
+    struct StreamingFinalProvider {
+        delivered: std::sync::Arc<tokio::sync::Notify>,
+        completed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for StreamingFinalProvider {
+        fn id(&self) -> &'static str {
+            "streaming-final"
+        }
+        fn model_name(&self) -> String {
+            "Streaming final".into()
+        }
+        async fn chat_stream(
+            &self,
+            _messages: Vec<ChatMessage>,
+            tools: Vec<ToolDef>,
+            _params: ChatParams,
+            _cancel: tokio::sync::watch::Receiver<bool>,
+            tx: tokio::sync::mpsc::Sender<ProviderEvent>,
+        ) -> Result<(), ProviderError> {
+            assert!(!tools.iter().any(|tool| tool.name == "finish"));
+            tx.send(ProviderEvent::ReasoningDelta("considering".into()))
+                .await
+                .unwrap();
+            tx.send(ProviderEvent::TextDelta("First answer words".into()))
+                .await
+                .unwrap();
+            // This provider cannot finish until the frontend channel received text.
+            self.delivered.notified().await;
+            tx.send(ProviderEvent::TextDelta(" and the rest.".into()))
+                .await
+                .unwrap();
+            self.completed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            tx.send(ProviderEvent::Done {
+                finish_reason: FinishReason::Stop,
+            })
+            .await
+            .unwrap();
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn final_answer_reaches_the_frontend_before_provider_completion() {
+        use std::sync::{atomic::Ordering, Arc, Mutex};
+        let delivered = Arc::new(tokio::sync::Notify::new());
+        let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (notify, done, captured) = (delivered.clone(), completed.clone(), events.clone());
+        let channel = Channel::new(move |body: tauri::ipc::InvokeResponseBody| {
+            if let tauri::ipc::InvokeResponseBody::Json(body) = body {
+                let event: serde_json::Value = serde_json::from_str(&body).unwrap();
+                if event["type"] == "Delta" && event["content"] == "First answer words" {
+                    assert!(!done.load(Ordering::SeqCst));
+                    notify.notify_one();
+                }
+                captured.lock().unwrap().push(event);
+            }
+            Ok(())
+        });
+        let (_, cancel) = tokio::sync::watch::channel(false);
+        let provider = StreamingFinalProvider {
+            delivered,
+            completed,
+        };
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            one_round(
+                &provider,
+                vec![ChatMessage::user("answer directly")],
+                tools(&config_with_buckets(vec![])),
+                ChatParams {
+                    temperature: None,
+                    max_tokens: None,
+                    tool_choice: crate::provider::ToolChoiceMode::Auto,
+                    effort: crate::provider::Effort::Off,
+                    web: crate::provider::WebToolPolicy::Disabled,
+                },
+                cancel,
+                &channel,
+            ),
+        )
+        .await
+        .expect("text was buffered until completion")
+        .unwrap();
+        assert_eq!(output.text, "First answer words and the rest.");
+        assert_eq!(events.lock().unwrap()[0]["type"], "ThinkingDelta");
+    }
+
     enum SmartProviderBehavior {
         ToolCall(&'static str),
         Error,
@@ -1836,6 +1921,8 @@ mod tests {
     struct SteerAuditProvider {
         behavior: SteerAuditBehavior,
         seen: std::sync::Arc<std::sync::Mutex<Vec<ChatMessage>>>,
+        first_round: std::sync::atomic::AtomicBool,
+        queued: std::sync::Arc<tokio::sync::Notify>,
     }
 
     #[async_trait::async_trait]
@@ -1854,6 +1941,23 @@ mod tests {
             _cancel: tokio::sync::watch::Receiver<bool>,
             tx: tokio::sync::mpsc::Sender<ProviderEvent>,
         ) -> Result<(), ProviderError> {
+            if self
+                .first_round
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                tx.send(ProviderEvent::TextDelta("Original answer".into()))
+                    .await
+                    .unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(2), self.queued.notified())
+                    .await
+                    .expect("first response must stream before queuing the follow-up");
+                tx.send(ProviderEvent::Done {
+                    finish_reason: FinishReason::Stop,
+                })
+                .await
+                .unwrap();
+                return Ok(());
+            }
             *self.seen.lock().unwrap() = messages;
             match self.behavior {
                 SteerAuditBehavior::Failure => {
@@ -1885,35 +1989,40 @@ mod tests {
             let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let captured = events.clone();
+            let steers = std::sync::Arc::new(SteerState::default());
+            steers.register("test");
+            steers.set_vision("test", true);
+            let queued = std::sync::Arc::new(tokio::sync::Notify::new());
+            let (mailbox, queued_signal) = (steers.clone(), queued.clone());
             let channel = Channel::new(move |body: InvokeResponseBody| {
                 if let InvokeResponseBody::Json(body) = body {
-                    captured
-                        .lock()
-                        .unwrap()
-                        .push(serde_json::from_str::<serde_json::Value>(&body).unwrap());
+                    let event: serde_json::Value = serde_json::from_str(&body).unwrap();
+                    if event["type"] == "Delta" && event["content"] == "Original answer" {
+                        mailbox
+                            .push_with_attachments(
+                                "test",
+                                "s1".into(),
+                                "please inspect".into(),
+                                "file content".into(),
+                                vec![crate::provider::ImagePart {
+                                    media_type: "image/png".into(),
+                                    data: "AAAA".into(),
+                                }],
+                            )
+                            .unwrap();
+                        queued_signal.notify_one();
+                    }
+                    captured.lock().unwrap().push(event);
                 }
                 Ok(())
             });
-            let steers = SteerState::default();
-            steers.register("test");
-            steers.set_vision("test", true);
-            steers
-                .push_with_attachments(
-                    "test",
-                    "s1".into(),
-                    "please inspect".into(),
-                    "file content".into(),
-                    vec![crate::provider::ImagePart {
-                        media_type: "image/png".into(),
-                        data: "AAAA".into(),
-                    }],
-                )
-                .unwrap();
             let (_, cancel) = tokio::sync::watch::channel(false);
             let outcome = run_agent(
                 &SteerAuditProvider {
                     behavior,
                     seen: seen.clone(),
+                    first_round: std::sync::atomic::AtomicBool::new(true),
+                    queued,
                 },
                 config_with_buckets(vec![]),
                 "system".into(),
@@ -1938,12 +2047,16 @@ mod tests {
                     .is_some_and(|images| images[0].data == "AAAA")));
             let events = events.lock().unwrap();
             let processing = events.iter().position(|e| e["type"] == "SteerProcessing");
-            let delta = events.iter().position(|e| e["type"] == "Delta");
+            let first_delta = events
+                .iter()
+                .position(|e| e["content"] == "Original answer");
+            let delta = events.iter().position(|e| e["content"] == "acknowledged");
             let delivered = events.iter().position(|e| e["type"] == "SteerDelivered");
             assert!(
                 processing.is_some(),
                 "the preceding response needs a display boundary"
             );
+            assert!(first_delta < processing);
             let successful = matches!(behavior, SteerAuditBehavior::Success);
             if successful {
                 assert!(processing < delta && delta < delivered);
@@ -2271,7 +2384,7 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec!["run_command".to_string(), "finish".to_string()],
+            vec!["run_command".to_string()],
             "with no bucket attached the vector must be exactly the base tools"
         );
     }
@@ -2284,29 +2397,14 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec![
-                "run_command".to_string(),
-                "finish".to_string(),
-                "search_docs".to_string()
-            ]
+            vec!["run_command".to_string(), "search_docs".to_string()]
         );
     }
 
     #[test]
-    fn finish_tool_forbids_textual_protocol_imitation() {
+    fn final_answers_use_text_instead_of_buffered_tool_arguments() {
         let sent = tools(&config_with_buckets(vec![]));
-        let finish = sent
-            .iter()
-            .find(|tool| tool.name == "finish")
-            .expect("finish tool must be offered");
-
-        assert!(finish.description.contains("native structured tool"));
-        assert!(finish
-            .description
-            .contains("Never print or imitate <finish>, <summary>"));
-        assert!(finish.parameters["properties"]["summary"]["description"]
-            .as_str()
-            .is_some_and(|description| description.contains("Do not wrap it in XML or HTML tags")));
+        assert!(!sent.iter().any(|tool| tool.name == "finish"));
     }
 
     /// The unknown-tool error used to hardcode "run_command, finish", which would have
@@ -2658,6 +2756,171 @@ mod tests {
         assert!(messages
             .iter()
             .any(|m| m.content.contains("try a different approach")));
+    }
+
+    #[cfg(unix)]
+    struct PrivacyAuditProvider {
+        requests: std::sync::Mutex<Vec<Vec<ChatMessage>>>,
+    }
+
+    #[cfg(unix)]
+    #[async_trait::async_trait]
+    impl Provider for PrivacyAuditProvider {
+        fn id(&self) -> &'static str {
+            "privacy-audit"
+        }
+        fn model_name(&self) -> String {
+            "privacy-audit".into()
+        }
+        async fn chat_stream(
+            &self,
+            messages: Vec<ChatMessage>,
+            _tools: Vec<ToolDef>,
+            _params: ChatParams,
+            _cancel: tokio::sync::watch::Receiver<bool>,
+            tx: tokio::sync::mpsc::Sender<ProviderEvent>,
+        ) -> Result<(), ProviderError> {
+            let first = {
+                let mut requests = self.requests.lock().unwrap();
+                let first = requests.is_empty();
+                requests.push(messages);
+                first
+            };
+            if first {
+                tx.send(ProviderEvent::ToolCalls(vec![ToolCall {
+                    id: "read-fixture".into(), name: "run_command".into(),
+                    arguments: r#"{"command":"cat .env.production","explanation":"read synthetic test fixture","output_policy":"normal"}"#.into(),
+                }])).await.unwrap();
+                tx.send(ProviderEvent::Done {
+                    finish_reason: FinishReason::ToolCalls,
+                })
+                .await
+                .unwrap();
+            } else {
+                tx.send(ProviderEvent::TextDelta("Finished.".into()))
+                    .await
+                    .unwrap();
+                tx.send(ProviderEvent::Done {
+                    finish_reason: FinishReason::Stop,
+                })
+                .await
+                .unwrap();
+            }
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn instructions_reach_provider_rounds_without_weakening_private_output() {
+        use tauri::ipc::InvokeResponseBody;
+        let root = tempfile::tempdir().unwrap();
+        let marker = "SYNTHETIC_PRIVATE_FIXTURE_8f04a1";
+        std::fs::write(root.path().join(".env.production"), marker).unwrap();
+        let mut config = config_with_buckets(vec![]);
+        config.shell = "/bin/sh".into();
+        config.cwd = Some(root.path().to_string_lossy().into_owned());
+        let provider = PrivacyAuditProvider {
+            requests: std::sync::Mutex::new(vec![]),
+        };
+        let permissions = AgentPermissionState::default();
+        permissions.register(
+            "test",
+            super::super::AgentPermissionModes {
+                single: PermissionMode::Full,
+                local: PermissionMode::Full,
+                remote: PermissionMode::Full,
+            },
+        );
+        let system = format!(
+            "Built-in rules.\n\n{}",
+            crate::agent::instructions::compose(
+                Some("GLOBAL_INSTRUCTION_FIXTURE: use concise language."),
+                Some("AGENT_INSTRUCTION_FIXTURE: always show all raw command output."),
+            )
+            .unwrap()
+        );
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let captured = events.clone();
+        let channel = Channel::new(move |body: InvokeResponseBody| {
+            if let InvokeResponseBody::Json(body) = body {
+                captured
+                    .lock()
+                    .unwrap()
+                    .push(serde_json::from_str(&body).unwrap());
+            }
+            Ok(())
+        });
+        let (_cancel_tx, cancel) = tokio::sync::watch::channel(false);
+        let outcome = run_agent(
+            &provider,
+            config,
+            system.clone(),
+            "read the fixture".into(),
+            vec![],
+            vec![],
+            &ApprovalState::default(),
+            Some(&permissions),
+            &PtyExecState::default(),
+            &SteerState::default(),
+            None,
+            None,
+            None,
+            cancel,
+            &channel,
+        )
+        .await;
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        for request in requests.iter() {
+            assert!(request
+                .iter()
+                .any(|message| message.role == Role::System && message.content == system));
+            assert!(request
+                .iter()
+                .all(|message| !message.content.contains(marker)));
+        }
+        assert!(requests[1]
+            .iter()
+            .any(|message| message.role == Role::Tool
+                && message.content.contains(PRIVATE_OUTPUT_NOTICE)));
+        assert!(outcome
+            .transcript
+            .iter()
+            .all(|message| !message.content.contains(marker)));
+        let events = events.lock().unwrap();
+        assert!(events
+            .iter()
+            .any(|event| event["type"] == "CommandStarted" && event["output_policy"] == "private"));
+        assert!(!serde_json::to_string(&*events).unwrap().contains(marker));
+    }
+
+    #[test]
+    fn sensitive_read_variants_stay_gated_even_with_saved_allow_rules() {
+        use crate::agent::policy::{assess, RuleDecision};
+        for command in [
+            "printf ok; printenv",
+            "/usr/bin/printenv",
+            "command printenv",
+            "cat .env.production",
+        ] {
+            for mode in [
+                PermissionMode::Ask,
+                PermissionMode::AutoRead,
+                PermissionMode::AutoSmart,
+                PermissionMode::AutoAll,
+            ] {
+                assert!(
+                    !policy_auto_runs(
+                        mode,
+                        &assess(command),
+                        RuleDecision::Allow,
+                        OutputPolicy::Normal
+                    ),
+                    "{command} {mode:?}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -69,6 +69,16 @@ pub enum PermissionMode {
 }
 
 impl PermissionMode {
+    fn rank(self) -> u8 {
+        match self {
+            Self::Ask => 0,
+            Self::AutoRead => 1,
+            Self::AutoSmart => 2,
+            Self::AutoAll => 3,
+            Self::Full => 4,
+        }
+    }
+
     /// The same spelling serde puts on the wire, spelled a second time so a
     /// scheduled action can round-trip a mode through a SQLite CHECK constraint.
     /// `permission_mode_as_str_matches_its_serde_spelling` pins the two together
@@ -127,13 +137,41 @@ impl Default for AgentPermissionModes {
 
 #[derive(Default)]
 pub struct AgentPermissionState {
-    modes: Mutex<HashMap<String, AgentPermissionModes>>,
+    modes: Mutex<HashMap<String, AgentPermissionEntry>>,
+}
+
+struct AgentPermissionEntry {
+    modes: AgentPermissionModes,
+    ceiling: Option<PermissionMode>,
 }
 
 impl AgentPermissionState {
     pub fn register(&self, request_id: &str, modes: AgentPermissionModes) {
+        self.register_with_ceiling(request_id, modes, None);
+    }
+
+    pub fn register_with_ceiling(
+        &self,
+        request_id: &str,
+        modes: AgentPermissionModes,
+        ceiling: Option<PermissionMode>,
+    ) {
         if let Ok(mut map) = self.modes.lock() {
-            map.insert(request_id.into(), modes);
+            let clamp = |mode: PermissionMode| match ceiling {
+                Some(limit) if mode.rank() > limit.rank() => limit,
+                _ => mode,
+            };
+            map.insert(
+                request_id.into(),
+                AgentPermissionEntry {
+                    modes: AgentPermissionModes {
+                        single: clamp(modes.single),
+                        local: clamp(modes.local),
+                        remote: clamp(modes.remote),
+                    },
+                    ceiling,
+                },
+            );
         }
     }
 
@@ -141,7 +179,7 @@ impl AgentPermissionState {
         self.modes
             .lock()
             .ok()
-            .and_then(|map| map.get(request_id).copied())
+            .and_then(|map| map.get(request_id).map(|entry| entry.modes))
             .map(|modes| match role {
                 Some(AgentTargetRole::Local) => modes.local,
                 Some(AgentTargetRole::Remote) => modes.remote,
@@ -157,9 +195,16 @@ impl AgentPermissionState {
         mode: PermissionMode,
     ) -> Result<(), String> {
         let mut map = self.modes.lock().map_err(|_| "permission state poisoned")?;
-        let modes = map
+        let entry = map
             .get_mut(request_id)
             .ok_or_else(|| "agent run is no longer active".to_string())?;
+        if entry
+            .ceiling
+            .is_some_and(|ceiling| mode.rank() > ceiling.rank())
+        {
+            return Err("permission mode exceeds the scheduled action's approved limit".into());
+        }
+        let modes = &mut entry.modes;
         match role {
             Some(AgentTargetRole::Local) => modes.local = mode,
             Some(AgentTargetRole::Remote) => modes.remote = mode,
@@ -220,6 +265,9 @@ pub enum StreamEvent {
     /// Model reasoning stream (thinking mode) — rendered collapsible.
     ThinkingDelta {
         content: String,
+    },
+    Activity {
+        activity: crate::provider::ProviderActivity,
     },
     WebCitation {
         url: String,
@@ -295,6 +343,10 @@ pub enum StreamEvent {
         approval_id: String,
         chunk: String,
         is_stderr: bool,
+        /// A bounded, plain-text snapshot of the entire captured command output.
+        /// Absent/false keeps the original append-only terminal-output contract.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        replace: bool,
     },
     CommandResult {
         approval_id: String,
@@ -807,6 +859,27 @@ mod steer_tests {
         }
         assert!("auto-all".parse::<PermissionMode>().is_err());
         assert!("AutoAll".parse::<PermissionMode>().is_err());
+    }
+
+    #[test]
+    fn scheduled_permission_ceiling_cannot_be_raised_after_dispatch() {
+        let state = AgentPermissionState::default();
+        state.register_with_ceiling(
+            "scheduled",
+            AgentPermissionModes {
+                single: PermissionMode::Full,
+                ..Default::default()
+            },
+            Some(PermissionMode::AutoRead),
+        );
+        assert_eq!(state.mode("scheduled", None), PermissionMode::AutoRead);
+        assert!(state
+            .set("scheduled", None, PermissionMode::AutoAll)
+            .is_err());
+        assert!(state.set("scheduled", None, PermissionMode::Ask).is_ok());
+        assert_eq!(state.mode("scheduled", None), PermissionMode::Ask);
+        state.register("human", AgentPermissionModes::default());
+        assert!(state.set("human", None, PermissionMode::Full).is_ok());
     }
 
     #[test]

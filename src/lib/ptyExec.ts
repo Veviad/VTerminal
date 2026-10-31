@@ -1196,14 +1196,13 @@ async function runReservedInTerminal({
     job.injected = true;
     if (privateOutput) protectPrivateTerminal(sessionId);
     if (opts.nonceCompletion) entry.tracker.beginRunbookOutputIsolation();
-    // Show what the guards changed: the user approved `systemctl status x`, and
-    // the terminal is about to echo an env prefix and a redirect they never saw.
-    // `hardened.line` rather than `line` — the exit-code sentinel is plumbing,
-    // not a change to what the command does.
-    if (hardened.applied.length || Object.keys(opts.environment ?? {}).length > 0) {
+    // Keep the approved command in the terminal and retain the actual guarded
+    // command in the card's execution details. The shell still reports `typed`
+    // through OSC 6973;CMD, so integrated completion keeps its exact binding.
+    if (typed !== command) {
       useAppStore.getState().setCommandTyped(sessionId, approvalId, typed);
     }
-    if (mode === "sentinel") cancelEcho = expectPtyEcho(entry.term, line, typed);
+    if (line !== command) cancelEcho = expectPtyEcho(entry.term, line, command);
     void api.ptyWrite(sessionId, `${line}\r`).catch(() => {
       job.finish(closedOutcome(job.startedAt, mode));
     });

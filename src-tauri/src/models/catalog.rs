@@ -129,7 +129,7 @@ impl ProviderId {
     }
 }
 
-/// Quality level. Every provider offers exactly one model per tier.
+/// Broad quality and speed category. Providers may offer several models per tier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Tier {
@@ -617,6 +617,25 @@ pub const CATALOG: &[CatalogModel] = &[
         local: None,
     },
     CatalogModel {
+        // This is a new ID rather than the historical GPT-5.6 Terra slot:
+        // that persisted ID already selects GPT-6.1 Sol for existing users.
+        id: "openai/gpt-6.1-terra",
+        provider: ProviderId::OpenAi,
+        tier: Tier::Fast,
+        label: "GPT-6.1 Terra",
+        description: "Fast GPT-6.1 for visual reasoning, computer use and writing. 1.05M context.",
+        wire_model: "gpt-6.1-terra",
+        context_tokens: 1_050_000,
+        efforts: FULL,
+        default_effort: Effort::Medium,
+        supports_temperature: false,
+        supports_tools: true,
+        native_web_search: false,
+        native_web_fetch: false,
+        supports_vision: true,
+        local: None,
+    },
+    CatalogModel {
         id: "openai/gpt-5.6-terra",
         provider: ProviderId::OpenAi,
         tier: Tier::Balanced,
@@ -803,9 +822,9 @@ mod tests {
     }
 
     #[test]
-    fn every_provider_offers_each_tier_once() {
-        // Deliberately explicit, not `all providers`: Local is exempt because
-        // it offers several models per tier, and Remote is not in the table.
+    fn every_cloud_provider_offers_each_tier() {
+        // A provider can offer more than one selectable model in a tier.
+        // Remote models are supplied by the user rather than by this catalog.
         for provider in [
             ProviderId::Anthropic,
             ProviderId::OpenAi,
@@ -816,11 +835,7 @@ mod tests {
                     .iter()
                     .filter(|m| m.provider == provider && m.tier == tier)
                     .count();
-                assert_eq!(
-                    n, 1,
-                    "{:?} should offer exactly one {:?} model",
-                    provider, tier
-                );
+                assert!(n >= 1, "{provider:?} should offer a {tier:?} model");
             }
         }
     }
@@ -877,6 +892,7 @@ mod tests {
             ("anthropic/claude-sonnet-5", "claude-sonnet-5-5", 1_000_000),
             ("anthropic/claude-opus-5", "claude-opus-5-5", 1_000_000),
             ("openai/gpt-5.6-luna", "gpt-6-luna", 1_050_000),
+            ("openai/gpt-6.1-terra", "gpt-6.1-terra", 1_050_000),
             ("openai/gpt-5.6-terra", "gpt-6.1-sol", 1_050_000),
             ("openai/gpt-5.6-sol", "gpt-6-astra", 1_050_000),
             (

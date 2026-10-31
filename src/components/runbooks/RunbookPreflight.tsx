@@ -38,7 +38,7 @@ export function RunbookPreflight({
   const session = useAppStore((state) => state.sessions.find((item) => item.id === sessionId));
   const targetUi = useAppStore((state) => (sessionId ? state.sessionUi[sessionId] : undefined));
   const [values, setValues] = useState<Record<string, string | number | boolean>>(() =>
-    defaultRunbookInputs(definition),
+    initialInputs(definition),
   );
   // The operator's policy and the package's request together set the least this
   // run may keep. `runbooks_start` applies the same clamp, so this only decides
@@ -67,7 +67,7 @@ export function RunbookPreflight({
   }, [ansibleTarget]);
 
   useEffect(() => {
-    setValues(defaultRunbookInputs(definition));
+    setValues(initialInputs(definition));
     setSubmitted(false);
   }, [definition]);
 
@@ -116,6 +116,11 @@ export function RunbookPreflight({
     if (!input.required) return false;
     const value = values[name];
     return value === undefined || value === null || (typeof value === "string" && !value.trim());
+  });
+  const invalidIntegers = inputs.filter(([name, input]) => {
+    const value = values[name];
+    return input.type === "integer" && value !== undefined && value !== "" &&
+      (typeof value !== "number" || !Number.isSafeInteger(value));
   });
 
   return (
@@ -204,8 +209,17 @@ export function RunbookPreflight({
               name={name}
               definition={input}
               value={values[name]}
-              invalid={submitted && missing.some(([missingName]) => missingName === name)}
-              onChange={(value) => setValues((current) => ({ ...current, [name]: value }))}
+              error={submitted && missing.some(([missingName]) => missingName === name)
+                ? "Required."
+                : submitted && invalidIntegers.some(([invalidName]) => invalidName === name)
+                  ? "Enter a whole number within the safe integer range."
+                  : null}
+              onChange={(value) => setValues((current) => {
+                const next = { ...current };
+                if (value === undefined) delete next[name];
+                else next[name] = value;
+                return next;
+              })}
             />
           ))}
         </section>
@@ -268,7 +282,7 @@ export function RunbookPreflight({
       <button
         onClick={() => {
           setSubmitted(true);
-          if (targetReady && missing.length === 0) onStart(values, evidenceMode);
+          if (targetReady && missing.length === 0 && invalidIntegers.length === 0) onStart(values, evidenceMode);
         }}
         disabled={busy || !targetReady}
         className={`${primaryButton} w-full`}
@@ -283,14 +297,14 @@ function RunbookInputField({
   name,
   definition,
   value,
-  invalid,
+  error,
   onChange,
 }: {
   name: string;
   definition: RunbookInputDefinition;
   value: string | number | boolean | undefined;
-  invalid: boolean;
-  onChange(value: string | number | boolean): void;
+  error: string | null;
+  onChange(value: string | number | boolean | undefined): void;
 }) {
   const label = name;
   const describedBy = `runbook-input-${name}-help`;
@@ -306,6 +320,7 @@ function RunbookInputField({
           type="checkbox"
           checked={value === true}
           aria-describedby={describedBy}
+          aria-invalid={error !== null}
           onChange={(event) => onChange(event.target.checked)}
           className="accent-accent"
         />
@@ -313,6 +328,7 @@ function RunbookInputField({
         <select
           value={value === undefined ? "" : String(value)}
           aria-describedby={describedBy}
+          aria-invalid={error !== null}
           onChange={(event) => onChange(coerceInput(event.target.value, definition))}
           className={runbookInputClass}
         >
@@ -326,21 +342,33 @@ function RunbookInputField({
           type={definition.type === "integer" ? "number" : "text"}
           value={value === undefined ? "" : String(value)}
           aria-describedby={describedBy}
+          aria-invalid={error !== null}
           onChange={(event) => onChange(coerceInput(event.target.value, definition))}
-          className={`${runbookInputClass} ${invalid ? "border-error" : ""}`}
+          className={`${runbookInputClass} ${error ? "border-error" : ""}`}
         />
       )}
-      <span id={describedBy} className={`block text-[10px] ${invalid ? "text-error" : "text-text-muted"}`}>
-        {invalid ? "Required." : (definition.description ?? "Non-secret input.")}
+      <span id={describedBy} className={`block text-[10px] ${error ? "text-error" : "text-text-muted"}`}>
+        {error ?? definition.description ?? "Non-secret input."}
       </span>
     </label>
   );
 }
 
-function coerceInput(value: string, definition: RunbookInputDefinition): string | number | boolean {
+function initialInputs(definition: RunbookDefinition): Record<string, string | number | boolean> {
+  const values = defaultRunbookInputs(definition);
+  for (const [name, input] of Object.entries(definition.spec.inputs ?? {})) {
+    // An unchecked required checkbox visibly represents false, not an unset value.
+    if (input.type === "boolean" && input.required && values[name] === undefined) values[name] = false;
+  }
+  return values;
+}
+
+function coerceInput(value: string, definition: RunbookInputDefinition): string | number | boolean | undefined {
+  if (!definition.required && value === "" && definition.type !== "string") return undefined;
   if (definition.type === "integer") {
-    const parsed = Number.parseInt(value, 10);
-    return Number.isFinite(parsed) ? parsed : value;
+    if (value === "") return value;
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) ? parsed : value;
   }
   if (definition.type === "boolean") return value === "true";
   return value;

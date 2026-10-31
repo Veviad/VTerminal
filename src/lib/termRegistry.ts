@@ -13,6 +13,7 @@ import { matchesReserved } from "./keymap";
 import { isWindows } from "./platform";
 import { resolveXtermTheme } from "./xtermTheme";
 import { cancelPtyEcho } from "./ptyEcho";
+import { onTerminalUserInput } from "./terminalUserInput";
 import { cancelTerminalClear, hasPendingTerminalClear } from "./terminalClear";
 import "@xterm/xterm/css/xterm.css";
 
@@ -222,18 +223,13 @@ export function getOrCreateTerm(
     term.onResize(() => entry.scrollListeners.forEach((fn) => fn())),
     term.onRender(() => entry.scrollListeners.forEach((fn) => fn())),
     // Quiescence signals for the agent's idle gate. onWriteParsed fires only
-    // for bytes that came through term.write() — i.e. the PTY — while onData is
-    // the user's keystrokes (plus xterm's own DSR/DA replies).
+    // for bytes that came through term.write() — i.e. the PTY. Protocol replies
+    // must not cancel an expected echo or count as an operator edit.
     term.onWriteParsed(() => {
       entry.lastDataAt = Date.now();
       emitTerm(sessionId, { type: "data" });
     }),
-    term.onData(() => {
-      cancelPtyEcho(term);
-      entry.lastUserInputAt = Date.now();
-      emitTerm(sessionId, { type: "userInput" });
-    }),
-    term.onBinary(() => {
+    onTerminalUserInput(term, () => {
       cancelPtyEcho(term);
       entry.lastUserInputAt = Date.now();
       emitTerm(sessionId, { type: "userInput" });

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useAppStore } from "../stores/appStore";
 import { S } from "../lib/strings";
 
@@ -106,6 +106,78 @@ describe("InstructionsSection", () => {
     await waitFor(() => expect(saveSettings).toHaveBeenCalledWith({ custom_instructions: atCap }));
   });
 
+  it("counts supplementary Unicode characters the same way as Rust", async () => {
+    render(<InstructionsSection />);
+    const box = screen.getByLabelText(S.settings.instructions.global);
+    const text = "😀".repeat(MAX_INSTRUCTION_CHARS);
+    fireEvent.change(box, { target: { value: text } });
+    fireEvent.blur(box);
+    await waitFor(() => expect(saveSettings).toHaveBeenCalledWith({ custom_instructions: text }));
+  });
+
+  it("preserves typing begun while the previous blur-save is pending", async () => {
+    let finish!: () => void;
+    saveSettings.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    render(<InstructionsSection />);
+    const box = screen.getByLabelText(S.settings.instructions.global);
+    fireEvent.change(box, { target: { value: "first save" } });
+    fireEvent.blur(box);
+    await waitFor(() => expect(saveSettings).toHaveBeenCalledTimes(1));
+    fireEvent.change(box, { target: { value: "newer draft" } });
+    await act(async () => { finish(); });
+    expect(box).toHaveValue("newer draft");
+    expect(screen.queryByText(S.settings.instructions.saved)).toBeNull();
+    fireEvent.blur(box);
+    await waitFor(() => expect(saveSettings).toHaveBeenLastCalledWith({ custom_instructions: "newer draft" }));
+  });
+
+  it("orders Clear after an in-flight blur-save without restoring the old draft", async () => {
+    useAppStore.setState({ customInstructions: "stored" });
+    let finish!: () => void;
+    saveSettings.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    render(<InstructionsSection />);
+    const box = screen.getByLabelText(S.settings.instructions.global);
+    fireEvent.change(box, { target: { value: "pending save" } });
+    fireEvent.blur(box);
+    await waitFor(() => expect(saveSettings).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getAllByRole("button", { name: S.settings.instructions.clear })[0]);
+    expect(box).toHaveValue("");
+    expect(saveSettings).toHaveBeenCalledTimes(1);
+    await act(async () => { finish(); });
+    await waitFor(() => expect(saveSettings).toHaveBeenLastCalledWith({ custom_instructions: "" }));
+    expect(box).toHaveValue("");
+    expect(useAppStore.getState().customInstructions).toBe("");
+  });
+
+  it("keeps per-field save ordering when the settings section is reopened", async () => {
+    let finish!: () => void;
+    saveSettings.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const first = render(<InstructionsSection />);
+    fireEvent.change(screen.getByLabelText(S.settings.instructions.global), { target: { value: "old mount" } });
+    fireEvent.blur(screen.getByLabelText(S.settings.instructions.global));
+    await waitFor(() => expect(saveSettings).toHaveBeenCalledTimes(1));
+    first.unmount();
+    render(<InstructionsSection />);
+    const box = screen.getByLabelText(S.settings.instructions.global);
+    fireEvent.change(box, { target: { value: "new mount" } });
+    fireEvent.blur(box);
+    expect(saveSettings).toHaveBeenCalledTimes(1);
+    await act(async () => { finish(); });
+    await waitFor(() => expect(saveSettings).toHaveBeenCalledTimes(2));
+    expect(saveSettings).toHaveBeenLastCalledWith({ custom_instructions: "new mount" });
+    expect(box).toHaveValue("new mount");
+    expect(useAppStore.getState().customInstructions).toBe("new mount");
+  });
+
+  it("settles only the submitted draft to the backend-normalized value", async () => {
+    render(<InstructionsSection />);
+    const box = screen.getByLabelText(S.settings.instructions.global);
+    fireEvent.change(box, { target: { value: "  normalized\r\ntext  " } });
+    fireEvent.blur(box);
+    await waitFor(() => expect(box).toHaveValue("normalized\ntext"));
+    expect(useAppStore.getState().customInstructions).toBe("normalized\ntext");
+  });
+
   /** A rejected save must surface. `useSettings` re-reads the backend on failure,
    *  so a silent catch would leave the box showing text that was never stored. */
   it("shows a backend rejection instead of pretending it saved", async () => {
@@ -116,6 +188,20 @@ describe("InstructionsSection", () => {
     fireEvent.blur(box);
     await waitFor(() => expect(screen.getByText("keychain is blocked")).toBeTruthy());
     expect(screen.queryByText(S.settings.instructions.saved)).toBeNull();
+  });
+
+  it("keeps a failed draft retryable without blocking the next save", async () => {
+    saveSettings.mockRejectedValueOnce(new Error("temporary write failure"));
+    render(<InstructionsSection />);
+    const box = screen.getByLabelText(S.settings.instructions.global);
+    fireEvent.change(box, { target: { value: "retry me" } });
+    fireEvent.blur(box);
+    await waitFor(() => expect(screen.getByText("temporary write failure")).toBeTruthy());
+    expect(box).toHaveValue("retry me");
+    fireEvent.blur(box);
+    await waitFor(() => expect(saveSettings).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(useAppStore.getState().customInstructions).toBe("retry me"));
+    expect(box).toHaveValue("retry me");
   });
 
   /** The three fields are markdown editors now, so what a formatting key writes

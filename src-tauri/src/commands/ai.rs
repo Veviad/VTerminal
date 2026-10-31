@@ -782,6 +782,23 @@ fn agent_terminal_event(outcome: &crate::agent::run::AgentRunOutcome) -> StreamE
     }
 }
 
+fn scheduled_agent_limits(
+    global_web: bool,
+    global_iterations: u32,
+    global_timeout: u32,
+    scheduled: Option<(bool, u32, u32)>,
+) -> (bool, u32, u32) {
+    let (schedule_web, schedule_iterations, schedule_timeout) =
+        scheduled.unwrap_or((true, 100, u32::MAX));
+    (
+        global_web && schedule_web,
+        global_iterations
+            .clamp(1, 100)
+            .min(schedule_iterations.clamp(1, 100)),
+        global_timeout.min(schedule_timeout),
+    )
+}
+
 /// Run one agent turn, returning the model-visible transcript it produced.
 ///
 /// The returned array is what the caller passes back as `history` on the next
@@ -801,6 +818,7 @@ pub async fn agent_start(
     mcp_manager: State<'_, crate::mcp::client::McpManager>,
     mcp_approvals: State<'_, crate::mcp::approval::McpApprovalState>,
     docs: State<'_, crate::docs::db::DocsDb>,
+    db_state: State<'_, crate::database::DbState>,
     request_id: String,
     goal: String,
     context: TerminalContext,
@@ -818,8 +836,38 @@ pub async fn agent_start(
     images: Option<Vec<crate::provider::ImagePart>>,
     permission_modes: Option<crate::agent::AgentPermissionModes>,
     mcp_selection: Option<crate::mcp::config::McpChatSelection>,
+    schedule_run_id: Option<String>,
     on_event: Channel<StreamEvent>,
 ) -> Result<Vec<crate::provider::ChatMessage>, String> {
+    // Resolve unattended turns from the committed backend snapshot. A supplied
+    // run id may never fall back to an interactive turn after cancellation.
+    // Also detect an active scheduled terminal if a caller omits the id.
+    let scheduled = {
+        let conn = db_state.0.lock().map_err(|_| "database lock poisoned")?;
+        crate::scheduled::db::scheduled_agent_plan(
+            &conn,
+            schedule_run_id.as_deref(),
+            &context.session_id,
+            context
+                .remote
+                .as_ref()
+                .and_then(|remote| remote.host_id.as_deref()),
+            context.remote.is_some(),
+            sidecar_targets.is_some(),
+            &goal,
+        )?
+    };
+    if let Some((run_id, _)) = &scheduled {
+        if !crate::scheduled::scheduler::gate_open(&app)
+            || crate::scheduled::scheduler::state(&app)
+                .is_some_and(|state| state.is_cancelled(run_id))
+        {
+            return Err("the scheduled run was cancelled".into());
+        }
+        if images.as_ref().is_some_and(|images| !images.is_empty()) {
+            return Err("a scheduled prompt cannot use unscheduled image attachments".into());
+        }
+    }
     if let Some(targets) = &sidecar_targets {
         if let Err(message) = targets.validate() {
             let _ = on_event.send(StreamEvent::Error {
@@ -829,14 +877,19 @@ pub async fn agent_start(
         }
     }
 
-    // Before anything that can await: resolving a local provider loads a GGUF,
-    // which takes seconds, and a steer typed in that window must not be refused
-    // for a run the user can already see starting.
+    let ceiling = scheduled.as_ref().map(|(_, plan)| plan.permission_mode);
+    if let Some(mode) = ceiling {
+        crate::scheduled::validate::clamp_for_schedule(mode)?;
+    }
+    // Register cancellation before provider or MCP setup can await; otherwise
+    // a stop during preflight is lost and the turn can start afterwards.
+    let cancel_rx = ai_state.register(&request_id);
     steers.register(&request_id);
-    permissions.register(&request_id, permission_modes.unwrap_or_default());
+    permissions.register_with_ceiling(&request_id, permission_modes.unwrap_or_default(), ceiling);
     let resolved = match resolve_provider(&app).await {
         Ok(r) => r,
         Err(message) => {
+            ai_state.finish(&request_id);
             steers.drain_for_request(&request_id);
             permissions.finish(&request_id);
             let _ = on_event.send(StreamEvent::Error {
@@ -849,14 +902,28 @@ pub async fn agent_start(
     steers.set_vision(&request_id, resolved.model.supports_vision);
     // The user's switch AND what this model can actually do. Each provider
     // intersects it again with its own catalog entry, so this is a ceiling.
-    let web_access = crate::commands::settings::read_bool(&app, "ai_web_access", true);
+    let (web_access, max_iterations, command_timeout_secs) = scheduled_agent_limits(
+        crate::commands::settings::read_bool(&app, "ai_web_access", true),
+        crate::commands::settings::read_u32(&app, "agent_max_iterations", 10),
+        crate::commands::settings::read_u32(&app, "agent_command_timeout_secs", 120),
+        scheduled.as_ref().map(|(_, plan)| {
+            (
+                plan.web_access,
+                plan.max_iterations,
+                plan.command_timeout_secs,
+            )
+        }),
+    );
     let native_web = web_access && resolved.model.native_web_fetch;
     let native_search = native_web && resolved.model.native_web_search;
     // Gate before the provider box is moved out of `resolved`.
     let (goal_images, gate_note) = gate_images(resolved.model, images.unwrap_or_default());
     let conversation_id = context.session_id.clone();
-    let mcp_selection = mcp_selection.unwrap_or_default();
-    let mcp_context = crate::agent::prepare_mcp_context(
+    let mcp_selection = scheduled
+        .as_ref()
+        .map(|(_, plan)| plan.mcp_selection.clone())
+        .unwrap_or_else(|| mcp_selection.unwrap_or_default());
+    let mcp_context = match crate::agent::prepare_mcp_context(
         &app,
         &mcp_manager,
         &mcp_approvals,
@@ -866,7 +933,16 @@ pub async fn agent_start(
         resolved.model,
         &on_event,
     )
-    .await?;
+    .await
+    {
+        Ok(context) => context,
+        Err(error) => {
+            ai_state.finish(&request_id);
+            steers.drain_for_request(&request_id);
+            permissions.finish(&request_id);
+            return Err(error);
+        }
+    };
     let provider = resolved.provider;
 
     let shell = crate::commands::settings::read_string(&app, "shell_path")
@@ -883,7 +959,10 @@ pub async fn agent_start(
     // Anthropic cache breakpoint's span.
     let docs_enabled = crate::commands::settings::read_bool(&app, "docs_enabled", false);
     let doc_buckets: Vec<crate::knowledge::KnowledgeBucketRef> = if docs_enabled {
-        doc_buckets.unwrap_or_default()
+        scheduled
+            .as_ref()
+            .map(|(_, plan)| plan.doc_buckets.clone())
+            .unwrap_or_else(|| doc_buckets.unwrap_or_default())
     } else {
         Vec::new()
     };
@@ -922,26 +1001,26 @@ pub async fn agent_start(
         // 1..=100 but `read_u32` returns a hand-edited `settings.json` verbatim,
         // and the value now feeds both the 3x steer hard cap and a number shown
         // to the user.
-        max_iterations: crate::commands::settings::read_u32(&app, "agent_max_iterations", 10)
-            .clamp(1, 100),
+        max_iterations,
         // All three from ONE read, so the guard and the compactor can never
         // disagree about how big the window is.
         context_tokens: agent_compaction.window_tokens,
         auto_compact: agent_compaction.enabled,
         compact_threshold_percent: agent_compaction.threshold_percent,
-        command_timeout_secs: u64::from(crate::commands::settings::read_u32(
-            &app,
-            "agent_command_timeout_secs",
-            120,
-        )),
+        command_timeout_secs: u64::from(command_timeout_secs),
         web_access,
         policy_rules: crate::commands::settings::read_command_policy_rules(&app),
-        policy_scope_single: context
-            .remote
+        policy_scope_single: scheduled
             .as_ref()
-            .and_then(|remote| remote.host_id.as_ref().or(remote.target.as_ref()))
-            .map(|identity| format!("remote:{identity}"))
-            .unwrap_or_else(|| "local".into()),
+            .and_then(|(_, plan)| plan.target.host_id().map(|id| format!("remote:{id}")))
+            .unwrap_or_else(|| {
+                context
+                    .remote
+                    .as_ref()
+                    .and_then(|remote| remote.host_id.as_ref().or(remote.target.as_ref()))
+                    .map(|identity| format!("remote:{identity}"))
+                    .unwrap_or_else(|| "local".into())
+            }),
         policy_scope_remote: sidecar_targets
             .as_ref()
             .and_then(|targets| targets.remote.remote.as_ref())
@@ -1017,7 +1096,38 @@ pub async fn agent_start(
         crate::agent::instructions::Surface::Agent,
         &mut system_prompt,
     );
-    let cancel_rx = ai_state.register(&request_id);
+    let scheduled_still_active = if let Some((run_id, _)) = &scheduled {
+        let checked = db_state
+            .0
+            .lock()
+            .map_err(|_| "database lock poisoned".to_string())
+            .and_then(|conn| {
+                crate::scheduled::db::scheduled_agent_plan(
+                    &conn,
+                    Some(run_id),
+                    &context.session_id,
+                    context
+                        .remote
+                        .as_ref()
+                        .and_then(|remote| remote.host_id.as_deref()),
+                    context.remote.is_some(),
+                    sidecar_targets.is_some(),
+                    &goal,
+                )
+            });
+        checked.is_ok_and(|plan| plan.is_some())
+            && crate::scheduled::scheduler::gate_open(&app)
+            && !crate::scheduled::scheduler::state(&app)
+                .is_some_and(|state| state.is_cancelled(run_id))
+    } else {
+        true
+    };
+    if *cancel_rx.borrow() || !scheduled_still_active {
+        ai_state.finish(&request_id);
+        steers.drain_for_request(&request_id);
+        permissions.finish(&request_id);
+        return Err("the agent run was cancelled during setup".into());
+    }
 
     let _ = on_event.send(StreamEvent::Started {
         request_id: request_id.clone(),
@@ -1153,6 +1263,11 @@ fn forward_chat_provider_event(
         ProviderEvent::ReasoningDelta(delta) => {
             let _ = on_event.send(StreamEvent::ThinkingDelta {
                 content: delta.clone(),
+            });
+        }
+        ProviderEvent::Activity(activity) => {
+            let _ = on_event.send(StreamEvent::Activity {
+                activity: activity.clone(),
             });
         }
         ProviderEvent::WebCitation(citation) => {
@@ -1602,6 +1717,20 @@ mod title_tests {
 #[cfg(test)]
 mod tests {
     use super::ThinkFilter;
+
+    #[test]
+    fn scheduled_limits_never_widen_global_or_action_settings() {
+        use super::scheduled_agent_limits;
+        assert_eq!(scheduled_agent_limits(true, 20, 120, None), (true, 20, 120));
+        assert_eq!(
+            scheduled_agent_limits(true, 20, 120, Some((false, 5, 30))),
+            (false, 5, 30)
+        );
+        assert_eq!(
+            scheduled_agent_limits(false, 5, 30, Some((true, 20, 120))),
+            (false, 5, 30)
+        );
+    }
 
     #[test]
     fn passes_plain_text() {

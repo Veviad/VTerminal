@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   saveSettings: vi.fn(),
   abortSession: vi.fn(),
   interruptJob: vi.fn(),
+  cancelAgent: vi.fn(),
 }));
 
 vi.mock("../lib/tauri", () => ({
@@ -18,6 +19,10 @@ vi.mock("../lib/tauri", () => ({
 vi.mock("../lib/ptyExec", () => ({
   abortSession: mocks.abortSession,
   interruptJob: mocks.interruptJob,
+}));
+
+vi.mock("../hooks/useAiStream", () => ({
+  useAiStream: () => ({ cancel: mocks.cancelAgent }),
 }));
 
 import { useSettings } from "../hooks/useSettings";
@@ -71,6 +76,14 @@ describe("disabling Scheduled Actions", () => {
     // And the exact owned job is aborted, not merely marked.
     expect(mocks.interruptJob).toHaveBeenCalledWith("s1", "a1");
     expect(mocks.abortSession).toHaveBeenCalledWith("s1", "cancelled", "a1");
+  });
+
+  it("cancels an active scheduled agent when schedules are switched off", async () => {
+    useAppStore.setState({ aiStreams: { s1: { requestId: "request-1" } as never } });
+    registerLiveScheduleJob({ runId: "r1", attemptId: "a1", sessionId: "s1", kind: "prompt", requestId: "request-1" });
+    const { result } = renderHook(() => useSettings());
+    await act(async () => { await result.current.save({ scheduled_actions_enabled: false }); });
+    expect(mocks.cancelAgent).toHaveBeenCalledWith("s1");
   });
 
   /** A rejected save can still have changed durable state, so never guess which

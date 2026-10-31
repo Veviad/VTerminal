@@ -249,6 +249,8 @@ pub fn run() {
             commands::ssh_hosts::ssh_hosts_update,
             commands::ssh_hosts::ssh_hosts_set_password,
             commands::ssh_hosts::ssh_hosts_write_password,
+            commands::ssh_hosts::ssh_hosts_begin_password,
+            commands::ssh_hosts::ssh_hosts_cancel_password,
             commands::ssh_hosts::ssh_hosts_delete,
             commands::ssh_hosts::ssh_hosts_touch,
             commands::ssh_hosts::ssh_hosts_scan_config,

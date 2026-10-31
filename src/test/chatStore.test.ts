@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { waitFor } from "@testing-library/react";
 import type {
   CatalogEntry,
   ChatDetail,
@@ -86,6 +87,13 @@ function chatModel(): CatalogEntry {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
 describe("Chat workspace store", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -96,6 +104,7 @@ describe("Chat workspace store", () => {
     mocks.aiNameChat.mockResolvedValue("Generated title");
     mocks.mcpDisconnect.mockResolvedValue(undefined);
     mocks.respondToMcpApproval.mockResolvedValue(undefined);
+    mocks.aiCancel.mockResolvedValue(undefined);
     mocks.saveSettings.mockResolvedValue(undefined);
     mocks.modelStatus.mockResolvedValue({
       loaded: null,
@@ -117,10 +126,207 @@ describe("Chat workspace store", () => {
       archivedOpen: false,
       stream: idleStream(),
       pendingAttachments: [],
+      mutatingChatIds: [],
       attachError: null,
       attachStatus: null,
       knowledgeWarning: null,
     });
+  });
+
+  it("reserves preparation synchronously and preserves attachments staged during a save", async () => {
+    const active = summary("prepare", false, 0);
+    const saving = deferred<void>();
+    mocks.chatSave.mockImplementationOnce(() => saving.promise);
+    mocks.chatStart.mockResolvedValue([]);
+    useChatStore.setState({ current: detail(active), summaries: [active] });
+    const first = useChatStore.getState().send("first");
+    await useChatStore.getState().send("duplicate");
+    await waitFor(() => expect(mocks.chatSave).toHaveBeenCalledTimes(1));
+    useChatStore.getState().addAttachments([{
+      id: "later", kind: "text", name: "later.txt", mediaType: "text/plain", bytes: 5, text: "later",
+    }]);
+    saving.resolve();
+    await first;
+    expect(mocks.chatStart).toHaveBeenCalledTimes(1);
+    expect(mocks.chatStart.mock.calls[0][2]).toBe("first");
+    expect(useChatStore.getState().pendingAttachments.map((item) => item.id)).toEqual(["later"]);
+  });
+
+  it("keeps the latest rapid chat selection when an older read finishes last", async () => {
+    const older = deferred<ChatDetail>();
+    const a = summary("a");
+    const b = summary("b");
+    useChatStore.setState({ current: detail(summary("initial")), summaries: [a, b] });
+    mocks.chatGet.mockImplementationOnce(() => older.promise).mockResolvedValueOnce(detail(b));
+    const first = useChatStore.getState().selectChat("a");
+    await useChatStore.getState().selectChat("b");
+    older.resolve(detail(a));
+    await first;
+    expect(useChatStore.getState().current!.summary.id).toBe("b");
+    expect(mocks.saveSettings).toHaveBeenLastCalledWith({ active_chat_id: "b" });
+  });
+
+  it("does not restore an older selection after delayed attachment hydration", async () => {
+    const bytes = deferred<number[]>();
+    const a = detail(summary("images"));
+    a.messages = [{ id: "image-message", sort_order: 0, role: "user", content: "image", thinking: null,
+      model: null, prompt_tokens: null, completion_tokens: null, citations: [], mcp_calls: [],
+      attachments: [{ id: "image", kind: "image", name: "test.png", media_type: "image/png", bytes: 3,
+        path: "/tmp/test.png", width: null, height: null }], created_at: "now" }];
+    const b = detail(summary("text"));
+    mocks.chatGet.mockResolvedValueOnce(a).mockResolvedValueOnce(b);
+    mocks.attachmentRead.mockImplementationOnce(() => bytes.promise);
+    const first = useChatStore.getState().selectChat(a.summary.id);
+    await waitFor(() => expect(mocks.attachmentRead).toHaveBeenCalledTimes(1));
+    await useChatStore.getState().selectChat(b.summary.id);
+    bytes.resolve([1, 2, 3]);
+    await first;
+    expect(useChatStore.getState().current!.summary.id).toBe(b.summary.id);
+  });
+
+  it("orders remembered-selection writes so a slow earlier save cannot become the final preference", async () => {
+    const save = deferred<void>();
+    const a = detail(summary("a"));
+    const b = detail(summary("b"));
+    mocks.chatGet.mockResolvedValueOnce(a).mockResolvedValueOnce(b);
+    mocks.saveSettings.mockImplementationOnce(() => save.promise);
+    const first = useChatStore.getState().selectChat("a");
+    await waitFor(() => expect(mocks.saveSettings).toHaveBeenCalledTimes(1));
+    const second = useChatStore.getState().selectChat("b");
+    await waitFor(() => expect(useChatStore.getState().current!.summary.id).toBe("b"));
+    expect(mocks.saveSettings).toHaveBeenCalledTimes(1);
+    save.resolve();
+    await Promise.all([first, second]);
+    expect(mocks.saveSettings).toHaveBeenLastCalledWith({ active_chat_id: "b" });
+  });
+
+  it.each(["select", "create"] as const)("does not let a delayed %s abandon a request started in the current chat", async (operation) => {
+    const active = summary("current", false, 1);
+    const read = deferred<ChatDetail>();
+    const save = deferred<void>();
+    const provider = deferred<ChatMessage[]>();
+    useChatStore.setState({ current: detail(active), summaries: [active] });
+    mocks.chatStart.mockImplementationOnce((...args: unknown[]) => {
+      (args[7] as (event: StreamEvent) => void)({ type: "Delta", content: "Current response" });
+      return provider.promise;
+    });
+    if (operation === "select") mocks.chatGet.mockImplementationOnce(() => read.promise);
+    else mocks.chatSave.mockImplementationOnce(() => save.promise);
+    const selection = operation === "select" ? useChatStore.getState().selectChat("other") : useChatStore.getState().createChat();
+    if (operation === "create") await waitFor(() => expect(mocks.chatSave).toHaveBeenCalledTimes(1));
+    const run = useChatStore.getState().send("continue here");
+    await waitFor(() => expect(mocks.chatStart).toHaveBeenCalledTimes(1));
+    const requestId = useChatStore.getState().stream.requestId;
+    read.resolve(detail(summary("other")));
+    save.resolve();
+    await selection;
+    expect(useChatStore.getState().current!.summary.id).toBe("current");
+    expect(useChatStore.getState().stream.requestId).toBe(requestId);
+    expect(useChatStore.getState().stream.content).toBe("Current response");
+    provider.resolve([]);
+    await run;
+  });
+
+  it("keeps a newly selected chat when an earlier delete finishes", async () => {
+    const deletion = deferred<void>();
+    const a = summary("delete-me");
+    const b = summary("keep-me");
+    useChatStore.setState({ current: detail(a), summaries: [a, b] });
+    mocks.chatDelete.mockImplementationOnce(() => deletion.promise);
+    mocks.chatGet.mockResolvedValueOnce(detail(b));
+    const deleting = useChatStore.getState().deleteChat(a.id);
+    await useChatStore.getState().selectChat(b.id);
+    deletion.resolve();
+    await deleting;
+    expect(useChatStore.getState().current!.summary.id).toBe(b.id);
+    expect(mocks.chatGet).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["archive", "delete"] as const)("reserves %s before awaiting and keeps an unsent attachment retryable on failure", async (operation) => {
+    const active = summary("mutating");
+    const mutation = deferred<void>();
+    const attachment = { id: "draft-file", kind: "text" as const, name: "draft.txt", mediaType: "text/plain", bytes: 5, text: "draft" };
+    useChatStore.setState({ current: detail(active), summaries: [active], pendingAttachments: [attachment] });
+    if (operation === "archive") mocks.chatSetArchived.mockImplementationOnce(() => mutation.promise);
+    else mocks.chatDelete.mockImplementationOnce(() => mutation.promise);
+    const changing = operation === "archive" ? useChatStore.getState().archive(true) : useChatStore.getState().deleteChat();
+    expect(useChatStore.getState().mutatingChatIds).toEqual([active.id]);
+    await useChatStore.getState().send("keep my draft");
+    expect(mocks.chatStart).not.toHaveBeenCalled();
+    expect(mocks.chatSave).not.toHaveBeenCalled();
+    expect(useChatStore.getState().pendingAttachments).toEqual([attachment]);
+    mutation.reject(new Error("mutation failed"));
+    await expect(changing).rejects.toThrow("mutation failed");
+    expect(useChatStore.getState().mutatingChatIds).toEqual([]);
+    expect(useChatStore.getState().pendingAttachments).toEqual([attachment]);
+    mocks.chatStart.mockResolvedValue([]);
+    await useChatStore.getState().send("keep my draft");
+    expect(mocks.chatStart.mock.calls[0][2]).toContain("draft");
+  });
+
+  it("preserves staged draft attachments when a successful deletion selects the next chat", async () => {
+    const a = summary("delete-me");
+    const b = summary("keep-me");
+    const attachment = { id: "unsent", kind: "text" as const, name: "draft.txt", mediaType: "text/plain", bytes: 5, text: "draft" };
+    useChatStore.setState({ current: detail(a), summaries: [a, b], pendingAttachments: [attachment] });
+    mocks.chatGet.mockResolvedValueOnce(detail(b));
+    await useChatStore.getState().deleteChat();
+    expect(useChatStore.getState().current!.summary.id).toBe(b.id);
+    expect(useChatStore.getState().pendingAttachments).toEqual([attachment]);
+    expect(useChatStore.getState().mutatingChatIds).toEqual([]);
+  });
+
+  it("fences a cancelled preflight so its delayed save cannot start a provider or reset a retry", async () => {
+    const active = summary("preflight-cancel", false, 0);
+    const saving = deferred<void>();
+    mocks.chatSave.mockImplementationOnce(() => saving.promise);
+    mocks.chatStart.mockResolvedValue([]);
+    useChatStore.setState({ current: detail(active), summaries: [active] });
+    const first = useChatStore.getState().send("cancel this");
+    await waitFor(() => expect(mocks.chatSave).toHaveBeenCalledTimes(1));
+    await useChatStore.getState().stop();
+    const second = useChatStore.getState().send("retry");
+    saving.resolve();
+    await Promise.all([first, second]);
+    expect(mocks.chatStart).toHaveBeenCalledTimes(1);
+    expect(mocks.chatStart.mock.calls[0][2]).toBe("retry");
+    expect(useChatStore.getState().current!.messages[0].content).toBe("retry");
+  });
+
+  it.each(["resolve", "reject"] as const)("ignores a superseded provider's late %s and keeps an Error busy until settlement", async (completion) => {
+    const active = summary("old", false, 0);
+    const old = deferred<ChatMessage[]>();
+    const fresh = deferred<ChatMessage[]>();
+    let oldEvent!: (event: StreamEvent) => void;
+    mocks.chatStart.mockImplementationOnce((...args: unknown[]) => {
+      oldEvent = args[7] as (event: StreamEvent) => void;
+      return old.promise;
+    }).mockImplementationOnce((...args: unknown[]) => {
+      (args[7] as (event: StreamEvent) => void)({ type: "Delta", content: "New answer" });
+      return fresh.promise;
+    });
+    useChatStore.setState({ current: detail(active), summaries: [active] });
+    const oldRun = useChatStore.getState().send("old request");
+    await waitFor(() => expect(mocks.chatStart).toHaveBeenCalledTimes(1));
+    oldEvent({ type: "Error", message: "old failed" });
+    await useChatStore.getState().send("premature retry");
+    expect(mocks.chatStart).toHaveBeenCalledTimes(1);
+    // Recovery/reinitialization can replace the whole selected conversation.
+    const newer = summary("new", false, 0);
+    useChatStore.setState({ current: detail(newer), summaries: [newer], stream: idleStream() });
+    const newRun = useChatStore.getState().send("new request");
+    await waitFor(() => expect(mocks.chatStart).toHaveBeenCalledTimes(2));
+    const newRequestId = useChatStore.getState().stream.requestId;
+    if (completion === "reject") old.reject(new Error("late old rejection"));
+    else old.resolve([]);
+    await oldRun;
+    expect(useChatStore.getState().stream.requestId).toBe(newRequestId);
+    expect(useChatStore.getState().stream.content).toBe("New answer");
+    expect(useChatStore.getState().stream.lastError).toBeNull();
+    fresh.resolve([]);
+    await newRun;
+    expect(useChatStore.getState().current!.summary.id).toBe("new");
+    expect(useChatStore.getState().current!.messages[1].content).toBe("New answer");
   });
 
   it("falls back from a missing remembered chat to the newest active chat", async () => {
@@ -471,5 +677,28 @@ describe("Chat workspace store", () => {
     });
     expect(final.model_transcript).toBe(transcript);
     expect(useChatStore.getState().stream.status).toBe("idle");
+  });
+
+  it.each(["done", "error", "cancelled", "interrupted"] as const)("persists native activity as %s and streams text before the provider completes", async (status) => {
+    const active = summary("activity", false, 0);
+    useChatStore.setState({ current: detail(active), summaries: [active] });
+    mocks.chatStart.mockImplementation(async (...args: unknown[]) => {
+      const onEvent = args[7] as (event: StreamEvent) => void;
+      onEvent({ type: "Activity", activity: { id: "native-1", kind: "web_search", status: "running" } });
+      onEvent({ type: "Delta", content: "First words" });
+      expect(useChatStore.getState().stream.content).toBe("First words");
+      expect(useChatStore.getState().stream.status).toBe("streaming");
+      expect(useChatStore.getState().stream.activities[0].status).toBe("running");
+      if (status === "done") onEvent({ type: "Activity", activity: { id: "native-1", kind: "web_search", status: "done" } });
+      if (status === "cancelled") onEvent({ type: "Cancelled" });
+      if (status === "error") throw new Error("provider failed");
+      return [];
+    });
+    await useChatStore.getState().send("search");
+    const response = useChatStore.getState().current!.messages[1];
+    expect(response.activities).toEqual([{ id: "native-1", kind: "web_search", status }]);
+    expect(response.content).toBe("First words");
+    const saved = mocks.chatSave.mock.calls[mocks.chatSave.mock.calls.length - 1][0] as ChatSaveInput;
+    expect(saved.messages[1].activities).toEqual(response.activities);
   });
 });
