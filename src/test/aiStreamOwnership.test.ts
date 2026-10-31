@@ -139,6 +139,65 @@ beforeEach(() => {
 });
 
 describe("steering with attachments", () => {
+  it.each(["done", "error", "cancelled"] as const)("streams activity and final text before completion and settles %s truthfully", async (outcome) => {
+    const agent = deferred<ChatMessage[]>();
+    let onEvent!: (event: StreamEvent) => void;
+    api.agentStart.mockImplementationOnce((...args: unknown[]) => {
+      onEvent = args[6] as (event: StreamEvent) => void;
+      return agent.promise;
+    });
+    const { result } = renderHook(() => useAiStream());
+    let run!: Promise<void>;
+    act(() => { run = result.current.startAgent(SID, "research"); });
+    await flushPreflight();
+    act(() => {
+      onEvent({ type: "Activity", activity: { id: "web-1", kind: "web_search", status: "running" } });
+      onEvent({ type: "ThinkingDelta", content: "Thoughts" });
+      onEvent({ type: "Delta", content: "First answer words" });
+    });
+    expect(useAppStore.getState().aiStreams[SID].streamingContent).toBe("First answer words");
+    expect(useAppStore.getState().aiStreams[SID].requestId).toBeTruthy();
+    expect(useAppStore.getState().aiStreams[SID].messages.find((m) => m.activity)?.activity?.status).toBe("running");
+    act(() => {
+      if (outcome === "done") {
+        onEvent({ type: "Activity", activity: { id: "web-1", kind: "web_search", status: "done" } });
+        onEvent({ type: "Done", prompt_tokens: 1, completion_tokens: 2 });
+      } else if (outcome === "error") onEvent({ type: "Error", message: "provider failed" });
+      else onEvent({ type: "Cancelled" });
+    });
+    agent.resolve([]);
+    await act(async () => run);
+    const messages = useAppStore.getState().aiStreams[SID].messages;
+    expect(messages.filter((m) => m.activity)).toHaveLength(1);
+    expect(messages.find((m) => m.activity)?.activity?.status).toBe(outcome);
+    expect(messages.find((m) => m.content === "First answer words")).toBeTruthy();
+  });
+
+  it("replaces captured output snapshots while preserving append events and private output", async () => {
+    const agent = deferred<ChatMessage[]>();
+    let onEvent!: (event: StreamEvent) => void;
+    api.agentStart.mockImplementationOnce((...args: unknown[]) => {
+      onEvent = args[6] as (event: StreamEvent) => void;
+      return agent.promise;
+    });
+    const { result } = renderHook(() => useAiStream());
+    let run!: Promise<void>;
+    act(() => { run = result.current.startAgent(SID, "read progress"); });
+    await flushPreflight();
+    act(() => {
+      onEvent({ type: "CommandStarted", approval_id: "public", command: "progress", explanation: "", output_policy: "normal" });
+      onEvent({ type: "CommandOutput", approval_id: "public", is_stderr: false, chunk: "0%" });
+      onEvent({ type: "CommandOutput", approval_id: "public", is_stderr: false, chunk: "100%", replace: true });
+      onEvent({ type: "CommandOutput", approval_id: "public", is_stderr: false, chunk: " done" });
+      onEvent({ type: "CommandStarted", approval_id: "private", command: "read secret", explanation: "", output_policy: "private" });
+      onEvent({ type: "CommandOutput", approval_id: "private", is_stderr: false, chunk: "PRIVATE", replace: true });
+    });
+    const messages = useAppStore.getState().aiStreams[SID].messages;
+    expect(messages.find((m) => m.id === "cmd-public")?.command?.output).toBe("100% done");
+    expect(messages.find((m) => m.id === "cmd-private")?.command?.output).toBe("");
+    agent.resolve([]);
+    await act(async () => run);
+  });
   it("separates the next response from the rest of the previous response while delivery is pending", async () => {
     const agent = deferred<ChatMessage[]>();
     let onEvent!: (event: StreamEvent) => void;
@@ -662,6 +721,25 @@ describe("AI generation ownership", () => {
     expect(stream.status).toBe("error");
     expect(stream.requestId).toBeNull();
     expect(stream.lastError).toContain("attachment preflight failed");
+    expect(stream.messages).toEqual([]);
+  });
+
+  it("does not send an ask without an attached image whose data is unavailable", async () => {
+    useAppStore.setState({ catalog: [{ id: "test-model", supports_vision: true } as never] });
+    const image: Attachment = {
+      id: "missing-image", kind: "image", name: "missing.png",
+      mediaType: "image/png", bytes: 4, path: "/tmp/missing.png",
+    };
+    useAppStore.getState().attachFilesToAi(SID, [image]);
+    const { result } = renderHook(() => useAiStream());
+
+    await act(async () => result.current.ask(SID, "what is shown?"));
+
+    const stream = useAppStore.getState().aiStreams[SID];
+    expect(api.aiAsk).not.toHaveBeenCalled();
+    expect(stream.status).toBe("error");
+    expect(stream.requestId).toBeNull();
+    expect(stream.pendingAttachments).toEqual([image]);
     expect(stream.messages).toEqual([]);
   });
 

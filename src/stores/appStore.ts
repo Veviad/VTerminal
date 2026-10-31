@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type {
   AiMessage,
+  ProviderActivity,
   Attachment,
   Block,
   CatalogEntry,
@@ -24,6 +25,7 @@ import type {
   SelectableAiMode,
   VisionCatalogEntry,
 } from "../lib/types";
+import { settleActivities } from "../lib/activity";
 import { PRIVATE_OUTPUT_NOTICE } from "../lib/types";
 import type { EvidenceRecordingPolicy } from "../lib/runbooks";
 import {
@@ -418,6 +420,7 @@ export interface AppState {
   pushAiMessage(sessionId: string, msg: AiMessage): void;
   appendAiDelta(sessionId: string, content: string): void;
   appendThinking(sessionId: string, content: string): void;
+  recordAiActivity(sessionId: string, activity: ProviderActivity): void;
   setPendingProposal(
     sessionId: string,
     proposal: AiStreamState["pendingProposal"],
@@ -495,6 +498,7 @@ export interface AppState {
     error?: string,
     usage?: { prompt: number; completion: number },
     generationId?: string,
+    outcome?: "cancelled",
   ): void;
   /** Retire every continuation for the current run. */
   fenceAiGeneration(sessionId: string): void;
@@ -867,14 +871,14 @@ function settleOrphanedCommands(messages: AiMessage[]): AiMessage[] {
   );
 }
 
-function settleFencedMessages(messages: AiMessage[]): AiMessage[] {
-  return settleOrphanedCommands(
-    messages.map((message) =>
-      message.steer === "queued"
-        ? { ...message, steer: "undelivered" as const }
-        : message,
-    ),
-  );
+function settleFencedMessages(messages: AiMessage[], outcome: "error" | "cancelled" | "interrupted" = "interrupted"): AiMessage[] {
+  return settleOrphanedCommands(messages.map((message) => ({
+    ...message,
+    ...(message.steer === "queued" ? { steer: "undelivered" as const } : {}),
+    ...(message.activity ? { activity: settleActivities([message.activity], outcome)[0] } : {}),
+    ...(message.mcp && (message.mcp.status === "running" || message.mcp.status === "awaiting")
+      ? { mcp: { ...message.mcp, status: "error" as const, error: outcome === "cancelled" ? "Cancelled" : outcome === "error" ? "Run failed" : "Interrupted" } } : {}),
+  })));
 }
 
 function reconcileSidecars(
@@ -1379,6 +1383,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         // Cleared per request: Started will name the model actually serving it.
         model: null,
         pendingProposal: null,
+          pendingMcpProposal: null,
         // A previous run's leftovers belong to that run — the new one has its own
         // mailbox on the backend and would never be handed them.
         steerQueue: [],
@@ -1512,6 +1517,18 @@ export const useAppStore = create<AppState>((set, get) => ({
         thinkingContent: s.thinkingContent + content,
       })),
     ),
+
+  recordAiActivity: (sessionId, activity) =>
+    set((state) => withAiStream(state, sessionId, (stream) => {
+      const existing = stream.messages.some((message) => message.activity?.id === activity.id);
+      if (existing) return { ...stream, messages: stream.messages.map((message) =>
+        message.activity?.id === activity.id ? { ...message, activity } : message) };
+      const flushed = flushStreaming(stream);
+      return { ...flushed, messages: [...flushed.messages, {
+        id: `activity-${activity.id}`, role: "assistant" as const, content: "",
+        createdAt: new Date().toISOString(), kind: "activity" as const, activity,
+      }] };
+    })),
 
   setPendingProposal: (sessionId, proposal, status) =>
     set((state) =>
@@ -1867,7 +1884,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       }),
     ),
 
-  finishAiStream: (sessionId, error, usage, generationId) =>
+  finishAiStream: (sessionId, error, usage, generationId, outcome) =>
     set((state) =>
       withAiStream(state, sessionId, (s) => {
         if (generationId !== undefined && s.generationId !== generationId)
@@ -1879,13 +1896,14 @@ export const useAppStore = create<AppState>((set, get) => ({
           requestId: null,
           generationId: generationId === undefined ? null : s.generationId,
           pendingProposal: null,
+          pendingMcpProposal: null,
           lastError: error ?? null,
           attachedBlockIds: [],
           // steerQueue is deliberately NOT cleared here: this fires on Done,
           // before agent_start's promise resolves, and the messages below still
           // need to be reconcilable against it. initAiStream clears it.
           // No command card may outlive its run (e.g. spawn failures).
-          messages: settleFencedMessages(flushed.messages),
+          messages: settleFencedMessages(flushed.messages, outcome ?? (error ? "error" : "interrupted")),
         };
       }),
     ),
@@ -1903,6 +1921,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           requestId: null,
           generationId: null,
           pendingProposal: null,
+          pendingMcpProposal: null,
           attachedBlockIds: [],
           messages: settleFencedMessages(flushed.messages),
         };
@@ -1925,6 +1944,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           requestId: null,
           generationId: generationId === undefined ? null : s.generationId,
           pendingProposal: null,
+          pendingMcpProposal: null,
           // Stays null — this is the whole point. The red banner keys off it.
           lastError: null,
           pause,

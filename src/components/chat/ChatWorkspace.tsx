@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
-import { useChatStore, attachmentForChatDisplay, chatAttachmentTarget } from "../../stores/chatStore";
+import { useChatStore, attachmentForChatDisplay, chatAttachmentTarget, chatIsBusy, chatHasMutation } from "../../stores/chatStore";
 import { useAppStore } from "../../stores/appStore";
 import { AiMessageView } from "../ai/AiMessageView";
 import { AttachmentChip } from "../ai/AttachmentChip";
@@ -38,20 +38,18 @@ import { GenerationModeBadge } from "../layout/GenerationModeBadge";
 import { ChatActions } from "./ChatActions";
 import { McpApprovalCard } from "../ai/McpApprovalCard";
 import { McpPicker } from "../ai/McpPicker";
+import { ProviderActivityFeed } from "../ai/ProviderActivityFeed";
 import { McpToolGroup } from "../ai/McpToolCard";
 
-const CHAT_BOTTOM_THRESHOLD_PX = 48;
+import { useStickyScroll } from "../../hooks/useStickyScroll";
+import { JumpToLatest } from "../ai/JumpToLatest";
+export { isNearChatBottom } from "../../hooks/useStickyScroll";
 const GENERATION_STATUS_POLL_MS = 500;
 const NO_ATTACHED_BUCKETS: readonly KnowledgeBucketRef[] = [];
 
-export function isNearChatBottom(
-  viewport: Pick<HTMLElement, "scrollTop" | "scrollHeight" | "clientHeight">,
-): boolean {
-  return viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= CHAT_BOTTOM_THRESHOLD_PX;
-}
-
 export function ChatWorkspace() {
   const current = useChatStore((state) => state.current);
+  const mutating = useChatStore((state) => chatHasMutation(state));
   const stream = useChatStore((state) => state.stream);
   const pending = useChatStore((state) => state.pendingAttachments);
   const attachError = useChatStore((state) => state.attachError);
@@ -60,24 +58,13 @@ export function ChatWorkspace() {
   const activeModelId = useAppStore((state) => state.activeModelId);
   const [composer, setComposer] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const stickToBottomRef = useRef(true);
+  const { scrollRef, contentRef, onScroll, showJump, jumpToLatest } = useStickyScroll(
+    current?.summary.id,
+    [current?.messages, stream],
+  );
   const archived = Boolean(current?.summary.archived_at);
-
-  useEffect(() => {
-    stickToBottomRef.current = true;
-    const viewport = scrollRef.current;
-    if (viewport) viewport.scrollTo({ top: viewport.scrollHeight });
-  }, [current?.summary.id]);
-
-  useEffect(() => {
-    const viewport = scrollRef.current;
-    if (!viewport || !stickToBottomRef.current) return;
-    viewport.scrollTo({
-      top: viewport.scrollHeight,
-      behavior: stream.status === "streaming" ? "auto" : "smooth",
-    });
-  }, [current?.messages.length, stream.content, stream.thinking]);
+  const activeTool = stream.activities.some((activity) => activity.status === "running")
+    || stream.mcpCalls.some((call) => call.status === "running" || call.status === "awaiting");
 
   useEffect(() => {
     if (stream.status !== "streaming" || !activeModelId.startsWith("local/")) return;
@@ -113,7 +100,8 @@ export function ChatWorkspace() {
   }, [activeModelId, stream.status]);
 
   const send = () => {
-    if ((!composer.trim() && pending.length === 0) || archived) return;
+    const currentState = useChatStore.getState();
+    if (!currentState.current || (!composer.trim() && pending.length === 0) || archived || chatHasMutation(currentState) || chatIsBusy(currentState.stream)) return;
     const text = composer;
     setComposer("");
     void useChatStore.getState().send(text);
@@ -128,11 +116,10 @@ export function ChatWorkspace() {
           ref={scrollRef}
           data-testid="chat-timeline"
           className="min-h-0 flex-1 overflow-y-auto px-6 py-7"
-          onScroll={(event) => {
-            stickToBottomRef.current = isNearChatBottom(event.currentTarget);
-          }}
+          onScroll={onScroll}
+          style={{ overflowAnchor: "none" }}
         >
-          <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
+          <div ref={contentRef} className="mx-auto flex w-full max-w-3xl flex-col gap-5">
             {current?.messages.length ? (
               current.messages.map((message) => <Message key={message.id} message={message} />)
             ) : (
@@ -144,7 +131,7 @@ export function ChatWorkspace() {
                 </p>
               </div>
             )}
-            {stream.status === "streaming" && (
+            {chatIsBusy(stream) && (
               <div className="rounded-xl border border-border-subtle bg-bg-card p-4 text-text-primary">
                 {stream.thinking && (
                   <details className="mb-3 text-xs text-text-muted">
@@ -152,7 +139,8 @@ export function ChatWorkspace() {
                     <p className="mt-2 whitespace-pre-wrap">{stream.thinking}</p>
                   </details>
                 )}
-                {stream.content ? <AiMessageView content={stream.content} origin="model" streaming /> : <span className="text-xs text-text-muted">Thinking…</span>}
+                {stream.content ? <AiMessageView content={stream.content} origin="model" streaming /> : !activeTool && stream.status === "streaming" && <span className="text-xs text-text-muted">Thinking…</span>}
+                <ProviderActivityFeed activities={stream.activities} />
                 {stream.mcpCalls.length > 0 && (
                   <div className="mt-3">
                     <McpToolGroup calls={stream.mcpCalls} />
@@ -184,6 +172,7 @@ export function ChatWorkspace() {
           </div>
         </div>
 
+        {showJump && <JumpToLatest onClick={jumpToLatest} />}
         <div className="shrink-0 px-5 pb-5 pt-2">
           <div className="mx-auto w-full max-w-3xl">
             {archived ? (
@@ -218,7 +207,7 @@ export function ChatWorkspace() {
                       send();
                     }
                   }}
-                  disabled={stream.status === "streaming"}
+                  disabled={!current || chatIsBusy(stream) || mutating}
                   rows={3}
                   placeholder="Message VTerminal Chat…"
                   className="block w-full resize-none bg-transparent px-4 pt-3 text-[13px] text-text-primary outline-none placeholder:text-text-muted"
@@ -236,10 +225,10 @@ export function ChatWorkspace() {
                     {attachStatus && <span className="text-[10px] text-text-muted">{attachStatus}</span>}
                     {attachError && <span className="text-[10px] text-danger">{attachError}</span>}
                   </div>
-                  {stream.status === "streaming" ? (
+                  {chatIsBusy(stream) ? (
                     <button type="button" onClick={() => void useChatStore.getState().stop()} className="rounded-lg bg-text-primary p-2 text-bg-primary" title="Stop response"><Square size={13} fill="currentColor" /></button>
                   ) : (
-                    <button type="button" onClick={send} disabled={!composer.trim() && pending.length === 0} className="rounded-lg bg-accent p-2 text-bg-primary disabled:opacity-30" title="Send"><Send size={14} /></button>
+                    <button type="button" onClick={send} disabled={!current || mutating || (!composer.trim() && pending.length === 0)} className="rounded-lg bg-accent p-2 text-bg-primary disabled:opacity-30" title="Send"><Send size={14} /></button>
                   )}
                 </div>
               </div>
@@ -323,7 +312,7 @@ function ChatToolbar() {
       : model?.native_web_search && model.native_web_fetch
         ? "Web search + fetch"
         : "Web unsupported";
-  const busy = stream.status === "streaming";
+  const busy = chatIsBusy(stream);
   return (
     <div className="flex h-11 shrink-0 items-center justify-between border-b border-border-subtle px-4">
       <div className="min-w-0">
@@ -397,6 +386,7 @@ function Message({ message }: { message: ChatDisplayMessage }) {
       {message.thinking && <details className="mb-3 text-xs text-text-muted"><summary className="cursor-pointer">Reasoning</summary><p className="mt-2 whitespace-pre-wrap">{message.thinking}</p></details>}
       <AiMessageView content={displayed.prompt} origin={user ? "literal" : "model"} />
       {displayed.blocks.map((block, index) => <FoldedBlockSection key={`${block.kind}-${block.name}-${index}`} block={block} />)}
+      <ProviderActivityFeed activities={message.activities} />
       {message.mcp_calls.length > 0 && (
         <div className="mt-3">
           <McpToolGroup calls={message.mcp_calls} />

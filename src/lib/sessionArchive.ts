@@ -16,6 +16,7 @@
  * mark-and-sweep, which deletes the row within ~750ms of a close.
  */
 
+import { activityLabel, settleActivities } from "./activity";
 import * as api from "./tauri";
 import { useAppStore } from "../stores/appStore";
 import { getTerm, serializeSession } from "./termRegistry";
@@ -131,9 +132,9 @@ export function toArchiveMessages(
     // archive. The explicit kind preserves the render-time trust boundary, while
     // the model transcript separately retains the tool-call/result pairing needed
     // for Agent continuation.
-    kind: m.kind === "mcp_tool" ? "literal" : (m.kind ?? "text"),
-    content: m.mcp
-      ? `${m.mcp.serverName} · ${m.mcp.toolName} (${m.mcp.status})\n\nArguments:\n${JSON.stringify(m.mcp.arguments, null, 2)}${m.mcp.result?.model_text ? `\n\nResult:\n${m.mcp.result.model_text}` : ""}${m.mcp.error ? `\n\nError: ${m.mcp.error}` : ""}`
+    kind: m.kind === "mcp_tool" || m.kind === "activity" ? "literal" : (m.kind ?? "text"),
+    content: m.activity ? activityLabel(settleActivities([m.activity])[0]) : m.mcp
+      ? `${m.mcp.serverName} · ${m.mcp.toolName} (${m.mcp.status === "running" || m.mcp.status === "awaiting" ? "interrupted" : m.mcp.status})\n\nArguments:\n${JSON.stringify(m.mcp.arguments, null, 2)}${m.mcp.result?.model_text ? `\n\nResult:\n${m.mcp.result.model_text}` : ""}${m.mcp.error ? `\n\nError: ${m.mcp.error}` : ""}`
       : m.content,
     thinking: m.thinking ?? null,
     ...(m.steer ? { steer_undelivered: true } : {}),

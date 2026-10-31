@@ -100,6 +100,7 @@ function sameTarget(
 
 let definitionRequestSequence = 0;
 let libraryRequestSequence = 0;
+let reportRequestSequence = 0;
 let sourceSelectionSequence = 0;
 function getRunById(runId: string): RunbookRun | null {
   return useRunbookStore.getState().getRunById(runId);
@@ -430,15 +431,25 @@ export function useRunbooks() {
   }, []);
 
   const loadReport = useCallback(async (runId: string) => {
+    const requestSequence = ++reportRequestSequence;
     const store = useRunbookStore.getState();
     store.selectHistoryRun(runId);
     store.setLoading("report", true);
     try {
-      store.setReport(await api.runbooksReport(runId));
+      const report = await api.runbooksReport(runId);
+      const current = useRunbookStore.getState();
+      if (requestSequence === reportRequestSequence && current.selectedHistoryRunId === runId) {
+        current.setReport(report);
+      }
     } catch (error) {
-      store.setError(String(error));
+      const current = useRunbookStore.getState();
+      if (requestSequence === reportRequestSequence && current.selectedHistoryRunId === runId) {
+        current.setError(String(error));
+      }
     } finally {
-      store.setLoading("report", false);
+      if (requestSequence === reportRequestSequence) {
+        useRunbookStore.getState().setLoading("report", false);
+      }
     }
   }, []);
 
@@ -696,13 +707,14 @@ export function useRunbooks() {
           void refreshRun(event.run_id);
           break;
         case "ReportReady":
-          void loadReport(event.run_id);
+          // Only refresh the report the operator already selected. A different
+          // concurrently finishing run must never change the history selection.
+          if (store.selectedHistoryRunId === event.run_id) void loadReport(event.run_id);
           break;
         case "RunFinished":
           disarmAutoApprove(event.run_id, null);
           void refreshRun(event.run_id);
           void loadHistory();
-          void loadReport(event.run_id);
           break;
         case "ApprovalRequested":
           await autoApproveArmedApproval(event);
@@ -1062,14 +1074,13 @@ export function useRunbooks() {
         });
         store.setActiveRun(terminal);
         await loadHistory();
-        if (terminal.report_ready) await loadReport(runId);
       } catch (error) {
         store.setError(String(error));
       } finally {
         store.setBusyAction(null);
       }
     },
-    [loadHistory, loadReport],
+    [loadHistory],
   );
 
   const respondApproval = useCallback(

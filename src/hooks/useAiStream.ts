@@ -326,6 +326,16 @@ export function useAiStream() {
     if (!ownsActiveRequest(sessionId, requestId)) return;
     let outgoing = buildOutgoing(prompt, staged);
 
+    // Never silently send a turn without an image the user attached. This can
+    // happen if its data is unavailable (for example after an unsuccessful
+    // restore); keep the staged files so the user can remove or retry them.
+    if (outgoing.images.length !== staged.filter((a) => a.kind === "image").length) {
+      useAppStore
+        .getState()
+        .finishAiStream(sessionId, S.vision.readFailed, undefined, requestId);
+      return;
+    }
+
     // The chat model cannot see, but a sidecar is loaded: transcribe on-device and
     // send TEXT. The panel blocks Send when there is no sidecar, so reaching here
     // with images and no vision means one is ready.
@@ -436,7 +446,7 @@ export function useAiStream() {
 
   /** Agent mode: the model proposes commands one at a time; each is gated by
    *  a Run/Skip/Stop card (or auto-accepted when the toggle is armed). */
-  const startAgent = useCallback(async (sessionId: string, goal: string, retryAttachments?: Attachment[]) => {
+  const startAgent = useCallback(async (sessionId: string, goal: string, retryAttachments?: Attachment[], scheduleRunId?: string) => {
     const store = useAppStore.getState();
     const ownerSessionId = store.resolveAiOwner(sessionId);
     if (isSessionBusy(ownerSessionId)) return;
@@ -569,6 +579,7 @@ export function useAiStream() {
         sidecarTargets,
         permissionModes,
         activeStream?.mcpSelection,
+        scheduleRunId,
       );
       // Done/Paused clears requestId before agentStart resolves. generationId
       // intentionally survives that event, but is replaced by a new run and
@@ -805,7 +816,7 @@ export function useAiStream() {
       // preflight there may not even be a registered backend operation yet.
       // Waiting for a Cancelled event would let that old continuation resume or
       // overwrite a new run started in the meantime.
-      useAppStore.getState().finishAiStream(ownerSessionId);
+      useAppStore.getState().finishAiStream(ownerSessionId, undefined, undefined, undefined, "cancelled");
       markTranscriptDirty(ownerSessionId);
       await api.aiCancel(requestId).catch(() => {});
     }
@@ -1003,6 +1014,9 @@ function dispatchPanelEvent(
   if (ownRecordValue(store.aiStreams, sessionId)?.requestId !== requestId)
     return;
   switch (e.type) {
+    case "Activity":
+      store.recordAiActivity(sessionId, e.activity);
+      break;
     case "Delta":
       store.appendAiDelta(sessionId, e.content);
       break;
@@ -1187,7 +1201,8 @@ function dispatchPanelEvent(
       break;
     }
     case "CommandOutput":
-      store.appendCommandOutput(sessionId, e.approval_id, e.chunk);
+      if (e.replace) store.setCommandOutput(sessionId, e.approval_id, e.chunk);
+      else store.appendCommandOutput(sessionId, e.approval_id, e.chunk);
       break;
     case "CommandResult": {
       // A backend watchdog may fire after a Sidecar binding degrades. Release
@@ -1316,7 +1331,7 @@ function dispatchPanelEvent(
       markTranscriptDirty(sessionId);
       break;
     case "Cancelled":
-      store.finishAiStream(sessionId, undefined, undefined, requestId);
+      store.finishAiStream(sessionId, undefined, undefined, requestId, "cancelled");
       markTranscriptDirty(sessionId);
       break;
     case "Error":

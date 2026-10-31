@@ -253,6 +253,8 @@ export interface ScheduleFireEvent {
   target_label: string;
   target_host_id: string | null;
   target_cwd: string | null;
+  /** Fire-time snapshot of the committed plan, not the editable store. */
+  action: ScheduleAction;
 }
 
 export interface ScheduleRunNotice {

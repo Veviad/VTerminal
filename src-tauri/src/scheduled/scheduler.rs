@@ -58,6 +58,9 @@ pub enum DueDecision<Tz: TimeZone> {
     Reschedule {
         next_fire_at: Option<DateTime<Tz>>,
         reason: &'static str,
+        /// Persist the new zone together with the occurrence so a moved machine
+        /// does not reschedule the same action on every subsequent tick.
+        timezone: Option<String>,
     },
     /// Record a real `skipped` run so the history shows the gap, and roll forward.
     Skip {
@@ -124,25 +127,35 @@ pub fn evaluate_due<Tz: TimeZone>(
         )
     };
 
-    let Some(next_fire_at) = parse_in(action.next_fire_at.as_deref(), &tz) else {
-        return DueDecision::Reschedule {
-            next_fire_at: roll(now, None),
-            reason: "no next occurrence was stored",
-        };
-    };
-
     // Rule 3: the machine moved. A `next_fire_at` computed in one zone is simply
     // wrong in another, and treating the difference as a missed run would report
     // a gap that never happened.
     if let Some(machine) = inputs.machine_timezone.as_deref() {
         let stored = action.input.timezone.trim();
         if !stored.is_empty() && !machine.is_empty() && stored != machine {
+            // Intervals and one-off instants are independent of the wall-clock
+            // timezone. Preserve their owed occurrence, including a missed one.
+            let next = match action.input.recurrence {
+                Recurrence::Once { .. } | Recurrence::Interval { .. } => {
+                    parse_in(action.next_fire_at.as_deref(), &tz).or_else(|| roll(now, None))
+                }
+                _ => roll(now, None),
+            };
             return DueDecision::Reschedule {
-                next_fire_at: roll(now, None),
+                next_fire_at: next,
                 reason: "the machine's timezone changed since this was scheduled",
+                timezone: Some(machine.to_string()),
             };
         }
     }
+
+    let Some(next_fire_at) = parse_in(action.next_fire_at.as_deref(), &tz) else {
+        return DueDecision::Reschedule {
+            next_fire_at: roll(now, None),
+            reason: "no next occurrence was stored",
+            timezone: None,
+        };
+    };
 
     // A clock that jumped backwards leaves every stored fire implausibly far
     // ahead. Recompute rather than sleeping for a year.
@@ -151,6 +164,7 @@ pub fn evaluate_due<Tz: TimeZone>(
             return DueDecision::Reschedule {
                 next_fire_at: roll(now, None),
                 reason: "the stored next occurrence is implausibly far ahead",
+                timezone: None,
             };
         }
     }
@@ -378,10 +392,20 @@ async fn tick_loop(app: tauri::AppHandle<Wry>, state: std::sync::Arc<SchedulerSt
 }
 
 /// The permit that serializes runs. Held for the whole run.
-pub async fn acquire_run_permit(
-    state: &SchedulerState,
-) -> Option<tokio::sync::SemaphorePermit<'_>> {
-    state.permits.acquire().await.ok()
+pub async fn acquire_run_permit<'a>(
+    state: &'a SchedulerState,
+    cancel: &mut tokio::sync::watch::Receiver<bool>,
+) -> Option<tokio::sync::SemaphorePermit<'a>> {
+    if *cancel.borrow() {
+        return None;
+    }
+    tokio::select! {
+        biased;
+        _ = cancel.changed() => None,
+        permit = state.permits.acquire() => {
+            if *cancel.borrow() { None } else { permit.ok() }
+        }
+    }
 }
 
 /// Whether a run status should hold the action's in-flight slot.
@@ -643,6 +667,7 @@ mod tests {
             DueDecision::Reschedule {
                 next_fire_at,
                 reason,
+                ..
             } => {
                 assert!(reason.contains("implausibly"), "{reason}");
                 assert_eq!(next_fire_at.unwrap(), berlin(2026, 6, 2, 3, 0));
@@ -673,8 +698,11 @@ mod tests {
             ..settled()
         };
         match evaluate_due(&a, berlin(2026, 6, 1, 9, 0), &moved) {
-            DueDecision::Reschedule { reason, .. } => {
-                assert!(reason.contains("timezone"), "{reason}")
+            DueDecision::Reschedule {
+                reason, timezone, ..
+            } => {
+                assert!(reason.contains("timezone"), "{reason}");
+                assert_eq!(timezone.as_deref(), Some("Asia/Tokyo"));
             }
             other => panic!("expected Reschedule, got {other:?}"),
         }
@@ -688,6 +716,77 @@ mod tests {
             evaluate_due(&a, berlin(2026, 6, 1, 9, 0), &unknown),
             DueDecision::Skip { .. }
         ));
+    }
+
+    #[test]
+    fn timezone_change_preserves_due_absolute_and_interval_occurrences() {
+        let now = berlin(2026, 6, 1, 9, 0);
+        let due = berlin(2026, 6, 1, 8, 59);
+        let moved = DueInputs {
+            machine_timezone: Some("Asia/Tokyo".into()),
+            ..settled()
+        };
+        for rule in [
+            Recurrence::Once {
+                at: due.to_rfc3339(),
+            },
+            Recurrence::Interval { every_minutes: 10 },
+        ] {
+            let mut a = with_next(action(rule, MissedRunPolicy::Skip), due);
+            match evaluate_due(&a, now, &moved) {
+                DueDecision::Reschedule {
+                    next_fire_at,
+                    timezone,
+                    ..
+                } => {
+                    assert_eq!(next_fire_at, Some(due));
+                    a.next_fire_at = next_fire_at.map(|dt| dt.to_rfc3339());
+                    a.input.timezone = timezone.unwrap();
+                }
+                other => panic!("expected timezone reschedule, got {other:?}"),
+            }
+            assert!(matches!(
+                evaluate_due(&a, now, &moved),
+                DueDecision::Fire { .. }
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_run_waiting_for_the_permit_can_be_cancelled() {
+        let state = SchedulerState::default();
+        let held = state.permits.acquire().await.unwrap();
+        let mut cancel = state.register_cancel("queued");
+        assert!(state.cancel("queued"));
+        assert!(tokio::time::timeout(
+            Duration::from_millis(100),
+            acquire_run_permit(&state, &mut cancel),
+        )
+        .await
+        .unwrap()
+        .is_none());
+        drop(held);
+        state.release_cancel("queued");
+    }
+
+    #[tokio::test]
+    async fn cancelling_all_unblocks_a_run_already_waiting_for_the_permit() {
+        let state = SchedulerState::default();
+        let held = state.permits.acquire().await.unwrap();
+        let mut cancel = state.register_cancel("queued");
+        let wait = acquire_run_permit(&state, &mut cancel);
+        tokio::pin!(wait);
+        tokio::select! {
+            biased;
+            permit = &mut wait => panic!("run unexpectedly started: {permit:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+        assert_eq!(state.cancel_all(), vec!["queued".to_string()]);
+        assert!(tokio::time::timeout(Duration::from_millis(100), &mut wait)
+            .await
+            .unwrap()
+            .is_none());
+        drop(held);
     }
 
     #[test]

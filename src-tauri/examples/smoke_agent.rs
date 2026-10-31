@@ -143,8 +143,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         policy_rules: vec![],
         policy_scope_single: "local".into(),
         policy_scope_remote: "remote:test".into(),
-        // Headless: no buckets, so `tools()` offers `run_command` and `finish` only.
-        // This example exercises tool calling against a real GGUF, and adding a third
+        // Headless: no buckets, so `tools()` offers `run_command` only.
+        // This example exercises tool calling against a real GGUF, and adding a second
         // tool would change what it is measuring — the `docs` argument below is `None`
         // for the same reason.
         doc_buckets: vec![],

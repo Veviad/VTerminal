@@ -243,6 +243,31 @@ pub struct WebCitation {
     pub cited_text: String,
 }
 
+/// Provider-confirmed work, deliberately excluding queries, URLs and arguments.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderActivity {
+    pub id: String,
+    pub kind: ActivityKind,
+    pub status: ActivityStatus,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityKind {
+    WebSearch,
+    WebFetch,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityStatus {
+    Running,
+    Done,
+    Error,
+    Cancelled,
+    Interrupted,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WebToolPolicy {
@@ -325,6 +350,7 @@ pub enum ProviderEvent {
     /// Complete, parsed tool calls (local models emit them whole).
     ToolCalls(Vec<ToolCall>),
     WebCitation(WebCitation),
+    Activity(ProviderActivity),
     /// Internal continuation data, never rendered as model output.
     ProviderState(ProviderState),
     Usage {

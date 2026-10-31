@@ -5,18 +5,30 @@ import { useAppStore } from "../stores/appStore";
 import { useRunbookStore } from "../stores/runbookStore";
 import { abortSession, interruptJob } from "../lib/ptyExec";
 import { revokeAllLiveRunbookRuns } from "../lib/runbookLiveJobs";
-import { revokeAllLiveScheduleRuns } from "../lib/scheduleLiveJobs";
+import { revokeAllLiveScheduleRuns, scheduleAgentOwnsRequest } from "../lib/scheduleLiveJobs";
 import { useScheduleStore } from "../stores/scheduleStore";
 import type { EvidenceRecordingPolicy } from "../lib/runbooks";
 import { updateAllTermOptions } from "../lib/termRegistry";
 import { clampPanelRatio } from "../lib/panelRatio";
 import { useChatStore } from "../stores/chatStore";
+import { useAiStream } from "./useAiStream";
+
+/** The backend validates before save. Mirror its accepted text so the editor
+ * can settle the submitted draft without loading over unrelated newer edits. */
+function normalizedInstructions(value: string): string {
+  return Array.from(value.replace(/\r\n?/g, "\n")
+    .replaceAll("<user_instructions>", "[user_instructions]")
+    .replaceAll("</user_instructions>", "[/user_instructions]")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, "")
+    .trim()).slice(0, 4000).join("");
+}
 
 // Load-mirror / save-partial pattern (Cowork useSettings): hydrate the store
 // from Rust on mount; every save writes through Rust first, then updates the
 // mirror. Nothing persists frontend-side.
 export function useSettings() {
   const hydrateSettings = useAppStore((s) => s.hydrateSettings);
+  const { cancel: cancelAgent } = useAiStream();
 
   const loadSettings = useCallback(async () => {
     const s = await api.getSettings();
@@ -93,6 +105,7 @@ export function useSettings() {
       for (const job of revokeAllLiveScheduleRuns()) {
         interruptJob(job.sessionId, job.attemptId);
         abortSession(job.sessionId, "cancelled", job.attemptId);
+        if (scheduleAgentOwnsRequest(job)) void cancelAgent(job.sessionId);
       }
     }
     if (patch.runbooks_enabled === false) {
@@ -216,16 +229,12 @@ export function useSettings() {
       useAppStore.setState({ agentCommandPolicyRules: patch.agent_command_policy_rules });
     if (patch.ai_web_access !== undefined)
       useAppStore.setState({ aiWebAccess: patch.ai_web_access });
-    // Mirrored with the SENT text, not the stored text: Rust trims and drops
-    // stray control bytes, so the two can differ by whitespace. Re-reading to
-    // reconcile that would fight the textarea the user is still typing in; the
-    // next `loadSettings` settles it.
     if (patch.custom_instructions !== undefined)
-      useAppStore.setState({ customInstructions: patch.custom_instructions });
+      useAppStore.setState({ customInstructions: normalizedInstructions(patch.custom_instructions) });
     if (patch.agent_custom_instructions !== undefined)
-      useAppStore.setState({ agentCustomInstructions: patch.agent_custom_instructions });
+      useAppStore.setState({ agentCustomInstructions: normalizedInstructions(patch.agent_custom_instructions) });
     if (patch.chat_custom_instructions !== undefined)
-      useAppStore.setState({ chatCustomInstructions: patch.chat_custom_instructions });
+      useAppStore.setState({ chatCustomInstructions: normalizedInstructions(patch.chat_custom_instructions) });
     if (patch.auto_update_enabled !== undefined)
       useAppStore.setState({ autoUpdateEnabled: patch.auto_update_enabled });
     if (patch.docs_enabled !== undefined)
@@ -257,7 +266,7 @@ export function useSettings() {
       const v = patch[key];
       if (v !== undefined) store.setHasApiKey(provider, v.trim().length > 0);
     }
-  }, [loadSettings]);
+  }, [cancelAgent, loadSettings]);
 
   return { loadSettings, save };
 }

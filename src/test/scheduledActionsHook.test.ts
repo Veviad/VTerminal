@@ -81,6 +81,7 @@ import { emptyScheduleInput, type ScheduleAction, type ScheduleFireEvent } from 
 import {
   recallActionSession,
   resetScheduleLiveJobsForTests,
+  revokeScheduleRun,
   scheduleOwnerOf,
 } from "../lib/scheduleLiveJobs";
 import { useAppStore } from "../stores/appStore";
@@ -121,6 +122,7 @@ const fire: ScheduleFireEvent = {
   target_label: "local shell",
   target_host_id: null,
   target_cwd: null,
+  action: action(),
 };
 
 function stubTerm(cols = 120, rows = 40) {
@@ -166,9 +168,10 @@ async function mount() {
   return hook;
 }
 
-async function deliver(event: ScheduleFireEvent = fire) {
+async function deliver(event: ScheduleFireEvent = fire, useSnapshot = false) {
   await act(async () => {
-    fireHandler?.(event);
+    const current = useScheduleStore.getState().actions.find((a) => a.id === event.action_id);
+    fireHandler?.({ ...event, action: useSnapshot ? event.action : (current ?? event.action) });
     // Let the queued driver run to completion.
     for (let i = 0; i < 60; i++) await Promise.resolve();
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -344,7 +347,7 @@ describe("scheduled actions driver", () => {
   });
 
   it("checks with the backend before typing, and refuses when the run is not active", async () => {
-    mocks.scheduleRunIsActive.mockResolvedValue(false);
+    mocks.scheduleRunIsActive.mockResolvedValueOnce(true).mockResolvedValue(false);
     await mount();
     await deliver();
     const opts = mocks.runInTerminal.mock.calls[0][3];
@@ -448,6 +451,92 @@ describe("scheduled actions driver", () => {
     expect(mocks.scheduleStepBegin).toHaveBeenCalledTimes(2);
   });
 
+  it("runs the committed snapshot even when the edited action in the store differs", async () => {
+    const snapshot = action({ steps: [{ ...action().steps[0], text: "echo original" }] });
+    mocks.schedulesList.mockResolvedValue([
+      action({ steps: [{ ...action().steps[0], text: "echo edited" }] }),
+    ]);
+    await mount();
+    await deliver({ ...fire, action: snapshot }, true);
+    expect(mocks.runInTerminal).toHaveBeenCalledWith(
+      "sess-1", "att1", "echo original", expect.any(Object),
+    );
+  });
+
+  it("uses a fresh shell for each run with an explicit working directory", async () => {
+    let sequence = 0;
+    mocks.createSession.mockImplementation(async () => {
+      const id = `sess-${++sequence}`;
+      addSession(id);
+      return id;
+    });
+    const target = { kind: "local_shell" as const, cwd: "/tmp" };
+    mocks.schedulesList.mockResolvedValue([action({ target })]);
+    await mount();
+    const event = { ...fire, target_cwd: "/tmp" };
+    await deliver(event);
+    await deliver({ ...event, run_id: "r2" });
+    expect(mocks.createSession).toHaveBeenCalledTimes(2);
+    expect(mocks.createSession).toHaveBeenLastCalledWith(expect.objectContaining({ cwd: "/tmp" }));
+  });
+
+  it("does not start a prompt when the run has been cancelled", async () => {
+    mocks.schedulesList.mockResolvedValue([action({
+      steps: [{ ...action().steps[0], kind: "prompt", text: "inspect" }],
+    })]);
+    mocks.scheduleRunIsActive.mockResolvedValue(false);
+    await mount();
+    await deliver();
+    expect(mocks.startAgent).not.toHaveBeenCalled();
+    expect(mocks.scheduleStepBegin).not.toHaveBeenCalled();
+    expect(mocks.scheduleRunFinish).toHaveBeenCalledWith("r1", "cancelled", null);
+  });
+
+  it("does not start a prompt if cancellation arrives while the final active check is pending", async () => {
+    mocks.schedulesList.mockResolvedValue([action({
+      steps: [{ ...action().steps[0], kind: "prompt", text: "inspect" }],
+    })]);
+    let resolveCheck!: (active: boolean) => void;
+    mocks.scheduleRunIsActive
+      .mockResolvedValueOnce(true)
+      .mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolveCheck = resolve; }));
+    await mount();
+    await deliver();
+    expect(resolveCheck).toBeTypeOf("function");
+    await act(async () => {
+      revokeScheduleRun("r1");
+      resolveCheck(true);
+      for (let i = 0; i < 60; i++) await Promise.resolve();
+    });
+    expect(mocks.startAgent).not.toHaveBeenCalled();
+    expect(mocks.scheduleStepFinish).toHaveBeenCalledWith(
+      "r1", "att1", expect.objectContaining({ status: "cancelled" }),
+    );
+  });
+
+  it("refuses command dispatch if cancellation arrives during backend authorization", async () => {
+    let resolveCheck!: (active: boolean) => void;
+    mocks.scheduleRunIsActive
+      .mockResolvedValueOnce(true)
+      .mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolveCheck = resolve; }));
+    let authorization: Promise<boolean> | undefined;
+    mocks.runInTerminal.mockImplementation(async (_session, _attempt, _command, opts) => {
+      authorization = opts.beforeWrite();
+      const allowed = await authorization;
+      return { exitCode: allowed ? 0 : null, output: "", durationMs: 1, error: allowed ? undefined : "cancelled" };
+    });
+    await mount();
+    await deliver();
+    expect(resolveCheck).toBeTypeOf("function");
+    await act(async () => {
+      revokeScheduleRun("r1");
+      resolveCheck(true);
+      for (let i = 0; i < 60; i++) await Promise.resolve();
+    });
+    await expect(authorization).resolves.toBe(false);
+    expect(mocks.scheduleRunFinish).toHaveBeenCalledWith("r1", "cancelled", null);
+  });
+
   it("leaves the tab open and renames it with the result", async () => {
     await mount();
     await deliver();
@@ -529,7 +618,7 @@ describe("prompt steps", () => {
     });
     await mount();
     await deliver();
-    expect(mocks.startAgent).toHaveBeenCalledWith("sess-1", "summarise the disk usage");
+    expect(mocks.startAgent).toHaveBeenCalledWith("sess-1", "summarise the disk usage", [], "r1");
     expect(mocks.scheduleStepFinish).toHaveBeenCalledWith(
       "r1",
       "att1",
@@ -603,86 +692,17 @@ describe("prompt steps", () => {
 });
 
 describe("ssh targets", () => {
-  const remoteFire: ScheduleFireEvent = {
-    ...fire,
-    target_kind: "ssh_host",
-    target_host_id: "h1",
-    target_label: "prod-01",
-  };
-
-  beforeEach(() => {
-    mocks.schedulesList.mockResolvedValue([
-      action({ target: { kind: "ssh_host", host_id: "h1" } }),
-    ]);
-    mocks.sshHostsGet.mockResolvedValue({ id: "h1", label: "prod-01" });
-    mocks.connectToHost.mockImplementation(async () => {
-      addSession("sess-1");
-      useAppStore.setState((state) => ({
-        sessionUi: {
-          ...state.sessionUi,
-          "sess-1": { remote: { kind: "ssh", host_id: "h1" } } as never,
-        },
-      }));
-      return "sess-1";
-    });
-  });
-
-  it("connects through the existing saved-host path, unfocused and sized", async () => {
+  it("refuses SSH tab runs before creating a terminal or sending any input", async () => {
+    const remote = action({ target: { kind: "ssh_host", host_id: "h1" } });
+    mocks.schedulesList.mockResolvedValue([remote]);
     await mount();
-    await deliver(remoteFire);
-    expect(mocks.connectToHost).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "h1" }),
-      "new-tab",
-      expect.any(Function),
-      undefined,
-      expect.objectContaining({ activate: false }),
-    );
-    expect(mocks.scheduleRunAttach).toHaveBeenCalledWith(
-      "r1",
-      "sess-1",
-      "h1",
-      expect.any(Number),
-      expect.any(Number),
-    );
-  });
-
-  it("fails loudly when the saved host is gone, rather than replaying a stale command", async () => {
-    mocks.sshHostsGet.mockResolvedValue(null);
-    await mount();
-    await deliver(remoteFire);
+    await deliver({ ...fire, action: remote, target_kind: "ssh_host", target_host_id: "h1" }, true);
+    expect(mocks.createSession).not.toHaveBeenCalled();
     expect(mocks.connectToHost).not.toHaveBeenCalled();
-    expect(mocks.scheduleRunFinish).toHaveBeenCalledWith(
-      "r1",
-      "failed",
-      expect.stringContaining("no longer exists"),
-    );
-  });
-
-  /** A host-key fingerprint prompt, MFA or a wrong password all land here. The
-   *  tab is left open so the operator can see it, and NOTHING is typed in
-   *  response — never `yes\r`. */
-  it("fails without typing anything when the remote never reaches a prompt", async () => {
-    mocks.connectToHost.mockImplementation(async () => {
-      addSession("sess-1");
-      return "sess-1";
-    });
-    vi.useFakeTimers();
-    const hook = renderHook(() => useScheduledActions());
-    await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    await act(async () => {
-      fireHandler?.(remoteFire);
-      await vi.advanceTimersByTimeAsync(60_000);
-    });
-    vi.useRealTimers();
-    hook.unmount();
     expect(mocks.runInTerminal).not.toHaveBeenCalled();
+    expect(mocks.startAgent).not.toHaveBeenCalled();
     expect(mocks.scheduleRunFinish).toHaveBeenCalledWith(
-      "r1",
-      "failed",
-      expect.stringContaining("never reached a prompt"),
+      "r1", "failed", expect.stringContaining("cannot safely verify authentication"),
     );
   });
 });

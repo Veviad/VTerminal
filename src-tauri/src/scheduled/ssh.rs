@@ -113,7 +113,7 @@ impl RemoteBatchTarget {
     fn remote_script(&self, command: &str) -> String {
         let mut parts: Vec<String> = Vec::new();
         if let Some(dir) = &self.remote_dir {
-            parts.push(format!("cd -- {}", sh_quote(dir)));
+            parts.push(format!("cd -- {} || exit $?", sh_quote(dir)));
         }
         if let Some(post) = &self.post_connect {
             parts.push(post.clone());
@@ -270,6 +270,41 @@ mod tests {
         // And the script region is the LAST thing on the line, so nothing the
         // host row contributed can be read as a local operator.
         assert!(line.ends_with('\''), "{line}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_script_stops_before_post_connect_and_command_when_directory_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = host();
+        h.remote_dir = Some(dir.path().join("missing").to_string_lossy().into_owned());
+        h.post_connect = Some("printf 'POST_CONNECT_RAN\\n'".into());
+        let output = std::process::Command::new("/bin/sh")
+            .args(["-c", &h.remote_script("printf 'COMMAND_RAN\\n'")])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "a failed cd must fail the step");
+        assert!(
+            output.stdout.is_empty(),
+            "post-connect or command ran: {output:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_script_runs_in_the_requested_directory_when_it_exists() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("space and ' quote");
+        std::fs::create_dir(&dir).unwrap();
+        let mut h = host();
+        h.remote_dir = Some(dir.to_string_lossy().into_owned());
+        let output = std::process::Command::new("/bin/sh")
+            .args(["-c", &h.remote_script("pwd -P")])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let actual = std::path::PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
+        assert_eq!(actual, std::fs::canonicalize(dir).unwrap());
     }
 
     #[test]

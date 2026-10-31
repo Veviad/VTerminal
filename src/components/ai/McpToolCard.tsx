@@ -5,6 +5,7 @@ import type { ChatMcpCall } from "../../lib/types";
 import { McpContent } from "./mcp/McpContent";
 
 function statusLabel(call: ChatMcpCall): string {
+  if (call.status === "error" && (call.error === "Cancelled" || call.error === "Interrupted")) return call.error;
   return call.status === "awaiting"
     ? "Awaiting approval"
     : call.status === "running"
@@ -43,7 +44,7 @@ export function McpToolCard({ call }: { call: ChatMcpCall }) {
           <span className="block truncate text-[11px] font-medium text-text-primary">
             {call.server_name} · {call.tool_name}
           </span>
-          <span className="text-[9px] text-text-muted">{statusLabel(call)}</span>
+          <span role="status" className="text-[9px] text-text-muted">{statusLabel(call)}</span>
         </span>
         {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
       </button>
@@ -85,13 +86,15 @@ function batchStatus(calls: ChatMcpCall[]): string {
     calls.filter((call) => call.status === status).length;
   const running = count("running");
   const awaiting = count("awaiting");
-  const errors = count("error");
+  const errors = calls.filter((call) => call.status === "error" && call.error !== "Cancelled" && call.error !== "Interrupted").length;
+  const cancelled = calls.filter((call) => call.status === "error" && call.error === "Cancelled").length;
+  const interrupted = calls.filter((call) => call.status === "error" && call.error === "Interrupted").length;
   const denied = count("denied");
 
   if (running) return `${running} running`;
   if (awaiting) return `${awaiting} awaiting approval`;
-  if (errors) return `${errors} failed`;
-  if (denied) return `${denied} denied`;
+  const outcomes = [errors && `${errors} failed`, cancelled && `${cancelled} cancelled`, interrupted && `${interrupted} interrupted`, denied && `${denied} denied`].filter(Boolean);
+  if (outcomes.length) return outcomes.join(" · ");
   return "Done";
 }
 
@@ -125,7 +128,7 @@ function McpToolBatch({ calls }: { calls: ChatMcpCall[] }) {
           <span className="block truncate text-[11px] font-medium text-text-primary">
             {label}
           </span>
-          <span className="text-[9px] text-text-muted">
+          <span role="status" className="text-[9px] text-text-muted">
             {status}
           </span>
         </span>

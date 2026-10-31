@@ -161,10 +161,10 @@ MTP is selected automatically when its artifacts are installed. Existing local d
 **Cloud** — bring your own API key; provider keys, Hugging Face tokens, and remote-server tokens are stored by the Rust backend in macOS Keychain or Windows Credential Manager (service `com.veviad.terminal`) and never round-trip to the UI or `settings.json`.
 
 - Anthropic — Claude Haiku 5.5, Sonnet 5.5, Opus 5.5
-- OpenAI — GPT-6 Luna, GPT-6.1 Sol, GPT-6 Astra
+- OpenAI — GPT-6 Luna, GPT-6.1 Terra, GPT-6.1 Sol, GPT-6 Astra
 - Mistral — Mistral Small 4, Medium 3.5, Large 4 Preview
 
-Cloud model releases were verified on October 20, 2026. Saved model selections and effort preferences carry forward when the catalog is refreshed. Mistral Large 4 is a public preview and may change before general availability. Opus 5.5, GPT-6.1 Sol and GPT-6 Astra always use reasoning; an existing Off preference uses Low. On Sonnet 5.5, Off disables thinking before the answer while allowing progress updates between tool calls.
+Cloud model releases were verified on October 20, 2026; GPT-6.1 Terra and Mistral Large 4's preview status were checked on October 31. Saved model selections and effort preferences carry forward when the catalog is refreshed. Mistral Large 4 is a public preview and may change before general availability. Opus 5.5, GPT-6.1 Sol and GPT-6 Astra always use reasoning; an existing Off preference uses Low. On Sonnet 5.5, Off disables thinking before the answer while allowing progress updates between tool calls.
 
 **Self-hosted** — point VTerminal at any OpenAI-compatible server: Ollama, LM Studio, llama.cpp's server, vLLM, LiteLLM. Add the address in **Settings → Models**, press **Test**, and pick which of the served models to expose. Per-server tokens are supported and optional; token-bearing connections require HTTPS except for localhost/loopback HTTP.
 

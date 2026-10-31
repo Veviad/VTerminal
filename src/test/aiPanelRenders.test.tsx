@@ -125,6 +125,62 @@ describe("AiPanel renders", () => {
 
   afterEach(() => vi.restoreAllMocks());
 
+  it("shows running MCP work without the generic thinking placeholder or raw arguments", () => {
+    seedReadyPanel({ status: "executing", requestId: "r", messages: [{
+      id: "mcp", role: "assistant", kind: "mcp_tool", content: "", createdAt: "now",
+      mcp: { approvalId: "a", serverId: "s", serverName: "Test MCP", toolName: "read_items",
+        arguments: { token: "PRIVATE-ARGUMENT" }, status: "running" },
+    }] });
+    render(<AiPanel sessionId="s1" />);
+    expect(screen.getByText("Test MCP · read_items")).toBeVisible();
+    expect(screen.getByText("Running")).toBeVisible();
+    expect(screen.queryByText(S.aiPanel.thinking)).not.toBeInTheDocument();
+    expect(screen.queryByText(/PRIVATE-ARGUMENT/)).not.toBeInTheDocument();
+  });
+
+  it("keeps a reader's position during agent text, thinking and activity updates until Jump to latest", () => {
+    seedReadyPanel({ status: "streaming", requestId: "r", streamingContent: "First" });
+    render(<AiPanel sessionId="s1" />);
+    const timeline = screen.getByTestId("agent-timeline");
+    Object.defineProperties(timeline, {
+      scrollHeight: { configurable: true, value: 1000 },
+      clientHeight: { configurable: true, value: 300 },
+      scrollTop: { configurable: true, writable: true, value: 100 },
+    });
+    const scrollTo = Element.prototype.scrollTo as ReturnType<typeof vi.fn>;
+    fireEvent.scroll(timeline);
+    scrollTo.mockClear();
+    act(() => {
+      useAppStore.getState().appendAiDelta("s1", " second");
+      useAppStore.getState().appendThinking("s1", "reasoning");
+      useAppStore.getState().recordAiActivity("s1", { id: "web", kind: "web_search", status: "running" });
+    });
+    expect(scrollTo).not.toHaveBeenCalledWith({ top: 1000, behavior: "auto" });
+    expect(screen.getByText("Searching web…", { selector: '[role="status"]' })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Jump to latest" }));
+    expect(scrollTo).toHaveBeenCalledWith({ top: 1000, behavior: "auto" });
+  });
+
+  it("follows live reasoning inside its bounded viewport and lets readers scroll back", () => {
+    seedReadyPanel({ status: "streaming", requestId: "r", thinkingContent: "First reasoning" });
+    render(<AiPanel sessionId="s1" />);
+    const viewport = screen.getByText("First reasoning").parentElement!;
+    Object.defineProperties(viewport, {
+      scrollHeight: { configurable: true, value: 900 },
+      clientHeight: { configurable: true, value: 160 },
+      scrollTop: { configurable: true, writable: true, value: 740 },
+    });
+    const scrollTo = Element.prototype.scrollTo as ReturnType<typeof vi.fn>;
+    scrollTo.mockClear();
+    act(() => useAppStore.getState().appendThinking("s1", " next"));
+    expect(scrollTo).toHaveBeenCalledWith({ top: 900, behavior: "auto" });
+    viewport.scrollTop = 40;
+    fireEvent.scroll(viewport);
+    scrollTo.mockClear();
+    act(() => useAppStore.getState().appendThinking("s1", " more"));
+    expect(scrollTo).not.toHaveBeenCalledWith({ top: 900, behavior: "auto" });
+  });
+
   it("renders with an API model selected and a key present", () => {
     useAppStore.setState({
       catalog: [cloudEntry()],
@@ -493,10 +549,10 @@ describe("AiPanel renders", () => {
     expect(screen.getByText(/exit 130/)).toBeInTheDocument();
     expect(unknown).toBeInTheDocument();
     expect(
-      screen.getByText(`${S.aiPanel.ranAs} sleep 60 < /dev/null`),
+      screen.getByText(S.aiPanel.ranAs).closest("details"),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(`${S.aiPanel.submittedAs} apt list --upgradable < /dev/null`),
+      screen.getByText(S.aiPanel.submittedAs).closest("details"),
     ).toBeInTheDocument();
     expect(
       screen.queryByText(`${S.aiPanel.ranAs} apt list --upgradable < /dev/null`),
@@ -532,7 +588,7 @@ describe("AiPanel renders", () => {
 
     expect(screen.getByText(S.aiPanel.completionUnknown)).toBeInTheDocument();
     expect(
-      screen.getByText(`${S.aiPanel.submittedAs} apt list --upgradable < /dev/null`),
+      screen.getByText(S.aiPanel.submittedAs).closest("details"),
     ).toBeInTheDocument();
     expect(screen.queryByText(`${S.blocks.exit} ?`)).not.toBeInTheDocument();
   });
@@ -563,11 +619,15 @@ describe("AiPanel renders", () => {
       render(<AiPanel sessionId="s1" />);
 
       expect(
-        screen.getByText(`${S.aiPanel.submittedAs} sleep 60 < /dev/null`),
+        screen.getByText(S.aiPanel.submittedAs).closest("details"),
       ).toBeInTheDocument();
       expect(
         screen.queryByText(`${S.aiPanel.ranAs} sleep 60 < /dev/null`),
       ).not.toBeInTheDocument();
+      const wrapper = screen.getByText("sleep 60 < /dev/null");
+      expect(wrapper).not.toBeVisible();
+      fireEvent.click(screen.getByText(S.aiPanel.submittedAs));
+      expect(wrapper).toBeVisible();
       expect(screen.getByText(S.aiPanel[status])).toBeInTheDocument();
     },
   );

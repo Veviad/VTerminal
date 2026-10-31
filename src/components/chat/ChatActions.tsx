@@ -11,7 +11,7 @@ import {
 
 import { useDismissibleLayer } from "../../hooks/useDismissibleLayer";
 import type { ChatSummary } from "../../lib/types";
-import { useChatStore } from "../../stores/chatStore";
+import { chatIsBusy, chatHasMutation, useChatStore } from "../../stores/chatStore";
 
 function MenuButton({
   icon,
@@ -54,9 +54,9 @@ export function ChatActions({
   const [regenerating, setRegenerating] = useState(false);
   const [regenerateError, setRegenerateError] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
-  const streaming = useChatStore((state) => state.stream.status === "streaming");
+  const streaming = useChatStore((state) => chatIsBusy(state.stream));
   const busy = useChatStore(
-    (state) => state.current?.summary.id === chat.id && state.stream.status === "streaming",
+    (state) => chatHasMutation(state, chat.id) || (state.current?.summary.id === chat.id && chatIsBusy(state.stream)),
   );
   const dismiss = useCallback(() => {
     setOpen(false);

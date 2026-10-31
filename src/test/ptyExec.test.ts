@@ -190,11 +190,19 @@ afterEach(() => {
 describe("runInTerminal — integrated session", () => {
   it("types the command once and reports the block's exit code and output", async () => {
     entry = makeEntry(["$ ", "hello", "$ "]);
+    useAppStore.getState().beginCommand("s1", "ap1", "echo hello");
     const promise = runInTerminal("s1", "ap1", "echo hello", { timeoutMs: 5000 });
     await flush();
 
     expect(ptyWrite).toHaveBeenCalledTimes(1);
     expect(ptyWrite).toHaveBeenCalledWith("s1", `${typed("echo hello")}\r`);
+    writePtyOutput(entry.term, new TextEncoder().encode(`${typed("echo hello")}\r\n`));
+    const displayed = vi.mocked(entry.term.write).mock.calls[0][0] as Uint8Array;
+    expect(new TextDecoder().decode(displayed)).toBe("echo hello\r\n");
+    const card = useAppStore.getState().aiStreams.s1?.messages
+      .find((message) => message.id === "cmd-ap1")?.command;
+    expect(card?.command).toBe("echo hello");
+    expect(card?.typed).toBe(typed("echo hello"));
 
     entry.blockMarkers.set("b1", {
       start: { line: 1, isDisposed: false },
@@ -524,7 +532,7 @@ describe("runInTerminal — integrated session", () => {
     const written = ptyWrite.mock.calls[0][1];
     writePtyOutput(entry.term, new TextEncoder().encode(`${written}\n`));
     const displayed = vi.mocked(entry.term.write).mock.calls[0][0] as Uint8Array;
-    expect(new TextDecoder().decode(displayed)).toBe(`${typed("cat hostile.bin")}\r\n`);
+    expect(new TextDecoder().decode(displayed)).toBe("cat hostile.bin\r\n");
     const nonce = /;([a-z0-9]+)\\007/.exec(written)?.[1];
     expect(nonce).toBeTruthy();
     // Both ordinary integrated markers and a replayed private token are
@@ -1495,7 +1503,7 @@ describe("runInTerminal — remote session", () => {
     const completion = `\x1b]6973;RD;0;${nonce}\x07`;
     writePtyOutput(entry.term, new TextEncoder().encode(`${commandLine}\nhello\r\n${completion}`));
     const displayedCommand = vi.mocked(entry.term.write).mock.calls[1][0] as Uint8Array;
-    expect(new TextDecoder().decode(displayedCommand)).toBe(`${typed("echo hello")}\r\nhello\r\n${completion}`);
+    expect(new TextDecoder().decode(displayedCommand)).toBe(`echo hello\r\nhello\r\n${completion}`);
     emit({ type: "osc", payload: `RD;0;${nonce}` });
     expect((await promise).exitCode).toBe(0);
   });

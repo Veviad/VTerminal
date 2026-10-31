@@ -1,0 +1,16 @@
+{
+  "shell": "zsh",
+  "platform": "darwin",
+  "cols": 85,
+  "line": "{ eval 'cat /private/tmp/vterminal-patch-credentials < /dev/null'; } >/dev/null 2>/dev/null",
+  "visible": "cat /private/tmp/vterminal-patch-credentials",
+  "chunks": [
+    "{",
+    "\b{ eval 'cat /private/tmp/",
+    "vterminal-patch-credentials < /dev/",
+    "null'; }",
+    "\u001b[K\u001b[1C",
+    "> \r\u001b[K/\r/dev",
+    "/null 2>/dev/null\u001b[?2004l\r\r\n"
+  ]
+}

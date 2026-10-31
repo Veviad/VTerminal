@@ -99,6 +99,7 @@ pub struct PtySession {
     /// Set by the wait thread once the shell has been reaped. Guards kill()
     /// against SIGHUP-ing a recycled pid hours later.
     pub exited: Arc<AtomicBool>,
+    pub ssh_autofill: Arc<Mutex<super::ssh_autofill::Autofill>>,
     /// Keep the provisioned local scope readable through profile exec handoffs.
     /// Only its path enters the child environment; the nonce stays in this
     /// private file and in non-exported shell variables.
@@ -437,6 +438,9 @@ pub fn spawn(
 
     let flow = Arc::new(FlowControl::new());
     let exited = Arc::new(AtomicBool::new(false));
+    let ssh_autofill = Arc::new(Mutex::new(super::ssh_autofill::Autofill::new(
+        params.shell_scope.clone(),
+    )));
 
     // Unix reader pump — poll() with a timeout so the thread
     // also exits on shutdown even when a SIGHUP-immune process (nohup) keeps
@@ -445,6 +449,7 @@ pub fn spawn(
     #[cfg(unix)]
     {
         let flow = Arc::clone(&flow);
+        let ssh_autofill = Arc::clone(&ssh_autofill);
         let session_id = params.session_id.clone();
         std::thread::Builder::new()
             .name(format!("pty-read-{session_id}"))
@@ -488,6 +493,9 @@ pub fn spawn(
                     match n {
                         n if n > 0 => {
                             let n = n as usize;
+                            if let Ok(mut autofill) = ssh_autofill.lock() {
+                                autofill.observe(&buf[..n]);
+                            }
                             flow.add_outstanding(n as u64);
                             if on_data
                                 .send(InvokeResponseBody::Raw(buf[..n].to_vec()))
@@ -546,11 +554,15 @@ pub fn spawn(
     {
         let session_id = params.session_id.clone();
         let exited = Arc::clone(&exited);
+        let ssh_autofill = Arc::clone(&ssh_autofill);
         std::thread::Builder::new()
             .name(format!("pty-wait-{session_id}"))
             .spawn(move || {
                 let exit_code = child.wait().ok().map(|status| status.exit_code() as i32);
                 exited.store(true, Ordering::Relaxed);
+                if let Ok(mut autofill) = ssh_autofill.lock() {
+                    autofill.cancel();
+                }
                 let _ = on_event.send(PtyEvent::Exit { exit_code });
             })
             .map_err(|e| format!("wait thread spawn failed: {e}"))?;
@@ -564,6 +576,7 @@ pub fn spawn(
         child_killer,
         flow,
         exited,
+        ssh_autofill,
         #[cfg(not(target_os = "windows"))]
         _shell_scope_file: shell_scope_file,
         #[cfg(target_os = "windows")]
@@ -579,15 +592,91 @@ impl PtySession {
     /// Forward xterm binary reports byte-for-byte, without UTF-8 encoding.
     pub fn write_bytes(&self, data: &[u8]) -> Result<(), String> {
         let mut writer = self.writer.lock().map_err(|_| "writer poisoned")?;
+        self.ssh_autofill
+            .lock()
+            .map_err(|_| "SSH autofill state poisoned")?
+            .input();
         writer
             .write_all(data)
             .map_err(|e| format!("pty write failed: {e}"))
     }
 
-    /// Submit a vault-backed secret as one terminal line without copying it
-    /// into a serializable `String` or returning it across IPC.
-    pub fn write_secret_line(&self, secret: &crate::credentials::Secret) -> Result<(), String> {
+    pub fn write_ssh_launch(&self, data: &str, token: &str) -> Result<(), String> {
         let mut writer = self.writer.lock().map_err(|_| "writer poisoned")?;
+        let mut autofill = self
+            .ssh_autofill
+            .lock()
+            .map_err(|_| "SSH autofill state poisoned")?;
+        autofill.dispatch(token, data.as_bytes())?;
+        if let Err(error) = writer.write_all(data.as_bytes()) {
+            autofill.cancel();
+            return Err(format!("pty write failed: {error}"));
+        }
+        Ok(())
+    }
+
+    /// Echo-off alone also describes a shell editor or an authenticated SSH
+    /// raw terminal. Canonical input and the exact foreground SSH argv are
+    /// additional requirements; any unsupported state leaves manual input.
+    pub fn verify_ssh_authentication(&self, argv: &[String]) -> Result<u32, String> {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            if self.exited.load(Ordering::Relaxed) {
+                return Err("terminal has exited".into());
+            }
+            let foreground = self
+                .master
+                .process_group_leader()
+                .filter(|pid| *pid > 0 && *pid as u32 != self.pid)
+                .ok_or("SSH is no longer the foreground command")?;
+            let fd = self
+                .master
+                .as_raw_fd()
+                .ok_or("terminal mode is unavailable")?;
+            let mut mode = std::mem::MaybeUninit::<libc::termios>::uninit();
+            // SAFETY: self.master owns fd for this borrow, and mode provides
+            // aligned, writable storage for one termios. Check success before
+            // reading the initialized structure below.
+            // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+            if unsafe { libc::tcgetattr(fd, mode.as_mut_ptr()) } != 0 {
+                return Err("terminal mode is unavailable".into());
+            }
+            // SAFETY: tcgetattr returned success, initializing mode in full.
+            // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+            let flags = unsafe { mode.assume_init() }.c_lflag;
+            if !ssh_password_terminal_mode(flags) {
+                return Err("terminal is not in an SSH password input mode".into());
+            }
+            if !foreground_is_expected_ssh(foreground as u32, argv) {
+                return Err("foreground SSH command could not be verified".into());
+            }
+            Ok(foreground as u32)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            let _ = argv;
+            Err(
+                "automatic password entry is unavailable for this terminal; enter it manually"
+                    .into(),
+            )
+        }
+    }
+
+    pub fn write_ssh_password(
+        &self,
+        grant: &super::ssh_autofill::Grant,
+        foreground: u32,
+        secret: &crate::credentials::Secret,
+    ) -> Result<(), String> {
+        let mut writer = self.writer.lock().map_err(|_| "writer poisoned")?;
+        let autofill = self
+            .ssh_autofill
+            .lock()
+            .map_err(|_| "SSH autofill state poisoned")?;
+        if !autofill.unchanged(grant) || self.verify_ssh_authentication(&grant.argv)? != foreground
+        {
+            return Err("SSH authentication changed; enter the password manually".into());
+        }
         writer
             .write_all(secret.expose().as_bytes())
             .and_then(|_| writer.write_all(b"\r"))
@@ -620,6 +709,9 @@ impl PtySession {
     /// NSIS may terminate the app immediately, so an unverified Linux process
     /// tree must prevent apply rather than becoming an orphan.
     pub fn kill_verified(&mut self) -> Result<(), String> {
+        if let Ok(mut autofill) = self.ssh_autofill.lock() {
+            autofill.cancel();
+        }
         self.flow.shutdown();
         #[cfg(target_os = "windows")]
         {
@@ -663,8 +755,84 @@ impl PtySession {
 #[path = "wsl_tests.rs"]
 mod wsl_tests;
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn ssh_password_terminal_mode(flags: libc::tcflag_t) -> bool {
+    flags & libc::ECHO == 0 && flags & libc::ICANON != 0
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn foreground_is_expected_ssh(pid: u32, expected: &[String]) -> bool {
+    #[cfg(target_os = "linux")]
+    let executable = std::fs::read_link(format!("/proc/{pid}/exe")).ok();
+    #[cfg(target_os = "macos")]
+    let executable = {
+        #[link(name = "proc")]
+        unsafe extern "C" {
+            fn proc_pidpath(pid: libc::c_int, buffer: *mut libc::c_void, size: u32) -> libc::c_int;
+        }
+        let mut buffer = [0u8; 4096];
+        // SAFETY: buffer is writable for the exact length supplied and remains
+        // live throughout this synchronous libproc call; no pointer escapes.
+        // The caller obtained the positive pid from the PTY foreground group.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        let length = unsafe {
+            proc_pidpath(
+                pid as libc::c_int,
+                buffer.as_mut_ptr().cast(),
+                buffer.len() as u32,
+            )
+        };
+        (length > 0).then(|| {
+            let end = buffer
+                .iter()
+                .position(|byte| *byte == 0)
+                .unwrap_or(buffer.len());
+            std::path::PathBuf::from(String::from_utf8_lossy(&buffer[..end]).into_owned())
+        })
+    };
+    let Some(executable) = executable else {
+        return false;
+    };
+    let system_ssh = std::fs::canonicalize("/usr/bin/ssh").ok();
+    if system_ssh.as_ref() != Some(&executable) {
+        return false;
+    }
+    let Ok(output) = std::process::Command::new("/bin/ps")
+        .args(["-ww", "-p", &pid.to_string(), "-o", "args="])
+        .env_clear()
+        .env("LC_ALL", "C")
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let Some(mut actual) = shlex::split(String::from_utf8_lossy(&output.stdout).trim()) else {
+        return false;
+    };
+    if let Some(program) = actual.first_mut() {
+        *program = program.rsplit('/').next().unwrap_or(program).to_string();
+    }
+    actual == expected
+}
+
 #[cfg(test)]
 mod tests {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn ssh_password_mode_rejects_echo_and_authenticated_raw_terminals() {
+        assert!(super::ssh_password_terminal_mode(libc::ICANON));
+        assert!(!super::ssh_password_terminal_mode(
+            libc::ICANON | libc::ECHO
+        ));
+        assert!(!super::ssh_password_terminal_mode(0));
+        assert!(!super::foreground_is_expected_ssh(
+            std::process::id(),
+            &["ssh".into(), "deploy@prod-01".into()]
+        ));
+    }
+
     use super::{
         resolve_cwd, validate_shell_scope, wsl_cleanup_args, wsl_command_args, FlowControl,
         HIGH_WATERMARK, WSL_SESSION_CLEANUP,

@@ -43,6 +43,14 @@ function calls(statuses: ChatMcpCall["status"][]): ChatMcpCall[] {
 }
 
 describe("MCP tool card", () => {
+  it("keeps cancellation and interruption distinct from failed calls in grouped status", () => {
+    render(<McpToolGroup calls={[
+      { ...call("error"), approval_id: "a", error: "Cancelled" },
+      { ...call("error"), approval_id: "b", error: "Interrupted" },
+    ]} />);
+    expect(screen.getByRole("status")).toHaveTextContent("1 cancelled · 1 interrupted");
+    expect(screen.getByRole("status")).not.toHaveTextContent("failed");
+  });
   it("collapses automatically when an approval finishes", async () => {
     const { rerender } = render(<McpToolCard call={call("awaiting")} />);
     const toggle = screen.getByRole("button", {

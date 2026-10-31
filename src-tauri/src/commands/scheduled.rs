@@ -477,6 +477,9 @@ pub fn scheduled_run_attach(
     rows: u32,
 ) -> Result<(), String> {
     gate(&app)?;
+    if scheduler::state(&app).is_some_and(|state| state.is_cancelled(&run_id)) {
+        return Err("that run was cancelled".into());
+    }
     let conn = db_state.0.lock().map_err(|_| "db poisoned")?;
     let run = db::get_run(&conn, &run_id)?.ok_or_else(|| "no such run".to_string())?;
     if run.status != ScheduledRunStatus::AwaitingTarget {
@@ -484,6 +487,9 @@ pub fn scheduled_run_attach(
     }
     if run.execution_mode != ExecutionMode::Tab {
         return Err("that run does not execute in a terminal tab".into());
+    }
+    if run.target_host_id.is_some() {
+        return Err("unattended SSH tab runs cannot safely verify authentication; use a key-authenticated headless schedule".into());
     }
     if run.target_host_id.as_deref() != remote_host_id.as_deref() {
         return Err(format!(
@@ -493,20 +499,16 @@ pub fn scheduled_run_attach(
         ));
     }
     // The same guard `engine::execute_run` applies before a headless run.
-    // `createSession` deliberately treats an unresolvable cwd as non-fatal and
-    // logs it, which is right when a person opens a tab and wrong for an
-    // unattended run — that would silently execute in whatever directory the
-    // shell landed in. Checked from the stored action rather than from anything
-    // the webview sent.
-    if let Some(action_id) = run.action_id.as_deref() {
-        if let Some(action) = db::get_action(&conn, action_id)? {
-            if let Some(dir) = action.input.target.local_cwd() {
-                if !std::path::Path::new(dir).is_dir() {
-                    return Err(format!(
-                        "the working directory {dir} no longer exists on this machine"
-                    ));
-                }
-            }
+    // An action may have been edited while this run was waiting. Check the
+    // immutable plan committed to this run, never the current action or UI.
+    let plan_json = db::plan_json_for_run(&conn, &run_id)?.ok_or("the run plan is missing")?;
+    let plan: ScheduledActionInput = serde_json::from_str(&plan_json)
+        .map_err(|e| format!("the run plan could not be read: {e}"))?;
+    if let Some(dir) = plan.target.local_cwd() {
+        if !std::path::Path::new(dir).is_dir() {
+            return Err(format!(
+                "the working directory {dir} no longer exists on this machine"
+            ));
         }
     }
     let now = db::now_rfc3339();
@@ -528,11 +530,15 @@ pub fn scheduled_step_begin(
     title: String,
 ) -> Result<String, String> {
     gate(&app)?;
-    let conn = db_state.0.lock().map_err(|_| "db poisoned")?;
-    let run = db::get_run(&conn, &run_id)?.ok_or_else(|| "no such run".to_string())?;
-    if run.status != ScheduledRunStatus::Running {
-        return Err("that run is not executing".into());
+    if scheduler::state(&app).is_some_and(|state| state.is_cancelled(&run_id)) {
+        return Err("that run was cancelled".into());
     }
+    let conn = db_state.0.lock().map_err(|_| "db poisoned")?;
+    if scheduler::state(&app).is_some_and(|state| state.is_cancelled(&run_id)) {
+        return Err("that run was cancelled".into());
+    }
+    let parsed_kind: StepKind = kind.parse().map_err(|_| "unknown step kind".to_string())?;
+    db::validate_step_intent(&conn, &run_id, &step_id, sort_order, parsed_kind, &title)?;
     let attempt_id = uuid::Uuid::new_v4().to_string();
     let now = db::now_rfc3339();
     let attempt = StepAttempt {
@@ -540,7 +546,7 @@ pub fn scheduled_step_begin(
         run_id: run_id.clone(),
         step_id,
         sort_order,
-        kind: kind.parse().map_err(|_| "unknown step kind".to_string())?,
+        kind: parsed_kind,
         title,
         status: StepAttemptStatus::Pending,
         executed_command: None,
@@ -583,10 +589,24 @@ pub fn scheduled_step_finish(
         .iter()
         .find(|a| a.id == attempt_id)
         .ok_or_else(|| "that step was not dispatched by this run".to_string())?;
+    if run.status.is_terminal()
+        || !matches!(
+            existing.status,
+            StepAttemptStatus::Pending | StepAttemptStatus::Running
+        )
+    {
+        return Err("that step is no longer active".into());
+    }
     let status: StepAttemptStatus = result
         .status
         .parse()
         .map_err(|_| "unknown step status".to_string())?;
+    if matches!(
+        status,
+        StepAttemptStatus::Pending | StepAttemptStatus::Running
+    ) {
+        return Err("a step may only finish with a terminal status".into());
+    }
     let now = db::now_rfc3339();
     let finished = StepAttempt {
         status,
@@ -627,7 +647,7 @@ pub fn scheduled_run_finish(
     error: Option<String>,
 ) -> Result<(), String> {
     gate(&app)?;
-    let status: ScheduledRunStatus = status
+    let mut status: ScheduledRunStatus = status
         .parse()
         .map_err(|_| "unknown run status".to_string())?;
     if !status.is_terminal() {
@@ -637,6 +657,11 @@ pub fn scheduled_run_finish(
     // path has no reason to give — so a frontend must not claim it.
     if status == ScheduledRunStatus::Skipped {
         return Err("a tab run cannot report itself skipped".into());
+    }
+    // A cancel may race with the frontend's last step result. It must win over
+    // a late success even before the tab watcher has observed the cancellation.
+    if scheduler::state(&app).is_some_and(|state| state.is_cancelled(&run_id)) {
+        status = ScheduledRunStatus::Cancelled;
     }
     let action_id = runner::current_action_id(&app, &run_id);
     runner::finish_run(&app, &run_id, action_id, status, error.as_deref());

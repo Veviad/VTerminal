@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { Terminal } from "@xterm/xterm";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cancelPtyEcho, expectPtyEcho, writePtyOutput } from "../lib/ptyEcho";
+import { onTerminalUserInput } from "../lib/terminalUserInput";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -19,6 +20,7 @@ afterAll(() => canvasContext.mockRestore());
 
 interface EchoFixture {
   shell: string;
+  platform: string;
   cols: number;
   prompt: string;
   rprompt: string;
@@ -29,11 +31,17 @@ interface EchoFixture {
   rawOutput: string;
 }
 
-// Captured with real interactive bash 3.2 and zsh 5.9 PTYs using
+// Captured with real interactive macOS Bash 3.2/zsh 5.9 and Linux Bash 5 PTYs using
 // TERM=xterm-256color. Includes ZLE margin redraws and right-prompt erasure.
 const fixtures = JSON.parse(
   readFileSync("src/test/fixtures/pty-echo.json", "utf8"),
 ) as EchoFixture[];
+
+// Captured from the isolated app's real integrated zsh at 85 columns. ZLE
+// emitted CSI 1 C for the space between the private group and its redirect.
+const privateRedraw = JSON.parse(
+  readFileSync("src/test/fixtures/pty-echo-private-redraw.json", "utf8"),
+) as { line: string; visible: string; chunks: string[] };
 
 class RecordingTerminal {
   chunks: Uint8Array[] = [];
@@ -60,7 +68,7 @@ describe("PTY command echo filtering", () => {
   afterEach(() => vi.useRealTimers());
 
   it.each(fixtures)(
-    "replaces a real $shell $kind echo at $cols columns (right prompt: '$rprompt') at every byte boundary",
+    "replaces a real $platform $shell $kind echo at $cols columns (right prompt: '$rprompt') at every byte boundary",
     (fixture) => {
       const bytes = encoder.encode(fixture.rawOutput);
       const modes = fixture.shell === "zsh" ? "\x1b[?2004l" : "";
@@ -87,6 +95,38 @@ describe("PTY command echo filtering", () => {
     expect(term.output).toBe(`${unicodeCommand}\r\nGrüße 🍰 東京\r\n${completion}`);
   });
 
+  it("replaces the real integrated private-command echo when ZLE uses cursor-forward for a space", () => {
+    const raw = encoder.encode(privateRedraw.chunks.join(""));
+    const expected = `\x1b[K${privateRedraw.visible}\r\n\x1b[?2004l`;
+    const splits = [
+      privateRedraw.chunks.map((chunk) => encoder.encode(chunk)),
+      Array.from(raw, (byte) => Uint8Array.of(byte)),
+      ...Array.from({ length: raw.length + 1 }, (_, at) => [raw.subarray(0, at), raw.subarray(at)]),
+    ];
+    for (const chunks of splits) {
+      const term = new RecordingTerminal();
+      expectPtyEcho(term, privateRedraw.line, privateRedraw.visible);
+      for (const chunk of chunks) writePtyOutput(term, chunk);
+      expect(term.output).toBe(expected);
+    }
+  });
+
+  it("fails open on oversized cursor advances without allocating their claimed width", () => {
+    const term = new RecordingTerminal();
+    const raw = `${line}\x1b[999999999999999999999C\r\n`;
+    expectPtyEcho(term, line, visible);
+    writePtyOutput(term, encoder.encode(raw));
+    expect(term.output).toBe(raw);
+  });
+
+  it("bounds the aggregate expansion of repeated cursor advances", () => {
+    const term = new RecordingTerminal();
+    const raw = `x${"\x1b[32768C".repeat(3)}\r\n`;
+    expectPtyEcho(term, `x${" ".repeat(32768 * 3)}`, visible);
+    writePtyOutput(term, encoder.encode(raw));
+    expect(term.output).toBe(raw);
+  });
+
   it("preserves standard and private terminal mode changes during echo replacement", () => {
     const term = new RecordingTerminal();
     expectPtyEcho(term, line, visible);
@@ -106,6 +146,8 @@ describe("PTY command echo filtering", () => {
     `${line.replace(nonce, "fedcba9876543210fedcba9876543210")}\r\n`,
     `hello world\r\n${completion}`,
     `\x1b7${line}\r\n`,
+    `\x1b[?1049h${line}\r\n`,
+    `\x1b[?1;1049;2004h${line}\r\n`,
   ])("fails open on mismatched or unfamiliar echoed bytes: %j", (raw) => {
     const term = new RecordingTerminal();
     expectPtyEcho(term, line, visible);
@@ -114,8 +156,8 @@ describe("PTY command echo filtering", () => {
     expect(term.output).toBe(raw + `${line}\r\n`);
   });
 
-  it.each([completion, "\x1b]133;C\x1b\\", "\x1b]7;file://remote/tmp\x07"])(
-    "immediately forwards actual OSC tokens, including tokens split after ESC: %j",
+  it.each([completion, "\x1b]133;C\x1b\\"])(
+    "ends echo matching at a real shell start/completion token: %j",
     (token) => {
       const term = new RecordingTerminal();
       expectPtyEcho(term, line, visible);
@@ -128,6 +170,20 @@ describe("PTY command echo filtering", () => {
     },
   );
 
+  it.each(["\x1b]0;terminal title\x07", "\x1b]7;file://remote/tmp\x1b\\", "\x1bP$q m\x1b\\"])(
+    "forwards leading protocol traffic and still replaces the echo at every byte boundary: %j",
+    (token) => {
+      const raw = encoder.encode(`${token}${line}\r\nhello world\r\n${completion}`);
+      for (let split = 0; split <= raw.length; split++) {
+        const term = new RecordingTerminal();
+        expectPtyEcho(term, line, visible);
+        writePtyOutput(term, raw.subarray(0, split));
+        writePtyOutput(term, raw.subarray(split));
+        expect(term.output, `split at ${split}`).toBe(`${token}${visible}\r\nhello world\r\n${completion}`);
+      }
+    },
+  );
+
   it("forwards a terminal status query immediately at every split boundary", () => {
     const query = encoder.encode("\x1b[6n");
     for (let split = 0; split <= query.length; split++) {
@@ -137,16 +193,16 @@ describe("PTY command echo filtering", () => {
       writePtyOutput(term, query.subarray(split));
       expect(term.output).toBe("\x1b[6n");
       writePtyOutput(term, encoder.encode(`${line}\r\n`));
-      expect(term.output).toBe(`\x1b[6n${line}\r\n`);
+      expect(term.output).toBe(`\x1b[6n${visible}\r\n`);
     }
   });
 
-  it("preserves a query and the full echoed line arriving in one chunk", () => {
+  it("preserves a query and replaces the full echoed line arriving in one chunk", () => {
     const term = new RecordingTerminal();
     expectPtyEcho(term, line, visible);
     const raw = `\x1b[6n${line}\r\n`;
     writePtyOutput(term, encoder.encode(raw));
-    expect(term.output).toBe(raw);
+    expect(term.output).toBe(`\x1b[6n${visible}\r\n`);
   });
 
   it("immediately releases a DCS prefix without waiting for its terminator or a newline", () => {
@@ -158,6 +214,30 @@ describe("PTY command echo filtering", () => {
     expect(term.output).toBe("\x1bP");
     writePtyOutput(term, encoder.encode("$q m\x1b\\"));
     expect(term.output).toBe("\x1bP$q m\x1b\\");
+    writePtyOutput(term, encoder.encode(`${line}\r\n`));
+    expect(term.output).toBe(`\x1bP$q m\x1b\\${visible}\r\n`);
+  });
+
+  it("does not mistake control-string payload or a different output line for an echo", () => {
+    const term = new RecordingTerminal();
+    expectPtyEcho(term, line, visible);
+    const token = `\x1b]0;${line}\n${line}\x07`;
+    for (const byte of encoder.encode(token)) writePtyOutput(term, Uint8Array.of(byte));
+    writePtyOutput(term, encoder.encode(`real output\r\n${line}\r\n`));
+    expect(term.output).toBe(`${token}real output\r\n${line}\r\n`);
+  });
+
+  it("acknowledges a mixed control/echo chunk only after the whole chunk is parsed", () => {
+    const term = new RecordingTerminal();
+    const acknowledge = vi.fn();
+    expectPtyEcho(term, line, visible);
+    writePtyOutput(term, encoder.encode(`\x1b[6n${line}`), acknowledge);
+    expect(term.output).toBe("\x1b[6n");
+    expect(acknowledge).not.toHaveBeenCalled();
+    writePtyOutput(term, encoder.encode("\r\n"));
+    expect(acknowledge).not.toHaveBeenCalled();
+    term.callbacks[0]();
+    expect(acknowledge).toHaveBeenCalledOnce();
   });
 
   it("holds a partial echo until timeout, then releases it without consuming later output", () => {
@@ -295,8 +375,58 @@ describe("PTY command echo filtering", () => {
 });
 
 describe("PTY echo filtering with xterm's real parser", () => {
+  it("renders the captured private zsh redraw as the approved command at 85 columns", async () => {
+    const term = new Terminal({ cols: 85, rows: 24 });
+    try {
+      const prompt = "maholick@VMAC ~ % ";
+      await new Promise<void>((resolve) => term.write(prompt, resolve));
+      expectPtyEcho(term, privateRedraw.line, privateRedraw.visible);
+      await new Promise<void>((resolve) => writePtyOutput(
+        term, encoder.encode(privateRedraw.chunks.join("")), resolve,
+      ));
+      expect(term.buffer.active.getLine(0)?.translateToString(true)).toBe(prompt + privateRedraw.visible);
+      expect(term.buffer.active.getLine(1)?.translateToString(true)).toBe("");
+    } finally {
+      cancelPtyEcho(term, true);
+      term.dispose();
+    }
+  });
+
+  it.each(["\x1b[6n", "\x1b[c", "\x1bP$q m\x1b\\"])(
+    "keeps the echo armed when the real input listener receives xterm's query reply: %j",
+    async (query) => {
+      const term = new Terminal({ cols: 240, rows: 24 });
+      const userInput = vi.fn(() => cancelPtyEcho(term));
+      const registration = onTerminalUserInput(term, userInput);
+      const replies: string[] = [];
+      term.onData((data) => replies.push(data));
+      try {
+        expectPtyEcho(term, line, visible);
+        await new Promise<void>((resolve) => writePtyOutput(term, encoder.encode(query), resolve));
+        expect(replies).toHaveLength(1);
+        expect(userInput).not.toHaveBeenCalled();
+        await new Promise<void>((resolve) => writePtyOutput(term, encoder.encode(`${line}\r\n`), resolve));
+        expect(term.buffer.active.getLine(0)?.translateToString(true)).toBe(visible);
+
+        for (const data of ["x", "pasted text", "\x1b[1;1R"]) {
+          expectPtyEcho(term, line, visible);
+          term.input(data, true);
+          await new Promise<void>((resolve) => writePtyOutput(term, encoder.encode(`${line}\r\n`), resolve));
+        }
+        expect(userInput).toHaveBeenCalledTimes(3);
+        // Even a pasted string resembling a DSR reply is real user input once
+        // the parser turn is over and must cancel suppression.
+        expect(term.buffer.active.getLine(3)?.translateToString(true)).toBe(line);
+      } finally {
+        registration.dispose();
+        cancelPtyEcho(term, true);
+        term.dispose();
+      }
+    },
+  );
+
   it.each(fixtures)(
-    "renders a clean $shell $kind at $cols columns while preserving protocol tokens",
+    "renders a clean $platform $shell $kind at $cols columns while preserving protocol tokens",
     async (fixture) => {
       const term = new Terminal({ cols: fixture.cols, rows: 24, allowProposedApi: true });
       const tokens: string[] = [];
@@ -306,10 +436,14 @@ describe("PTY echo filtering with xterm's real parser", () => {
       });
       try {
         await new Promise<void>((resolve) => term.write(fixture.initial, resolve));
+        const replies: string[] = [];
+        term.onData((data) => replies.push(data));
         expectPtyEcho(term, fixture.line, fixture.kind === "probe" ? null : visible);
         await new Promise<void>((resolve) =>
-          writePtyOutput(term, encoder.encode(fixture.rawOutput), resolve),
+          writePtyOutput(term, encoder.encode(`\x1b]0;audit title\x07\x1b[6n${fixture.rawOutput}`), resolve),
         );
+        expect(replies).toHaveLength(1);
+        expect(replies[0]).toMatch(/^\x1b\[\d+;\d+R$/);
         const buffer = term.buffer.active;
         const rendered = Array.from({ length: buffer.baseY + buffer.cursorY + 1 }, (_, row) =>
           buffer.getLine(row)?.translateToString(true) ?? "",

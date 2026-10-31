@@ -28,7 +28,9 @@ fn absorb(output: &mut RoundOutput, event: ProviderEvent) {
             completion_tokens,
         } => output.usage = (prompt_tokens, completion_tokens),
         ProviderEvent::Done { finish_reason } => output.finish = finish_reason,
-        ProviderEvent::ReasoningDelta(_) | ProviderEvent::WebCitation(_) => {}
+        ProviderEvent::ReasoningDelta(_)
+        | ProviderEvent::WebCitation(_)
+        | ProviderEvent::Activity(_) => {}
     }
 }
 

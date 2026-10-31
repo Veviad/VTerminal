@@ -1,7 +1,7 @@
 //! Step-scoped agent execution for runbooks.
 //!
-//! This is intentionally separate from `agent::run`: a normal agent may call
-//! `finish`, while a runbook agent must only propose phase commands and return one
+//! This is intentionally separate from `agent::run`: a normal agent concludes in
+//! streamed assistant text, while a runbook agent proposes phase commands and returns one
 //! structured `phase_complete` value bound to the active run, step and phase. The
 //! engine remains authoritative over lifecycle transitions and final status.
 

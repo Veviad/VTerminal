@@ -5,18 +5,21 @@ import * as api from "../lib/schedules";
 import * as tauri from "../lib/tauri";
 import { S } from "../lib/strings";
 import { getTerm } from "../lib/termRegistry";
-import { runInTerminal, type PtyExecOutcome } from "../lib/ptyExec";
-import { connectToHost } from "../lib/sshConnect";
+import { abortSession, runInTerminal, type PtyExecOutcome } from "../lib/ptyExec";
 import { protectPrivateTerminal } from "../lib/runbookTerminalPrivacy";
 import {
   claimScheduleSession,
+  bindScheduleAgentRequest,
+  clearScheduleRunRevocation,
   forgetActionSession,
   isScheduleRunRevoked,
   recallActionSession,
   registerLiveScheduleJob,
   releaseScheduleSession,
   rememberActionSession,
+  revokeScheduleRun,
   scheduleOwnerOf,
+  scheduleAgentOwnsRequest,
   unregisterLiveScheduleJob,
 } from "../lib/scheduleLiveJobs";
 // Every record read below is keyed by a runtime id. `ownRecordValue` is the
@@ -40,18 +43,12 @@ import type { ScheduleAction, ScheduleFireEvent, ScheduleStep } from "../lib/sch
  *
  * Everything here composes existing primitives rather than reimplementing them:
  * `createSession` already supports a background tab (`activate: false` plus seeded
- * `dims`), `connectToHost` already owns the saved-host connect including password
- * autofill, `runInTerminal` already types and observes one command, and
+ * `dims`), `runInTerminal` already types and observes one command, and
  * `startAgent` already drives the agent loop against a session's PTY. Neither
  * `ptyExec.ts` nor `useAiStream.ts` references `activeSessionId` — the active-tab
  * requirement is Runbooks policy, not a platform constraint.
  */
 
-/** Long enough for password autofill (60s TTL), a `-J` bastion, and an MFA
- *  prompt. `FIRST_PROMPT_WAIT_MS` is 8s and is a TIMEOUT, not a confirmation —
- *  it resolves and types anyway, which an unattended run must never do. */
-const REMOTE_PROMPT_TIMEOUT_MS = 45_000;
-const REMOTE_POLL_MS = 250;
 /** Fallback geometry when there is no fitted tab to copy. Not xterm's 80×24: a
  *  background pane never fits, so whatever is chosen here is what every command
  *  in the run sees, and 80 columns truncates `ps`, `docker ps` and `df -h` into
@@ -83,12 +80,11 @@ const sessionQueues = new Map<string, Promise<void>>();
 
 function enqueue(sessionId: string, work: () => Promise<void>): Promise<void> {
   const tail = (sessionQueues.get(sessionId) ?? Promise.resolve()).then(work, work);
-  sessionQueues.set(
-    sessionId,
-    tail.finally(() => {
-      if (sessionQueues.get(sessionId) === tail) sessionQueues.delete(sessionId);
-    }),
+  const tracked = tail.then(
+    () => { if (sessionQueues.get(sessionId) === tracked) sessionQueues.delete(sessionId); },
+    () => { if (sessionQueues.get(sessionId) === tracked) sessionQueues.delete(sessionId); },
   );
+  sessionQueues.set(sessionId, tracked);
   return tail;
 }
 
@@ -104,41 +100,10 @@ function seedDims(): { cols: number; rows: number } {
   };
 }
 
-/** Wait for a CONFIRMED remote prompt.
- *
- *  `waitForFirstPrompt` cannot be reused: it resolves on the local shell's first
- *  input phase, and `createSession` has already consumed that to type the ssh
- *  line. The signal that we are on the remote is `detectNesting` firing on the
- *  ssh block, which sets `sessionUi[sessionId].remote` — the remote emits only
- *  private `OSC 6973;RD` and never OSC 133, so there is no phase event to await.
- */
-async function waitForRemote(sessionId: string, timeoutMs: number): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const ui = ownRecordValue(useAppStore.getState().sessionUi, sessionId);
-    if (ui?.remote) return true;
-    const session = useAppStore.getState().sessions.find((s) => s.id === sessionId);
-    if (!session || session.exited) return false;
-    await new Promise((resolve) => setTimeout(resolve, REMOTE_POLL_MS));
-  }
-  return false;
-}
-
 /** `Array.prototype.at` is above this project's lib target. */
 function lastContent(messages: { content: string }[] | undefined): string | null {
   if (!messages || messages.length === 0) return null;
   return messages[messages.length - 1].content;
-}
-
-function scrollbackTail(sessionId: string, bytes = 2048): string {
-  const entry = getTerm(sessionId);
-  if (!entry) return "";
-  const buffer = entry.term.buffer.active;
-  const lines: string[] = [];
-  for (let i = Math.max(0, buffer.length - 60); i < buffer.length; i++) {
-    lines.push(buffer.getLine(i)?.translateToString(true) ?? "");
-  }
-  return lines.join("\n").slice(-bytes);
 }
 
 function outcomeToResult(outcome: PtyExecOutcome, command: string): StepResult {
@@ -178,13 +143,15 @@ function outcomeToResult(outcome: PtyExecOutcome, command: string): StepResult {
 export function useScheduledActions() {
   const enabled = useAppStore((s) => s.schedulesEnabled);
   const { createSession } = useSessions();
-  const { startAgent } = useAiStream();
+  const { startAgent, cancel: cancelAgent } = useAiStream();
   // Held in refs so the listener effect does not re-subscribe on every render of
   // a hook whose callbacks are recreated per commit.
   const createRef = useRef(createSession);
   const startAgentRef = useRef(startAgent);
+  const cancelAgentRef = useRef(cancelAgent);
   createRef.current = createSession;
   startAgentRef.current = startAgent;
+  cancelAgentRef.current = cancelAgent;
 
   useEffect(() => {
     if (!enabled) return;
@@ -210,6 +177,13 @@ export function useScheduledActions() {
       if (isScheduleRunRevoked(runId)) {
         return { status: "cancelled", error: "the run was cancelled" };
       }
+      if (
+        !(await api.scheduleRunIsActive(runId).catch(() => false)) ||
+        isScheduleRunRevoked(runId) ||
+        !useAppStore.getState().schedulesEnabled
+      ) {
+        return { status: "cancelled", error: "the run is no longer active" };
+      }
       const attemptId = await api.scheduleStepBegin(
         runId,
         step.id,
@@ -217,9 +191,14 @@ export function useScheduledActions() {
         step.kind,
         step.title,
       );
-      const lease = registerLiveScheduleJob({ runId, attemptId, sessionId });
+      const lease = registerLiveScheduleJob({ runId, attemptId, sessionId, kind: step.kind });
       const startedAt = Date.now();
       try {
+        if (isScheduleRunRevoked(runId) || !useAppStore.getState().schedulesEnabled) {
+          const cancelled = { status: "cancelled", error: "the run is no longer active" };
+          await api.scheduleStepFinish(runId, attemptId, cancelled);
+          return cancelled;
+        }
         if (step.kind === "command") {
           const outcome = await runInTerminal(sessionId, attemptId, step.text, {
             // The action's own timeout, not a hardcoded one: the editor exposes
@@ -232,7 +211,8 @@ export function useScheduledActions() {
             harden: true,
             beforeWrite: async () => {
               if (isScheduleRunRevoked(runId)) return false;
-              return await api.scheduleRunIsActive(runId).catch(() => false);
+              const active = await api.scheduleRunIsActive(runId).catch(() => false);
+              return active && !isScheduleRunRevoked(runId) && useAppStore.getState().schedulesEnabled;
             },
             canWrite: () => {
               const app = useAppStore.getState();
@@ -266,7 +246,24 @@ export function useScheduledActions() {
           return busy;
         }
         const messagesBefore = before?.messages.length ?? 0;
-        await startAgentRef.current(sessionId, step.text);
+        if (
+          !(await api.scheduleRunIsActive(runId).catch(() => false)) ||
+          isScheduleRunRevoked(runId) ||
+          !useAppStore.getState().schedulesEnabled
+        ) {
+          const cancelled = { status: "cancelled", error: "the run is no longer active" };
+          await api.scheduleStepFinish(runId, attemptId, cancelled);
+          return cancelled;
+        }
+        // startAgent claims its request synchronously before its first await.
+        // Capture that exact owner before yielding, so a delayed cancellation
+        // notice cannot stop a newer human turn in the same terminal.
+        const started = startAgentRef.current(sessionId, step.text, [], runId);
+        const state = useAppStore.getState();
+        const owner = state.resolveAiOwner(sessionId);
+        const requestId = ownRecordValue(state.aiStreams, owner)?.requestId;
+        if (requestId && requestId !== before?.requestId) bindScheduleAgentRequest(lease, requestId);
+        await started;
         const after = ownRecordValue(useAppStore.getState().aiStreams, sessionId);
         // `startAgent` returns immediately, having done nothing, if the session
         // was busy or a sidecar is unhealthy. An await on that resolves instantly
@@ -311,33 +308,19 @@ export function useScheduledActions() {
     };
 
     const drive = async (fire: ScheduleFireEvent) => {
-      const store = useScheduleStore.getState();
-      let action: ScheduleAction | null =
-        store.actions.find((a) => a.id === fire.action_id) ?? null;
-      if (!action) {
-        action = await api.scheduleGet(fire.action_id).catch(() => null);
-        if (action) useScheduleStore.getState().upsertAction(action);
-      }
-      if (!action) {
-        await finish(fire.run_id, "failed", "the action could not be read");
+      // The event carries the plan committed by the backend, so edits made
+      // while this run waited never change the commands or permissions it runs.
+      const action = fire.action;
+
+      // The local SSH block starts before password, host-key and MFA prompts.
+      // It is not proof of a remote prompt, so do not open or type into an
+      // unattended SSH tab without a passive authentication signal.
+      if (fire.target_host_id !== null || action.target.kind === "ssh_host") {
+        await finish(fire.run_id, "failed", "Unattended SSH tab runs cannot safely verify authentication. Use a key-authenticated headless schedule, or connect interactively.");
         return;
       }
 
-      // Re-read the host at FIRE time. A schedule row must never cache it: an
-      // edited address has to be connected to, and a deleted host must fail
-      // loudly rather than replaying a stale command line.
-      const host =
-        fire.target_host_id !== null
-          ? await tauri.sshHostsGet(fire.target_host_id).catch(() => null)
-          : null;
-      if (fire.target_host_id !== null && !host) {
-        await finish(fire.run_id, "failed", "the saved host no longer exists");
-        return;
-      }
-
-      // Reuse the action's tab when it is still usable, so an hourly action does
-      // not open twenty-four a day — and for an ssh target the reused tab is
-      // already connected, which skips the connect entirely.
+      // Reuse an unconstrained local tab when it is still usable.
       const remembered = recallActionSession(fire.action_id);
       const app = useAppStore.getState();
       const reusable =
@@ -345,23 +328,16 @@ export function useScheduledActions() {
         app.sessions.some((s) => s.id === remembered && !s.exited) &&
         getTerm(remembered) !== undefined &&
         scheduleOwnerOf(remembered) === null &&
-        (fire.target_host_id === null
-          ? !ownRecordValue(app.sessionUi, remembered)?.remote
-          : ownRecordValue(app.sessionUi, remembered)?.remote?.host_id ===
-            fire.target_host_id);
+        // A shell can change directories, so an explicit cwd needs a new tab.
+        fire.target_cwd === null &&
+        !ownRecordValue(app.sessionUi, remembered)?.remote;
 
       let sessionId = reusable ? (remembered as string) : null;
       const dims = seedDims();
 
       if (!sessionId) {
         try {
-          sessionId = host
-            ? await connectToHost(host, "new-tab", createRef.current, undefined, {
-                activate: false,
-                dims,
-                userTitle: `⏱ ${action.name}`,
-              })
-            : await createRef.current({
+          sessionId = await createRef.current({
                 activate: false,
                 dims,
                 cwd: fire.target_cwd,
@@ -381,20 +357,6 @@ export function useScheduledActions() {
         if (useAppStore.getState().sessions.find((s) => s.id === sessionId)?.exited) {
           await finish(fire.run_id, "failed", "the shell for this run failed to start");
           return;
-        }
-        if (host) {
-          const arrived = await waitForRemote(sessionId, REMOTE_PROMPT_TIMEOUT_MS);
-          if (!arrived) {
-            // Leave the tab OPEN: an unknown host key, an MFA challenge or a
-            // wrong password is visible there and nowhere else. And nothing is
-            // typed in response — never `yes\r` to a fingerprint prompt.
-            await finish(
-              fire.run_id,
-              "failed",
-              `the remote shell never reached a prompt. Last output:\n${scrollbackTail(sessionId)}`,
-            );
-            return;
-          }
         }
       }
 
@@ -428,6 +390,10 @@ export function useScheduledActions() {
       const appStore = useAppStore.getState();
       appStore.setPermissionMode(sessionId, action.permission_mode);
       appStore.setMcpSelection(sessionId, action.mcp_selection as never);
+      const stream = ownRecordValue(useAppStore.getState().aiStreams, sessionId);
+      for (const ref of stream?.attachedBucketRefs ?? stream?.attachedBucketIds ?? []) {
+        appStore.detachBucketFromAi(sessionId, ref);
+      }
       for (const ref of action.doc_buckets) {
         appStore.attachBucketToAi(sessionId, ref as never);
       }
@@ -437,7 +403,11 @@ export function useScheduledActions() {
       try {
         for (const [index, step] of action.steps.entries()) {
           const result = await runStep(fire.run_id, action, step, index, sessionId);
-          if (result.status === "cancelled") {
+          if (
+            result.status === "cancelled" ||
+            isScheduleRunRevoked(fire.run_id) ||
+            !(await api.scheduleRunIsActive(fire.run_id).catch(() => false))
+          ) {
             status = "cancelled";
             break;
           }
@@ -480,7 +450,11 @@ export function useScheduledActions() {
         // Serialized per action rather than per session: the session is not known
         // until the tab is resolved, and two fires of one action must not race to
         // create two tabs.
-        void enqueue(`action:${fire.action_id}`, () => drive(fire));
+        void enqueue(`action:${fire.action_id}`, () => drive(fire))
+          .catch((error) => finish(fire.run_id, "failed", String(error)))
+          .finally(() => {
+            clearScheduleRunRevocation(fire.run_id);
+          });
       })
       .then((unlisten) => {
         if (disposed) unlisten();
@@ -492,6 +466,14 @@ export function useScheduledActions() {
         if (disposed) return;
         const store = useScheduleStore.getState();
         store.noteRunEvent(notice);
+        if (notice.status === "cancelled" || notice.status === "failed" || notice.status === "interrupted") {
+          for (const job of revokeScheduleRun(notice.run_id)) {
+            // A watchdog has no user gesture to send Ctrl-C; release the
+            // waiter, and stop any model turn from dispatching more work.
+            abortSession(job.sessionId, "cancelled", job.attemptId);
+            if (scheduleAgentOwnsRequest(job)) void cancelAgentRef.current(job.sessionId);
+          }
+        }
         // A terminal notice is the cue to re-read the durable record, which has
         // per-step detail the notice does not carry.
         if (api.isTerminalScheduleRunStatus(notice.status)) {

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAppStore } from "../../stores/appStore";
 import { useSettings } from "../../hooks/useSettings";
 import { MarkdownEditor, formattingModifier } from "../ui/MarkdownEditor";
@@ -37,6 +37,9 @@ const FIELDS = [
 ] as const;
 
 type FieldKey = (typeof FIELDS)[number]["key"];
+// A settings section can unmount while its IPC save is pending. Keep ordering
+// outside React so reopening the section cannot start a competing older write.
+const instructionSaveQueues = new Map<FieldKey, Promise<void>>();
 
 function InstructionsEditor({
   fieldKey,
@@ -59,29 +62,56 @@ function InstructionsEditor({
   const [draft, setDraft] = useState(value);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const draftRef = useRef(value);
+  const storedRef = useRef(value);
+  const saveGeneration = useRef(0);
+  const queuedValue = useRef<string | null>(null);
 
   // Re-sync when the store changes underneath — a `loadSettings` after a failed
   // save, or the Clear button below. Keyed on `value` so a save that Rust
   // normalised (it trims) settles the box rather than leaving it dirty forever.
   useEffect(() => {
-    setDraft(value);
+    // A completed blur-save must not overwrite typing begun while it was in
+    // flight. Only a draft that still mirrors the previous store can reconcile.
+    if (draftRef.current === storedRef.current) {
+      draftRef.current = value;
+      setDraft(value);
+    }
+    storedRef.current = value;
   }, [value]);
 
-  const used = draft.trim().length;
+  const used = Array.from(draft.replace(/\r\n?/g, "\n").trim()).length;
   const tooLong = used > MAX_INSTRUCTION_CHARS;
 
   const commit = async (next: string) => {
-    if (next === value) return;
+    if (next === (queuedValue.current ?? storedRef.current)) return;
     // Refusing here rather than letting Rust reject keeps the message specific:
     // the backend's error names a character count, this names the field the user
     // is looking at, and neither round-trips.
-    if (next.trim().length > MAX_INSTRUCTION_CHARS) return;
+    if (Array.from(next.replace(/\r\n?/g, "\n").trim()).length > MAX_INSTRUCTION_CHARS) return;
+    const generation = ++saveGeneration.current;
+    queuedValue.current = next;
     setError(null);
+    // Keep writes ordered, including Clear following a blur-save. A failed
+    // write releases the queue so the newer value can still be saved.
+    const saving = (instructionSaveQueues.get(fieldKey) ?? Promise.resolve()).then(() => onSave({ [fieldKey]: next } as Partial<SettingsPatch>));
+    const settled = saving.catch(() => {});
+    instructionSaveQueues.set(fieldKey, settled);
     try {
-      await onSave({ [fieldKey]: next } as Partial<SettingsPatch>);
-      setSaved(true);
+      await saving;
+      if (generation === saveGeneration.current && draftRef.current === next) {
+        const field = FIELDS.find((entry) => entry.key === fieldKey);
+        if (!field) return;
+        const stored = field.select(useAppStore.getState());
+        draftRef.current = stored;
+        setDraft(stored);
+        setSaved(true);
+      }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (generation === saveGeneration.current) setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (generation === saveGeneration.current) queuedValue.current = null;
+      if (instructionSaveQueues.get(fieldKey) === settled) instructionSaveQueues.delete(fieldKey);
     }
   };
 
@@ -113,6 +143,7 @@ function InstructionsEditor({
         placeholder={placeholder}
         invalid={tooLong}
         onChange={(next) => {
+          draftRef.current = next;
           setDraft(next);
           setSaved(false);
         }}
@@ -125,6 +156,7 @@ function InstructionsEditor({
             e.preventDefault();
             e.currentTarget.blur();
           } else if (e.key === "Escape") {
+            draftRef.current = value;
             setDraft(value);
             setError(null);
           }
@@ -146,7 +178,12 @@ function InstructionsEditor({
               className="rounded px-1.5 py-0.5 text-[10px] text-text-muted hover:bg-bg-hover hover:text-text-secondary"
               // Empty string is the clear sentinel over IPC — JSON null is
               // indistinguishable from "not provided" once serde sees Option.
-              onClick={() => void commit("")}
+              onClick={() => {
+                draftRef.current = "";
+                setDraft("");
+                setSaved(false);
+                void commit("");
+              }}
             >
               {S.settings.instructions.clear}
             </button>

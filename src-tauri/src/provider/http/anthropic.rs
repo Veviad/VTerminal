@@ -10,8 +10,8 @@ use serde_json::{json, Map, Value};
 use super::{client, emit, read_sse, send_with_retry};
 use crate::models::catalog::{CatalogModel, Effort};
 use crate::provider::{
-    ChatMessage, ChatParams, FinishReason, Provider, ProviderError, ProviderEvent, Role, ToolCall,
-    ToolChoiceMode, ToolDef,
+    ActivityKind, ActivityStatus, ChatMessage, ChatParams, FinishReason, Provider,
+    ProviderActivity, ProviderError, ProviderEvent, Role, ToolCall, ToolChoiceMode, ToolDef,
 };
 
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -20,6 +20,57 @@ const API_VERSION: &str = "2023-06-01";
 pub struct AnthropicProvider {
     pub model: &'static CatalogModel,
     pub api_key: crate::credentials::Secret,
+}
+
+/// Only server-confirmed native work becomes activity. Never copy the search
+/// query, fetched URL, response content or arbitrary provider text to the UI.
+fn native_activity(
+    event: &Value,
+    active: &mut std::collections::BTreeMap<String, ActivityKind>,
+) -> Option<ProviderActivity> {
+    if event["type"] != "content_block_start" {
+        return None;
+    }
+    let block = &event["content_block"];
+    match block["type"].as_str()? {
+        "server_tool_use" => {
+            let kind = match block["name"].as_str()? {
+                "web_search" => ActivityKind::WebSearch,
+                "web_fetch" => ActivityKind::WebFetch,
+                _ => return None,
+            };
+            let id = block["id"].as_str()?.to_owned();
+            active.insert(id.clone(), kind);
+            Some(ProviderActivity {
+                id,
+                kind,
+                status: ActivityStatus::Running,
+            })
+        }
+        "web_search_tool_result" | "web_fetch_tool_result" => {
+            let id = block["tool_use_id"].as_str()?.to_owned();
+            let kind = active.remove(&id)?;
+            let is_error = |value: &Value| {
+                value["type"].as_str().is_some_and(|kind| {
+                    kind == "web_search_tool_result_error" || kind == "web_fetch_tool_result_error"
+                })
+            };
+            let failed = is_error(&block["content"])
+                || block["content"]
+                    .as_array()
+                    .is_some_and(|items| items.iter().any(is_error));
+            Some(ProviderActivity {
+                id,
+                kind,
+                status: if failed {
+                    ActivityStatus::Error
+                } else {
+                    ActivityStatus::Done
+                },
+            })
+        }
+        _ => None,
+    }
 }
 
 /// App ladder → Anthropic's levels, by the same name wherever one exists.
@@ -340,11 +391,15 @@ impl Provider for AnthropicProvider {
         let mut finish = FinishReason::Stop;
         let mut paused = false;
 
+        let mut native_active = std::collections::BTreeMap::new();
         let cancelled = read_sse(resp, &mut cancel, &tx, |data, out| {
             let v: Value = match serde_json::from_str(data) {
                 Ok(v) => v,
                 Err(_) => return Ok(false), // ignore frames we don't model
             };
+            if let Some(activity) = native_activity(&v, &mut native_active) {
+                out.push(ProviderEvent::Activity(activity));
+            }
             match v["type"].as_str().unwrap_or_default() {
                 "message_start" => {
                     // Cached reads are billed separately from fresh input, so
@@ -505,6 +560,60 @@ impl Provider for AnthropicProvider {
 mod tests {
     use super::*;
     use crate::models::catalog;
+
+    #[test]
+    fn native_activity_follows_confirmed_tool_blocks_without_private_payloads() {
+        for (name, result_type, kind) in [
+            (
+                "web_search",
+                "web_search_tool_result",
+                ActivityKind::WebSearch,
+            ),
+            ("web_fetch", "web_fetch_tool_result", ActivityKind::WebFetch),
+        ] {
+            for failed in [false, true] {
+                let mut active = std::collections::BTreeMap::new();
+                let start = native_activity(
+                    &json!({"type":"content_block_start", "content_block": {
+                        "type":"server_tool_use", "name": name, "id":"tool-1",
+                        "input": {"query":"PRIVATE-QUERY", "url":"https://private.example/token"}
+                    }}),
+                    &mut active,
+                )
+                .unwrap();
+                assert_eq!(start.kind, kind);
+                assert_eq!(start.status, ActivityStatus::Running);
+                let serialized = serde_json::to_string(&start).unwrap();
+                assert!(!serialized.contains("PRIVATE"));
+                assert!(!serialized.contains("private.example"));
+                let content = if failed {
+                    json!({"type":format!("{result_type}_error"),"error_code":"PRIVATE-ERROR"})
+                } else {
+                    json!([])
+                };
+                let result = native_activity(
+                    &json!({"type":"content_block_start", "content_block": {
+                        "type":result_type, "tool_use_id":"tool-1", "content": content
+                    }}),
+                    &mut active,
+                )
+                .unwrap();
+                assert_eq!(result.id, start.id);
+                assert_eq!(
+                    result.status,
+                    if failed {
+                        ActivityStatus::Error
+                    } else {
+                        ActivityStatus::Done
+                    }
+                );
+                assert!(active.is_empty());
+            }
+        }
+        let mut active = std::collections::BTreeMap::new();
+        assert!(native_activity(&json!({"type":"content_block_delta", "delta":{"type":"text_delta", "text":"Searching web"}}), &mut active).is_none());
+        assert!(native_activity(&json!({"type":"content_block_start", "content_block":{"type":"tool_use", "name":"web_search", "id":"client"}}), &mut active).is_none());
+    }
 
     #[test]
     fn every_claude_effort_builds_a_supported_adaptive_payload() {

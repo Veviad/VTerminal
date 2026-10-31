@@ -16,10 +16,15 @@
  *   than opening twenty-four — and for an ssh target the reused tab is already
  *   connected, so the connect step is skipped entirely.
  */
+import { ownRecordValue } from "./records";
+import { useAppStore } from "../stores/appStore";
+
 export interface LiveSchedulePtyJob {
   runId: string;
   attemptId: string;
   sessionId: string;
+  kind?: "command" | "prompt";
+  requestId?: string;
 }
 
 export interface LiveSchedulePtyJobLease extends LiveSchedulePtyJob {
@@ -64,6 +69,20 @@ export function unregisterLiveScheduleJob(lease: LiveSchedulePtyJobLease): void 
   if (!existing) return;
   existing.registrations.delete(lease.registration);
   if (existing.registrations.size === 0) liveJobs.delete(key);
+}
+
+/** Bind only the request created by this lease; a later human turn in the same
+ * terminal is not owned by the scheduled action. */
+export function bindScheduleAgentRequest(lease: LiveSchedulePtyJobLease, requestId: string): void {
+  const entry = liveJobs.get(jobKey(lease));
+  if (entry?.registrations.has(lease.registration)) entry.job.requestId = requestId;
+}
+
+export function scheduleAgentOwnsRequest(job: LiveSchedulePtyJob): boolean {
+  if (job.kind !== "prompt" || !job.requestId) return false;
+  const app = useAppStore.getState();
+  const owner = app.resolveAiOwner(job.sessionId);
+  return ownRecordValue(app.aiStreams, owner)?.requestId === job.requestId;
 }
 
 export function listLiveScheduleJobs(runId?: string): LiveSchedulePtyJob[] {

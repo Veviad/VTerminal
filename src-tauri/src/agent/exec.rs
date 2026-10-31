@@ -4,10 +4,10 @@ use tokio::io::AsyncReadExt;
 
 use super::{OutputPolicy, StreamEvent, PRIVATE_OUTPUT_NOTICE};
 
-/// Cap on bytes streamed to the UI per command (the panel is not a terminal).
-const UI_STREAM_CAP: usize = 65_536;
-/// Tail kept for the model's tool result.
-const MODEL_TAIL: usize = 8_192;
+#[path = "exec_text.rs"]
+mod text;
+use text::{CapturedOutput, CapturedText};
+
 /// Bounded read size — also bounds a single CommandOutput chunk.
 const CHUNK: usize = 8_192;
 
@@ -27,8 +27,8 @@ pub struct ExecResult {
 /// The shell gets its own PROCESS GROUP so timeout/cancel kill the whole
 /// pipeline (zsh exec-optimizes `cmd >/dev/null`, and pipelines fork children
 /// that would otherwise survive a kill of the shell alone). Reads are raw
-/// bounded chunks (binary-safe, lossy-decoded) — line readers error on
-/// non-UTF-8 and buffer newline-less output without bound.
+/// bounded chunks, decoded incrementally into plain text for the command card
+/// and model. Private output is discarded before any decoding or capture.
 pub async fn run_command(
     shell: &str,
     cwd: Option<&str>,
@@ -169,10 +169,13 @@ pub async fn run_command(
     let mut stderr = child.stderr.take().ok_or("no stderr")?;
     let mut out_buf = vec![0u8; CHUNK];
     let mut err_buf = vec![0u8; CHUNK];
+    let mut out_text = CapturedText::default();
+    let mut err_text = CapturedText::default();
 
-    let mut tail = String::new();
-    let mut ui_sent = 0usize;
-    let mut ui_truncated = false;
+    let mut output = CapturedOutput::default();
+    let mut last_snapshot = String::new();
+    let mut updates = tokio::time::interval(std::time::Duration::from_millis(50));
+    updates.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut out_open = true;
     let mut err_open = true;
     let mut timed_out = false;
@@ -181,34 +184,16 @@ pub async fn run_command(
     let timeout = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs.max(1)));
     tokio::pin!(timeout);
 
-    let push = |bytes: &[u8],
-                is_stderr: bool,
-                ui_sent: &mut usize,
-                ui_truncated: &mut bool,
-                tail: &mut String| {
-        let text = String::from_utf8_lossy(bytes).into_owned();
-        tail.push_str(&text);
-        if tail.len() > MODEL_TAIL * 2 {
-            let mut cut = tail.len() - MODEL_TAIL;
-            while !tail.is_char_boundary(cut) {
-                cut += 1;
-            }
-            *tail = tail[cut..].to_string();
-        }
-        if *ui_sent < UI_STREAM_CAP {
-            *ui_sent += text.len();
+    let publish = |output: &CapturedOutput, last_snapshot: &mut String| {
+        let snapshot = output.snapshot();
+        if snapshot != *last_snapshot {
             let _ = on_event.send(StreamEvent::CommandOutput {
                 approval_id: approval_id.to_string(),
-                chunk: text,
-                is_stderr,
-            });
-        } else if !*ui_truncated {
-            *ui_truncated = true;
-            let _ = on_event.send(StreamEvent::CommandOutput {
-                approval_id: approval_id.to_string(),
-                chunk: "\n[output truncated in view — full tail goes to the model]\n".into(),
+                chunk: snapshot.clone(),
                 is_stderr: false,
+                replace: true,
             });
+            *last_snapshot = snapshot;
         }
     };
 
@@ -216,13 +201,20 @@ pub async fn run_command(
     while out_open || err_open {
         tokio::select! {
             n = stdout.read(&mut out_buf), if out_open => match n {
-                Ok(0) | Err(_) => out_open = false,
-                Ok(n) => push(&out_buf[..n], false, &mut ui_sent, &mut ui_truncated, &mut tail),
+                Ok(0) | Err(_) => {
+                    out_open = false;
+                    out_text.finish(&mut output);
+                },
+                Ok(n) => out_text.push(&out_buf[..n], &mut output),
             },
             n = stderr.read(&mut err_buf), if err_open => match n {
-                Ok(0) | Err(_) => err_open = false,
-                Ok(n) => push(&err_buf[..n], true, &mut ui_sent, &mut ui_truncated, &mut tail),
+                Ok(0) | Err(_) => {
+                    err_open = false;
+                    err_text.finish(&mut output);
+                },
+                Ok(n) => err_text.push(&err_buf[..n], &mut output),
             },
+            _ = updates.tick() => publish(&output, &mut last_snapshot),
             _ = &mut timeout => {
                 timed_out = true;
                 kill_tree(process_id);
@@ -237,6 +229,12 @@ pub async fn run_command(
             }
         }
     }
+    // Publish the final partial line before the result, including cancellation
+    // and timeout. UTF-8 decoding remains independent for each pipe.
+    out_text.finish(&mut output);
+    err_text.finish(&mut output);
+    publish(&output, &mut last_snapshot);
+    let mut tail = output.tail();
 
     // Guarded reap: pipes at EOF do NOT imply the command exited (zsh
     // exec-optimizes `cmd >/dev/null 2>&1`, daemons close their fds) — the
@@ -273,6 +271,7 @@ pub async fn run_command(
         tail.push_str(&format!(
             "\n[command timed out after {timeout_secs}s and was killed]\n"
         ));
+        text::trim_tail(&mut tail);
     }
 
     let _ = on_event.send(StreamEvent::CommandResult {
@@ -325,6 +324,81 @@ mod tests {
         assert_eq!(r.exit_code, 0);
         assert!(r.output_tail.contains("hello-exec"));
         assert!(!r.timed_out);
+    }
+
+    #[tokio::test]
+    async fn streams_plain_text_without_a_newline_before_process_completion() {
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let channel = Channel::new(move |body: InvokeResponseBody| {
+            if let InvokeResponseBody::Json(body) = body {
+                let _ = events_tx.send(serde_json::from_str::<serde_json::Value>(&body).unwrap());
+            }
+            Ok(())
+        });
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let handle = tokio::spawn(async move {
+            run_command(
+                "/bin/zsh",
+                None,
+                "printf '\\033[31mworking\\033[0m'; sleep 60",
+                "partial-stream",
+                30,
+                OutputPolicy::Normal,
+                cancel_rx,
+                &channel,
+            )
+            .await
+            .unwrap()
+        });
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), events_rx.recv())
+            .await
+            .expect("partial output must be visible while the command runs")
+            .unwrap();
+        assert_eq!(first["type"], "CommandOutput");
+        assert_eq!(first["chunk"], "working");
+        assert_eq!(first["replace"], true);
+        assert!(
+            !handle.is_finished(),
+            "the snapshot must precede process completion"
+        );
+        cancel_tx.send(true).unwrap();
+        let result = handle.await.unwrap();
+        assert!(result.cancelled);
+        assert_eq!(result.output_tail, "working");
+        let result_event = events_rx.recv().await.unwrap();
+        assert_eq!(result_event["type"], "CommandResult");
+    }
+
+    #[tokio::test]
+    async fn captured_snapshots_and_model_tail_agree_after_progress_rewrites() {
+        use std::sync::{Arc, Mutex};
+        let snapshots = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&snapshots);
+        let channel = Channel::new(move |body: InvokeResponseBody| {
+            if let InvokeResponseBody::Json(body) = body {
+                let event: serde_json::Value = serde_json::from_str(&body).unwrap();
+                if event["type"] == "CommandOutput" {
+                    assert_eq!(event["replace"], true);
+                    captured
+                        .lock()
+                        .unwrap()
+                        .push(event["chunk"].as_str().unwrap().to_string());
+                }
+            }
+            Ok(())
+        });
+        let result = run_command(
+            "/bin/zsh", None,
+            "printf 'progress 1%%'; sleep 0.1; printf '\\rprogress 100%%\\n'; printf '\\033]0;hidden\\007Grüße 🍰\\n' >&2",
+            "progress-stream", 5, OutputPolicy::Normal, no_cancel(), &channel,
+        ).await.unwrap();
+        let snapshots = snapshots.lock().unwrap();
+        assert!(snapshots.iter().any(|s| s == "progress 1%"));
+        assert_eq!(snapshots.last().unwrap(), &result.output_tail);
+        assert!(result.output_tail.contains("progress 100%\n"));
+        assert!(result.output_tail.contains("Grüße 🍰\n"));
+        assert!(!result.output_tail.contains("hidden"));
+        assert!(!result.output_tail.contains('\x1b'));
     }
 
     #[tokio::test]

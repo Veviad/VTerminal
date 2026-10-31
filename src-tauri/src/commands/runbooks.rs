@@ -6043,6 +6043,178 @@ spec:
     }
 
     #[test]
+    fn synthetic_secret_is_absent_from_reopened_reports_and_exported_evidence() {
+        let root = TempRoot::new("private-report-export");
+        let marker = "SYNTHETIC_EXPORT_SECRET_78a49c";
+        let raw = format!("TOKEN={marker}\npublic-value\n");
+        for mode in [EvidenceCaptureMode::None, EvidenceCaptureMode::Full] {
+            let mut connection = runbook_db();
+            let app_data = root.0.join(mode.as_str());
+            let destination = app_data.join("exports");
+            fs::create_dir_all(&destination).unwrap();
+            let run = db::create_run(
+                &mut connection,
+                &RunCreation {
+                    source_id: None,
+                    definition_id: "privacy-fixture".into(),
+                    definition_version: "1.0.0".into(),
+                    definition_title: "Privacy fixture".into(),
+                    source_yaml: "kind: Runbook".into(),
+                    canonical_json: "{\"kind\":\"Runbook\"}".into(),
+                    source_sha256: "a".repeat(64),
+                    canonical_sha256: "b".repeat(64),
+                    target: TargetBinding::active_terminal(
+                        "fixture-terminal".into(),
+                        Some("zsh".into()),
+                        Some("/tmp".into()),
+                        None,
+                        None,
+                        None,
+                        now(),
+                    ),
+                    inputs: serde_json::json!({}),
+                    evidence_mode: mode,
+                    app_version: "test".into(),
+                    model: None,
+                    steps: vec![StepSeed {
+                        id: "inspect".into(),
+                        title: "Inspect".into(),
+                        required: true,
+                    }],
+                },
+            )
+            .unwrap();
+            db::transition_run(
+                &mut connection,
+                &run.id,
+                RunStatus::Created,
+                RunStatus::Ready,
+                None,
+            )
+            .unwrap();
+            db::transition_run(
+                &mut connection,
+                &run.id,
+                RunStatus::Ready,
+                RunStatus::Running,
+                None,
+            )
+            .unwrap();
+            db::transition_step(
+                &mut connection,
+                &run.id,
+                "inspect",
+                StepStatus::Pending,
+                StepStatus::Checking,
+                db::StepUpdate::default(),
+            )
+            .unwrap();
+            let attempt = db::create_attempt_intent(
+                &mut connection,
+                &db::AttemptIntent {
+                    run_id: run.id.clone(),
+                    step_id: "inspect".into(),
+                    phase: RunbookPhase::Check,
+                    executor: "shell".into(),
+                    proposed_command: Some("read synthetic fixture".into()),
+                },
+            )
+            .unwrap();
+            db::start_attempt(&mut connection, &attempt.id, Some("read synthetic fixture"))
+                .unwrap();
+            db::finish_attempt(
+                &mut connection,
+                &attempt.id,
+                db::AttemptResult {
+                    status: AttemptStatus::Succeeded,
+                    exit_code: Some(0),
+                    duration_ms: Some(1),
+                    output: Some(&raw),
+                    output_observed_bytes: raw.len() as u64,
+                    output_captured_bytes: raw.len() as u64,
+                    source_truncated: false,
+                    error: None,
+                    structured_outcomes: None,
+                },
+            )
+            .unwrap();
+            if mode == EvidenceCaptureMode::Full {
+                // Use the same full-evidence sanitizer, reservation and
+                // completion boundary as the engine before exercising export.
+                let captured = crate::runbooks::redact::sanitize_evidence(raw.as_bytes(), mode);
+                let relative = format!("runbooks/{}/{}.log", run.id, attempt.id);
+                let evidence = db::EvidenceRecord {
+                    id: "fixture-evidence".into(),
+                    attempt_id: attempt.id.clone(),
+                    run_id: run.id.clone(),
+                    mode,
+                    availability: EvidenceAvailability::Pending,
+                    relative_path: Some(relative.clone()),
+                    bytes: captured.text.len() as u64,
+                    sha256: sha256_hex(captured.text.as_bytes()),
+                    redacted: captured.redacted,
+                    truncated: captured.truncated,
+                    created_at: now(),
+                };
+                db::reserve_evidence(&connection, &evidence).unwrap();
+                let artifact = app_data.join(relative);
+                fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+                fs::write(&artifact, captured.text).unwrap();
+                db::mark_evidence_complete(&connection, &evidence.id, &run.id, &attempt.id)
+                    .unwrap();
+            }
+            db::transition_step(
+                &mut connection,
+                &run.id,
+                "inspect",
+                StepStatus::Checking,
+                StepStatus::AlreadyCompliant,
+                db::StepUpdate::default(),
+            )
+            .unwrap();
+            db::finalize_run(
+                &mut connection,
+                &run.id,
+                RunStatus::Running,
+                RunStatus::Succeeded,
+                None,
+                "Fixture inspected.",
+            )
+            .unwrap();
+            let reopened = db::load_report(&connection, &run.id).unwrap().unwrap();
+            assert!(!reopened.canonical_json().unwrap().contains(marker));
+            let exported = export_report_bundle(&app_data, &reopened, &destination).unwrap();
+            assert_eq!(
+                exported.files.len(),
+                if mode == EvidenceCaptureMode::Full {
+                    3
+                } else {
+                    2
+                }
+            );
+            for path in &exported.files {
+                let text = fs::read_to_string(path).unwrap();
+                assert!(!text.contains(marker), "secret escaped through {path}");
+                if path.ends_with(".txt") {
+                    assert!(text.contains("public-value"));
+                    assert!(text.contains("[REDACTED]"));
+                }
+                if mode == EvidenceCaptureMode::None {
+                    assert!(!text.contains("public-value"));
+                }
+            }
+            let raw_database: String = connection
+                .query_row(
+                    "SELECT COALESCE(output_tail, '') FROM runbook_attempts WHERE id = ?1",
+                    [&attempt.id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(!raw_database.contains(marker));
+        }
+    }
+
+    #[test]
     fn bundled_runbooks_seed_idempotently_hide_and_restore_in_fixed_order() {
         let app_data = TempRoot::new("builtin-runbooks");
         let connection = runbook_db();

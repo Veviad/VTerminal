@@ -335,6 +335,11 @@ pub async fn chat_start(
                         content: content.clone(),
                     });
                 }
+                ProviderEvent::Activity(activity) => {
+                    let _ = on_event.send(StreamEvent::Activity {
+                        activity: activity.clone(),
+                    });
+                }
                 ProviderEvent::WebCitation(citation) => {
                     let _ = on_event.send(StreamEvent::WebCitation {
                         url: citation.url.clone(),

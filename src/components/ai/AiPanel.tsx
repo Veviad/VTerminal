@@ -36,6 +36,9 @@ import { panelWidthCss, ratioFromDrag } from "../../lib/panelRatio";
 import { ownRecordValue } from "../../lib/records";
 import { useAiStream } from "../../hooks/useAiStream";
 import { useDismissibleLayer } from "../../hooks/useDismissibleLayer";
+import { useStickyScroll } from "../../hooks/useStickyScroll";
+import { ProviderActivityFeed } from "./ProviderActivityFeed";
+import { JumpToLatest } from "./JumpToLatest";
 import { useAutoGrow } from "../../hooks/useAutoGrow";
 import { useClipboardStaging } from "../../hooks/useClipboardStaging";
 import { AiMessageView } from "./AiMessageView";
@@ -73,6 +76,7 @@ import {
 } from "../../lib/attachInput";
 import type {
   AiMessage,
+  ProviderActivity,
   Attachment,
   Block,
   ChatMcpCall,
@@ -205,7 +209,6 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const [confirmClear, setConfirmClear] = useState(false);
   const [sidecarMenuOpen, setSidecarMenuOpen] = useState(false);
   const [replacingTarget, setReplacingTarget] = useState(false);
-  const scrollRef = useRef<HTMLDivElement>(null);
   const asideRef = useRef<HTMLElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [panelHeight, setPanelHeight] = useState(0);
@@ -303,6 +306,9 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
     stream?.status === "streaming" ||
     stream?.status === "awaiting_approval" ||
     stream?.status === "executing";
+  const activeTool = messages.some((message) =>
+    message.activity?.status === "running" || message.mcp?.status === "running" || message.mcp?.status === "awaiting",
+  );
   const streamingContent = stream?.streamingContent ?? "";
   const thinkingContent = stream?.thinkingContent ?? "";
   const pendingProposal = stream?.pendingProposal ?? null;
@@ -387,15 +393,10 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const imagesBlocked = pendingImages.length > 0 && readerKind === "none";
   const imagesViaOcr = pendingImages.length > 0 && readerKind === "sidecar";
 
-  useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
-  }, [
-    messages.length,
-    streamingContent,
-    thinkingContent,
-    pendingProposal,
-    pendingMcpProposal,
-  ]);
+  const { scrollRef, contentRef, onScroll, showJump, jumpToLatest } = useStickyScroll(
+    `${sessionId}:${collapsed}`,
+    stream,
+  );
 
   // Feeds `composerMax` and the composer's re-fit. Both axes: height for the
   // former, width for the latter, and only width changes on a window resize now
@@ -848,8 +849,12 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
       {/* Messages */}
       <div
         ref={scrollRef}
-        className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3"
+        data-testid="agent-timeline"
+        className="min-h-0 flex-1 overflow-y-auto px-3 py-3"
+        onScroll={onScroll}
+        style={{ overflowAnchor: "none" }}
       >
+        <div ref={contentRef} className="space-y-3">
         {messages.length === 0 && !busy && (
           <p className="pt-6 text-center text-[12px] text-text-muted">
             {aiReady
@@ -886,6 +891,8 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
           </div>
         )}
         {busy &&
+          stream?.status !== "executing" &&
+          !activeTool &&
           !streamingContent &&
           !thinkingContent &&
           !pendingProposal &&
@@ -1008,7 +1015,9 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             {S.aiPanel.errorPrefix}: {stream.lastError}
           </p>
         )}
+        </div>
       </div>
+      {showJump && <JumpToLatest onClick={jumpToLatest} />}
 
       {/* The active model cannot read what is staged. Blocking, with the two ways
           out named — the warning treatment is the auto-accept banner's, so "this
@@ -1466,6 +1475,9 @@ function MessageRow({
   message: AiMessage;
   sessionId: string | null;
 }) {
+  if (message.kind === "activity" && message.activity) {
+    return <ProviderActivityFeed activities={[message.activity]} />;
+  }
   if (message.kind === "command" && message.command) {
     return <CommandMessage message={message} sessionId={sessionId} />;
   }
@@ -1544,6 +1556,7 @@ function isMcpToolMessage(
  *  each consecutive run into the same turn-level group used by Chat. */
 type MessageTimelineRow =
   | { kind: "message"; key: string; message: AiMessage }
+  | { kind: "activity"; key: string; activities: ProviderActivity[] }
   | { kind: "mcp"; key: string; calls: ChatMcpCall[] };
 
 function messageTimelineRows(messages: AiMessage[]): MessageTimelineRow[] {
@@ -1564,6 +1577,12 @@ function messageTimelineRows(messages: AiMessage[]): MessageTimelineRow[] {
       continue;
     }
     flushMcpCalls();
+    if (message.kind === "activity" && message.activity) {
+      const previous = rows[rows.length - 1];
+      if (previous?.kind === "activity") previous.activities.push(message.activity);
+      else rows.push({ kind: "activity", key: message.id, activities: [message.activity] });
+      continue;
+    }
     rows.push({ kind: "message", key: message.id, message });
   }
   flushMcpCalls();
@@ -1581,6 +1600,7 @@ function MessageTimeline({
     if (row.kind === "mcp") {
       return <McpToolGroup key={row.key} calls={row.calls} />;
     }
+    if (row.kind === "activity") return <ProviderActivityFeed key={row.key} activities={row.activities} />;
     return (
       <MessageRow
         key={row.key}
@@ -1778,10 +1798,10 @@ function CommandMessage({
       {/* What actually went in. The user approved `systemctl status x`; the
           terminal echoes an env prefix and a redirect they never saw. */}
       {cmd.typed && (
-        <p className="truncate bg-bg-elevated px-2.5 py-1 font-mono text-[10px] text-text-secondary">
-          {executionConfirmed ? S.aiPanel.ranAs : S.aiPanel.submittedAs}{" "}
-          {cmd.typed}
-        </p>
+        <details className="bg-bg-elevated px-2.5 py-1 text-[10px] text-text-secondary">
+          <summary className="cursor-pointer">{executionConfirmed ? S.aiPanel.ranAs : S.aiPanel.submittedAs}</summary>
+          <pre className="mt-1 overflow-auto whitespace-pre-wrap break-all font-mono">{cmd.typed}</pre>
+        </details>
       )}
       {stall && (
         <div className="flex items-center gap-2 bg-warning/10 px-2.5 py-1 text-[10px] text-warning">
@@ -1822,6 +1842,7 @@ function ThinkingSection({
   live: boolean;
 }) {
   const [open, setOpen] = useState(live);
+  const { scrollRef, contentRef, onScroll, showJump, jumpToLatest } = useStickyScroll(open, content);
   // Auto-collapse when the live stream transitions into the answer.
   useEffect(() => {
     if (!live) setOpen(false);
@@ -1840,9 +1861,12 @@ function ThinkingSection({
         )}
       </button>
       {open && (
-        <div className="max-h-40 overflow-y-auto px-3 pb-2 text-[11px] leading-relaxed text-text-muted">
-          {content}
-        </div>
+        <>
+          <div ref={scrollRef} onScroll={onScroll} style={{ overflowAnchor: "none" }} className="max-h-40 overflow-y-auto px-3 pb-2 text-[11px] leading-relaxed text-text-muted">
+            <div ref={contentRef}>{content}</div>
+          </div>
+          {showJump && <JumpToLatest onClick={jumpToLatest} />}
+        </>
       )}
     </div>
   );

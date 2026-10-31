@@ -11,10 +11,11 @@
 
 import * as api from "./tauri";
 import { useAppStore } from "../stores/appStore";
-import { getTerm } from "./termRegistry";
+import { getTerm, subscribeTerm } from "./termRegistry";
 import { isBusy } from "./ptyExec";
 import { sanitizeCommand } from "./ptyExecShell";
 import { buildSshCommand, shQuote } from "./ssh";
+import { waitForFirstPrompt } from "./terminalReady";
 import type { LaunchSpec, SshHost } from "./types";
 
 export type ConnectTarget = "current-tab" | "new-tab";
@@ -34,15 +35,22 @@ export interface PendingConnect {
 const pending = new Map<string, PendingConnect>();
 
 interface PendingPasswordAutofill {
-  hostId: string;
+  attemptId: string;
   hostname: string;
-  requireHostMatch: boolean;
+  username: string;
   decoder: TextDecoder;
   tail: string;
   expiresAt: number;
 }
 
 const passwordAutofill = new Map<string, PendingPasswordAutofill>();
+const passwordGenerations = new Map<string, symbol>();
+const passwordObservers = new Map<string, () => void>();
+
+type PasswordPreparation =
+  | { kind: "armed"; generation: symbol; attemptId: string }
+  | { kind: "manual"; generation: symbol }
+  | { kind: "cancelled" };
 
 /** Long enough to survive a slow prompt, short enough that an abandoned connect
  *  cannot label an unrelated ssh five minutes later. */
@@ -73,42 +81,67 @@ export function takePendingConnect(sessionId: string, command: string): PendingC
 
 export function clearPendingConnect(sessionId: string): void {
   pending.delete(sessionId);
+  passwordGenerations.delete(sessionId);
+  passwordObservers.get(sessionId)?.();
+  passwordObservers.delete(sessionId);
+  const attempt = passwordAutofill.get(sessionId);
   passwordAutofill.delete(sessionId);
+  if (attempt) void api.sshHostsCancelPassword(sessionId, attempt.attemptId).catch(() => {});
 }
 
-/** A password prompt can be split across PTY chunks and may contain ANSI
- *  styling. Match only the final visible line, and require the target hostname
- *  when a proxy could prompt before the destination does. */
+function beginConnection(sessionId: string): symbol {
+  clearPendingConnect(sessionId);
+  const generation = Symbol();
+  passwordGenerations.set(sessionId, generation);
+  passwordObservers.set(sessionId, subscribeTerm(sessionId, (event) => {
+    if (event.type === "userInput" || event.type === "disposed") clearPendingConnect(sessionId);
+  }));
+  return generation;
+}
+
+function stillOwnsConnection(sessionId: string, preparation: PasswordPreparation): preparation is Exclude<PasswordPreparation, { kind: "cancelled" }> {
+  return preparation.kind !== "cancelled" && passwordGenerations.get(sessionId) === preparation.generation;
+}
+
+/** Prompt matching is an IPC trigger only; native independently verifies the
+ * launch, destination, terminal input mode and foreground process. */
 export function isSshPasswordPrompt(
   text: string,
   hostname: string,
-  requireHostMatch: boolean,
+  username: string,
 ): boolean {
   const visible = text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
   const lines = visible.split(/[\r\n]/);
   const line = lines[lines.length - 1] ?? "";
-  if (!/\bpassword:\s*$/i.test(line)) return false;
-  if (!requireHostMatch) return true;
-  const host = hostname.trim().replace(/^\[|\]$/g, "").toLowerCase();
-  return host.length > 0 && line.toLowerCase().includes(host);
+  return Boolean(hostname && username) && line.trim() === `${username}@${hostname}'s password:`;
 }
 
-export function notePasswordAutofill(sessionId: string, host: SshHost): void {
-  if (!host.has_password) {
-    passwordAutofill.delete(sessionId);
-    return;
+export async function notePasswordAutofill(sessionId: string, host: SshHost, command = buildSshCommand(host), generation = beginConnection(sessionId)): Promise<PasswordPreparation> {
+  const manual = (): PasswordPreparation => passwordGenerations.get(sessionId) === generation
+    ? { kind: "manual", generation } : { kind: "cancelled" };
+  if (passwordGenerations.get(sessionId) !== generation) return { kind: "cancelled" };
+  // Unsupported authentication is deliberately manual. Native validates this
+  // again against the saved host and its own observed local shell prompt.
+  if (!host.has_password || !host.username || [host.identity_file, host.jump_host, host.extra_args, host.remote_dir, host.post_connect, host.config_alias].some((value) => value?.trim())) return manual();
+  let attemptId: string;
+  try {
+    attemptId = await api.sshHostsBeginPassword(host.id, sessionId, command);
+  } catch {
+    return manual(); // A refusal permits manual entry only while this launch still owns the tab.
   }
-  const proxyConfigured =
-    Boolean(host.jump_host?.trim()) ||
-    /(?:^|\s)-J|proxyjump|proxycommand/i.test(host.extra_args ?? "");
+  if (passwordGenerations.get(sessionId) !== generation) {
+    void api.sshHostsCancelPassword(sessionId, attemptId).catch(() => {});
+    return { kind: "cancelled" };
+  }
   passwordAutofill.set(sessionId, {
-    hostId: host.id,
+    attemptId,
     hostname: host.hostname,
-    requireHostMatch: proxyConfigured,
+    username: host.username,
     decoder: new TextDecoder(),
     tail: "",
     expiresAt: Date.now() + PASSWORD_AUTOFILL_TTL_MS,
   });
+  return { kind: "armed", generation, attemptId };
 }
 
 /** Inspect terminal output for one matching prompt. The frontend observes only
@@ -117,7 +150,7 @@ export function observeSshPasswordPrompt(sessionId: string, bytes: Uint8Array): 
   const pendingPassword = passwordAutofill.get(sessionId);
   if (!pendingPassword) return;
   if (Date.now() > pendingPassword.expiresAt) {
-    passwordAutofill.delete(sessionId);
+    clearPendingConnect(sessionId);
     return;
   }
   pendingPassword.tail = `${pendingPassword.tail}${pendingPassword.decoder.decode(bytes, { stream: true })}`.slice(
@@ -127,7 +160,7 @@ export function observeSshPasswordPrompt(sessionId: string, bytes: Uint8Array): 
     !isSshPasswordPrompt(
       pendingPassword.tail,
       pendingPassword.hostname,
-      pendingPassword.requireHostMatch,
+      pendingPassword.username,
     )
   ) {
     return;
@@ -136,8 +169,10 @@ export function observeSshPasswordPrompt(sessionId: string, bytes: Uint8Array): 
   // Consume before invoking so duplicate chunks or React lifecycle work can
   // never submit the same password twice after a failed authentication.
   passwordAutofill.delete(sessionId);
+  passwordObservers.get(sessionId)?.();
+  passwordObservers.delete(sessionId);
   void api
-    .sshHostsWritePassword(pendingPassword.hostId, sessionId)
+    .sshHostsWritePassword(pendingPassword.attemptId, sessionId)
     .catch((error) => console.error(`SSH password autofill failed (${sessionId}):`, error));
 }
 
@@ -213,16 +248,27 @@ export async function connectToHost(
   };
 
   if (target === "new-tab") {
-    // createSession types the command itself once the first prompt lands, so
-    // the pending note must be registered before it can possibly fire.
     const sessionId = await createSession({
       ...spec,
       hostId: hostRow.id,
       title: hostRow.label,
-      initialCommand: gated.command,
     });
+    const generation = beginConnection(sessionId);
+    await waitForFirstPrompt(sessionId, 8_000);
+    if (passwordGenerations.get(sessionId) !== generation) return null;
+    const gate = canConnectHere(sessionId);
+    if (!gate.ok) { clearPendingConnect(sessionId); return null; }
     notePendingConnect(sessionId, { ...note, at: Date.now() });
-    notePasswordAutofill(sessionId, hostRow);
+    const preparation = await notePasswordAutofill(sessionId, hostRow, gated.command, generation);
+    if (!stillOwnsConnection(sessionId, preparation)) return null;
+    if (!canConnectHere(sessionId).ok) { clearPendingConnect(sessionId); return null; }
+    try {
+      await api.ptyWrite(sessionId, `${gated.command}\r`, preparation.kind === "armed" ? preparation.attemptId : undefined);
+    } catch (error) {
+      if (stillOwnsConnection(sessionId, preparation)) clearPendingConnect(sessionId);
+      console.error(`connect write failed (${sessionId}):`, error);
+      return null;
+    }
     return sessionId;
   }
 
@@ -235,16 +281,19 @@ export async function connectToHost(
     return null;
   }
 
+  const generation = beginConnection(sessionId);
   notePendingConnect(sessionId, { ...note, at: Date.now() });
-  notePasswordAutofill(sessionId, hostRow);
+  const preparation = await notePasswordAutofill(sessionId, hostRow, gated.command, generation);
+  if (!stillOwnsConnection(sessionId, preparation)) return null;
+  if (!canConnectHere(sessionId).ok) { clearPendingConnect(sessionId); return null; }
   useAppStore.getState().updateSession(sessionId, {
     hostId: hostRow.id,
     hostLabel: hostRow.label,
   });
   try {
-    await api.ptyWrite(sessionId, `${gated.command}\r`);
+    await api.ptyWrite(sessionId, `${gated.command}\r`, preparation.kind === "armed" ? preparation.attemptId : undefined);
   } catch (err) {
-    clearPendingConnect(sessionId);
+    if (stillOwnsConnection(sessionId, preparation)) clearPendingConnect(sessionId);
     console.error(`connect write failed (${sessionId}):`, err);
     return null;
   }
