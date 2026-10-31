@@ -899,43 +899,76 @@ async fn process_tool_calls(
                 let approval_id = format!("{}-ap{}", config.request_id, approval_counter);
                 let auto =
                     policy_auto_runs(mode, &assessment, rule_decision, effective_output_policy);
-                let response = if auto {
+                let check_terminal_prompt = auto
+                    && matches!(
+                        config.exec_target,
+                        ExecTarget::Pty { .. } | ExecTarget::Sidecar { .. }
+                    );
+                let response = if auto && !check_terminal_prompt {
                     ApprovalResponse {
                         decision: ApprovalDecision::Run,
                         edited_command: None,
                     }
                 } else {
-                    stats.command_proposals = stats.command_proposals.saturating_add(1);
-                    let ask_reason =
-                        if assessment.effect == super::policy::CommandEffect::SensitiveRead {
-                            "this read may reveal credential or secret values"
-                        } else if effective_output_policy == OutputPolicy::Private {
-                            "private-output commands always require approval"
-                        } else if assessment.privileged {
-                            "privileged commands always require approval"
-                        } else if assessment.opaque {
-                            "dynamic or opaque execution cannot be verified"
-                        } else if rule_decision == super::policy::RuleDecision::Ask {
-                            "a saved policy rule requires approval"
-                        } else if assessment.effect == super::policy::CommandEffect::StateChange {
-                            "this command intends to change state"
-                        } else {
-                            "the command could not be verified as a semantic read"
-                        };
+                    if !auto {
+                        stats.command_proposals = stats.command_proposals.saturating_add(1);
+                    }
+                    let ask_reason = if check_terminal_prompt {
+                        "the remote shell prompt needs confirmation before automatic execution"
+                    } else if assessment.effect == super::policy::CommandEffect::SensitiveRead {
+                        "this read may reveal credential or secret values"
+                    } else if effective_output_policy == OutputPolicy::Private {
+                        "private-output commands always require approval"
+                    } else if assessment.privileged {
+                        "privileged commands always require approval"
+                    } else if assessment.opaque {
+                        "dynamic or opaque execution cannot be verified"
+                    } else if rule_decision == super::policy::RuleDecision::Ask {
+                        "a saved policy rule requires approval"
+                    } else if assessment.effect == super::policy::CommandEffect::StateChange {
+                        "this command intends to change state"
+                    } else {
+                        "the command could not be verified as a semantic read"
+                    };
                     let rx = approvals.register(&approval_id, &config.request_id);
                     let (target_role, target_session_id) = command_target.event_metadata();
-                    let _ = on_event.send(StreamEvent::CommandProposal {
-                        approval_id: approval_id.clone(),
-                        command: command.clone(),
-                        explanation: explanation.clone(),
-                        read_only: assessment.read_only(),
-                        network: assessment.network,
-                        output_policy: effective_output_policy,
-                        assessment: assessment.clone(),
-                        ask_reason: ask_reason.into(),
-                        target_role,
-                        target_session_id,
-                    });
+                    // Both events own a real approval waiter before the channel
+                    // callback runs. No PTY execution timeout or terminal write
+                    // starts while the operator confirms a remote prompt.
+                    let event = if check_terminal_prompt {
+                        StreamEvent::TerminalPromptCheck {
+                            approval_id: approval_id.clone(),
+                            command: command.clone(),
+                            explanation: explanation.clone(),
+                            read_only: assessment.read_only(),
+                            network: assessment.network,
+                            output_policy: effective_output_policy,
+                            assessment: assessment.clone(),
+                            ask_reason: ask_reason.into(),
+                            target_role,
+                            target_session_id,
+                        }
+                    } else {
+                        StreamEvent::CommandProposal {
+                            approval_id: approval_id.clone(),
+                            command: command.clone(),
+                            explanation: explanation.clone(),
+                            read_only: assessment.read_only(),
+                            network: assessment.network,
+                            output_policy: effective_output_policy,
+                            assessment: assessment.clone(),
+                            ask_reason: ask_reason.into(),
+                            target_role,
+                            target_session_id,
+                        }
+                    };
+                    let _ = on_event.send(event);
+                    // Cancellation may arrive synchronously with the event,
+                    // before cloning the watch receiver below.
+                    if *cancel.borrow() {
+                        approvals.drain_for_request(&config.request_id);
+                        return ToolBatchResult::Terminate(AgentTermination::Cancelled);
+                    }
                     let mut cancel_watch = cancel.clone();
                     let received = tokio::select! {
                         r = rx => r,
@@ -954,6 +987,10 @@ async fn process_tool_calls(
                     let Ok(received) = received else {
                         return ToolBatchResult::Terminate(AgentTermination::Cancelled);
                     };
+                    if *cancel.borrow() {
+                        approvals.drain_for_request(&config.request_id);
+                        return ToolBatchResult::Terminate(AgentTermination::Cancelled);
+                    }
                     received
                 };
 
@@ -2764,6 +2801,324 @@ mod tests {
         command: String,
     }
 
+    struct PromptGateProvider {
+        arguments: String,
+        rounds: std::sync::atomic::AtomicU32,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for PromptGateProvider {
+        fn id(&self) -> &'static str {
+            "prompt-gate-audit"
+        }
+        fn model_name(&self) -> String {
+            "prompt-gate-audit".into()
+        }
+        async fn chat_stream(
+            &self,
+            _messages: Vec<ChatMessage>,
+            _tools: Vec<ToolDef>,
+            _params: ChatParams,
+            _cancel: tokio::sync::watch::Receiver<bool>,
+            tx: tokio::sync::mpsc::Sender<ProviderEvent>,
+        ) -> Result<(), ProviderError> {
+            let first = self
+                .rounds
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                == 0;
+            if first {
+                tx.send(ProviderEvent::ToolCalls(vec![ToolCall {
+                    id: "prompt-gate-fixture".into(),
+                    name: "run_command".into(),
+                    arguments: self.arguments.clone(),
+                }]))
+                .await
+                .unwrap();
+            } else {
+                tx.send(ProviderEvent::TextDelta("Finished.".into()))
+                    .await
+                    .unwrap();
+            }
+            tx.send(ProviderEvent::Done {
+                finish_reason: if first {
+                    FinishReason::ToolCalls
+                } else {
+                    FinishReason::Stop
+                },
+            })
+            .await
+            .unwrap();
+            Ok(())
+        }
+    }
+
+    async fn prompt_gate_fixture(
+        exec_target: ExecTarget,
+        mode: PermissionMode,
+        mut arguments: serde_json::Value,
+        response: Option<ApprovalResponse>,
+    ) -> (AgentRunOutcome, Vec<serde_json::Value>) {
+        use std::sync::{Arc, Mutex};
+        use tauri::ipc::InvokeResponseBody;
+
+        let fields = arguments.as_object_mut().unwrap();
+        fields
+            .entry("explanation")
+            .or_insert(json!("Inspect the test terminal"));
+        fields.entry("output_policy").or_insert(json!("normal"));
+        let provider = PromptGateProvider {
+            arguments: arguments.to_string(),
+            rounds: std::sync::atomic::AtomicU32::new(0),
+        };
+        let mut config = config_with_buckets(vec![]);
+        config.exec_target = exec_target;
+        let permissions = AgentPermissionState::default();
+        permissions.register(
+            "test",
+            super::super::AgentPermissionModes {
+                single: mode,
+                local: mode,
+                remote: mode,
+            },
+        );
+        let approvals = Arc::new(ApprovalState::default());
+        let pty_exec = Arc::new(PtyExecState::default());
+        let events = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let captured = events.clone();
+        let command_results = pty_exec.clone();
+        let (gate_tx, mut gate_rx) = tokio::sync::mpsc::unbounded_channel();
+        let channel = Channel::new(move |body: InvokeResponseBody| {
+            if let InvokeResponseBody::Json(body) = body {
+                let event: serde_json::Value = serde_json::from_str(&body).unwrap();
+                match event["type"].as_str() {
+                    Some("TerminalPromptCheck" | "CommandProposal") => {
+                        gate_tx.send(event.clone()).unwrap();
+                    }
+                    Some("RunInTerminal") => {
+                        command_results
+                            .respond(
+                                event["approval_id"].as_str().unwrap(),
+                                super::super::PtyExecResult {
+                                    exit_code: Some(0),
+                                    output_tail: "SYNTHETIC_PROMPT_GATE_OUTPUT".into(),
+                                    duration_ms: 1,
+                                    error: None,
+                                },
+                            )
+                            .unwrap();
+                    }
+                    _ => {}
+                }
+                captured.lock().unwrap().push(event);
+            }
+            Ok(())
+        });
+        let (cancel_tx, cancel) = tokio::sync::watch::channel(false);
+        let steers = SteerState::default();
+        let run = run_agent(
+            &provider,
+            config,
+            "Follow the native command policy.".into(),
+            "inspect the fixture terminal".into(),
+            vec![],
+            vec![],
+            &approvals,
+            Some(&permissions),
+            &pty_exec,
+            &steers,
+            None,
+            None,
+            None,
+            cancel,
+            &channel,
+        );
+        let answer_gate = async {
+            let gate = gate_rx
+                .recv()
+                .await
+                .expect("the command must wait at a gate");
+            let id = gate["approval_id"].as_str().unwrap();
+            assert!(approvals.pending.lock().unwrap().contains_key(id));
+            assert!(pty_exec.pending.lock().unwrap().is_empty());
+            assert_eq!(provider.rounds.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert!(!events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| event["type"] == "RunInTerminal"));
+            if let Some(response) = response {
+                approvals.respond(id, response).unwrap();
+            } else {
+                cancel_tx.send(true).unwrap();
+            }
+        };
+        let (outcome, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(run, answer_gate)
+        })
+        .await
+        .expect("the prompt gate must settle without a command or approval timeout");
+        assert!(approvals.pending.lock().unwrap().is_empty());
+        assert!(pty_exec.pending.lock().unwrap().is_empty());
+        let recorded = events.lock().unwrap().clone();
+        (outcome, recorded)
+    }
+
+    #[tokio::test]
+    async fn auto_terminal_commands_wait_for_prompt_readiness_before_dispatch() {
+        for mode in [
+            PermissionMode::AutoRead,
+            PermissionMode::AutoSmart,
+            PermissionMode::AutoAll,
+            PermissionMode::Full,
+        ] {
+            for role in [None, Some("local"), Some("remote")] {
+                let exec_target = if role.is_some() {
+                    sidecar_config().exec_target
+                } else {
+                    ExecTarget::Pty {
+                        session_id: "single-session".into(),
+                    }
+                };
+                let (outcome, events) = prompt_gate_fixture(
+                    exec_target,
+                    mode,
+                    json!({ "command": "pwd", "explanation": "Inspect working directory", "target": role }),
+                    Some(ApprovalResponse {
+                        decision: ApprovalDecision::Run,
+                        edited_command: None,
+                    }),
+                )
+                .await;
+                assert_eq!(outcome.termination, AgentTermination::Completed);
+                let gates: Vec<_> = events
+                    .iter()
+                    .filter(|event| event["type"] == "TerminalPromptCheck")
+                    .collect();
+                assert_eq!(gates.len(), 1);
+                assert_eq!(gates[0]["command"], "pwd");
+                assert_eq!(gates[0]["output_policy"], "normal");
+                assert_eq!(gates[0]["read_only"], true);
+                let dispatch = events
+                    .iter()
+                    .find(|event| event["type"] == "RunInTerminal")
+                    .unwrap();
+                assert_eq!(dispatch["approval_id"], gates[0]["approval_id"]);
+                if let Some(role) = role {
+                    assert_eq!(gates[0]["target_role"], role);
+                    assert_eq!(gates[0]["target_session_id"], format!("session-{role}"));
+                    assert_eq!(dispatch["session_id"], format!("session-{role}"));
+                } else {
+                    assert!(gates[0].get("target_role").is_none());
+                    assert!(gates[0].get("target_session_id").is_none());
+                    assert_eq!(dispatch["session_id"], "single-session");
+                }
+                assert!(!events
+                    .iter()
+                    .any(|event| event["type"] == "CommandProposal"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_prompt_checks_can_be_skipped_stopped_or_cancelled_without_dispatch() {
+        for decision in [
+            Some(ApprovalDecision::Skip),
+            Some(ApprovalDecision::Stop),
+            None,
+        ] {
+            let skip = matches!(decision, Some(ApprovalDecision::Skip));
+            let (outcome, events) = prompt_gate_fixture(
+                ExecTarget::Pty {
+                    session_id: "single-session".into(),
+                },
+                PermissionMode::Full,
+                json!({ "command": "pwd" }),
+                decision.map(|decision| ApprovalResponse {
+                    decision,
+                    edited_command: None,
+                }),
+            )
+            .await;
+            assert_eq!(
+                outcome.termination,
+                if skip {
+                    AgentTermination::Completed
+                } else {
+                    AgentTermination::Cancelled
+                }
+            );
+            assert_eq!(outcome.stats.commands_executed, 0);
+            assert!(!events.iter().any(|event| event["type"] == "RunInTerminal"));
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event["type"] == "TerminalPromptCheck")
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn policy_proposals_never_become_automatic_terminal_prompt_checks() {
+        for (mode, arguments) in [
+            (PermissionMode::Ask, json!({ "command": "pwd" })),
+            (PermissionMode::AutoAll, json!({ "command": "cat .env" })),
+            (
+                PermissionMode::AutoAll,
+                json!({ "command": "pwd", "output_policy": "private" }),
+            ),
+        ] {
+            let (outcome, events) = prompt_gate_fixture(
+                ExecTarget::Pty {
+                    session_id: "single-session".into(),
+                },
+                mode,
+                arguments,
+                Some(ApprovalResponse {
+                    decision: ApprovalDecision::Skip,
+                    edited_command: None,
+                }),
+            )
+            .await;
+            assert_eq!(outcome.termination, AgentTermination::Completed);
+            assert!(events
+                .iter()
+                .any(|event| event["type"] == "CommandProposal"));
+            assert!(!events
+                .iter()
+                .any(|event| event["type"] == "TerminalPromptCheck"
+                    || event["type"] == "RunInTerminal"));
+        }
+    }
+
+    #[tokio::test]
+    async fn edited_prompt_confirmations_preserve_private_output_reclassification() {
+        let (outcome, events) = prompt_gate_fixture(
+            ExecTarget::Pty {
+                session_id: "single-session".into(),
+            },
+            PermissionMode::Full,
+            json!({ "command": "pwd" }),
+            Some(ApprovalResponse {
+                decision: ApprovalDecision::Run,
+                edited_command: Some("cat .env".into()),
+            }),
+        )
+        .await;
+        assert_eq!(outcome.termination, AgentTermination::Completed);
+        let dispatch = events
+            .iter()
+            .find(|event| event["type"] == "RunInTerminal")
+            .unwrap();
+        assert_eq!(dispatch["command"], "cat .env");
+        assert_eq!(dispatch["output_policy"], "private");
+        assert!(outcome
+            .transcript
+            .iter()
+            .all(|message| !message.content.contains("SYNTHETIC_PROMPT_GATE_OUTPUT")));
+    }
+
     #[cfg(unix)]
     #[async_trait::async_trait]
     impl Provider for PrivacyAuditProvider {
@@ -3004,6 +3359,10 @@ mod tests {
             .iter()
             .all(|message| !message.content.contains(marker)));
         let events = events.lock().unwrap();
+        assert!(!events
+            .iter()
+            .any(|event| event["type"] == "TerminalPromptCheck"
+                || event["type"] == "CommandProposal"));
         assert!(events
             .iter()
             .any(|event| event["type"] == "CommandStarted" && event["output_policy"] == "private"));

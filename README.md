@@ -38,7 +38,12 @@ Modern AI terminals tend to be Electron apps that phone home for every completio
 - OSC 133 shell integration marks every command: exit-code badges, copy command or output, re-run, attach as AI context
 - Restored tabs never reconnect on their own — an `ssh` tab offers *Reconnect* instead
 
-Starting another interactive shell inside a tab does not install VTerminal's
+**Settings → Terminal → Shell integration (command blocks)** initializes the
+local shell. It does not install integration on SSH hosts. Before running an
+Agent command over SSH, VTerminal may ask you to confirm that the remote terminal
+is at an empty shell prompt, including when an automatic permission mode is on.
+
+Starting another local interactive shell inside a tab does not install VTerminal's
 integration in that nested shell. Command blocks and agent command execution may
 be unavailable until you exit the nested shell or open a fresh terminal tab.
 
@@ -203,8 +208,9 @@ This matters more in a terminal than anywhere else, so it is worth being precise
 - The **permission mode** is per-session, never persisted, and never inherited. Arming it *is* the authorization.
 - **Reads** mode can auto-run network-backed commands only when their shape is proven read-only and web access is enabled. GitHub CLI writes, GraphQL, request bodies, method overrides, browser launches, and unknown shapes remain approval-gated.
 - **Auto** mode runs standard commands, including writes and network access, but still asks for sensitive, privileged, opaque, private-output, and saved always-ask operations.
-- **Full** mode runs every executable command without an approval card. Explicit deny rules and disabled capabilities still block execution instead of asking.
+- **Full** mode authorizes every executable command automatically. Explicit deny rules and disabled capabilities still block execution instead of asking.
 - Commands run in your **visible PTY**, so you see exactly what ran, and it runs wherever that tab is — including over `ssh`.
+- Every mode still requires a ready terminal. For SSH, VTerminal asks you to confirm an empty shell prompt when it cannot verify the current prompt. This check does not change your command permission mode; typing in the terminal or reconnecting can require another confirmation.
 - Commands you edit before approving are treated as *your* text, not the model's.
 
 When web access is disabled, VTerminal withholds the model's fetch tooling and rejects network-shaped commands before an approval card is even drawn.

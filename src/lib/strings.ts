@@ -108,9 +108,9 @@ export const S = {
       reconnect: "Reconnect",
       reconnecting: "Reconnecting…",
       remoteAuto: (host: string) =>
-        `Standard commands for ${host} run without asking. Protected commands still require approval.`,
+        `Standard commands for ${host} run automatically when the terminal is ready. Protected commands require approval, and you may need to confirm an empty SSH prompt.`,
       remoteFull: (host: string) =>
-        `Full access is on for ${host}. Every executable command runs without approval.`,
+        `Full access is on for ${host}. Commands run automatically when the terminal is ready. You may still need to confirm an empty SSH prompt.`,
       divider: "Resize local and SSH terminals",
     },
     placeholder: "Ask about your terminal…",
@@ -174,7 +174,7 @@ export const S = {
       auto_all:
         "Standard commands, including writes and network access, run without asking. Sensitive, privileged, opaque, private-output, and saved always-ask operations still wait.",
       full:
-        "Every executable command runs without approval, including protected and saved always-ask operations. Deny rules and disabled capabilities remain blocked.",
+        "Commands are authorized automatically, including protected and saved always-ask operations. The terminal must be ready; SSH may still require an empty-prompt confirmation. Deny rules and disabled capabilities remain blocked.",
     },
     // Document buckets. Deliberately says the agent "can search" rather than "will
     // read": attaching a bucket grants a lookup tool, it does not put the documents
@@ -186,9 +186,9 @@ export const S = {
       `${label} — ${chunks} passage${chunks === 1 ? "" : "s"} the agent can search`,
     docsDetach: (label: string) => `Detach ${label}`,
     autoAllWarning:
-      "Auto mode is ON. Standard commands run without asking, while protected commands still require approval.",
+      "Auto mode is ON. Standard commands run automatically when the terminal is ready. Protected commands require approval, and SSH may need an empty-prompt confirmation.",
     fullWarning:
-      "Full access is ON. Every executable command runs in your terminal without approval.",
+      "Full access is ON. Commands run automatically when the terminal is ready. SSH may still need an empty-prompt confirmation.",
     autoReadNote:
       "Proven read-only commands run without asking, including network-backed reads. Writes and uncertain commands still stop here.",
     autoSmartNote:
@@ -611,7 +611,7 @@ export const S = {
         : "Leave empty for /bin/zsh",
       shellIntegration: "Shell integration (command blocks)",
       shellIntegrationHint:
-        "Open a new tab after changing this setting.",
+        "Applies to local shells; it does not install integration on SSH hosts. SSH commands may need an empty-prompt confirmation. Open a new tab after changing this setting.",
       historyEnabled: "Save command history",
       historyCaptureOutput: "Capture output tails in history",
       aiSessionNaming: "Name tabs with AI",

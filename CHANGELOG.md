@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.15
+
+- Show the remote empty-prompt confirmation in Full and automatic Agent modes, so an initial SSH command can run instead of repeatedly returning “not run.”
+- Reuse verified SSH prompt state for subsequent commands while requiring fresh confirmation after typing, reconnection, or expiry.
+- Keep remote prompt confirmation pending when selecting Full, and clarify that the shell-integration setting initializes local shells.
+
 ## 0.6.14
 
 - Reduce interface work during AI output by batching small stream fragments, caching completed messages, and avoiding unrelated Settings, toolbar, status, and session-persistence updates.

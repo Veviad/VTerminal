@@ -33,6 +33,7 @@ const {
   captureApprovalPromptBinding,
   interruptJob,
   forgetShellProof,
+  hasReusableRemoteShellProof,
 } = await import("../lib/ptyExec");
 const { hardenCommand, suppressPrivateOutput } = await import("../lib/ptyExecShell");
 const {
@@ -1649,6 +1650,27 @@ describe("runInTerminal — remote session", () => {
     expect((await second).exitCode).toBe(0);
     expect(ptyWrite).toHaveBeenCalledTimes(3);
   });
+
+  it.each(["input", "expiry", "replacement", "target", "disconnect"] as const)(
+    "reports remote readiness without writes and rejects an invalidated proof (%s)", async (change) => {
+      vi.useFakeTimers();
+      entry = makeEntry(["remote$ "]);
+      expect(hasReusableRemoteShellProof("s1")).toBe(false);
+      expect(ptyWrite).not.toHaveBeenCalled();
+      await proveShell("readiness-proof", "pwd", tickFakeTimers);
+      const writes = ptyWrite.mock.calls.length;
+      expect(hasReusableRemoteShellProof("s1")).toBe(true);
+      if (change === "input") entry.lastUserInputAt += 1;
+      if (change === "expiry") await vi.advanceTimersByTimeAsync(5 * 60_000 + 1);
+      if (change === "replacement") entry = makeEntry(["remote$ "]);
+      if (change === "target") useAppStore.getState().updateSessionUi("s1", {
+        remote: { kind: "ssh", target: "other-host" },
+      });
+      if (change === "disconnect") useAppStore.getState().updateSessionUi("s1", { remote: null });
+      expect(hasReusableRemoteShellProof("s1")).toBe(false);
+      expect(ptyWrite).toHaveBeenCalledTimes(writes);
+    },
+  );
 
   it("re-probes when the user has touched the keyboard since the proof", async () => {
     entry = makeEntry(["$ ", "out", "$ "]);

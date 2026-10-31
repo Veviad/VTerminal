@@ -112,7 +112,7 @@ export function TerminalSection() {
 
         <Toggle
           label={S.settings.terminal.shellIntegration}
-          hint={isWindows() ? undefined : S.settings.terminal.shellIntegrationHint}
+          hint={S.settings.terminal.shellIntegrationHint}
           checked={s.shellIntegrationEnabled}
           onChange={(v) => void save({ shell_integration_enabled: v })}
         />
