@@ -194,8 +194,24 @@ function InstructionsEditor({
   );
 }
 
+function InstructionField({ field, onSave }: {
+  field: (typeof FIELDS)[number];
+  onSave: (patch: Partial<SettingsPatch>) => Promise<void>;
+}) {
+  const value = useAppStore(field.select);
+  return (
+    <InstructionsEditor
+      fieldKey={field.key}
+      label={field.label}
+      hint={field.hint}
+      placeholder={field.placeholder}
+      value={value}
+      onSave={onSave}
+    />
+  );
+}
+
 export function InstructionsSection() {
-  const s = useAppStore();
   const { save } = useSettings();
 
   return (
@@ -214,13 +230,9 @@ export function InstructionsSection() {
 
       <section className="space-y-5">
         {FIELDS.map((field) => (
-          <InstructionsEditor
+          <InstructionField
             key={field.key}
-            fieldKey={field.key}
-            label={field.label}
-            hint={field.hint}
-            placeholder={field.placeholder}
-            value={field.select(s)}
+            field={field}
             onSave={save}
           />
         ))}

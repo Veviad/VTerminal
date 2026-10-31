@@ -56,6 +56,13 @@ struct StepOutcome {
 }
 
 impl StepOutcome {
+    fn cancelled() -> Self {
+        Self {
+            status: StepAttemptStatus::Cancelled,
+            ..Self::empty()
+        }
+    }
+
     fn failed(error: impl Into<String>) -> Self {
         Self {
             status: StepAttemptStatus::Failed,
@@ -105,6 +112,66 @@ impl StepOutcome {
 /// filesystem reconciliation pass at every startup; this feature does not need
 /// one, and 8 KiB is enough to answer "what did it say?".
 const OUTPUT_TAIL_BYTES: usize = 8 * 1024;
+
+/// Apply the SAME deadline to every step, including a step that is currently
+/// running. Cancellation must travel through the executor: dropping its future
+/// can kill the immediate shell while leaving descendants or WSL work alive.
+async fn within_run_budget<F, Fut>(
+    deadline: tokio::time::Instant,
+    max_run_secs: u32,
+    mut cancel: tokio::sync::watch::Receiver<bool>,
+    execute: F,
+) -> StepOutcome
+where
+    F: FnOnce(tokio::sync::watch::Receiver<bool>) -> Fut,
+    Fut: std::future::Future<Output = StepOutcome>,
+{
+    if *cancel.borrow() {
+        return StepOutcome::cancelled();
+    }
+    let budget_error = || format!("the run exceeded its {max_run_secs}s budget");
+    if tokio::time::Instant::now() >= deadline {
+        return StepOutcome {
+            termination: Some("time_budget".into()),
+            ..StepOutcome::failed(budget_error())
+        };
+    }
+    let (step_cancel, receiver) = tokio::sync::watch::channel(false);
+    let work = execute(receiver);
+    tokio::pin!(work);
+    let timed_out = tokio::select! {
+        biased;
+        _ = cancel.wait_for(|cancelled| *cancelled) => false,
+        _ = tokio::time::sleep_until(deadline) => true,
+        outcome = &mut work => return outcome,
+    };
+    let _ = step_cancel.send(true);
+    // Await process-tree cleanup and the agent's request cleanup before the
+    // scheduler releases its global run permit or starts another action.
+    let mut outcome = work.await;
+    if timed_out {
+        outcome.status = StepAttemptStatus::Failed;
+        outcome.termination = Some("time_budget".into());
+        outcome.error = Some(budget_error());
+    } else {
+        outcome.status = StepAttemptStatus::Cancelled;
+    }
+    outcome
+}
+
+/// Provider resolution and MCP preparation have no command to reap yet. They
+/// must still stop on a run deadline instead of postponing cancellation until
+/// the agent loop finally starts.
+async fn prepare_until_cancelled<T>(
+    cancel: &mut tokio::sync::watch::Receiver<bool>,
+    prepare: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::select! {
+        biased;
+        _ = cancel.wait_for(|cancelled| *cancelled) => None,
+        value = prepare => Some(value),
+    }
+}
 
 fn tail(output: &str) -> (String, bool) {
     if output.len() <= OUTPUT_TAIL_BYTES {
@@ -208,23 +275,31 @@ pub async fn execute_run(
             db::mark_attempt_running(conn, &attempt_id, &started_at)
         });
 
-        let outcome = match step.kind {
-            StepKind::Command => {
-                run_command_step(app, action, step, remote.clone(), cancel.clone()).await
-            }
-            StepKind::Prompt => {
-                run_prompt_step(
-                    app,
-                    run_id,
-                    action,
-                    step,
-                    index,
-                    remote.clone(),
-                    cancel.clone(),
-                )
-                .await
-            }
-        };
+        let outcome = within_run_budget(
+            deadline,
+            action.input.max_run_secs,
+            cancel.clone(),
+            |step_cancel| async {
+                match step.kind {
+                    StepKind::Command => {
+                        run_command_step(app, action, step, remote.clone(), step_cancel).await
+                    }
+                    StepKind::Prompt => {
+                        run_prompt_step(
+                            app,
+                            run_id,
+                            action,
+                            step,
+                            index,
+                            remote.clone(),
+                            step_cancel,
+                        )
+                        .await
+                    }
+                }
+            },
+        )
+        .await;
 
         let finished_at = db::now_rfc3339();
         let row = StepAttempt {
@@ -268,6 +343,18 @@ pub async fn execute_run(
 
         if outcome.status == StepAttemptStatus::Cancelled {
             return Ok(ScheduledRunStatus::Cancelled);
+        }
+        if outcome.termination.as_deref() == Some("time_budget") {
+            record_skipped_remainder(
+                app,
+                run_id,
+                action,
+                index + 1,
+                "the run reached its time budget during an earlier step",
+            );
+            return Err(outcome
+                .error
+                .unwrap_or_else(|| "the run exceeded its budget".into()));
         }
         if outcome.is_failure() {
             if !step.continue_on_failure {
@@ -433,12 +520,17 @@ async fn run_prompt_step(
     step: &ScheduledStep,
     index: usize,
     remote: Option<Arc<super::ssh::RemoteBatchTarget>>,
-    cancel: tokio::sync::watch::Receiver<bool>,
+    mut cancel: tokio::sync::watch::Receiver<bool>,
 ) -> StepOutcome {
     let Some(goal) = step.as_prompt() else {
         return StepOutcome::failed("this step is not a prompt");
     };
-    let resolved = match crate::commands::ai::resolve_provider(app).await {
+    let Some(resolved) =
+        prepare_until_cancelled(&mut cancel, crate::commands::ai::resolve_provider(app)).await
+    else {
+        return StepOutcome::cancelled();
+    };
+    let resolved = match resolved {
         Ok(resolved) => resolved,
         Err(error) => return StepOutcome::failed(error),
     };
@@ -509,18 +601,24 @@ async fn run_prompt_step(
     // refused at once rather than waiting out the MCP gate's own timeout.
     let mcp_manager = app.state::<crate::mcp::client::McpManager>();
     let mcp_approvals = app.state::<crate::mcp::approval::McpApprovalState>();
-    let mcp_context = match crate::agent::prepare_mcp_context(
-        app,
-        &mcp_manager,
-        &mcp_approvals,
-        &request_id,
-        &action.id,
-        &action.input.mcp_selection,
-        resolved.model,
-        &sink,
+    let Some(mcp_context) = prepare_until_cancelled(
+        &mut cancel,
+        crate::agent::prepare_mcp_context(
+            app,
+            &mcp_manager,
+            &mcp_approvals,
+            &request_id,
+            &action.id,
+            &action.input.mcp_selection,
+            resolved.model,
+            &sink,
+        ),
     )
     .await
-    {
+    else {
+        return StepOutcome::cancelled();
+    };
+    let mcp_context = match mcp_context {
         Ok(context) => context,
         Err(error) => {
             // A server that cannot be reached fails THIS step, not the run: a
@@ -804,6 +902,113 @@ pub const fn is_tab(mode: ExecutionMode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_run_budget_cancels_pending_provider_or_mcp_preparation() {
+        let (_cancel_tx, cancel) = tokio::sync::watch::channel(false);
+        let started = tokio::time::Instant::now();
+        let outcome = within_run_budget(
+            started + std::time::Duration::from_millis(20),
+            30,
+            cancel,
+            |mut cancel| async move {
+                let result =
+                    prepare_until_cancelled(&mut cancel, std::future::pending::<()>()).await;
+                assert!(result.is_none());
+                StepOutcome::cancelled()
+            },
+        )
+        .await;
+        assert_eq!(outcome.status, StepAttemptStatus::Failed);
+        assert_eq!(outcome.termination.as_deref(), Some("time_budget"));
+        assert_eq!(
+            outcome.error.as_deref(),
+            Some("the run exceeded its 30s budget")
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn operator_cancellation_stays_cancelled_instead_of_becoming_a_timeout() {
+        let (cancel_tx, cancel) = tokio::sync::watch::channel(false);
+        let work = within_run_budget(
+            tokio::time::Instant::now() + std::time::Duration::from_secs(60),
+            60,
+            cancel,
+            |mut cancel| async move {
+                let _ = cancel.wait_for(|cancelled| *cancelled).await;
+                StepOutcome::cancelled()
+            },
+        );
+        let signal = async {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            cancel_tx.send(true).unwrap();
+        };
+        let (outcome, _) = tokio::join!(work, signal);
+        assert_eq!(outcome.status, StepAttemptStatus::Cancelled);
+        assert_eq!(outcome.termination, None);
+    }
+
+    #[tokio::test]
+    async fn an_expired_shared_budget_never_starts_another_step() {
+        let (_cancel_tx, cancel) = tokio::sync::watch::channel(false);
+        let outcome = within_run_budget(tokio::time::Instant::now(), 30, cancel, |_| async {
+            panic!("the next step must not execute after the shared deadline");
+        })
+        .await;
+        assert_eq!(outcome.status, StepAttemptStatus::Failed);
+        assert_eq!(outcome.termination.as_deref(), Some("time_budget"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_run_budget_reaps_the_shell_and_stops_its_descendants() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("descendant-survived");
+        let command = format!(
+            "(sleep 1; printf survived > '{}') & printf '%s\\n' \"$$\"; wait",
+            marker.display()
+        );
+        let (_cancel_tx, cancel) = tokio::sync::watch::channel(false);
+        let started = tokio::time::Instant::now();
+        let outcome = within_run_budget(
+            started + std::time::Duration::from_millis(200),
+            30,
+            cancel,
+            |cancel| async {
+                let sink = Channel::new(|_: InvokeResponseBody| Ok(()));
+                let result = crate::agent::exec::run_command(
+                    "/bin/sh",
+                    None,
+                    &command,
+                    "schedule-budget-test",
+                    60,
+                    crate::agent::OutputPolicy::Normal,
+                    cancel,
+                    &sink,
+                )
+                .await
+                .unwrap();
+                assert!(result.cancelled);
+                StepOutcome {
+                    output_tail: Some(result.output_tail),
+                    ..StepOutcome::cancelled()
+                }
+            },
+        )
+        .await;
+        assert_eq!(outcome.status, StepAttemptStatus::Failed);
+        assert_eq!(outcome.termination.as_deref(), Some("time_budget"));
+        let shell_pid: i32 = outcome.output_tail.unwrap().trim().parse().unwrap();
+        assert_eq!(
+            unsafe { libc::kill(shell_pid, 0) },
+            -1,
+            "the shell must already be reaped"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        assert!(!marker.exists(), "a child process survived the run budget");
+    }
 
     #[test]
     fn the_output_tail_is_bounded_and_slices_on_a_char_boundary() {

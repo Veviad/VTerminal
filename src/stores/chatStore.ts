@@ -498,6 +498,9 @@ async function streamTurn(
           }));
         }
         if (event.type === "Checkpoint") {
+          // A later provider round can reject instead of returning a final
+          // transcript. Keep completed tools in the retry/archive snapshot.
+          transcript = event.transcript;
           detail = { ...detail, model_transcript: event.transcript };
           void persist(detail);
         }
@@ -749,6 +752,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!targetId || !existing || chatHasMutation(state, targetId) || (state.current?.summary.id === targetId && chatIsBusy(state.stream))) return;
     set((current) => ({ mutatingChatIds: [...current.mutatingChatIds, targetId] }));
     try {
+      // The reservation prevents new edits. Drain all previously queued full
+      // snapshots before changing archive state, or they can unarchive it.
+      await persistQueues.get(targetId)?.catch(() => {});
       const archivedAt = archived ? new Date().toISOString() : null;
       await api.chatSetArchived(targetId, archivedAt);
       if (archived) void api.mcpDisconnect(targetId).catch(() => {});
@@ -766,6 +772,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!targetId || chatHasMutation(state, targetId) || (state.current?.summary.id === targetId && chatIsBusy(state.stream))) return;
     set((current) => ({ mutatingChatIds: [...current.mutatingChatIds, targetId] }));
     try {
+      // chatSave is an upsert, so a queued snapshot after deletion would
+      // recreate the entire conversation on disk.
+      await persistQueues.get(targetId)?.catch(() => {});
       await api.chatDelete(targetId);
       void api.mcpDisconnect(targetId).catch(() => {});
       const remaining = get().summaries.filter((chat) => chat.id !== targetId);
@@ -784,16 +793,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   attachBuckets: async (ref) => {
-    const detail = get().current;
-    if (!detail || detail.summary.archived_at || chatHasMutation(get())) return;
+    const state = get();
+    const detail = state.current;
+    if (!detail || detail.summary.archived_at || chatIsBusy(state.stream) || chatHasMutation(state)) return;
     if (detail.attached_bucket_refs.some((candidate) => sameKnowledgeBucket(candidate, ref))) return;
     const next = { ...detail, attached_bucket_refs: [...detail.attached_bucket_refs, ref] };
     set({ current: next });
     await persist(next);
   },
   detachBucket: async (ref) => {
-    const detail = get().current;
-    if (!detail || detail.summary.archived_at || chatHasMutation(get())) return;
+    const state = get();
+    const detail = state.current;
+    if (!detail || detail.summary.archived_at || chatIsBusy(state.stream) || chatHasMutation(state)) return;
     const next = {
       ...detail,
       attached_bucket_refs: detail.attached_bucket_refs.filter((candidate) => !sameKnowledgeBucket(candidate, ref)),
@@ -830,8 +841,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   respondToMcpProposal: async (decision) => {
-    const proposal = get().stream.pendingMcpProposal;
-    if (!proposal) return;
+    const { stream, current } = get();
+    const proposal = stream.pendingMcpProposal;
+    if (!proposal || !stream.requestId || stream.status !== "streaming") return;
     set((state) => ({
       stream: {
         ...state.stream,
@@ -843,19 +855,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
         ),
       },
     }));
+    const awaitingCall = get().stream.mcpCalls.find((call) => call.approval_id === proposal.approvalId);
     await api.respondToMcpApproval(proposal.approvalId, decision).catch((error) => {
-      set((state) => ({
-        stream: {
-          ...state.stream,
-          pendingMcpProposal: proposal,
-          mcpCalls: state.stream.mcpCalls.map((call) =>
-            call.approval_id === proposal.approvalId
-              ? { ...call, status: "awaiting" as const, error: null }
-              : call,
-          ),
-          lastError: String(error),
-        },
-      }));
+      set((state) => {
+        // A native decision can settle after cancellation, another proposal,
+        // or a tool lifecycle event. Restore only the unchanged pending call.
+        if (state.stream.requestId !== stream.requestId || state.stream.status !== "streaming"
+          || state.current?.summary.id !== current?.summary.id || state.stream.pendingMcpProposal
+          || !awaitingCall || !state.stream.mcpCalls.includes(awaitingCall)) return {};
+        return {
+          stream: {
+            ...state.stream,
+            pendingMcpProposal: proposal,
+            mcpCalls: state.stream.mcpCalls.map((call) =>
+              call === awaitingCall ? { ...call, status: "awaiting" as const, error: null } : call,
+            ),
+            lastError: String(error),
+          },
+        };
+      });
     });
   },
 

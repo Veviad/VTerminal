@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import {
   Brain,
   ArrowLeftRight,
@@ -157,7 +158,14 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const collapsed = !useAppStore((s) => s.aiPanelOpen);
   const sessions = useAppStore((s) => s.sessions);
   const sessionUi = useAppStore((s) => s.sessionUi);
-  const aiStreams = useAppStore((s) => s.aiStreams);
+  // Sidecar eligibility needs only status. Text in another Agent must not
+  // repaint this panel on every token.
+  const streamStatuses = useAppStore(useShallow((s) => Object.fromEntries(
+    Object.entries(s.aiStreams).map(([id, stream]) => [id, stream.status]),
+  )));
+  const aiStreams = useMemo(() => Object.fromEntries(
+    Object.entries(streamStatuses).map(([id, status]) => [id, { status }]),
+  ), [streamStatuses]);
   const sidecars = useAppStore((s) => s.sidecars);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
   const stream = useAppStore((s) =>
@@ -1468,7 +1476,7 @@ function ResizeHandle() {
   );
 }
 
-function MessageRow({
+const MessageRow = memo(function MessageRow({
   message,
   sessionId,
 }: {
@@ -1525,7 +1533,7 @@ function MessageRow({
       <MessageMeta message={message} />
     </div>
   );
-}
+});
 
 type AiMcpToolMessage = AiMessage & {
   kind: "mcp_tool";
@@ -1589,7 +1597,7 @@ function messageTimelineRows(messages: AiMessage[]): MessageTimelineRow[] {
   return rows;
 }
 
-function MessageTimeline({
+const MessageTimeline = memo(function MessageTimeline({
   messages,
   sessionId,
 }: {
@@ -1609,7 +1617,7 @@ function MessageTimeline({
       />
     );
   });
-}
+});
 
 /** Delivery state of a message typed mid-run.
  *
@@ -1834,7 +1842,7 @@ function CommandMessage({
   );
 }
 
-function ThinkingSection({
+const ThinkingSection = memo(function ThinkingSection({
   content,
   live,
 }: {
@@ -1870,4 +1878,4 @@ function ThinkingSection({
       )}
     </div>
   );
-}
+});

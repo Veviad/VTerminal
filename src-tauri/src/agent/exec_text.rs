@@ -94,6 +94,20 @@ impl CapturedText {
                 }
                 return;
             }
+            _ if matches!(ch, '\x18' | '\x1a') => {
+                // CAN/SUB abort an unfinished sequence. Keeping them as CSI
+                // parameters would consume the next printed letter as its
+                // final byte, corrupting both the command card and model tail.
+                self.state = State::Text;
+                return;
+            }
+            _ if (ch < '\x20' && ch != '\x1b') || ch == '\x7f' => {
+                // C0 controls execute without changing an escape/CSI parser's
+                // state; DEL is ignored. Control-string payloads stay hidden
+                // in the earlier arm rather than leaking into captured text.
+                output.character(ch);
+                return;
+            }
             _ if ch == '\x1b' => {
                 self.state = State::Escape;
                 return;
@@ -300,6 +314,37 @@ mod tests {
             ]),
             "progress 100%\naXY\nnew\n"
         );
+    }
+
+    #[test]
+    fn cancelled_control_sequences_preserve_the_next_printed_character() {
+        for &cancel in b"\x18\x1a" {
+            for prefix in [b"\x1b[31".as_slice(), b"\x1b[", b"\x1b(", b"\x1b"] {
+                let mut raw = b"before".to_vec();
+                raw.extend_from_slice(prefix);
+                raw.push(cancel);
+                raw.extend_from_slice(b"after\n");
+                for split in 0..=raw.len() {
+                    assert_eq!(
+                        decode_chunks(&[&raw[..split], &raw[split..]]),
+                        "beforeafter\n",
+                        "cancel {cancel:#x}, prefix {prefix:?}, byte split {split}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inline_controls_execute_without_ending_a_control_sequence() {
+        let raw = b"old\x1b[31\r\n\x7fmnew\x1b\x08[0m!\n";
+        for split in 0..=raw.len() {
+            assert_eq!(
+                decode_chunks(&[&raw[..split], &raw[split..]]),
+                "old\nne!\n",
+                "byte split {split}"
+            );
+        }
     }
 
     #[test]

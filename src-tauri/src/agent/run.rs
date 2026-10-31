@@ -2761,6 +2761,7 @@ mod tests {
     #[cfg(unix)]
     struct PrivacyAuditProvider {
         requests: std::sync::Mutex<Vec<Vec<ChatMessage>>>,
+        command: String,
     }
 
     #[cfg(unix)]
@@ -2788,9 +2789,17 @@ mod tests {
             };
             if first {
                 tx.send(ProviderEvent::ToolCalls(vec![ToolCall {
-                    id: "read-fixture".into(), name: "run_command".into(),
-                    arguments: r#"{"command":"cat .env.production","explanation":"read synthetic test fixture","output_policy":"normal"}"#.into(),
-                }])).await.unwrap();
+                    id: "read-fixture".into(),
+                    name: "run_command".into(),
+                    arguments: serde_json::json!({
+                        "command": self.command,
+                        "explanation": "read synthetic test fixture",
+                        "output_policy": "normal"
+                    })
+                    .to_string(),
+                }]))
+                .await
+                .unwrap();
                 tx.send(ProviderEvent::Done {
                     finish_reason: FinishReason::ToolCalls,
                 })
@@ -2813,15 +2822,121 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn instructions_reach_provider_rounds_without_weakening_private_output() {
+        assert_private_provider_rounds("cat .env.production").await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn multiline_private_output_never_reaches_provider_rounds_or_events() {
+        assert_private_provider_rounds("printf safe\nprintenv VTERMINAL_SYNTHETIC_SECRET").await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn quoted_private_output_never_reaches_provider_rounds_or_events() {
+        assert_private_provider_rounds(r#"printf '%s' "$(printenv VTERMINAL_SYNTHETIC_SECRET)""#)
+            .await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn multiline_and_quoted_dynamic_commands_wait_for_read_mode_approval() {
+        use std::sync::{Arc, Mutex};
+        use tauri::ipc::InvokeResponseBody;
+
+        for command in [
+            "pwd\ntouch audit-fixture",
+            "pwd\r\ntouch audit-fixture",
+            r#"printf '%s' "$(touch audit-fixture)""#,
+            "printf '%s' \"`touch audit-fixture`\"",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let mut config = config_with_buckets(vec![]);
+            config.shell = "/bin/sh".into();
+            config.cwd = Some(root.path().to_string_lossy().into_owned());
+            let provider = PrivacyAuditProvider {
+                requests: Mutex::new(vec![]),
+                command: command.into(),
+            };
+            let permissions = AgentPermissionState::default();
+            permissions.register(
+                "test",
+                super::super::AgentPermissionModes {
+                    single: PermissionMode::AutoRead,
+                    local: PermissionMode::AutoRead,
+                    remote: PermissionMode::AutoRead,
+                },
+            );
+            let approvals = Arc::new(ApprovalState::default());
+            let decisions = approvals.clone();
+            let events = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+            let captured = events.clone();
+            let channel = Channel::new(move |body: InvokeResponseBody| {
+                if let InvokeResponseBody::Json(body) = body {
+                    let event: serde_json::Value = serde_json::from_str(&body).unwrap();
+                    if event["type"] == "CommandProposal" {
+                        decisions
+                            .respond(
+                                event["approval_id"].as_str().unwrap(),
+                                ApprovalResponse {
+                                    decision: ApprovalDecision::Skip,
+                                    edited_command: None,
+                                },
+                            )
+                            .unwrap();
+                    }
+                    captured.lock().unwrap().push(event);
+                }
+                Ok(())
+            });
+            let (_cancel_tx, cancel) = tokio::sync::watch::channel(false);
+            run_agent(
+                &provider,
+                config,
+                "Follow the permission policy.".into(),
+                "run the synthetic test command".into(),
+                vec![],
+                vec![],
+                &approvals,
+                Some(&permissions),
+                &PtyExecState::default(),
+                &SteerState::default(),
+                None,
+                None,
+                None,
+                cancel,
+                &channel,
+            )
+            .await;
+            let events = events.lock().unwrap();
+            assert!(events
+                .iter()
+                .any(|event| event["type"] == "CommandProposal"));
+            assert!(!events.iter().any(|event| event["type"] == "CommandStarted"));
+            assert!(!root.path().join("audit-fixture").exists(), "{command:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    async fn assert_private_provider_rounds(command: &str) {
+        use std::os::unix::fs::PermissionsExt;
         use tauri::ipc::InvokeResponseBody;
         let root = tempfile::tempdir().unwrap();
         let marker = "SYNTHETIC_PRIVATE_FIXTURE_8f04a1";
         std::fs::write(root.path().join(".env.production"), marker).unwrap();
+        let shell = root.path().join("fixture-shell");
+        std::fs::write(
+            &shell,
+            format!("#!/bin/sh\nexport VTERMINAL_SYNTHETIC_SECRET={marker}\nexec /bin/sh \"$@\"\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700)).unwrap();
         let mut config = config_with_buckets(vec![]);
-        config.shell = "/bin/sh".into();
+        config.shell = shell.to_string_lossy().into_owned();
         config.cwd = Some(root.path().to_string_lossy().into_owned());
         let provider = PrivacyAuditProvider {
             requests: std::sync::Mutex::new(vec![]),
+            command: command.into(),
         };
         let permissions = AgentPermissionState::default();
         permissions.register(
@@ -2900,6 +3015,9 @@ mod tests {
         use crate::agent::policy::{assess, RuleDecision};
         for command in [
             "printf ok; printenv",
+            "printf ok\nprintenv",
+            "printf ok\r\nprintenv",
+            r#"printf '%s' "$(printenv)""#,
             "/usr/bin/printenv",
             "command printenv",
             "cat .env.production",

@@ -356,6 +356,29 @@ describe("cleared terminal snapshots", () => {
   });
 });
 
+describe("streaming metadata work", () => {
+  it("does not rebuild every tab's metadata for token and terminal-output updates", () => {
+    let metadataReads = 0;
+    const sessions = Array.from({ length: 100 }, (_, index) => {
+      const session = makeSession(`tab-${index}`);
+      Object.defineProperty(session, "userTitle", {
+        enumerable: true,
+        get: () => { metadataReads += 1; return "Saved title"; },
+      });
+      return session;
+    });
+    seed(sessions, "tab-0");
+    useAppStore.setState({ aiStreams: { "tab-0": emptyAiStream() } });
+    startPersistence();
+    metadataReads = 0;
+    for (let index = 0; index < 100; index++) {
+      useAppStore.getState().appendAiDelta("tab-0", "token ");
+      useAppStore.getState().updateSessionUi("tab-0", { phase: index % 2 === 0 ? "input" : "output" });
+    }
+    expect(metadataReads).toBe(0);
+  });
+});
+
 describe("metadata snapshots", () => {
   it("captures tab order, active tab, cwd, title and shell", async () => {
     seed([makeSession("a"), makeSession("b", { userTitle: "logs", cwd: "/var/log" })], "b");

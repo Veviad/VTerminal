@@ -156,6 +156,8 @@ export function useScheduledActions() {
   useEffect(() => {
     if (!enabled) return;
     let disposed = false;
+    const generation = useScheduleStore.getState().resetGeneration;
+    const current = () => !disposed && generation === useScheduleStore.getState().resetGeneration;
     const unlisteners: UnlistenFn[] = [];
 
     const finish = async (runId: string, status: string, error?: string | null) => {
@@ -463,7 +465,7 @@ export function useScheduledActions() {
 
     void api
       .onScheduleRunNotice((notice) => {
-        if (disposed) return;
+        if (!current()) return;
         const store = useScheduleStore.getState();
         store.noteRunEvent(notice);
         if (notice.status === "cancelled" || notice.status === "failed" || notice.status === "interrupted") {
@@ -477,12 +479,13 @@ export function useScheduledActions() {
         // A terminal notice is the cue to re-read the durable record, which has
         // per-step detail the notice does not carry.
         if (api.isTerminalScheduleRunStatus(notice.status)) {
+          const issuedAtRevision = useScheduleStore.getState().revisionOf(notice.run_id);
           void api.scheduleRunGet(notice.run_id).then((run) => {
-            if (run) useScheduleStore.getState().upsertRun(run);
-          });
+            if (current() && run) useScheduleStore.getState().upsertRun(run, issuedAtRevision);
+          }).catch(() => {});
           void api.schedulesList().then((actions) => {
-            useScheduleStore.getState().setActions(actions);
-          });
+            if (current()) useScheduleStore.getState().setActions(actions);
+          }).catch(() => {});
         }
       })
       .then((unlisten) => {
@@ -494,7 +497,7 @@ export function useScheduledActions() {
     // overdue banner and a live badge have to be right whether or not anyone has
     // opened the workspace.
     void api.schedulesList().then((actions) => {
-      if (!disposed) useScheduleStore.getState().setActions(actions);
+      if (current()) useScheduleStore.getState().setActions(actions);
     });
 
     return () => {

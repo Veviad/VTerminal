@@ -77,6 +77,20 @@ describe("schedule store", () => {
     expect(useScheduleStore.getState().runsById.r1.status).toBe("cancelled");
   });
 
+  it("keeps a newly discovered history row when its completion notice precedes the list response", () => {
+    const issuedAt = useScheduleStore.getState().runRevisions;
+    useScheduleStore.getState().noteRunEvent({ run_id: "r1", action_id: "a1", status: "succeeded" });
+    useScheduleStore.getState().setHistory([run({ status: "running" })], issuedAt);
+    expect(useScheduleStore.getState().history.map((item) => item.id)).toEqual(["r1"]);
+    expect(useScheduleStore.getState().history[0].status).toBe("succeeded");
+    expect(useScheduleStore.getState().runsById.r1.status).toBe("succeeded");
+
+    // The durable detail may arrive only after the history request settles.
+    useScheduleStore.getState().upsertRun(run({ status: "succeeded", completion_tokens: 42 }));
+    expect(useScheduleStore.getState().history.map((item) => item.id)).toEqual(["r1"]);
+    expect(useScheduleStore.getState().runsById.r1.completion_tokens).toBe(42);
+  });
+
   it("never lets a terminal run hold the live badge", () => {
     const store = useScheduleStore.getState();
     store.upsertRun(run({ id: "done", status: "succeeded" }));

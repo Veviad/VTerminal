@@ -180,7 +180,7 @@ describe("Chat workspace autoscroll", () => {
     expect(container.textContent?.split(inner)).toHaveLength(2);
   });
 
-  it("does not pull a reader back to the bottom while tokens stream", () => {
+  it("does not pull a reader back to the bottom while tokens stream", async () => {
     render(<ChatWorkspace />);
     const timeline = screen.getByTestId("chat-timeline");
     Object.defineProperties(timeline, {
@@ -206,7 +206,7 @@ describe("Chat workspace autoscroll", () => {
         stream: { ...state.stream, content: "First token, second token" },
       }));
     });
-    expect(scrollTo).toHaveBeenCalledWith({ top: 1_000, behavior: "auto" });
+    await waitFor(() => expect(scrollTo).toHaveBeenCalledWith({ top: 1_000, behavior: "auto" }));
   });
 
   it("refreshes a local generation fallback while the response is streaming", async () => {
@@ -275,6 +275,24 @@ describe("Chat workspace autoscroll", () => {
 
     fireEvent.pointerDown(screen.getByTestId("chat-timeline"));
     expect(screen.queryByRole("menu", { name: "Knowledge sources" })).toBeNull();
+  });
+
+  it.each(["response", "metadata change"] as const)("closes and disables Knowledge selection during a %s", (operation) => {
+    useAppStore.setState({ docsEnabled: true });
+    useChatStore.setState({ stream: idleStream() });
+    render(<ChatWorkspace />);
+    const picker = screen.getByRole("button", { name: "Knowledge" });
+    fireEvent.click(picker);
+    expect(screen.getByRole("menu", { name: "Knowledge sources" })).toBeInTheDocument();
+
+    act(() => useChatStore.setState(operation === "response"
+      ? { stream: { ...idleStream(), status: "streaming", requestId: "running" } }
+      : { mutatingChatIds: [detail.summary.id] }));
+
+    expect(picker).toBeDisabled();
+    expect(screen.queryByRole("menu", { name: "Knowledge sources" })).not.toBeInTheDocument();
+    act(() => useChatStore.setState({ stream: idleStream(), mutatingChatIds: [] }));
+    expect(picker).not.toBeDisabled();
   });
 
   it("shows the current Chat thread's MCP selection in the toolbar", async () => {

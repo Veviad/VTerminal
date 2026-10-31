@@ -101,6 +101,7 @@ function sameTarget(
 let definitionRequestSequence = 0;
 let libraryRequestSequence = 0;
 let reportRequestSequence = 0;
+let historyRequestSequence = 0;
 let sourceSelectionSequence = 0;
 function getRunById(runId: string): RunbookRun | null {
   return useRunbookStore.getState().getRunById(runId);
@@ -415,18 +416,19 @@ export function useRunbooks() {
   const refreshRun = useCallback(refreshRunById, []);
 
   const loadHistory = useCallback(async () => {
+    const requestSequence = ++historyRequestSequence;
     const store = useRunbookStore.getState();
     store.setLoading("history", true);
     store.setError(null);
     try {
       const history = await api.runbooksHistory();
-      store.setHistory(history);
-      return history;
+      if (requestSequence === historyRequestSequence) store.setHistory(history);
+      return useRunbookStore.getState().history;
     } catch (error) {
-      store.setError(String(error));
+      if (requestSequence === historyRequestSequence) store.setError(String(error));
       return [];
     } finally {
-      store.setLoading("history", false);
+      if (requestSequence === historyRequestSequence) store.setLoading("history", false);
     }
   }, []);
 
@@ -462,23 +464,36 @@ export function useRunbooks() {
         return;
       }
 
+      // Live entries and reports share one selection. A slow live-run read
+      // must not reopen itself after a later click selected another report.
+      const requestSequence = ++reportRequestSequence;
+      const issuedAtRevision = store.runRevisions.get(runId) ?? 0;
+      store.selectHistoryRun(runId);
+      store.setLoading("report", false);
       store.setBusyAction(`open-run:${runId}`);
       store.setError(null);
+      const selected = () => requestSequence === reportRequestSequence &&
+        useRunbookStore.getState().selectedHistoryRunId === runId;
       try {
         // History is a summary. Load the durable checklist before showing the
         // live recovery surface; interrupted runs need its target for rebind.
         const run = await api.runbooksGet(runId);
-        if (api.isTerminalRunState(run.status)) {
+        if (!selected()) return;
+        store.upsertRun(run, issuedAtRevision);
+        const current = getRunById(runId);
+        if (!current) return;
+        if (api.isTerminalRunState(current.status)) {
           await loadReport(runId);
           return;
         }
-        store.selectHistoryRun(runId);
-        store.setActiveRun(run);
+        store.setActiveRun(current);
         store.setView("run");
       } catch (error) {
-        store.setError(String(error));
+        if (selected()) store.setError(String(error));
       } finally {
-        store.setBusyAction(null);
+        if (useRunbookStore.getState().busyAction === `open-run:${runId}`) {
+          store.setBusyAction(null);
+        }
       }
     },
     [loadReport],

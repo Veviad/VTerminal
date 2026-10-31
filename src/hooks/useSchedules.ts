@@ -6,7 +6,13 @@ import { abortSession, interruptJob } from "../lib/ptyExec";
 import { revokeScheduleRun, scheduleAgentOwnsRequest } from "../lib/scheduleLiveJobs";
 import { useScheduleStore } from "../stores/scheduleStore";
 import { useAiStream } from "./useAiStream";
-import type { ScheduleActionInput, ScheduleRecurrence } from "../lib/schedules";
+import type { ScheduleAction, ScheduleActionInput, ScheduleRecurrence } from "../lib/schedules";
+
+// Several mounted panels use this hook against the same store. Request
+// ownership must therefore outlive any one hook instance.
+let historyRequestSequence = 0;
+let actionsRequestSequence = 0;
+const draftSaves = new Map<number, Promise<ScheduleAction | null>>();
 
 /**
  * Data operations for the Scheduled Actions panel.
@@ -21,25 +27,36 @@ export function useSchedules() {
   const { cancel: cancelAgent } = useAiStream();
 
   const refreshActions = useCallback(async () => {
+    const requestId = ++actionsRequestSequence;
+    const generation = store.getState().resetGeneration;
+    const current = () => requestId === actionsRequestSequence && generation === store.getState().resetGeneration;
     store.getState().setLoadingActions(true);
     try {
-      store.getState().setActions(await api.schedulesList());
+      const actions = await api.schedulesList();
+      if (current()) store.getState().setActions(actions);
     } catch (error) {
-      store.getState().setError(String(error));
+      if (current()) store.getState().setError(String(error));
     } finally {
-      store.getState().setLoadingActions(false);
+      if (current()) store.getState().setLoadingActions(false);
     }
   }, [store]);
 
   const refreshHistory = useCallback(
     async (actionId?: string | null) => {
+      const requestId = ++historyRequestSequence;
+      const generation = store.getState().resetGeneration;
+      const current = () => requestId === historyRequestSequence && generation === store.getState().resetGeneration;
+      const issuedAtRevisions = store.getState().runRevisions;
       store.getState().setLoadingHistory(true);
       try {
-        store.getState().setHistory(await api.scheduleRunsList(actionId ?? null));
+        const runs = await api.scheduleRunsList(actionId ?? null);
+        if (current()) {
+          store.getState().setHistory(runs, issuedAtRevisions);
+        }
       } catch (error) {
-        store.getState().setError(String(error));
+        if (current()) store.getState().setError(String(error));
       } finally {
-        store.getState().setLoadingHistory(false);
+        if (current()) store.getState().setLoadingHistory(false);
       }
     },
     [store],
@@ -52,36 +69,48 @@ export function useSchedules() {
   const validateDraft = useCallback(
     async (input: ScheduleActionInput) => {
       try {
-        store.getState().setIssues(await api.scheduleValidate(input));
+        const issues = await api.scheduleValidate(input);
+        if (store.getState().draft?.input === input) store.getState().setIssues(issues);
       } catch {
         // A validation call that fails is not itself an error worth showing —
         // the save will surface the real reason.
-        store.getState().setIssues([]);
+        if (store.getState().draft?.input === input) store.getState().setIssues([]);
       }
     },
     [store],
   );
 
-  const saveDraft = useCallback(async () => {
+  const saveDraft = useCallback((): Promise<ScheduleAction | null> => {
     const draft = store.getState().draft;
-    if (!draft) return null;
+    if (!draft) return Promise.resolve(null);
+    const pending = draftSaves.get(draft.editorId);
+    if (pending) return pending;
+    const generation = store.getState().resetGeneration;
     store.getState().setBusyAction("save");
-    try {
-      const saved = draft.actionId
-        ? await api.scheduleUpdate(draft.actionId, draft.input)
-        : await api.scheduleCreate(draft.input);
-      store.getState().upsertAction(saved);
-      store.getState().selectAction(saved.id);
-      store.getState().discardDraft();
-      store.getState().setView("list");
-      store.getState().setNotice(null);
-      return saved;
-    } catch (error) {
-      store.getState().setError(String(error));
-      return null;
-    } finally {
-      store.getState().setBusyAction(null);
-    }
+    const saving = (async () => {
+      try {
+        const saved = draft.actionId
+          ? await api.scheduleUpdate(draft.actionId, draft.input)
+          : await api.scheduleCreate(draft.input);
+        if (generation === store.getState().resetGeneration) {
+          store.getState().upsertAction(saved);
+          store.getState().finishDraftSave(draft, saved);
+        }
+        return saved;
+      } catch (error) {
+        if (store.getState().draft?.editorId === draft.editorId) {
+          store.getState().setError(String(error));
+        }
+        return null;
+      } finally {
+        draftSaves.delete(draft.editorId);
+        if (draftSaves.size === 0 && store.getState().busyAction === "save") {
+          store.getState().setBusyAction(null);
+        }
+      }
+    })();
+    draftSaves.set(draft.editorId, saving);
+    return saving;
   }, [store]);
 
   const setEnabled = useCallback(
@@ -140,8 +169,9 @@ export function useSchedules() {
       try {
         const runId = await api.scheduleRunNow(actionId);
         store.getState().selectRun(runId);
+        const issuedAtRevision = store.getState().revisionOf(runId);
         const run = await api.scheduleRunGet(runId);
-        if (run) store.getState().upsertRun(run);
+        if (run) store.getState().upsertRun(run, issuedAtRevision);
         await refreshActions();
         return runId;
       } catch (error) {

@@ -1,5 +1,5 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
-import type { ComponentPropsWithoutRef, MouseEvent } from "react";
+import { memo, type ComponentPropsWithoutRef, type MouseEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
@@ -41,7 +41,9 @@ export type AiMessageOrigin = "model" | "literal";
  * presentation-only cleanup for known provider markup. User prompts and MCP tool
  * output are literal data and must never be rewritten as if the model authored them.
  */
-export function AiMessageView({
+// Completed answers are immutable while the next answer streams. Keep their
+// Markdown parse/highlight work out of every new chunk and composer edit.
+export const AiMessageView = memo(function AiMessageView({
   content,
   origin,
   streaming = false,
@@ -57,11 +59,11 @@ export function AiMessageView({
     <div className="prose max-w-none text-[13px] leading-relaxed prose-p:my-1.5 prose-pre:my-2 prose-headings:my-2">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeHighlight]}
+        rehypePlugins={streaming ? [] : [rehypeHighlight]}
         components={{ a: ExternalChatLink }}
       >
         {markdown}
       </ReactMarkdown>
     </div>
   );
-}
+});

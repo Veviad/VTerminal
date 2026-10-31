@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.14
+
+- Reduce interface work during AI output by batching small stream fragments, caching completed messages, and avoiding unrelated Settings, toolbar, status, and session-persistence updates.
+- Preserve Chat drafts, queued saves, tool checkpoints, and retry state across cancellation, deletion, archival, and conversation changes.
+- Keep cancellation bound to the original AI request, including provider setup and stream shutdown.
+- Strengthen sensitive-output protection for multiline and nested shell commands, and normalize additional captured terminal control characters.
+- Fix stale runbook and scheduler updates, validate edited schedule drafts, and enforce one execution deadline across scheduled command steps.
+
 ## 0.6.13
 
 - Stream final Agent answers and show native web-search and MCP activity; preserve reading position during output.
