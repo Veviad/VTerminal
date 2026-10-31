@@ -1,4 +1,3 @@
-import { useShallow } from "zustand/react/shallow";
 import { useEffect, useRef, useState } from "react";
 import { useAppStore } from "../../stores/appStore";
 import { useSettings } from "../../hooks/useSettings";
@@ -195,8 +194,24 @@ function InstructionsEditor({
   );
 }
 
+function InstructionField({ field, onSave }: {
+  field: (typeof FIELDS)[number];
+  onSave: (patch: Partial<SettingsPatch>) => Promise<void>;
+}) {
+  const value = useAppStore(field.select);
+  return (
+    <InstructionsEditor
+      fieldKey={field.key}
+      label={field.label}
+      hint={field.hint}
+      placeholder={field.placeholder}
+      value={value}
+      onSave={onSave}
+    />
+  );
+}
+
 export function InstructionsSection() {
-  const values = useAppStore(useShallow((state) => FIELDS.map((field) => field.select(state))));
   const { save } = useSettings();
 
   return (
@@ -214,14 +229,10 @@ export function InstructionsSection() {
       </section>
 
       <section className="space-y-5">
-        {FIELDS.map((field, index) => (
-          <InstructionsEditor
+        {FIELDS.map((field) => (
+          <InstructionField
             key={field.key}
-            fieldKey={field.key}
-            label={field.label}
-            hint={field.hint}
-            placeholder={field.placeholder}
-            value={values[index]}
+            field={field}
             onSave={save}
           />
         ))}
