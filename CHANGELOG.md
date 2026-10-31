@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.12
+
+- Prevent Escape from terminal search reaching the shell and altering the next command.
+- Show an agent’s follow-up response separately when a message or attachment is queued during generation.
+- Preserve retry state when queued-message delivery fails or is cancelled.
+
 ## 0.6.11
 
 - Preserve queued agent attachments and retry state through provider responses and restored sessions.
