@@ -11,9 +11,19 @@ declare const __APP_COPYRIGHT__: string;
 // Nothing in the production app touches a node builtin, so @types/node is
 // deliberately not a dependency. Tests use readFileSync to verify checked-in
 // styles and project metadata without duplicating values that can drift. Only
-// the signature those tests use is declared.
+// the signatures those tests use are declared. Shell protocol tests also run
+// available local shells with a bounded, synthetic command.
 declare module "node:fs" {
   export function readFileSync(path: string, encoding: "utf8"): string;
+  export function existsSync(path: string): boolean;
+}
+
+declare module "node:child_process" {
+  export function spawnSync(
+    executable: string,
+    args: string[],
+    options: { encoding: "utf8"; timeout: number; env: Record<string, string> },
+  ): { error?: Error; status: number | null; stdout: string; stderr: string };
 }
 
 // pdfjs-dist ships no `.d.mts` for its worker entry (verified: `build/pdf.d.mts`

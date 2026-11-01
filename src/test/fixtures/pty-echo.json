@@ -5,10 +5,10 @@
     "prompt": "PROMPT> ",
     "rprompt": "",
     "kind": "probe",
-    "line": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"",
+    "line": "builtin eval 'builtin status' >/dev/null 2>&1 && command printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;z;b;f%s\\007' \"$FISH_VERSION\" || command eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null || builtin eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null",
     "initial": "\u001b[?1034hPROMPT> ",
-    "rawEcho": "printf '\\033]6973;RP;0123456789a \rbcdef0123456789abcdef;%s;%s;%s\\007' \"z$Z \rSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VER \rSION\"\r\n",
-    "rawOutput": "printf '\\033]6973;RP;0123456789a \rbcdef0123456789abcdef;%s;%s;%s\\007' \"z$Z \rSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VER \rSION\"\r\n\u001b]6973;RP;0123456789abcdef0123456789abcdef;z;b3.2.57(1)-release;f\u0007PROMPT> ",
+    "rawEcho": "builtin eval 'builtin status' >/ \rdev/null 2>&1 && command printf '\\033]69 \r73;RP;0123456789abcdef0123456789abcdef;z \r;b;f%s\\007' \"$FISH_VERSION\" || command e \rval '\\command printf '\"'\"'\\033]6973;RP;0 \r123456789abcdef0123456789abcdef;%s;%s;f\\ \r007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VER \rSION-}\"' 2>/dev/null || builtin eval '\\c \rommand printf '\"'\"'\\033]6973;RP;01234567 \r89abcdef0123456789abcdef;%s;%s;f\\007'\"'\" \r' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\" \r' 2>/dev/null\r\n",
+    "rawOutput": "builtin eval 'builtin status' >/ \rdev/null 2>&1 && command printf '\\033]69 \r73;RP;0123456789abcdef0123456789abcdef;z \r;b;f%s\\007' \"$FISH_VERSION\" || command e \rval '\\command printf '\"'\"'\\033]6973;RP;0 \r123456789abcdef0123456789abcdef;%s;%s;f\\ \r007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VER \rSION-}\"' 2>/dev/null || builtin eval '\\c \rommand printf '\"'\"'\\033]6973;RP;01234567 \r89abcdef0123456789abcdef;%s;%s;f\\007'\"'\" \r' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\" \r' 2>/dev/null\r\n\u001b]6973;RP;0123456789abcdef0123456789abcdef;z;b3.2.57(1)-release;f\u0007PROMPT> ",
     "platform": "darwin"
   },
   {
@@ -17,10 +17,10 @@
     "prompt": "PROMPT> ",
     "rprompt": "",
     "kind": "sentinel",
-    "line": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
+    "line": "printf 'hello world\\n'; command printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
     "initial": "\u001b[?1034hPROMPT> ",
-    "rawEcho": "printf 'hello world\\n'; printf ' \r\\033]6973;RD;%s;0123456789abcdef01234567 \r89abcdef\\007' $?\r\n",
-    "rawOutput": "printf 'hello world\\n'; printf ' \r\\033]6973;RD;%s;0123456789abcdef01234567 \r89abcdef\\007' $?\r\nhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007PROMPT> ",
+    "rawEcho": "printf 'hello world\\n'; command  \rprintf '\\033]6973;RD;%s;0123456789abcdef \r0123456789abcdef\\007' $?\r\n",
+    "rawOutput": "printf 'hello world\\n'; command  \rprintf '\\033]6973;RD;%s;0123456789abcdef \r0123456789abcdef\\007' $?\r\nhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007PROMPT> ",
     "platform": "darwin"
   },
   {
@@ -29,10 +29,10 @@
     "prompt": "PROMPT> ",
     "rprompt": "",
     "kind": "probe",
-    "line": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"",
+    "line": "builtin eval 'builtin status' >/dev/null 2>&1 && command printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;z;b;f%s\\007' \"$FISH_VERSION\" || command eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null || builtin eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null",
     "initial": "\u001b[?1034hPROMPT> ",
-    "rawEcho": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$Z \rSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"\r\n",
-    "rawOutput": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$Z \rSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"\r\n\u001b]6973;RP;0123456789abcdef0123456789abcdef;z;b3.2.57(1)-release;f\u0007PROMPT> ",
+    "rawEcho": "builtin eval 'builtin status' >/dev/null 2>&1 && command printf '\\033]69 \r73;RP;0123456789abcdef0123456789abcdef;z;b;f%s\\007' \"$FISH_VERSION\" || command e \rval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\ \r007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null || builtin eval '\\c \rommand printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\" \r' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null\r\n",
+    "rawOutput": "builtin eval 'builtin status' >/dev/null 2>&1 && command printf '\\033]69 \r73;RP;0123456789abcdef0123456789abcdef;z;b;f%s\\007' \"$FISH_VERSION\" || command e \rval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\ \r007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null || builtin eval '\\c \rommand printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\" \r' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null\r\n\u001b]6973;RP;0123456789abcdef0123456789abcdef;z;b3.2.57(1)-release;f\u0007PROMPT> ",
     "platform": "darwin"
   },
   {
@@ -41,10 +41,10 @@
     "prompt": "PROMPT> ",
     "rprompt": "",
     "kind": "sentinel",
-    "line": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
+    "line": "printf 'hello world\\n'; command printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
     "initial": "\u001b[?1034hPROMPT> ",
-    "rawEcho": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef01234567 \r89abcdef\\007' $?\r\n",
-    "rawOutput": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef01234567 \r89abcdef\\007' $?\r\nhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007PROMPT> ",
+    "rawEcho": "printf 'hello world\\n'; command printf '\\033]6973;RD;%s;0123456789abcdef \r0123456789abcdef\\007' $?\r\n",
+    "rawOutput": "printf 'hello world\\n'; command printf '\\033]6973;RD;%s;0123456789abcdef \r0123456789abcdef\\007' $?\r\nhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007PROMPT> ",
     "platform": "darwin"
   },
   {
@@ -53,10 +53,10 @@
     "prompt": "PROMPT> ",
     "rprompt": "",
     "kind": "probe",
-    "line": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"",
+    "line": "builtin eval 'builtin status' >/dev/null 2>&1 && command printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;z;b;f%s\\007' \"$FISH_VERSION\" || command eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null || builtin eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null",
     "initial": "\u001b[?1034hPROMPT> ",
-    "rawEcho": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"\r\n",
-    "rawOutput": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"\r\n\u001b]6973;RP;0123456789abcdef0123456789abcdef;z;b3.2.57(1)-release;f\u0007PROMPT> ",
+    "rawEcho": "builtin eval 'builtin status' >/dev/null 2>&1 && command printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;z;b;f%s\\007' \"$FISH_VERSION\" || command eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\ \r007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null || builtin eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null\r\n",
+    "rawOutput": "builtin eval 'builtin status' >/dev/null 2>&1 && command printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;z;b;f%s\\007' \"$FISH_VERSION\" || command eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\ \r007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null || builtin eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null\r\n\u001b]6973;RP;0123456789abcdef0123456789abcdef;z;b3.2.57(1)-release;f\u0007PROMPT> ",
     "platform": "darwin"
   },
   {
@@ -65,10 +65,10 @@
     "prompt": "PROMPT> ",
     "rprompt": "",
     "kind": "sentinel",
-    "line": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
+    "line": "printf 'hello world\\n'; command printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
     "initial": "\u001b[?1034hPROMPT> ",
-    "rawEcho": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?\r\n",
-    "rawOutput": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?\r\nhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007PROMPT> ",
+    "rawEcho": "printf 'hello world\\n'; command printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?\r\n",
+    "rawOutput": "printf 'hello world\\n'; command printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?\r\nhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007PROMPT> ",
     "platform": "darwin"
   },
   {
@@ -77,10 +77,10 @@
     "prompt": "PROMPT> ",
     "rprompt": "",
     "kind": "probe",
-    "line": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"",
+    "line": "builtin eval 'builtin status' >/dev/null 2>&1 && command printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;z;b;f%s\\007' \"$FISH_VERSION\" || command eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null || builtin eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null",
     "initial": "\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                       \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[?2004h",
-    "rawEcho": "p\bprintf '\\033]6973;RP;0123456789a \r\u001b[Kb\rbcdef0123456789abcdef;%s;%s;%s\\007' \"z$Z \r\u001b[KS\rSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VER \r\u001b[KS\rSION\"\u001b[?2004l\r\r\n",
-    "rawOutput": "p\bprintf '\\033]6973;RP;0123456789a \r\u001b[Kb\rbcdef0123456789abcdef;%s;%s;%s\\007' \"z$Z \r\u001b[KS\rSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VER \r\u001b[KS\rSION\"\u001b[?2004l\r\r\n\u001b]6973;RP;0123456789abcdef0123456789abcdef;z5.9;b;f\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                       \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[?2004h",
+    "rawEcho": "b\bbuiltin eval 'builtin status' >/ \r\u001b[Kd\rdev/null 2>&1 && command printf '\\033]69 \r\u001b[K7\r73;RP;0123456789abcdef0123456789abcdef;z \r\u001b[K;\r;b;f%s\\007' \"$FISH_VERSION\" || command e \r\u001b[Kv\rval '\\command printf '\"'\"'\\033]6973;RP;0 \r\u001b[K1\r123456789abcdef0123456789abcdef;%s;%s;f\\ \r\u001b[K0\r007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VER \r\u001b[KS\rSION-}\"' 2>/dev/null || builtin eval '\\c \r\u001b[Ko\rommand printf '\"'\"'\\033]6973;RP;01234567 \r\u001b[K8\r89abcdef0123456789abcdef;%s;%s;f\\007'\"'\" \r\u001b[K'\r' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\" \r\u001b[K'\r' 2>/dev/null\u001b[?2004l\r\r\n",
+    "rawOutput": "b\bbuiltin eval 'builtin status' >/ \r\u001b[Kd\rdev/null 2>&1 && command printf '\\033]69 \r\u001b[K7\r73;RP;0123456789abcdef0123456789abcdef;z \r\u001b[K;\r;b;f%s\\007' \"$FISH_VERSION\" || command e \r\u001b[Kv\rval '\\command printf '\"'\"'\\033]6973;RP;0 \r\u001b[K1\r123456789abcdef0123456789abcdef;%s;%s;f\\ \r\u001b[K0\r007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VER \r\u001b[KS\rSION-}\"' 2>/dev/null || builtin eval '\\c \r\u001b[Ko\rommand printf '\"'\"'\\033]6973;RP;01234567 \r\u001b[K8\r89abcdef0123456789abcdef;%s;%s;f\\007'\"'\" \r\u001b[K'\r' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\" \r\u001b[K'\r' 2>/dev/null\u001b[?2004l\r\r\n\u001b]6973;RP;0123456789abcdef0123456789abcdef;z5.9;b;f\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                       \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[?2004h",
     "platform": "darwin"
   },
   {
@@ -89,10 +89,10 @@
     "prompt": "PROMPT> ",
     "rprompt": "",
     "kind": "sentinel",
-    "line": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
+    "line": "printf 'hello world\\n'; command printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
     "initial": "\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                       \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[?2004h",
-    "rawEcho": "p\bprintf 'hello world\\n'; printf ' \r\u001b[K\\\r\\033]6973;RD;%s;0123456789abcdef01234567 \r\u001b[K8\r89abcdef\\007' $?\u001b[?2004l\r\r\n",
-    "rawOutput": "p\bprintf 'hello world\\n'; printf ' \r\u001b[K\\\r\\033]6973;RD;%s;0123456789abcdef01234567 \r\u001b[K8\r89abcdef\\007' $?\u001b[?2004l\r\r\nhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                       \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[?2004h",
+    "rawEcho": "p\bprintf 'hello world\\n'; command  \r\u001b[Kp\rprintf '\\033]6973;RD;%s;0123456789abcdef \r\u001b[K0\r0123456789abcdef\\007' $?\u001b[?2004l\r\r\n",
+    "rawOutput": "p\bprintf 'hello world\\n'; command  \r\u001b[Kp\rprintf '\\033]6973;RD;%s;0123456789abcdef \r\u001b[K0\r0123456789abcdef\\007' $?\u001b[?2004l\r\r\nhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                       \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[?2004h",
     "platform": "darwin"
   },
   {
@@ -101,10 +101,10 @@
     "prompt": "PROMPT> ",
     "rprompt": "RIGHT",
     "kind": "probe",
-    "line": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"",
+    "line": "builtin eval 'builtin status' >/dev/null 2>&1 && command printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;z;b;f%s\\007' \"$FISH_VERSION\" || command eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null || builtin eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null",
     "initial": "\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                       \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[26CRIGHT\u001b[31D\u001b[?2004h",
-    "rawEcho": "p\bprintf '\\033]6973;RP;01234\u001b[K56789a \r\u001b[Kb\rbcdef0123456789abcdef;%s;%s;%s\\007' \"z$Z \r\u001b[KS\rSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VER \r\u001b[KS\rSION\"\u001b[?2004l\r\r\n",
-    "rawOutput": "p\bprintf '\\033]6973;RP;01234\u001b[K56789a \r\u001b[Kb\rbcdef0123456789abcdef;%s;%s;%s\\007' \"z$Z \r\u001b[KS\rSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VER \r\u001b[KS\rSION\"\u001b[?2004l\r\r\n\u001b]6973;RP;0123456789abcdef0123456789abcdef;z5.9;b;f\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                       \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[26CRIGHT\u001b[31D\u001b[?2004h",
+    "rawEcho": "b\bbuiltin eval 'builtin stat\u001b[Kus' >/ \r\u001b[Kd\rdev/null 2>&1 && command printf '\\033]69 \r\u001b[K7\r73;RP;0123456789abcdef0123456789abcdef;z \r\u001b[K;\r;b;f%s\\007' \"$FISH_VERSION\" || command e \r\u001b[Kv\rval '\\command printf '\"'\"'\\033]6973;RP;0 \r\u001b[K1\r123456789abcdef0123456789abcdef;%s;%s;f\\ \r\u001b[K0\r007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VER \r\u001b[KS\rSION-}\"' 2>/dev/null || builtin eval '\\c \r\u001b[Ko\rommand printf '\"'\"'\\033]6973;RP;01234567 \r\u001b[K8\r89abcdef0123456789abcdef;%s;%s;f\\007'\"'\" \r\u001b[K'\r' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\" \r\u001b[K'\r' 2>/dev/null\u001b[?2004l\r\r\n",
+    "rawOutput": "b\bbuiltin eval 'builtin stat\u001b[Kus' >/ \r\u001b[Kd\rdev/null 2>&1 && command printf '\\033]69 \r\u001b[K7\r73;RP;0123456789abcdef0123456789abcdef;z \r\u001b[K;\r;b;f%s\\007' \"$FISH_VERSION\" || command e \r\u001b[Kv\rval '\\command printf '\"'\"'\\033]6973;RP;0 \r\u001b[K1\r123456789abcdef0123456789abcdef;%s;%s;f\\ \r\u001b[K0\r007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VER \r\u001b[KS\rSION-}\"' 2>/dev/null || builtin eval '\\c \r\u001b[Ko\rommand printf '\"'\"'\\033]6973;RP;01234567 \r\u001b[K8\r89abcdef0123456789abcdef;%s;%s;f\\007'\"'\" \r\u001b[K'\r' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\" \r\u001b[K'\r' 2>/dev/null\u001b[?2004l\r\r\n\u001b]6973;RP;0123456789abcdef0123456789abcdef;z5.9;b;f\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                       \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[26CRIGHT\u001b[31D\u001b[?2004h",
     "platform": "darwin"
   },
   {
@@ -113,10 +113,10 @@
     "prompt": "PROMPT> ",
     "rprompt": "RIGHT",
     "kind": "sentinel",
-    "line": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
+    "line": "printf 'hello world\\n'; command printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
     "initial": "\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                       \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[26CRIGHT\u001b[31D\u001b[?2004h",
-    "rawEcho": "p\bprintf 'hello world\\n'; pr\u001b[Kintf ' \r\u001b[K\\\r\\033]6973;RD;%s;0123456789abcdef01234567 \r\u001b[K8\r89abcdef\\007' $?\u001b[?2004l\r\r\n",
-    "rawOutput": "p\bprintf 'hello world\\n'; pr\u001b[Kintf ' \r\u001b[K\\\r\\033]6973;RD;%s;0123456789abcdef01234567 \r\u001b[K8\r89abcdef\\007' $?\u001b[?2004l\r\r\nhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                       \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[26CRIGHT\u001b[31D\u001b[?2004h",
+    "rawEcho": "p\bprintf 'hello world\\n'; co\u001b[Kmmand  \r\u001b[Kp\rprintf '\\033]6973;RD;%s;0123456789abcdef \r\u001b[K0\r0123456789abcdef\\007' $?\u001b[?2004l\r\r\n",
+    "rawOutput": "p\bprintf 'hello world\\n'; co\u001b[Kmmand  \r\u001b[Kp\rprintf '\\033]6973;RD;%s;0123456789abcdef \r\u001b[K0\r0123456789abcdef\\007' $?\u001b[?2004l\r\r\nhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                       \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[26CRIGHT\u001b[31D\u001b[?2004h",
     "platform": "darwin"
   },
   {
@@ -125,10 +125,10 @@
     "prompt": "PROMPT> ",
     "rprompt": "",
     "kind": "probe",
-    "line": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"",
+    "line": "builtin eval 'builtin status' >/dev/null 2>&1 && command printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;z;b;f%s\\007' \"$FISH_VERSION\" || command eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null || builtin eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null",
     "initial": "\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[?2004h",
-    "rawEcho": "p\bprintf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$Z \r\u001b[KS\rSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"\u001b[?2004l\r\r\n",
-    "rawOutput": "p\bprintf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$Z \r\u001b[KS\rSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"\u001b[?2004l\r\r\n\u001b]6973;RP;0123456789abcdef0123456789abcdef;z5.9;b;f\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[?2004h",
+    "rawEcho": "b\bbuiltin eval 'builtin status' >/dev/null 2>&1 && command printf '\\033]69 \r\u001b[K7\r73;RP;0123456789abcdef0123456789abcdef;z;b;f%s\\007' \"$FISH_VERSION\" || command e \r\u001b[Kv\rval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\ \r\u001b[K0\r007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null || builtin eval '\\c \r\u001b[Ko\rommand printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\" \r\u001b[K'\r' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null\u001b[?2004l\r\r\n",
+    "rawOutput": "b\bbuiltin eval 'builtin status' >/dev/null 2>&1 && command printf '\\033]69 \r\u001b[K7\r73;RP;0123456789abcdef0123456789abcdef;z;b;f%s\\007' \"$FISH_VERSION\" || command e \r\u001b[Kv\rval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\ \r\u001b[K0\r007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null || builtin eval '\\c \r\u001b[Ko\rommand printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\" \r\u001b[K'\r' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null\u001b[?2004l\r\r\n\u001b]6973;RP;0123456789abcdef0123456789abcdef;z5.9;b;f\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[?2004h",
     "platform": "darwin"
   },
   {
@@ -137,10 +137,10 @@
     "prompt": "PROMPT> ",
     "rprompt": "",
     "kind": "sentinel",
-    "line": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
+    "line": "printf 'hello world\\n'; command printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
     "initial": "\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[?2004h",
-    "rawEcho": "p\bprintf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef01234567 \r\u001b[K8\r89abcdef\\007' $?\u001b[?2004l\r\r\n",
-    "rawOutput": "p\bprintf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef01234567 \r\u001b[K8\r89abcdef\\007' $?\u001b[?2004l\r\r\nhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[?2004h",
+    "rawEcho": "p\bprintf 'hello world\\n'; command printf '\\033]6973;RD;%s;0123456789abcdef \r\u001b[K0\r0123456789abcdef\\007' $?\u001b[?2004l\r\r\n",
+    "rawOutput": "p\bprintf 'hello world\\n'; command printf '\\033]6973;RD;%s;0123456789abcdef \r\u001b[K0\r0123456789abcdef\\007' $?\u001b[?2004l\r\r\nhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[?2004h",
     "platform": "darwin"
   },
   {
@@ -149,10 +149,10 @@
     "prompt": "PROMPT> ",
     "rprompt": "RIGHT",
     "kind": "probe",
-    "line": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"",
+    "line": "builtin eval 'builtin status' >/dev/null 2>&1 && command printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;z;b;f%s\\007' \"$FISH_VERSION\" || command eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null || builtin eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null",
     "initial": "\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[66CRIGHT\u001b[71D\u001b[?2004h",
-    "rawEcho": "p\bprintf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007\u001b[K' \"z$Z \r\u001b[KS\rSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"\u001b[?2004l\r\r\n",
-    "rawOutput": "p\bprintf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007\u001b[K' \"z$Z \r\u001b[KS\rSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"\u001b[?2004l\r\r\n\u001b]6973;RP;0123456789abcdef0123456789abcdef;z5.9;b;f\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[66CRIGHT\u001b[71D\u001b[?2004h",
+    "rawEcho": "b\bbuiltin eval 'builtin status' >/dev/null 2>&1 && command printf '\\\u001b[K033]69 \r\u001b[K7\r73;RP;0123456789abcdef0123456789abcdef;z;b;f%s\\007' \"$FISH_VERSION\" || command e \r\u001b[Kv\rval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\ \r\u001b[K0\r007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null || builtin eval '\\c \r\u001b[Ko\rommand printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\" \r\u001b[K'\r' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null\u001b[?2004l\r\r\n",
+    "rawOutput": "b\bbuiltin eval 'builtin status' >/dev/null 2>&1 && command printf '\\\u001b[K033]69 \r\u001b[K7\r73;RP;0123456789abcdef0123456789abcdef;z;b;f%s\\007' \"$FISH_VERSION\" || command e \r\u001b[Kv\rval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\ \r\u001b[K0\r007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null || builtin eval '\\c \r\u001b[Ko\rommand printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\" \r\u001b[K'\r' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null\u001b[?2004l\r\r\n\u001b]6973;RP;0123456789abcdef0123456789abcdef;z5.9;b;f\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[66CRIGHT\u001b[71D\u001b[?2004h",
     "platform": "darwin"
   },
   {
@@ -161,10 +161,10 @@
     "prompt": "PROMPT> ",
     "rprompt": "RIGHT",
     "kind": "sentinel",
-    "line": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
+    "line": "printf 'hello world\\n'; command printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
     "initial": "\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[66CRIGHT\u001b[71D\u001b[?2004h",
-    "rawEcho": "p\bprintf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef01\u001b[K234567 \r\u001b[K8\r89abcdef\\007' $?\u001b[?2004l\r\r\n",
-    "rawOutput": "p\bprintf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef01\u001b[K234567 \r\u001b[K8\r89abcdef\\007' $?\u001b[?2004l\r\r\nhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[66CRIGHT\u001b[71D\u001b[?2004h",
+    "rawEcho": "p\bprintf 'hello world\\n'; command printf '\\033]6973;RD;%s;0123456789\u001b[Kabcdef \r\u001b[K0\r0123456789abcdef\\007' $?\u001b[?2004l\r\r\n",
+    "rawOutput": "p\bprintf 'hello world\\n'; command printf '\\033]6973;RD;%s;0123456789\u001b[Kabcdef \r\u001b[K0\r0123456789abcdef\\007' $?\u001b[?2004l\r\r\nhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[66CRIGHT\u001b[71D\u001b[?2004h",
     "platform": "darwin"
   },
   {
@@ -173,10 +173,10 @@
     "prompt": "PROMPT> ",
     "rprompt": "",
     "kind": "probe",
-    "line": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"",
+    "line": "builtin eval 'builtin status' >/dev/null 2>&1 && command printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;z;b;f%s\\007' \"$FISH_VERSION\" || command eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null || builtin eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null",
     "initial": "\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                                                                                                                                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[?2004h",
-    "rawEcho": "p\bprintf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"\u001b[?2004l\r\r\n",
-    "rawOutput": "p\bprintf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"\u001b[?2004l\r\r\n\u001b]6973;RP;0123456789abcdef0123456789abcdef;z5.9;b;f\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                                                                                                                                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[?2004h",
+    "rawEcho": "b\bbuiltin eval 'builtin status' >/dev/null 2>&1 && command printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;z;b;f%s\\007' \"$FISH_VERSION\" || command eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\ \r\u001b[K0\r007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null || builtin eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null\u001b[?2004l\r\r\n",
+    "rawOutput": "b\bbuiltin eval 'builtin status' >/dev/null 2>&1 && command printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;z;b;f%s\\007' \"$FISH_VERSION\" || command eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\ \r\u001b[K0\r007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null || builtin eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null\u001b[?2004l\r\r\n\u001b]6973;RP;0123456789abcdef0123456789abcdef;z5.9;b;f\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                                                                                                                                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[?2004h",
     "platform": "darwin"
   },
   {
@@ -185,10 +185,10 @@
     "prompt": "PROMPT> ",
     "rprompt": "",
     "kind": "sentinel",
-    "line": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
+    "line": "printf 'hello world\\n'; command printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
     "initial": "\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                                                                                                                                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[?2004h",
-    "rawEcho": "p\bprintf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?\u001b[?2004l\r\r\n",
-    "rawOutput": "p\bprintf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?\u001b[?2004l\r\r\nhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                                                                                                                                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[?2004h",
+    "rawEcho": "p\bprintf 'hello world\\n'; command printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?\u001b[?2004l\r\r\n",
+    "rawOutput": "p\bprintf 'hello world\\n'; command printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?\u001b[?2004l\r\r\nhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                                                                                                                                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[?2004h",
     "platform": "darwin"
   },
   {
@@ -197,10 +197,10 @@
     "prompt": "PROMPT> ",
     "rprompt": "RIGHT",
     "kind": "probe",
-    "line": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"",
+    "line": "builtin eval 'builtin status' >/dev/null 2>&1 && command printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;z;b;f%s\\007' \"$FISH_VERSION\" || command eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null || builtin eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null",
     "initial": "\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                                                                                                                                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[226CRIGHT\u001b[231D\u001b[?2004h",
-    "rawEcho": "p\bprintf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"\u001b[?2004l\r\r\n",
-    "rawOutput": "p\bprintf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"\u001b[?2004l\r\r\n\u001b]6973;RP;0123456789abcdef0123456789abcdef;z5.9;b;f\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                                                                                                                                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[226CRIGHT\u001b[231D\u001b[?2004h",
+    "rawEcho": "b\bbuiltin eval 'builtin status' >/dev/null 2>&1 && command printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;z;b;f%s\\007' \"$FISH_VERSION\" || command eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s\u001b[K;%s;f\\ \r\u001b[K0\r007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null || builtin eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null\u001b[?2004l\r\r\n",
+    "rawOutput": "b\bbuiltin eval 'builtin status' >/dev/null 2>&1 && command printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;z;b;f%s\\007' \"$FISH_VERSION\" || command eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s\u001b[K;%s;f\\ \r\u001b[K0\r007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null || builtin eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null\u001b[?2004l\r\r\n\u001b]6973;RP;0123456789abcdef0123456789abcdef;z5.9;b;f\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                                                                                                                                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[226CRIGHT\u001b[231D\u001b[?2004h",
     "platform": "darwin"
   },
   {
@@ -209,10 +209,10 @@
     "prompt": "PROMPT> ",
     "rprompt": "RIGHT",
     "kind": "sentinel",
-    "line": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
+    "line": "printf 'hello world\\n'; command printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
     "initial": "\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                                                                                                                                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[226CRIGHT\u001b[231D\u001b[?2004h",
-    "rawEcho": "p\bprintf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?\u001b[?2004l\r\r\n",
-    "rawOutput": "p\bprintf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?\u001b[?2004l\r\r\nhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                                                                                                                                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[226CRIGHT\u001b[231D\u001b[?2004h",
+    "rawEcho": "p\bprintf 'hello world\\n'; command printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?\u001b[?2004l\r\r\n",
+    "rawOutput": "p\bprintf 'hello world\\n'; command printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?\u001b[?2004l\r\r\nhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m                                                                                                                                                                                                                                               \r \r\r\u001b[0m\u001b[27m\u001b[24m\u001b[JPROMPT> \u001b[K\u001b[226CRIGHT\u001b[231D\u001b[?2004h",
     "platform": "darwin"
   },
   {
@@ -220,10 +220,10 @@
     "platform": "linux",
     "cols": 40,
     "kind": "probe",
-    "line": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"",
+    "line": "builtin eval 'builtin status' >/dev/null 2>&1 && command printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;z;b;f%s\\007' \"$FISH_VERSION\" || command eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null || builtin eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null",
     "initial": "\u001b[?2004hPROMPT> ",
-    "rawEcho": "printf '\\033]6973;RP;0123456789ab\rbcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZS\rSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERS\rSION\"\r\n",
-    "rawOutput": "printf '\\033]6973;RP;0123456789ab\rbcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZS\rSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERS\rSION\"\r\n\u001b[?2004l\r\u001b]6973;RP;0123456789abcdef0123456789abcdef;z;b5.2.15(1)-release;f\u0007\u001b[?2004hPROMPT> ",
+    "rawEcho": "builtin eval 'builtin status' >/d\rdev/null 2>&1 && command printf '\\033]697\r73;RP;0123456789abcdef0123456789abcdef;z;\r;b;f%s\\007' \"$FISH_VERSION\" || command ev\rval '\\command printf '\"'\"'\\033]6973;RP;01\r123456789abcdef0123456789abcdef;%s;%s;f\\0\r007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERS\rSION-}\"' 2>/dev/null || builtin eval '\\co\rommand printf '\"'\"'\\033]6973;RP;012345678\r89abcdef0123456789abcdef;%s;%s;f\\007'\"'\"'\r' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"'\r' 2>/dev/null\r\n",
+    "rawOutput": "builtin eval 'builtin status' >/d\rdev/null 2>&1 && command printf '\\033]697\r73;RP;0123456789abcdef0123456789abcdef;z;\r;b;f%s\\007' \"$FISH_VERSION\" || command ev\rval '\\command printf '\"'\"'\\033]6973;RP;01\r123456789abcdef0123456789abcdef;%s;%s;f\\0\r007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERS\rSION-}\"' 2>/dev/null || builtin eval '\\co\rommand printf '\"'\"'\\033]6973;RP;012345678\r89abcdef0123456789abcdef;%s;%s;f\\007'\"'\"'\r' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"'\r' 2>/dev/null\r\n\u001b[?2004l\r\u001b]6973;RP;0123456789abcdef0123456789abcdef;z;b5.2.15(1)-release;f\u0007\u001b[?2004hPROMPT> ",
     "prompt": "PROMPT> ",
     "rprompt": ""
   },
@@ -232,10 +232,10 @@
     "platform": "linux",
     "cols": 40,
     "kind": "sentinel",
-    "line": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
+    "line": "printf 'hello world\\n'; command printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
     "initial": "\u001b[?2004hPROMPT> ",
-    "rawEcho": "printf 'hello world\\n'; printf '\\\r\\033]6973;RD;%s;0123456789abcdef012345678\r89abcdef\\007' $?\r\n",
-    "rawOutput": "printf 'hello world\\n'; printf '\\\r\\033]6973;RD;%s;0123456789abcdef012345678\r89abcdef\\007' $?\r\n\u001b[?2004l\rhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007\u001b[?2004hPROMPT> ",
+    "rawEcho": "printf 'hello world\\n'; command p\rprintf '\\033]6973;RD;%s;0123456789abcdef0\r0123456789abcdef\\007' $?\r\n",
+    "rawOutput": "printf 'hello world\\n'; command p\rprintf '\\033]6973;RD;%s;0123456789abcdef0\r0123456789abcdef\\007' $?\r\n\u001b[?2004l\rhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007\u001b[?2004hPROMPT> ",
     "prompt": "PROMPT> ",
     "rprompt": ""
   },
@@ -244,10 +244,10 @@
     "platform": "linux",
     "cols": 80,
     "kind": "probe",
-    "line": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"",
+    "line": "builtin eval 'builtin status' >/dev/null 2>&1 && command printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;z;b;f%s\\007' \"$FISH_VERSION\" || command eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null || builtin eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null",
     "initial": "\u001b[?2004hPROMPT> ",
-    "rawEcho": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZS\rSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"\r\n",
-    "rawOutput": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZS\rSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"\r\n\u001b[?2004l\r\u001b]6973;RP;0123456789abcdef0123456789abcdef;z;b5.2.15(1)-release;f\u0007\u001b[?2004hPROMPT> ",
+    "rawEcho": "builtin eval 'builtin status' >/dev/null 2>&1 && command printf '\\033]697\r73;RP;0123456789abcdef0123456789abcdef;z;b;f%s\\007' \"$FISH_VERSION\" || command ev\rval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\0\r007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null || builtin eval '\\co\rommand printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"'\r' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null\r\n",
+    "rawOutput": "builtin eval 'builtin status' >/dev/null 2>&1 && command printf '\\033]697\r73;RP;0123456789abcdef0123456789abcdef;z;b;f%s\\007' \"$FISH_VERSION\" || command ev\rval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\0\r007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null || builtin eval '\\co\rommand printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"'\r' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null\r\n\u001b[?2004l\r\u001b]6973;RP;0123456789abcdef0123456789abcdef;z;b5.2.15(1)-release;f\u0007\u001b[?2004hPROMPT> ",
     "prompt": "PROMPT> ",
     "rprompt": ""
   },
@@ -256,10 +256,10 @@
     "platform": "linux",
     "cols": 80,
     "kind": "sentinel",
-    "line": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
+    "line": "printf 'hello world\\n'; command printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
     "initial": "\u001b[?2004hPROMPT> ",
-    "rawEcho": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef012345678\r89abcdef\\007' $?\r\n",
-    "rawOutput": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef012345678\r89abcdef\\007' $?\r\n\u001b[?2004l\rhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007\u001b[?2004hPROMPT> ",
+    "rawEcho": "printf 'hello world\\n'; command printf '\\033]6973;RD;%s;0123456789abcdef0\r0123456789abcdef\\007' $?\r\n",
+    "rawOutput": "printf 'hello world\\n'; command printf '\\033]6973;RD;%s;0123456789abcdef0\r0123456789abcdef\\007' $?\r\n\u001b[?2004l\rhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007\u001b[?2004hPROMPT> ",
     "prompt": "PROMPT> ",
     "rprompt": ""
   },
@@ -268,10 +268,10 @@
     "platform": "linux",
     "cols": 240,
     "kind": "probe",
-    "line": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"",
+    "line": "builtin eval 'builtin status' >/dev/null 2>&1 && command printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;z;b;f%s\\007' \"$FISH_VERSION\" || command eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null || builtin eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null",
     "initial": "\u001b[?2004hPROMPT> ",
-    "rawEcho": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"\r\n",
-    "rawOutput": "printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;%s\\007' \"z$ZSH_VERSION\" \"b$BASH_VERSION\" \"f$FISH_VERSION\"\r\n\u001b[?2004l\r\u001b]6973;RP;0123456789abcdef0123456789abcdef;z;b5.2.15(1)-release;f\u0007\u001b[?2004hPROMPT> ",
+    "rawEcho": "builtin eval 'builtin status' >/dev/null 2>&1 && command printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;z;b;f%s\\007' \"$FISH_VERSION\" || command eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\0\r007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null || builtin eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null\r\n",
+    "rawOutput": "builtin eval 'builtin status' >/dev/null 2>&1 && command printf '\\033]6973;RP;0123456789abcdef0123456789abcdef;z;b;f%s\\007' \"$FISH_VERSION\" || command eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\0\r007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null || builtin eval '\\command printf '\"'\"'\\033]6973;RP;0123456789abcdef0123456789abcdef;%s;%s;f\\007'\"'\"' \"z${ZSH_VERSION-}\" \"b${BASH_VERSION-}\"' 2>/dev/null\r\n\u001b[?2004l\r\u001b]6973;RP;0123456789abcdef0123456789abcdef;z;b5.2.15(1)-release;f\u0007\u001b[?2004hPROMPT> ",
     "prompt": "PROMPT> ",
     "rprompt": ""
   },
@@ -280,10 +280,10 @@
     "platform": "linux",
     "cols": 240,
     "kind": "sentinel",
-    "line": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
+    "line": "printf 'hello world\\n'; command printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?",
     "initial": "\u001b[?2004hPROMPT> ",
-    "rawEcho": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?\r\n",
-    "rawOutput": "printf 'hello world\\n'; printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?\r\n\u001b[?2004l\rhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007\u001b[?2004hPROMPT> ",
+    "rawEcho": "printf 'hello world\\n'; command printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?\r\n",
+    "rawOutput": "printf 'hello world\\n'; command printf '\\033]6973;RD;%s;0123456789abcdef0123456789abcdef\\007' $?\r\n\u001b[?2004l\rhello world\r\n\u001b]6973;RD;0;0123456789abcdef0123456789abcdef\u0007\u001b[?2004hPROMPT> ",
     "prompt": "PROMPT> ",
     "rprompt": ""
   }

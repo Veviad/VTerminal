@@ -30,8 +30,9 @@ export function ReconnectBar({ sessionId }: { sessionId: string }) {
   const { createSession } = useSessions();
   const [busy, setBusy] = useState(false);
 
-  const hostId = session?.hostId ?? null;
-  const show = Boolean(hostId) && !remote && !session?.exited;
+  const hostId = remote ? sessionUi?.remoteHost?.id ?? null : session?.hostId ?? null;
+  const unresponsive = !!remote && !!sessionUi?.remoteUnresponsive;
+  const show = Boolean(hostId) && (!remote || unresponsive) && !session?.exited;
   const { host } = useSshHost(show ? hostId : null);
 
   // The host row may have been deleted since; nothing to reconnect to then.
@@ -42,14 +43,14 @@ export function ReconnectBar({ sessionId }: { sessionId: string }) {
   // Without a local shell handshake, the absence of `remote` says nothing
   // about liveness. A startup wrapper may already be carrying an SSH session.
   // A new tab is safe; writing another SSH command into this one is not.
-  const trackingAvailable = sessionUi?.integrationActive ?? false;
+  const trackingAvailable = !unresponsive && (sessionUi?.integrationActive ?? false);
 
   return (
     <div className="pointer-events-auto absolute inset-x-0 bottom-0 z-20 flex items-center justify-between gap-2 overflow-hidden border-t border-border-subtle bg-bg-secondary/95 px-3 py-1.5 text-[11px] text-text-muted">
       <span className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
         <Server aria-hidden="true" className="shrink-0" size={11} />
         <span className="min-w-0 truncate font-mono" title={target}>
-          {target} · {trackingAvailable ? S.terminal.notConnected : S.terminal.connectionUnknown}
+          {target} · {unresponsive ? "SSH session not responding" : trackingAvailable ? S.terminal.notConnected : S.terminal.connectionUnknown}
         </span>
       </span>
       <button

@@ -35,6 +35,10 @@ export type SshSpec = Pick<
 /** Longest line we will ever type; mirrors sanitizeCommand's own limit. */
 const MAX_COMMAND_LEN = 4096;
 
+/** Bound silent saved-host connections without changing global SSH settings.
+ * OpenSSH keeps the first value, so explicit extra_args precede these defaults. */
+const KEEPALIVE_OPTIONS = ["-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3"];
+
 /** Characters that never need quoting in any POSIX shell. `~` is deliberately
  *  absent — it must stay outside quotes to expand. */
 const SHELL_SAFE = /^[A-Za-z0-9_@%+=:,./-]+$/;
@@ -107,7 +111,7 @@ export function buildSshCommand(h: SshSpec): string {
     // rejects instead of three commands the shell runs.
     for (const token of tokenizeCommand(h.extra_args)) args.push(shQuote(token));
   }
-  args.push(shQuote(sshTarget(h)));
+  args.push(...KEEPALIVE_OPTIONS, shQuote(sshTarget(h)));
   if (script) args.push(shQuote(script));
   return args.join(" ");
 }

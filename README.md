@@ -43,6 +43,14 @@ local shell. It does not install integration on SSH hosts. Before running an
 Agent command over SSH, VTerminal may ask you to confirm that the remote terminal
 is at an empty shell prompt, including when an automatic permission mode is on.
 
+Every remote Agent command checks that the shell responds before sending the
+requested command. A missing response stops the run and asks you to check the
+connection; it does not establish that another program is running. For an
+unresponsive saved-host session, use **New SSH tab** to reconnect. Saved
+interactive connections use SSH keepalives every 30 seconds and close after
+three unanswered checks; explicit host options take precedence. These defaults
+apply when opening a new connection.
+
 Starting another local interactive shell inside a tab does not install VTerminal's
 integration in that nested shell. Command blocks and agent command execution may
 be unavailable until you exit the nested shell or open a fresh terminal tab.

@@ -224,6 +224,8 @@ export const S = {
       "Completion unknown: this archived command was still marked running when the session was saved.",
     resultSubmitFailed:
       "VTerminal could not report this terminal outcome to the agent. The run was stopped before another command could start.",
+    shellProbeFailedCommand:
+      "Nothing was executed: the SSH connection did not answer a fresh shell readiness check in time. The session may be stale or disconnected, the shell may need attention, or a program may be waiting for input; this does not establish that another program is running. Check the connection and empty prompt. If the session is unresponsive, reconnect in a new SSH tab before retrying. Do not send interrupt keys or repeat the command automatically.",
     integrationUnavailableCommand:
       "Nothing was executed: shell integration did not initialize in this tab, so VTerminal could not verify an idle shell prompt. Check Settings → Terminal → Shell integration and open a new tab.",
     completionUnknownRun:

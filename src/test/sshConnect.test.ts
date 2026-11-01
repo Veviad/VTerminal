@@ -213,7 +213,7 @@ describe("SSH password prompt matching", () => {
     resolve("stale-token");
     expect(await old).toBeNull();
     expect(apiMocks.ptyWrite).toHaveBeenCalledTimes(1);
-    expect(apiMocks.ptyWrite).toHaveBeenCalledWith("s1", "ssh deploy@staging\r", "native-attempt");
+    expect(apiMocks.ptyWrite).toHaveBeenCalledWith("s1", "ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 deploy@staging\r", "native-attempt");
     expect(apiMocks.cancelPassword).toHaveBeenCalledWith("s1", "stale-token");
   });
 
@@ -240,7 +240,7 @@ describe("SSH password prompt matching", () => {
 
   it("still dispatches current unsupported authentication for manual entry", async () => {
     expect(await connectToHost({ ...host, username: null }, "current-tab", vi.fn(), "s1")).toBe("s1");
-    expect(apiMocks.ptyWrite).toHaveBeenCalledWith("s1", "ssh prod-01\r", undefined);
+    expect(apiMocks.ptyWrite).toHaveBeenCalledWith("s1", "ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 prod-01\r", undefined);
     expect(apiMocks.beginPassword).not.toHaveBeenCalled();
   });
 });

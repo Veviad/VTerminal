@@ -36,7 +36,9 @@ fn result_flags(error: Option<&str>, exit_code: Option<i32>) -> (bool, bool) {
         Some("timeout" | "frontend_timeout") => (true, true),
         // The terminal may still be occupied. Ending the loop prevents a second
         // command from being proposed against an unknown foreground process.
-        Some("interrupt_failed" | "command_not_observed" | "terminal_closed") => (false, true),
+        Some(
+            "interrupt_failed" | "command_not_observed" | "terminal_closed" | "shell_probe_failed",
+        ) => (false, true),
         Some("interrupted") if exit_code.is_none() => (false, true),
         Some("cancelled") => (false, true),
         // These fail before a command is dispatched, so the Agent can rewrite
@@ -169,6 +171,10 @@ mod tests {
             (false, true)
         );
         assert_eq!(result_flags(Some("terminal_closed"), None), (false, true));
+        assert_eq!(
+            result_flags(Some("shell_probe_failed"), None),
+            (false, true)
+        );
         assert_eq!(result_flags(None, None), (false, true));
         assert_eq!(result_flags(Some("interrupted"), None), (false, true));
         assert_eq!(result_flags(Some("interrupted"), Some(130)), (false, false));

@@ -435,6 +435,16 @@ describe("terminal command result classification", () => {
     });
   });
 
+  it("keeps a failed SSH health check definitely not run in both local and backend results", () => {
+    const outcome: PtyExecOutcome = { exitCode: null, output: "", durationMs: 10_000, mode: null, error: "shell_probe_failed" };
+    expect(cardStatus(outcome)).toBe("blocked");
+    const presentation = commandResultPresentation(outcome.error, outcome.exitCode);
+    expect(presentation.status).toBe("blocked");
+    expect(presentation.note).toContain("stale or disconnected");
+    expect(presentation.note).not.toContain("Completion unknown");
+    expect(presentation.fence).toEqual(commandOutcomeFence(outcome));
+  });
+
   it("distinguishes pre-dispatch closure from post-dispatch uncertainty", () => {
     const beforeDispatch = {
       exitCode: null,
@@ -941,6 +951,45 @@ describe("native terminal readiness gates", () => {
     expect(pty.runInTerminal).not.toHaveBeenCalled();
   });
 
+  it.each(["run", "skip", "stop"] as const)("surfaces a failed %s response and cancels the native waiter", async (decision) => {
+    const { emit, result } = await start();
+    act(() => emit({ ...check, approval_id: `failed-${decision}` }));
+    api.respondToApproval.mockRejectedValueOnce(new Error("IPC closed"));
+    await act(async () => result.current.respondToProposal(SID, decision));
+    expect(useAppStore.getState().aiStreams[SID].lastError).toContain("Could not confirm the command approval response");
+    expect(useAppStore.getState().aiStreams[SID].requestId).toBeNull();
+    expect(api.aiCancel).toHaveBeenCalled();
+  });
+
+  it("does not submit duplicate approval decisions while native acknowledgement is pending", async () => {
+    const { emit, result } = await start();
+    act(() => emit({ ...check, approval_id: "one-response" }));
+    const response = deferred<void>();
+    api.respondToApproval.mockImplementationOnce(() => response.promise);
+    let first!: Promise<void>;
+    act(() => { first = result.current.respondToProposal(SID, "run"); });
+    await act(async () => result.current.respondToProposal(SID, "run"));
+    expect(api.respondToApproval).toHaveBeenCalledOnce();
+    response.resolve();
+    await act(async () => first);
+  });
+
+  it("preserves a definite failed health check when the backend result arrives before submission resolves", async () => {
+    const { emit } = await start();
+    const submitted = deferred<void>();
+    api.submitCommandResult.mockImplementationOnce(() => submitted.promise);
+    pty.runInTerminal.mockResolvedValueOnce({ exitCode: null, output: "", durationMs: 10_000, mode: null, error: "shell_probe_failed" });
+    await act(async () => emit({ type: "RunInTerminal", approval_id: "unresponsive-ssh", session_id: SID,
+      command: "pwd", explanation: "Inspect", timeout_secs: 30, output_policy: "normal" }));
+    act(() => emit({ type: "CommandResult", approval_id: "unresponsive-ssh", exit_code: null, error: "shell_probe_failed", duration_ms: 10_000 }));
+    const command = useAppStore.getState().aiStreams[SID].messages.find(m => m.command?.approvalId === "unresponsive-ssh")?.command;
+    expect(command?.status).toBe("blocked");
+    expect(command?.note).toContain("stale or disconnected");
+    expect(useAppStore.getState().aiStreams[SID].lastError).not.toContain("Completion unknown");
+    submitted.resolve();
+    await act(async () => {});
+  });
+
   it("rechecks target identity after a readiness acknowledgement", async () => {
     const { emit } = await start();
     pty.hasReusableRemoteShellProof.mockReturnValue(true);
@@ -1021,6 +1070,21 @@ describe("single-terminal command routing", () => {
     expect(api.submitCommandResult).toHaveBeenCalledWith("ssh-after-approval", null,
       expect.stringContaining("terminal target changed"), 0, "target_changed");
   });
+  it("ends a stale-target approval if its skip response cannot reach native", async () => {
+    useAppStore.getState().updateSessionUi(SID, { remote: { kind: "ssh", target: "old-host" }, nestedBlockId: "old-ssh" });
+    let emit!: (event: StreamEvent) => void;
+    api.agentStart.mockImplementationOnce((...args: unknown[]) => { emit = args[6] as (event: StreamEvent) => void; return Promise.resolve([]); });
+    const { result } = renderHook(() => useAiStream());
+    await act(async () => result.current.startAgent(SID, "inspect"));
+    act(() => emit({ type: "CommandProposal", approval_id: "stale-skip-failed", command: "pwd", explanation: "Inspect", read_only: true, network: false, output_policy: "normal" }));
+    act(() => useAppStore.getState().updateSessionUi(SID, { remote: null, nestedBlockId: null }));
+    api.respondToApproval.mockRejectedValueOnce(new Error("IPC closed"));
+    await act(async () => result.current.respondToProposal(SID, "run"));
+    expect(useAppStore.getState().aiStreams[SID].lastError).toContain("Could not dismiss the command");
+    expect(api.aiCancel).toHaveBeenCalled();
+    expect(pty.runInTerminal).not.toHaveBeenCalled();
+  });
+
   it("accepts an ordinary approval and dispatch without treating it as Sidecar", async () => {
     let onEvent!: (event: StreamEvent) => void;
     api.agentStart.mockImplementationOnce((...args: unknown[]) => {

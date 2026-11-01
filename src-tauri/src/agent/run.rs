@@ -700,6 +700,25 @@ fn policy_auto_runs(
     }
 }
 
+/// A Smart verdict may add conservative facts in every mode, but only Smart
+/// may use its semantic-read inference as automatic command authorization.
+fn assessment_for_mode(
+    assessment: &super::policy::CommandAssessment,
+    deterministic: &super::policy::CommandAssessment,
+    mode: PermissionMode,
+) -> super::policy::CommandAssessment {
+    use super::policy::{AssessmentSource, CommandEffect};
+    if mode == PermissionMode::AutoSmart
+        || assessment.source != AssessmentSource::Model
+        || assessment.effect == CommandEffect::SensitiveRead
+    {
+        return assessment.clone();
+    }
+    let mut result = deterministic.clone();
+    result.network |= assessment.network;
+    result
+}
+
 fn record_command_blocked(
     stats: &mut AgentRunStats,
     on_event: &Channel<StreamEvent>,
@@ -813,6 +832,7 @@ async fn process_tool_calls(
                     }
                 };
                 let mut assessment = super::policy::assess(&command);
+                let deterministic_assessment = assessment.clone();
 
                 if config.exec_target.is_sidecar()
                     && super::policy::is_environment_transition(&command)
@@ -895,103 +915,131 @@ async fn process_tool_calls(
                     continue;
                 }
 
-                *approval_counter = approval_counter.saturating_add(1);
-                let approval_id = format!("{}-ap{}", config.request_id, approval_counter);
-                let auto =
-                    policy_auto_runs(mode, &assessment, rule_decision, effective_output_policy);
-                let check_terminal_prompt = auto
-                    && matches!(
-                        config.exec_target,
-                        ExecTarget::Pty { .. } | ExecTarget::Sidecar { .. }
-                    );
-                let response = if auto && !check_terminal_prompt {
-                    ApprovalResponse {
-                        decision: ApprovalDecision::Run,
-                        edited_command: None,
-                    }
-                } else {
-                    if !auto {
-                        stats.command_proposals = stats.command_proposals.saturating_add(1);
-                    }
-                    let ask_reason = if check_terminal_prompt {
-                        "the remote shell prompt needs confirmation before automatic execution"
-                    } else if assessment.effect == super::policy::CommandEffect::SensitiveRead {
-                        "this read may reveal credential or secret values"
-                    } else if effective_output_policy == OutputPolicy::Private {
-                        "private-output commands always require approval"
-                    } else if assessment.privileged {
-                        "privileged commands always require approval"
-                    } else if assessment.opaque {
-                        "dynamic or opaque execution cannot be verified"
-                    } else if rule_decision == super::policy::RuleDecision::Ask {
-                        "a saved policy rule requires approval"
-                    } else if assessment.effect == super::policy::CommandEffect::StateChange {
-                        "this command intends to change state"
-                    } else {
-                        "the command could not be verified as a semantic read"
-                    };
-                    let rx = approvals.register(&approval_id, &config.request_id);
-                    let (target_role, target_session_id) = command_target.event_metadata();
-                    // Both events own a real approval waiter before the channel
-                    // callback runs. No PTY execution timeout or terminal write
-                    // starts while the operator confirms a remote prompt.
-                    let event = if check_terminal_prompt {
-                        StreamEvent::TerminalPromptCheck {
-                            approval_id: approval_id.clone(),
-                            command: command.clone(),
-                            explanation: explanation.clone(),
-                            read_only: assessment.read_only(),
-                            network: assessment.network,
-                            output_policy: effective_output_policy,
-                            assessment: assessment.clone(),
-                            ask_reason: ask_reason.into(),
-                            target_role,
-                            target_session_id,
-                        }
-                    } else {
-                        StreamEvent::CommandProposal {
-                            approval_id: approval_id.clone(),
-                            command: command.clone(),
-                            explanation: explanation.clone(),
-                            read_only: assessment.read_only(),
-                            network: assessment.network,
-                            output_policy: effective_output_policy,
-                            assessment: assessment.clone(),
-                            ask_reason: ask_reason.into(),
-                            target_role,
-                            target_session_id,
-                        }
-                    };
-                    let _ = on_event.send(event);
-                    // Cancellation may arrive synchronously with the event,
-                    // before cloning the watch receiver below.
+                // Classification and prompt confirmation can both await. An older
+                // automatic decision must not outlive a permission downgrade.
+                let (approval_id, response) = loop {
                     if *cancel.borrow() {
-                        approvals.drain_for_request(&config.request_id);
                         return ToolBatchResult::Terminate(AgentTermination::Cancelled);
                     }
-                    let mut cancel_watch = cancel.clone();
-                    let received = tokio::select! {
-                        r = rx => r,
-                        _ = cancel_watch.changed() => {
+                    let mode = mode_for(permissions, &config.request_id, command_target.role);
+                    assessment = assessment_for_mode(&assessment, &deterministic_assessment, mode);
+                    *approval_counter = approval_counter.saturating_add(1);
+                    let approval_id = format!("{}-ap{}", config.request_id, approval_counter);
+                    let auto =
+                        policy_auto_runs(mode, &assessment, rule_decision, effective_output_policy);
+                    let check_terminal_prompt = auto
+                        && matches!(
+                            config.exec_target,
+                            ExecTarget::Pty { .. } | ExecTarget::Sidecar { .. }
+                        );
+                    let response = if auto && !check_terminal_prompt {
+                        ApprovalResponse {
+                            decision: ApprovalDecision::Run,
+                            edited_command: None,
+                        }
+                    } else {
+                        if !auto {
+                            stats.command_proposals = stats.command_proposals.saturating_add(1);
+                        }
+                        let ask_reason = if check_terminal_prompt {
+                            "the remote shell prompt needs confirmation before automatic execution"
+                        } else if assessment.effect == super::policy::CommandEffect::SensitiveRead {
+                            "this read may reveal credential or secret values"
+                        } else if effective_output_policy == OutputPolicy::Private {
+                            "private-output commands always require approval"
+                        } else if assessment.privileged {
+                            "privileged commands always require approval"
+                        } else if assessment.opaque {
+                            "dynamic or opaque execution cannot be verified"
+                        } else if rule_decision == super::policy::RuleDecision::Ask {
+                            "a saved policy rule requires approval"
+                        } else if assessment.effect == super::policy::CommandEffect::StateChange {
+                            "this command intends to change state"
+                        } else {
+                            "the command could not be verified as a semantic read"
+                        };
+                        let rx = approvals.register(&approval_id, &config.request_id);
+                        let (target_role, target_session_id) = command_target.event_metadata();
+                        // Both events own a real approval waiter before the channel
+                        // callback runs. No PTY execution timeout or terminal write
+                        // starts while the operator confirms a remote prompt.
+                        let event = if check_terminal_prompt {
+                            StreamEvent::TerminalPromptCheck {
+                                approval_id: approval_id.clone(),
+                                command: command.clone(),
+                                explanation: explanation.clone(),
+                                read_only: assessment.read_only(),
+                                network: assessment.network,
+                                output_policy: effective_output_policy,
+                                assessment: assessment.clone(),
+                                ask_reason: ask_reason.into(),
+                                target_role,
+                                target_session_id,
+                            }
+                        } else {
+                            StreamEvent::CommandProposal {
+                                approval_id: approval_id.clone(),
+                                command: command.clone(),
+                                explanation: explanation.clone(),
+                                read_only: assessment.read_only(),
+                                network: assessment.network,
+                                output_policy: effective_output_policy,
+                                assessment: assessment.clone(),
+                                ask_reason: ask_reason.into(),
+                                target_role,
+                                target_session_id,
+                            }
+                        };
+                        let _ = on_event.send(event);
+                        // Cancellation may arrive synchronously with the event,
+                        // before cloning the watch receiver below.
+                        if *cancel.borrow() {
                             approvals.drain_for_request(&config.request_id);
                             return ToolBatchResult::Terminate(AgentTermination::Cancelled);
                         }
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(APPROVAL_TIMEOUT_SECS)) => {
+                        let mut cancel_watch = cancel.clone();
+                        let received = tokio::select! {
+                            r = rx => r,
+                            _ = cancel_watch.changed() => {
+                                approvals.drain_for_request(&config.request_id);
+                                return ToolBatchResult::Terminate(AgentTermination::Cancelled);
+                            }
+                            _ = tokio::time::sleep(std::time::Duration::from_secs(APPROVAL_TIMEOUT_SECS)) => {
+                                approvals.drain_for_request(&config.request_id);
+                                return ToolBatchResult::Terminate(AgentTermination::Failed {
+                                    kind: AgentFailureKind::ApprovalTimeout,
+                                    message: "approval timed out — agent run ended".into(),
+                                });
+                            }
+                        };
+                        let Ok(received) = received else {
+                            return ToolBatchResult::Terminate(AgentTermination::Cancelled);
+                        };
+                        if *cancel.borrow() {
                             approvals.drain_for_request(&config.request_id);
-                            return ToolBatchResult::Terminate(AgentTermination::Failed {
-                                kind: AgentFailureKind::ApprovalTimeout,
-                                message: "approval timed out — agent run ended".into(),
-                            });
+                            return ToolBatchResult::Terminate(AgentTermination::Cancelled);
                         }
+                        received
                     };
-                    let Ok(received) = received else {
-                        return ToolBatchResult::Terminate(AgentTermination::Cancelled);
-                    };
-                    if *cancel.borrow() {
-                        approvals.drain_for_request(&config.request_id);
-                        return ToolBatchResult::Terminate(AgentTermination::Cancelled);
+
+                    let current_mode =
+                        mode_for(permissions, &config.request_id, command_target.role);
+                    assessment =
+                        assessment_for_mode(&assessment, &deterministic_assessment, current_mode);
+                    if check_terminal_prompt
+                        && matches!(response.decision, ApprovalDecision::Run)
+                        && !policy_auto_runs(
+                            current_mode,
+                            &assessment,
+                            rule_decision,
+                            effective_output_policy,
+                        )
+                    {
+                        // A readiness acknowledgement is not an operator's command
+                        // approval. Mint a fresh gate under the current mode.
+                        continue;
                     }
-                    received
+                    break (approval_id, response);
                 };
 
                 match response.decision {
@@ -2852,6 +2900,265 @@ mod tests {
         }
     }
 
+    struct PermissionRaceProvider {
+        permissions: std::sync::Arc<AgentPermissionState>,
+        role: Option<AgentTargetRole>,
+        change_during_assessment: Option<PermissionMode>,
+        assessment_effect: &'static str,
+        rounds: std::sync::atomic::AtomicU32,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for PermissionRaceProvider {
+        fn id(&self) -> &'static str {
+            "permission-race-test"
+        }
+        fn model_name(&self) -> String {
+            self.id().into()
+        }
+        async fn chat_stream(
+            &self,
+            _messages: Vec<ChatMessage>,
+            tools: Vec<ToolDef>,
+            _params: ChatParams,
+            _cancel: tokio::sync::watch::Receiver<bool>,
+            tx: tokio::sync::mpsc::Sender<ProviderEvent>,
+        ) -> Result<(), ProviderError> {
+            let classifier = tools
+                .iter()
+                .any(|tool| tool.name == "submit_command_assessment");
+            let first = classifier
+                || self
+                    .rounds
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                    == 0;
+            if classifier {
+                tokio::task::yield_now().await;
+                if let Some(mode) = self.change_during_assessment {
+                    self.permissions.set("test", self.role, mode).unwrap();
+                }
+                tx.send(ProviderEvent::ToolCalls(vec![ToolCall {
+                    id: "permission-assessment".into(), name: "submit_command_assessment".into(),
+                    arguments: json!({"effect":self.assessment_effect,"network":"no","reason":"synthetic classification"}).to_string(),
+                }])).await.unwrap();
+            } else if first {
+                tx.send(ProviderEvent::ToolCalls(vec![ToolCall {
+                    id: "permission-command".into(), name: "run_command".into(),
+                    arguments: json!({"command":"future-cli inspect project","explanation":"Inspect the fixture","output_policy":"normal","target":self.role}).to_string(),
+                }])).await.unwrap();
+            } else {
+                tx.send(ProviderEvent::TextDelta("Finished.".into()))
+                    .await
+                    .unwrap();
+            }
+            tx.send(ProviderEvent::Done {
+                finish_reason: if first {
+                    FinishReason::ToolCalls
+                } else {
+                    FinishReason::Stop
+                },
+            })
+            .await
+            .unwrap();
+            Ok(())
+        }
+    }
+
+    async fn permission_race_fixture(
+        initial: PermissionMode,
+        during_assessment: Option<PermissionMode>,
+        after_prompt_check: Option<PermissionMode>,
+        role: Option<AgentTargetRole>,
+        assessment_effect: &'static str,
+    ) -> (AgentRunOutcome, Vec<serde_json::Value>) {
+        use std::sync::{Arc, Mutex};
+        use tauri::ipc::InvokeResponseBody;
+        let permissions = Arc::new(AgentPermissionState::default());
+        permissions.register(
+            "test",
+            super::super::AgentPermissionModes {
+                single: initial,
+                local: initial,
+                remote: initial,
+            },
+        );
+        let provider = PermissionRaceProvider {
+            permissions: permissions.clone(),
+            role,
+            change_during_assessment: during_assessment,
+            assessment_effect,
+            rounds: std::sync::atomic::AtomicU32::new(0),
+        };
+        let mut config = config_with_buckets(vec![]);
+        config.exec_target = if role.is_some() {
+            sidecar_config().exec_target
+        } else {
+            ExecTarget::Pty {
+                session_id: "single-session".into(),
+            }
+        };
+        let approvals = Arc::new(ApprovalState::default());
+        let decisions = approvals.clone();
+        let pty = Arc::new(PtyExecState::default());
+        let results = pty.clone();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let live_permissions = permissions.clone();
+        let channel = Channel::new(move |body: InvokeResponseBody| {
+            if let InvokeResponseBody::Json(body) = body {
+                let event: serde_json::Value = serde_json::from_str(&body).unwrap();
+                match event["type"].as_str() {
+                    Some("TerminalPromptCheck") => {
+                        if let Some(mode) = after_prompt_check {
+                            live_permissions.set("test", role, mode).unwrap();
+                        }
+                        decisions
+                            .respond(
+                                event["approval_id"].as_str().unwrap(),
+                                ApprovalResponse {
+                                    decision: ApprovalDecision::Run,
+                                    edited_command: None,
+                                },
+                            )
+                            .unwrap();
+                    }
+                    Some("CommandProposal") => {
+                        decisions
+                            .respond(
+                                event["approval_id"].as_str().unwrap(),
+                                ApprovalResponse {
+                                    decision: ApprovalDecision::Skip,
+                                    edited_command: None,
+                                },
+                            )
+                            .unwrap();
+                    }
+                    Some("RunInTerminal") => {
+                        results
+                            .respond(
+                                event["approval_id"].as_str().unwrap(),
+                                super::super::PtyExecResult {
+                                    exit_code: Some(0),
+                                    output_tail: "SYNTHETIC_PERMISSION_OUTPUT".into(),
+                                    duration_ms: 1,
+                                    error: None,
+                                },
+                            )
+                            .unwrap();
+                    }
+                    _ => {}
+                }
+                captured.lock().unwrap().push(event);
+            }
+            Ok(())
+        });
+        let (_cancel, cancel) = tokio::sync::watch::channel(false);
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            run_agent(
+                &provider,
+                config,
+                "system".into(),
+                "inspect the fixture".into(),
+                vec![],
+                vec![],
+                &approvals,
+                Some(&permissions),
+                &pty,
+                &SteerState::default(),
+                None,
+                None,
+                None,
+                cancel,
+                &channel,
+            ),
+        )
+        .await
+        .expect("permission changes must settle without waiting for a stale gate");
+        let recorded = events.lock().unwrap().clone();
+        (outcome, recorded)
+    }
+
+    #[tokio::test]
+    async fn permission_downgrades_during_smart_classification_use_current_mode() {
+        for role in [
+            None,
+            Some(AgentTargetRole::Local),
+            Some(AgentTargetRole::Remote),
+        ] {
+            for mode in [PermissionMode::Ask, PermissionMode::AutoRead] {
+                let (outcome, events) = permission_race_fixture(
+                    PermissionMode::AutoSmart,
+                    Some(mode),
+                    None,
+                    role,
+                    "semantic_read",
+                )
+                .await;
+                assert_eq!(outcome.termination, AgentTermination::Completed);
+                let proposal = events
+                    .iter()
+                    .find(|e| e["type"] == "CommandProposal")
+                    .unwrap();
+                assert_eq!(proposal["read_only"], false, "{mode:?} {role:?}");
+                assert!(!events
+                    .iter()
+                    .any(|e| e["type"] == "TerminalPromptCheck" || e["type"] == "RunInTerminal"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn permission_downgrades_during_prompt_checks_require_a_fresh_command_approval() {
+        for role in [
+            None,
+            Some(AgentTargetRole::Local),
+            Some(AgentTargetRole::Remote),
+        ] {
+            let (outcome, events) = permission_race_fixture(
+                PermissionMode::Full,
+                None,
+                Some(PermissionMode::Ask),
+                role,
+                "semantic_read",
+            )
+            .await;
+            assert_eq!(outcome.termination, AgentTermination::Completed);
+            let prompt = events
+                .iter()
+                .find(|e| e["type"] == "TerminalPromptCheck")
+                .unwrap();
+            let proposal = events
+                .iter()
+                .find(|e| e["type"] == "CommandProposal")
+                .unwrap();
+            assert_ne!(prompt["approval_id"], proposal["approval_id"]);
+            assert!(!events.iter().any(|e| e["type"] == "RunInTerminal"));
+        }
+    }
+
+    #[tokio::test]
+    async fn full_selected_during_smart_classification_keeps_sensitive_output_private() {
+        let (outcome, events) = permission_race_fixture(
+            PermissionMode::AutoSmart,
+            Some(PermissionMode::Full),
+            None,
+            None,
+            "sensitive_read",
+        )
+        .await;
+        assert_eq!(outcome.termination, AgentTermination::Completed);
+        let dispatched = events
+            .iter()
+            .find(|e| e["type"] == "RunInTerminal")
+            .unwrap();
+        assert_eq!(dispatched["output_policy"], "private");
+        assert!(outcome
+            .transcript
+            .iter()
+            .all(|m| !m.content.contains("SYNTHETIC_PERMISSION_OUTPUT")));
+    }
+
     async fn prompt_gate_fixture(
         exec_target: ExecTarget,
         mode: PermissionMode,
@@ -2961,6 +3268,78 @@ mod tests {
         assert!(pty_exec.pending.lock().unwrap().is_empty());
         let recorded = events.lock().unwrap().clone();
         (outcome, recorded)
+    }
+
+    #[tokio::test]
+    async fn permission_mode_matrix_runs_approved_commands_on_single_and_sidecar_targets() {
+        for mode in [
+            PermissionMode::Ask,
+            PermissionMode::AutoRead,
+            PermissionMode::AutoSmart,
+            PermissionMode::AutoAll,
+            PermissionMode::Full,
+        ] {
+            for role in [None, Some("local"), Some("remote")] {
+                for (command, private, read) in [
+                    ("pwd", false, true),
+                    ("touch synthetic-fixture", false, false),
+                    ("printenv", true, false),
+                ] {
+                    let target = if role.is_some() {
+                        sidecar_config().exec_target
+                    } else {
+                        ExecTarget::Pty {
+                            session_id: "single-session".into(),
+                        }
+                    };
+                    let (outcome, events) = prompt_gate_fixture(
+                        target,
+                        mode,
+                        json!({"command":command,"target":role}),
+                        Some(ApprovalResponse {
+                            decision: ApprovalDecision::Run,
+                            edited_command: None,
+                        }),
+                    )
+                    .await;
+                    assert_eq!(outcome.termination, AgentTermination::Completed);
+                    let automatic = mode == PermissionMode::Full
+                        || (!private
+                            && (mode == PermissionMode::AutoAll
+                                || (read && mode != PermissionMode::Ask)));
+                    let gate = events
+                        .iter()
+                        .find(|e| {
+                            e["type"] == "TerminalPromptCheck" || e["type"] == "CommandProposal"
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        gate["type"],
+                        if automatic {
+                            "TerminalPromptCheck"
+                        } else {
+                            "CommandProposal"
+                        },
+                        "{mode:?} {role:?} {command}"
+                    );
+                    let dispatched = events
+                        .iter()
+                        .find(|e| e["type"] == "RunInTerminal")
+                        .unwrap();
+                    assert_eq!(dispatched["approval_id"], gate["approval_id"]);
+                    assert_eq!(
+                        dispatched["output_policy"],
+                        if private { "private" } else { "normal" }
+                    );
+                    if private {
+                        assert!(outcome
+                            .transcript
+                            .iter()
+                            .all(|m| !m.content.contains("SYNTHETIC_PROMPT_GATE_OUTPUT")));
+                    }
+                }
+            }
+        }
     }
 
     #[tokio::test]
