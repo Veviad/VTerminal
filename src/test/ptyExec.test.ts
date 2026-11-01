@@ -1530,6 +1530,32 @@ describe("runInTerminal — remote session", () => {
     expect(ptyWrite).toHaveBeenCalledTimes(2);
   });
 
+  it("hides a probe echoed after readiness timed out without executing the command", async () => {
+    vi.useFakeTimers();
+    entry = makeEntry(["remote$ "]);
+    const binding = captureApprovalPromptBinding("s1")!;
+    const run = runInTerminal("s1", "delayed-probe", "pwd", {
+      requireRemotePromptAttestation: true,
+      approvalPromptBinding: binding,
+      timeoutMs: 30_000,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ptyWrite).toHaveBeenCalledTimes(1);
+    const written = ptyWrite.mock.calls[0][1];
+    const nonce = probeNonce(written);
+    await vi.advanceTimersByTimeAsync(10_100);
+    expect((await run).error).toBe("shell_probe_failed");
+    await vi.advanceTimersByTimeAsync(9_900);
+    const reply = `\x1b]6973;RP;${nonce};z;b5.2;f\x07`;
+    writePtyOutput(entry.term, new TextEncoder().encode(`${written}\n${reply}remote$ `));
+    const rendered = vi.mocked(entry.term.write).mock.calls.map((call) =>
+      typeof call[0] === "string" ? call[0] : new TextDecoder().decode(call[0]),
+    ).join("");
+    expect(rendered).toBe(`\r\x1b[2K${reply}remote$ `);
+    emit({ type: "osc", payload: `RP;${nonce};z;b5.2;f` });
+    expect(ptyWrite).toHaveBeenCalledTimes(1);
+  });
+
   it("never dispatches after the approved remote identity changes", async () => {
     entry = makeEntry(["remote$ "]);
     const promise = runInTerminal("s1", "ap1", "hostname", { timeoutMs: 60_000 });

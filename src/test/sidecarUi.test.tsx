@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CommandApprovalCard } from "../components/ai/CommandApprovalCard";
 import {
@@ -9,6 +9,7 @@ import {
 import { SidecarReplacementPopover } from "../components/sidecar/SidecarReplacementPopover";
 import type { AgentTargetRole } from "../lib/sidecar";
 import { S } from "../lib/strings";
+import { APPROVAL_PROMPT_TTL_MS } from "../lib/approvalPrompt";
 import * as terminalRegistry from "../lib/termRegistry";
 import type { TermEvent } from "../lib/termRegistry";
 
@@ -211,6 +212,8 @@ describe("SidecarReplacementPopover", () => {
   });
 });
 
+afterEach(() => { vi.useRealTimers(); });
+
 describe("CommandApprovalCard Sidecar destinations", () => {
   it("keeps the proposed remote destination and disables Run after its target changes", () => {
     render(<CommandApprovalCard command="pwd" explanation="" target="ssh prod-01" remote
@@ -239,6 +242,62 @@ describe("CommandApprovalCard Sidecar destinations", () => {
     expect(run).toBeDisabled();
     expect(onConfirm).toHaveBeenLastCalledWith(false);
     subscription.mockRestore();
+  });
+
+  it("expires prompt confirmation at the execution binding deadline without renewing on rerender", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-01T20:00:00Z"));
+    const firstConfirm = vi.fn(() => true);
+    const latestConfirm = vi.fn(() => true);
+    const onRespond = vi.fn();
+    const view = render(<CommandApprovalCard command="cat /tmp/private-fixture" explanation="Inspect privately" target="ssh host" remote
+      outputPolicy="private" remoteSessionId="remote-1" onConfirmPrompt={firstConfirm} onRespond={onRespond} />);
+    const checkbox = screen.getByRole("checkbox", { name: /empty shell prompt/i });
+    const run = screen.getByRole("button", { name: "Run on host" });
+    fireEvent.click(checkbox);
+    expect(checkbox).toBeChecked();
+    expect(run).toBeEnabled();
+    act(() => vi.advanceTimersByTime(APPROVAL_PROMPT_TTL_MS / 2));
+    view.rerender(<CommandApprovalCard command="cat /tmp/private-fixture" explanation="Inspect privately" target="ssh host" remote
+      outputPolicy="private" remoteSessionId="remote-1" onConfirmPrompt={latestConfirm} onRespond={onRespond} />);
+    act(() => vi.advanceTimersByTime(APPROVAL_PROMPT_TTL_MS / 2));
+    expect(checkbox).not.toBeChecked();
+    expect(run).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent("Prompt confirmation expired");
+    expect(latestConfirm).toHaveBeenLastCalledWith(false);
+    expect(onRespond).not.toHaveBeenCalled();
+    // Expiry releases trust; the next lease requires another explicit gesture.
+    fireEvent.click(checkbox);
+    expect(checkbox).toBeChecked();
+    expect(run).toBeEnabled();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    fireEvent.click(run);
+    expect(onRespond).toHaveBeenCalledExactlyOnceWith("run", undefined);
+  });
+
+  it("rejects an expired Run click even before delayed timer callbacks are delivered", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-01T20:00:00Z"));
+    const onConfirm = vi.fn(() => true);
+    const onRespond = vi.fn();
+    render(<CommandApprovalCard command="pwd" explanation="Inspect directory" target="ssh host" remote
+      outputPolicy="normal" remoteSessionId="remote-1" onConfirmPrompt={onConfirm} onRespond={onRespond} />);
+    const checkbox = screen.getByRole("checkbox", { name: /empty shell prompt/i });
+    const run = screen.getByRole("button", { name: "Run on host" });
+    fireEvent.click(checkbox);
+    // setSystemTime changes wall time without firing timers, as when a webview
+    // resumes with a stale enabled control after being occluded or suspended.
+    vi.setSystemTime(new Date(Date.now() + APPROVAL_PROMPT_TTL_MS + 1));
+    fireEvent.click(run);
+    expect(onRespond).not.toHaveBeenCalled();
+    expect(checkbox).not.toBeChecked();
+    expect(run).toBeDisabled();
+    expect(onConfirm).toHaveBeenLastCalledWith(false);
+    expect(screen.getByRole("status")).toHaveTextContent("confirm again");
+    expect(screen.getByRole("button", { name: S.aiPanel.skip })).toBeEnabled();
+    fireEvent.click(checkbox);
+    fireEvent.click(run);
+    expect(onRespond).toHaveBeenCalledExactlyOnceWith("run", undefined);
   });
 
   it("announces and labels a remote command with its exact destination", () => {

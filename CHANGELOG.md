@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.18
+
+- Clear expired SSH empty-prompt confirmations and keep the approval available for an explicit recheck.
+- Hide delayed, exactly matched SSH readiness-probe echoes after a connection timeout while preserving genuine terminal output and protocol traffic.
+
 ## 0.6.17
 
 - Stop an Agent run when its terminal enters or leaves an interactive SSH or container session, preserving its original target across delayed replies and reconnects.

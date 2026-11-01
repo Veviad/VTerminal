@@ -12,6 +12,7 @@ import {
 import { protectPrivateTerminal } from "./runbookTerminalPrivacy";
 import { expectPtyEcho } from "./ptyEcho";
 import { S } from "./strings";
+import { APPROVAL_PROMPT_TTL_MS } from "./approvalPrompt";
 import {
   canSentinel,
   dialectFromProbe,
@@ -159,7 +160,6 @@ interface ApprovalPromptSnapshot {
 /** Opaque, one-shot bindings from an operator's approval click to the exact
  * terminal epoch they attested. They never cross IPC or enter persistence. */
 const approvalPromptBindings = new Map<string, ApprovalPromptSnapshot>();
-const APPROVAL_PROMPT_TTL_MS = 30_000;
 
 const IDLE_WAIT_MAX_MS = 20_000;
 const IDLE_POLL_MS = 100;
@@ -1554,6 +1554,7 @@ async function resolveMode(
     probeWaitMs,
     (token) => token.t === "RP" && token.nonce === probeNonce ? token : null,
     signal,
+    probeNonce,
   );
   if (signal?.aborted) return "cancelled";
   if (!probe) {
@@ -1592,6 +1593,7 @@ function sendAndAwait<T>(
   timeoutMs: number,
   match: (t: PrivateToken) => T | null,
   signal?: AbortSignal,
+  probeNonce?: string,
 ): Promise<T | null> {
   return new Promise((resolve) => {
     let done = false;
@@ -1618,7 +1620,7 @@ function sendAndAwait<T>(
     signal?.addEventListener("abort", onAbort, { once: true });
     if (signal?.aborted) return settle(null);
     const entry = getTerm(sessionId);
-    if (entry) cancelEcho = expectPtyEcho(entry.term, line, null);
+    if (entry) cancelEcho = expectPtyEcho(entry.term, line, null, probeNonce ? { probeNonce } : undefined);
     void api.ptyWrite(sessionId, `${line}\r`).catch(() => settle(null));
   });
 }
