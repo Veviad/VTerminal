@@ -69,7 +69,7 @@ function clearLongRunningTimer(sessionId: string): void {
   }
 }
 
-/** Fence every asynchronous continuation that can still act on a linked pair.
+/** Fence asynchronous work tied to this terminal and any linked peer.
  *
  * This runs before a user-initiated PTY kill and synchronously at the start of
  * an observed PTY exit. `aiCancel` may take a round trip, so store ownership is
@@ -82,6 +82,7 @@ function clearLongRunningTimer(sessionId: string): void {
 function cancelLinkedSessionWork(
   sessionId: string,
   reason: "closed" | "cancelled",
+  message?: string,
 ): Promise<void> | null {
   const store = useAppStore.getState();
   const binding = store.sidecarForSession(sessionId);
@@ -101,7 +102,7 @@ function cancelLinkedSessionWork(
   if (requestId) {
     // Same synchronous fence as useAiStream.cancel: fold visible partial text,
     // settle the panel, and invalidate request/generation ownership first.
-    store.finishAiStream(ownerSessionId);
+    store.finishAiStream(ownerSessionId, message);
     markTranscriptDirty(ownerSessionId);
     cancellations.push(api.aiCancel(requestId));
   } else {
@@ -211,11 +212,11 @@ export function useSessions() {
             // machine — until this block ends, the local cwd is not the truth.
             const nested = detectNesting(command);
             if (nested) {
-              // Entering a nested environment invalidates a Sidecar local role.
-              // Fence the provider even when this workspace is not mounted.
-              if (useAppStore.getState().sidecarForSession(sessionId)) {
-                void cancelLinkedSessionWork(sessionId, "cancelled");
-              }
+              // An Agent's context belongs to the previous environment. Fence
+              // standalone and Sidecar work before publishing the new identity,
+              // even when this workspace is not mounted.
+              void cancelLinkedSessionWork(sessionId, "cancelled",
+                "The terminal target changed, so this Agent run stopped. Verify the current terminal, reconnect if needed, and start a new request.");
               // Claimed only on an exact command match, so a connect the user
               // typed by hand still gets `remote` but no saved-host identity.
               const connect = takePendingConnect(sessionId, command);
@@ -282,11 +283,11 @@ export function useSessions() {
             // that no longer exists.
             if (s.sessionUi[sessionId]?.nestedBlockId === blockId) {
               clearPendingConnect(sessionId);
-              // The SSH role stopped being SSH. Cancel before publishing the
-              // identity transition so no hidden Sidecar continues generating.
-              if (s.sidecarForSession(sessionId)) {
-                void cancelLinkedSessionWork(sessionId, "cancelled");
-              }
+              // SSH returning leaves the same PTY at a local shell. Fence every
+              // Agent before publishing that identity change, so an old remote
+              // goal cannot dispatch its next command into the local shell.
+              void cancelLinkedSessionWork(sessionId, "cancelled",
+                "The terminal target changed, so this Agent run stopped. Verify the current terminal, reconnect if needed, and start a new request.");
               s.updateSessionUi(sessionId, {
                 remote: null,
                 remoteUnresponsive: false,

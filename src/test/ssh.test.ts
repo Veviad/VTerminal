@@ -178,6 +178,7 @@ const FIXTURES: SshHostInput[] = [
   host({ identity_file: "/Users/me/My Keys/id_ed25519" }),
   host({ hostname: "10.0.0.5", username: "root", jump_host: "jump@bastion:2222" }),
   host({ username: "deploy", remote_dir: "/srv/app releases" }),
+  host({ username: "deploy", remote_dir: "/srv/it's app", post_connect: "printf '%s' ready" }),
   host({ remote_dir: "/srv/app", post_connect: "tmux attach || tmux new -s main" }),
   host({ extra_args: "-o ConnectTimeout=5 -vv" }),
   host({ extra_args: '-o "ProxyCommand=nc -X 5 %h %p"' }),

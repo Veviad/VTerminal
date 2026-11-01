@@ -2,10 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { emptyAiStream, useAppStore } from "../stores/appStore";
 import { AiPanel } from "../components/ai/AiPanel";
+import { isAgentPreparing } from "../hooks/useAiStream";
+import { claimScheduleSession, releaseScheduleSession } from "../lib/scheduleLiveJobs";
 import { S } from "../lib/strings";
 import * as api from "../lib/tauri";
 import * as ptyExec from "../lib/ptyExec";
-import type { CatalogEntry, Session } from "../lib/types";
+import type { CatalogEntry, Session, StreamEvent } from "../lib/types";
 import { makeSidecarBinding } from "./factories";
 
 // The AI panel is unmounted entirely when `settingsLoaded` is false, so a bug in
@@ -387,41 +389,35 @@ describe("AiPanel renders", () => {
   });
 
   it("refuses an approval without its original target snapshot when Full is selected", async () => {
+    const nativeRound = deferred<Awaited<ReturnType<typeof api.agentStart>>>();
+    const start = vi.spyOn(api, "agentStart").mockReturnValue(nativeRound.promise);
     const setMode = vi.spyOn(api, "agentSetPermissionMode").mockResolvedValue(undefined);
     const approve = vi.spyOn(api, "respondToApproval").mockResolvedValue(undefined);
-    useAppStore.setState({
-      sessions: [session("s1")],
-      aiStreams: {
-        s1: {
-          ...emptyAiStream(),
-          mode: "agent",
-          status: "awaiting_approval",
-          requestId: "req-full",
-          pendingProposal: {
-            approvalId: "approval-full",
-            command: "printenv",
-            explanation: "read the environment",
-            readOnly: false,
-            network: false,
-            outputPolicy: "private",
-          },
-        },
-      },
-    });
+    seedReadyPanel({ mode: "agent" });
     render(<AiPanel sessionId="s1" />);
-
+    const box = screen.getByPlaceholderText(/Describe a goal/i);
+    fireEvent.change(box, { target: { value: "Inspect the fixture" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() => expect(start).toHaveBeenCalledOnce());
+    const requestId = useAppStore.getState().aiStreams.s1.requestId!;
+    act(() => useAppStore.getState().setPendingProposal("s1", {
+      approvalId: "approval-full", command: "printenv", explanation: "read the environment",
+      readOnly: false, network: false, outputPolicy: "private",
+    }, "awaiting_approval"));
     fireEvent.click(screen.getByRole("button", { name: S.aiPanel.permissionLabel }));
-    fireEvent.click(
-      screen.getByRole("option", {
-        name: (accessibleName) => accessibleName.startsWith(S.aiPanel.permission.full),
-      }),
-    );
-
+    fireEvent.click(screen.getByRole("option", {
+      name: (name) => name.startsWith(S.aiPanel.permission.full),
+    }));
     await waitFor(() => {
-      expect(setMode).toHaveBeenCalledWith("req-full", "full", undefined);
+      expect(setMode).toHaveBeenCalledWith(requestId, "full", undefined);
       expect(approve).toHaveBeenCalledWith("approval-full", "skip");
     });
     expect(useAppStore.getState().aiStreams.s1.permissionMode).toBe("full");
+    await act(async () => {
+      const emit = start.mock.calls[0][6] as (event: StreamEvent) => void;
+      emit({ type: "Done", prompt_tokens: 0, completion_tokens: 0 });
+      nativeRound.resolve([]);
+    });
   });
 
   it("keeps the remote prompt confirmation pending when Full is selected", async () => {
@@ -456,6 +452,81 @@ describe("AiPanel renders", () => {
     expect(useAppStore.getState().aiStreams.s1.permissionMode).toBe("auto_read");
     expect(screen.getByRole("button", { name: S.aiPanel.permissionLabel })).toHaveTextContent(S.aiPanel.permission.auto_read);
     expect(approve).not.toHaveBeenCalled();
+  });
+
+  it("applies permission choices locally during attachment preparation and sends the final choice at native dispatch", async () => {
+    const persistence = deferred<Awaited<ReturnType<typeof api.attachmentPut>>>();
+    const nativeRound = deferred<Awaited<ReturnType<typeof api.agentStart>>>();
+    const persist = vi.spyOn(api, "attachmentPut").mockReturnValue(persistence.promise);
+    const start = vi.spyOn(api, "agentStart").mockReturnValue(nativeRound.promise);
+    const setMode = vi.spyOn(api, "agentSetPermissionMode").mockResolvedValue(undefined);
+    seedReadyPanel({ mode: "agent", permissionMode: "ask", pendingAttachments: [{
+      id: "preparing-image", kind: "image", name: "fixture.png", mediaType: "image/png", bytes: 1, data: "QQ==",
+    }] });
+    render(<AiPanel sessionId="s1" />);
+    const box = screen.getByPlaceholderText(/Describe a goal/i);
+    fireEvent.change(box, { target: { value: "Inspect the synthetic attachment" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() => expect(persist).toHaveBeenCalledOnce());
+    const requestId = useAppStore.getState().aiStreams.s1.requestId!;
+    expect(isAgentPreparing("s1", requestId)).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: S.aiPanel.permissionLabel }));
+    fireEvent.click(screen.getByRole("option", { name: (name) => name.startsWith(S.aiPanel.permission.full) }));
+    expect(useAppStore.getState().aiStreams.s1.permissionMode).toBe("full");
+    expect(setMode).not.toHaveBeenCalled();
+    expect(start).not.toHaveBeenCalled();
+
+    await act(async () => persistence.resolve({ path: "/tmp/synthetic-preparing-image", bytes: 1 }));
+    await waitFor(() => expect(start).toHaveBeenCalledOnce());
+    expect(start.mock.calls[0][8]).toMatchObject({ single: "full" });
+    expect(isAgentPreparing("s1", requestId)).toBe(false);
+    expect(setMode).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: S.aiPanel.permissionLabel }));
+    fireEvent.click(screen.getByRole("option", { name: (name) => name.startsWith(S.aiPanel.permission.auto_read) }));
+    expect(useAppStore.getState().aiStreams.s1.permissionMode).toBe("full");
+    await waitFor(() => expect(setMode).toHaveBeenCalledWith(requestId, "auto_read", undefined));
+    await waitFor(() => expect(useAppStore.getState().aiStreams.s1.permissionMode).toBe("auto_read"));
+    await act(async () => {
+      const emit = start.mock.calls[0][6] as (event: StreamEvent) => void;
+      emit({ type: "Done", prompt_tokens: 0, completion_tokens: 0 });
+      nativeRound.resolve([]);
+    });
+  });
+
+  it("retains scheduled permissions during preparation instead of claiming unacknowledged Full access", async () => {
+    const persistence = deferred<Awaited<ReturnType<typeof api.attachmentPut>>>();
+    const nativeRound = deferred<Awaited<ReturnType<typeof api.agentStart>>>();
+    const persist = vi.spyOn(api, "attachmentPut").mockReturnValue(persistence.promise);
+    const start = vi.spyOn(api, "agentStart").mockReturnValue(nativeRound.promise);
+    const setMode = vi.spyOn(api, "agentSetPermissionMode").mockResolvedValue(undefined);
+    seedReadyPanel({ mode: "agent", permissionMode: "auto_read", pendingAttachments: [{
+      id: "scheduled-preparing-image", kind: "image", name: "fixture.png", mediaType: "image/png", bytes: 1, data: "QQ==",
+    }] });
+    expect(claimScheduleSession("scheduled-preparing-run", "s1")).toBe(true);
+    try {
+      render(<AiPanel sessionId="s1" />);
+      const box = screen.getByPlaceholderText(/Describe a goal/i);
+      fireEvent.change(box, { target: { value: "Inspect the scheduled synthetic fixture" } });
+      fireEvent.keyDown(box, { key: "Enter" });
+      await waitFor(() => expect(persist).toHaveBeenCalledOnce());
+      fireEvent.click(screen.getByRole("button", { name: S.aiPanel.permissionLabel }));
+      fireEvent.click(screen.getByRole("option", { name: (name) => name.startsWith(S.aiPanel.permission.full) }));
+      expect(useAppStore.getState().aiStreams.s1.permissionMode).toBe("auto_read");
+      expect(screen.getByRole("alert")).toHaveTextContent("after preparation finishes");
+      expect(setMode).not.toHaveBeenCalled();
+      await act(async () => persistence.resolve({ path: "/tmp/synthetic-scheduled-image", bytes: 1 }));
+      await waitFor(() => expect(start).toHaveBeenCalledOnce());
+      expect(start.mock.calls[0][8]).toMatchObject({ single: "auto_read" });
+      await act(async () => {
+        const emit = start.mock.calls[0][6] as (event: StreamEvent) => void;
+        emit({ type: "Done", prompt_tokens: 0, completion_tokens: 0 });
+        nativeRound.resolve([]);
+      });
+    } finally {
+      releaseScheduleSession("s1");
+    }
   });
 
   it("serializes permission changes and never releases a superseded Full selection", async () => {

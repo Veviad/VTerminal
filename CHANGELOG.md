@@ -1,7 +1,9 @@
 # Changelog
 
-## 0.6.16
+## 0.6.17
 
+- Stop an Agent run when its terminal enters or leaves an interactive SSH or container session, preserving its original target across delayed replies and reconnects.
+- Keep one-off SSH and container commands in their original terminal context.
 - Check SSH shell health before each remote command, stop before dispatch when the connection does not respond, and offer a new SSH tab for an unresponsive saved-host session.
 - Make shell readiness and completion markers tolerate strict unset-variable handling and common aliases or functions in Bash, zsh, dash, and fish; allow more time for slow SSH responses.
 - Add bounded keepalive defaults to saved interactive SSH connections while preserving explicit host options.

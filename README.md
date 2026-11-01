@@ -49,7 +49,9 @@ connection; it does not establish that another program is running. For an
 unresponsive saved-host session, use **New SSH tab** to reconnect. Saved
 interactive connections use SSH keepalives every 30 seconds and close after
 three unanswered checks; explicit host options take precedence. These defaults
-apply when opening a new connection.
+apply when opening a new connection. If the interactive connection ends or the
+terminal changes target during an Agent run, that run stops. Verify the new
+target and start a new request to continue.
 
 Starting another local interactive shell inside a tab does not install VTerminal's
 integration in that nested shell. Command blocks and agent command execution may

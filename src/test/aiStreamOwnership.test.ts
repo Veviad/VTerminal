@@ -37,6 +37,7 @@ const pty = vi.hoisted(() => ({
 }));
 const terminalRegistry = vi.hoisted(() => ({
   entries: new Map<string, { disposed: boolean }>(),
+  listeners: new Map<string, Set<(event: { type: string }) => void>>(),
 }));
 
 vi.mock("../lib/tauri", () => api);
@@ -46,6 +47,12 @@ vi.mock("../lib/aiPanel", () => ({ setAiPanelOpen: vi.fn() }));
 vi.mock("../lib/ptyExec", () => pty);
 vi.mock("../lib/termRegistry", () => ({
   getTerm: (sessionId: string) => terminalRegistry.entries.get(sessionId),
+  subscribeTerm: (sessionId: string, callback: (event: { type: string }) => void) => {
+    const listeners = terminalRegistry.listeners.get(sessionId) ?? new Set();
+    terminalRegistry.listeners.set(sessionId, listeners);
+    listeners.add(callback);
+    return () => listeners.delete(callback);
+  },
 }));
 vi.mock("../lib/terminalSnapshot", () => ({
   readLineRange: () => "",
@@ -56,6 +63,7 @@ import {
   cardStatus,
   commandOutcomeFence,
   commandResultPresentation,
+  isAgentPreparing,
   useAiStream,
 } from "../hooks/useAiStream";
 import { useAppStore } from "../stores/appStore";
@@ -128,6 +136,7 @@ beforeEach(() => {
     mode: "integrated",
   });
   terminalRegistry.entries.clear();
+  terminalRegistry.listeners.clear();
   pty.hasReusableRemoteShellProof.mockReturnValue(false);
 
   useAppStore.setState({
@@ -138,8 +147,12 @@ beforeEach(() => {
     sidecars: {},
     catalog: [],
     activeModelId: "test-model",
+    visionModelId: null,
+    visionLoadedModelId: null,
+    visionCatalog: [],
   });
   useAppStore.getState().addSession(session());
+  terminalRegistry.entries.set(SID, { disposed: false });
 });
 
 describe("steering with attachments", () => {
@@ -998,8 +1011,9 @@ describe("native terminal readiness gates", () => {
     act(() => emit({ type: "RunInTerminal", approval_id: "readiness-target", session_id: SID,
       command: "pwd", explanation: check.explanation, timeout_secs: 30, output_policy: "normal" }));
     expect(pty.runInTerminal).not.toHaveBeenCalled();
-    expect(api.submitCommandResult).toHaveBeenCalledWith("readiness-target", null,
-      expect.stringContaining("target changed"), 0, "target_changed");
+    expect(api.submitCommandResult).not.toHaveBeenCalled();
+    expect(useAppStore.getState().aiStreams[SID].lastError).toContain("target changed");
+    expect(api.aiCancel).toHaveBeenCalled();
   });
 
   it("fences a failed readiness acknowledgement instead of leaving an invisible waiter", async () => {
@@ -1009,6 +1023,153 @@ describe("native terminal readiness gates", () => {
     expect(useAppStore.getState().aiStreams[SID].lastError).toContain("Could not confirm terminal readiness");
     expect(api.aiCancel).toHaveBeenCalled();
     expect(pty.runInTerminal).not.toHaveBeenCalled();
+  });
+});
+
+describe("whole-run terminal identity", () => {
+  const readiness: StreamEvent = {
+    type: "TerminalPromptCheck", approval_id: "new-round", command: "pwd",
+    explanation: "Inspect", read_only: true, network: false, output_policy: "normal",
+  };
+  async function start() {
+    let emit!: (event: StreamEvent) => void;
+    api.agentStart.mockImplementationOnce((...args: unknown[]) => {
+      emit = args[6] as (event: StreamEvent) => void;
+      return Promise.resolve([]);
+    });
+    const hook = renderHook(() => useAiStream());
+    await act(async () => hook.result.current.startAgent(SID, "inspect original target"));
+    return { ...hook, emit, requestId: useAppStore.getState().aiStreams[SID].requestId };
+  }
+
+  it.each(["ask", "auto_read", "auto_smart", "auto_all", "full"] as const)(
+    "fences SSH disconnect before the first proposal in %s", async (mode) => {
+      useAppStore.getState().updateSessionUi(SID, { remote: { kind: "ssh", target: "original" }, nestedBlockId: "ssh-original" });
+      useAppStore.getState().setPermissionMode(SID, mode);
+      const { emit, requestId } = await start();
+      act(() => useAppStore.getState().updateSessionUi(SID, { remote: null, nestedBlockId: null }));
+      expect(useAppStore.getState().aiStreams[SID]).toMatchObject({ requestId: null, generationId: null, lastError: expect.stringContaining("target changed") });
+      act(() => {
+        emit(readiness);
+        emit({ type: "RunInTerminal", approval_id: "new-round", session_id: SID, command: "pwd", timeout_secs: 30, explanation: "Inspect", output_policy: "normal" });
+        emit({ type: "Delta", content: "stale local continuation" });
+      });
+      expect(api.aiCancel).toHaveBeenCalledWith(requestId);
+      expect(api.respondToApproval).not.toHaveBeenCalled();
+      expect(pty.runInTerminal).not.toHaveBeenCalled();
+      expect(useAppStore.getState().aiStreams[SID].streamingContent).toBe("");
+    },
+  );
+
+  it("latches disconnect/reconnect to the same remote identity", async () => {
+    const remote = { kind: "ssh" as const, target: "same-host" };
+    useAppStore.getState().updateSessionUi(SID, { remote, nestedBlockId: null });
+    const { emit } = await start();
+    act(() => {
+      useAppStore.getState().updateSessionUi(SID, { remote: null });
+      useAppStore.getState().updateSessionUi(SID, { remote });
+      emit(readiness);
+    });
+    expect(useAppStore.getState().aiStreams[SID].requestId).toBeNull();
+    expect(api.respondToApproval).not.toHaveBeenCalled();
+    expect(pty.runInTerminal).not.toHaveBeenCalled();
+  });
+
+  it.each(["replacement", "disposal"] as const)("rejects terminal %s with otherwise unchanged metadata", async (change) => {
+    const { emit } = await start();
+    act(() => {
+      if (change === "replacement") terminalRegistry.entries.set(SID, { disposed: false });
+      else {
+        terminalRegistry.entries.get(SID)!.disposed = true;
+        for (const listener of [...(terminalRegistry.listeners.get(SID) ?? [])]) listener({ type: "disposed" });
+      }
+      emit(readiness);
+    });
+    expect(api.aiCancel).toHaveBeenCalled();
+    expect(api.respondToApproval).not.toHaveBeenCalled();
+    expect(pty.runInTerminal).not.toHaveBeenCalled();
+    expect(terminalRegistry.listeners.get(SID)?.size).toBe(0);
+  });
+
+  it("fences local-to-SSH transition and does not let the retired guard abort a new run", async () => {
+    const old = await start();
+    act(() => useAppStore.getState().updateSessionUi(SID, { remote: { kind: "ssh", target: "next-host" }, nestedBlockId: "next-ssh" }));
+    const current = await start();
+    const aborts = pty.abortSession.mock.calls.length;
+    act(() => old.emit(readiness));
+    expect(pty.abortSession).toHaveBeenCalledTimes(aborts);
+    expect(useAppStore.getState().aiStreams[SID].requestId).toBe(current.requestId);
+    act(() => current.emit(readiness));
+    expect(useAppStore.getState().aiStreams[SID].pendingProposal?.approvalId).toBe("new-round");
+  });
+
+  it("preserves files if SSH disconnects while the opening attachment is saved", async () => {
+    useAppStore.getState().updateSessionUi(SID, { remote: { kind: "ssh", target: "original" } });
+    useAppStore.setState({ catalog: [{ id: "test-model", supports_vision: true } as never] });
+    const attachment: Attachment = { id: "startup-image", kind: "image", name: "screen.png", mediaType: "image/png", bytes: 4, data: "AAAA" };
+    useAppStore.getState().attachFilesToAi(SID, [attachment]);
+    const saved = deferred<{ path: string }>();
+    api.attachmentPut.mockImplementationOnce(() => saved.promise);
+    const hook = renderHook(() => useAiStream());
+    let run!: Promise<void>;
+    act(() => { run = hook.result.current.startAgent(SID, "inspect this file"); });
+    act(() => useAppStore.getState().updateSessionUi(SID, { remote: null }));
+    saved.resolve({ path: "/tmp/startup-image" });
+    await act(async () => run);
+    expect(api.agentStart).not.toHaveBeenCalled();
+    expect(useAppStore.getState().aiStreams[SID].pendingAttachments).toEqual([attachment]);
+    expect(useAppStore.getState().aiStreams[SID].messages).toEqual([]);
+  });
+
+  it("keeps Sidecar permission and presentation changes valid and dispatches fresh permissions after OCR", async () => {
+    installSidecar();
+    useAppStore.getState().setSidecarPermission(SID, "remote", "full");
+    useAppStore.setState({ visionModelId: "ocr", visionLoadedModelId: "ocr", visionCatalog: [] });
+    const read = deferred<string>();
+    api.visionDescribe.mockImplementationOnce(() => read.promise);
+    useAppStore.getState().attachFilesToAi(SID, [{ id: "ocr", kind: "image", name: "screen.png", mediaType: "image/png", bytes: 4, data: "AAAA" }]);
+    const hook = renderHook(() => useAiStream());
+    let run!: Promise<void>;
+    act(() => { run = hook.result.current.startAgent(SID, "inspect screenshot"); });
+    await flushPreflight();
+    expect(api.visionDescribe).toHaveBeenCalled();
+    const preparingRequest = useAppStore.getState().aiStreams[SID].requestId!;
+    expect(isAgentPreparing(SID, preparingRequest)).toBe(true);
+    act(() => {
+      useAppStore.getState().setSidecarPermission(SID, "remote", "ask");
+      useAppStore.getState().setSidecarFocusedSession(SID, REMOTE_SID);
+      useAppStore.getState().setSidecarRatio(SID, .6);
+      useAppStore.getState().swapSidecarPanes(SID);
+    });
+    read.resolve("synthetic OCR");
+    await act(async () => run);
+    expect(api.agentStart).toHaveBeenCalledOnce();
+    expect(api.agentStart.mock.calls[0][8]).toMatchObject({ remote: "ask" });
+    expect(isAgentPreparing(SID, preparingRequest)).toBe(false);
+    expect(api.aiCancel).not.toHaveBeenCalled();
+  });
+
+  it("fences a restored Sidecar binding without changing the original local entry", async () => {
+    installSidecar();
+    const sidecars = useAppStore.getState().sidecars;
+    useAppStore.getState().endSidecar(SID);
+    const { requestId } = await start();
+    const originalEntry = terminalRegistry.entries.get(SID);
+    act(() => useAppStore.setState({ sidecars }));
+    expect(terminalRegistry.entries.get(SID)).toBe(originalEntry);
+    expect(useAppStore.getState().aiStreams[SID].requestId).toBeNull();
+    expect(api.aiCancel).toHaveBeenCalledWith(requestId);
+  });
+
+  it.each(["done", "error", "cancelled"] as const)("removes subscriptions on %s retirement", async (outcome) => {
+    const { emit } = await start();
+    act(() => emit(outcome === "done"
+      ? { type: "Done", prompt_tokens: 1, completion_tokens: 1 }
+      : outcome === "error" ? { type: "Error", message: "fixture failure" }
+        : { type: "Cancelled" }));
+    expect(terminalRegistry.listeners.get(SID)?.size).toBe(0);
+    act(() => useAppStore.getState().updateSessionUi(SID, { remote: { kind: "ssh", target: "later" } }));
+    expect(api.aiCancel).not.toHaveBeenCalled();
   });
 });
 
@@ -1036,11 +1197,10 @@ describe("single-terminal command routing", () => {
     act(() => useAppStore.getState().updateSessionUi(SID, { remote: null, nestedBlockId: null }));
     expect(result.current.proposalTargetIsCurrent(SID)).toBe(false);
     await act(async () => result.current.respondToProposal(SID, "run"));
-    expect(api.respondToApproval).toHaveBeenCalledWith("ssh-disconnect", "skip");
+    expect(api.respondToApproval).not.toHaveBeenCalled();
     expect(pty.runInTerminal).not.toHaveBeenCalled();
-    expect(useAppStore.getState().aiStreams[SID].messages.some(
-      (message) => message.command?.note?.includes("terminal target changed"),
-    )).toBe(true);
+    expect(useAppStore.getState().aiStreams[SID].lastError).toContain("target changed");
+    expect(api.aiCancel).toHaveBeenCalled();
   });
 
   it("rejects a remote command when SSH disconnects between approval and dispatch", async () => {
@@ -1067,8 +1227,9 @@ describe("single-terminal command routing", () => {
       command: "pwd", timeout_secs: 30, explanation: "Inspect remote directory", output_policy: "normal",
     }));
     expect(pty.runInTerminal).not.toHaveBeenCalled();
-    expect(api.submitCommandResult).toHaveBeenCalledWith("ssh-after-approval", null,
-      expect.stringContaining("terminal target changed"), 0, "target_changed");
+    expect(api.submitCommandResult).not.toHaveBeenCalled();
+    expect(useAppStore.getState().aiStreams[SID].lastError).toContain("target changed");
+    expect(api.aiCancel).toHaveBeenCalled();
   });
   it("ends a stale-target approval if its skip response cannot reach native", async () => {
     useAppStore.getState().updateSessionUi(SID, { remote: { kind: "ssh", target: "old-host" }, nestedBlockId: "old-ssh" });
@@ -1078,9 +1239,9 @@ describe("single-terminal command routing", () => {
     await act(async () => result.current.startAgent(SID, "inspect"));
     act(() => emit({ type: "CommandProposal", approval_id: "stale-skip-failed", command: "pwd", explanation: "Inspect", read_only: true, network: false, output_policy: "normal" }));
     act(() => useAppStore.getState().updateSessionUi(SID, { remote: null, nestedBlockId: null }));
-    api.respondToApproval.mockRejectedValueOnce(new Error("IPC closed"));
     await act(async () => result.current.respondToProposal(SID, "run"));
-    expect(useAppStore.getState().aiStreams[SID].lastError).toContain("Could not dismiss the command");
+    expect(api.respondToApproval).not.toHaveBeenCalled();
+    expect(useAppStore.getState().aiStreams[SID].lastError).toContain("target changed");
     expect(api.aiCancel).toHaveBeenCalled();
     expect(pty.runInTerminal).not.toHaveBeenCalled();
   });
@@ -1498,12 +1659,8 @@ describe("AI Sidecar routing", () => {
       });
     });
 
-    expect(pty.abortSession).toHaveBeenCalledOnce();
-    expect(pty.abortSession).toHaveBeenCalledWith(
-      REMOTE_SID,
-      "cancelled",
-      "remote-backend-timeout",
-    );
+    expect(pty.abortSession).toHaveBeenCalledWith(SID, "cancelled");
+    expect(pty.abortSession).toHaveBeenCalledWith(REMOTE_SID, "cancelled");
     expect(api.aiCancel).toHaveBeenCalledWith(requestId);
   });
 
@@ -1598,13 +1755,8 @@ describe("AI Sidecar routing", () => {
     await flushPreflight();
 
     expect(terminalWrite).not.toHaveBeenCalled();
-    expect(api.submitCommandResult).toHaveBeenCalledWith(
-      "stale-during-probe",
-      null,
-      "",
-      1,
-      "target_changed",
-    );
+    expect(api.submitCommandResult).not.toHaveBeenCalled();
+    expect(useAppStore.getState().aiStreams[SID].lastError).toContain("target changed");
   });
 
   it("cancelling from either pane aborts pending work in both terminals", async () => {
