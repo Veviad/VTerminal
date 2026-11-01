@@ -3,6 +3,7 @@ import { Terminal } from "@xterm/xterm";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cancelPtyEcho, expectPtyEcho, writePtyOutput } from "../lib/ptyEcho";
 import { onTerminalUserInput } from "../lib/terminalUserInput";
+import { probeFor } from "../lib/ptyExecShell";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -139,6 +140,158 @@ describe("PTY command echo filtering", () => {
     const text = `${line}\r\n${completion}`;
     writePtyOutput(term, encoder.encode(text));
     expect(term.output).toBe(text);
+  });
+
+  it("hides a retired exact probe echo when SSH returns after twenty seconds", () => {
+    const term = new RecordingTerminal();
+    const probe = probeFor(nonce);
+    const retire = expectPtyEcho(term, probe, null, { probeNonce: nonce });
+    vi.advanceTimersByTime(10_000);
+    retire(); // The request stopped awaiting readiness; its bytes may be late.
+    vi.advanceTimersByTime(10_000);
+    const reply = `\x1b]6973;RP;${nonce};z;b5.2;f\x07`;
+    const acknowledge = vi.fn();
+    writePtyOutput(term, encoder.encode(`${probe}\r\n${reply}remote$ `), acknowledge);
+    expect(term.output).toBe(`\r\x1b[2K${reply}remote$ `);
+    expect(acknowledge).not.toHaveBeenCalled();
+    term.callbacks[0]();
+    expect(acknowledge).toHaveBeenCalledOnce();
+  });
+
+  it("preserves queries immediately while an empty retired probe remains armed", () => {
+    const term = new RecordingTerminal();
+    const probe = probeFor(nonce);
+    expectPtyEcho(term, probe, null, { probeNonce: nonce })();
+    vi.advanceTimersByTime(20_000);
+    writePtyOutput(term, encoder.encode("\x1b[6n"));
+    expect(term.output).toBe("\x1b[6n");
+    writePtyOutput(term, encoder.encode(`${probe}\r\n`));
+    expect(term.output).toBe("\x1b[6n\r\x1b[2K");
+  });
+
+  it("does not park an empty chunk acknowledgment behind a retired probe", () => {
+    const term = new RecordingTerminal();
+    const acknowledge = vi.fn();
+    expectPtyEcho(term, probeFor(nonce), null, { probeNonce: nonce })();
+    writePtyOutput(term, new Uint8Array(), acknowledge);
+    expect(term.callbacks).toHaveLength(1);
+    term.callbacks[0]();
+    expect(acknowledge).toHaveBeenCalledOnce();
+    vi.advanceTimersByTime(60_001);
+    expect(term.callbacks).toHaveLength(1);
+  });
+
+  it("handles two owned late echoes and their distinct replies in one-byte chunks", () => {
+    const term = new RecordingTerminal();
+    const nextNonce = "fedcba9876543210fedcba9876543210";
+    const first = probeFor(nonce);
+    const second = probeFor(nextNonce);
+    expectPtyEcho(term, first, null, { probeNonce: nonce })();
+    vi.advanceTimersByTime(12_000);
+    expectPtyEcho(term, second, null, { probeNonce: nextNonce })();
+    const reply1 = `\x1b]6973;RP;${nonce};z;b5.2;f\x07`;
+    const reply2 = `\x1b]6973;RP;${nextNonce};z;b5.2;f\x07`;
+    const raw = encoder.encode(`${first}\r\n${reply1}${second}\r\n${reply2}`);
+    for (const byte of raw) writePtyOutput(term, Uint8Array.of(byte));
+    expect(term.output).toBe(`\r\x1b[2K${reply1}\r\x1b[2K${reply2}`);
+  });
+
+  it("retires an echo-disabled probe only for its own nonce reply", () => {
+    const term = new RecordingTerminal();
+    const nextNonce = "fedcba9876543210fedcba9876543210";
+    const first = probeFor(nonce);
+    const second = probeFor(nextNonce);
+    expectPtyEcho(term, first, null, { probeNonce: nonce })();
+    expectPtyEcho(term, second, null, { probeNonce: nextNonce })();
+    const reply = `\x1b]6973;RP;${nonce};z;b5.2;f\x07`;
+    writePtyOutput(term, encoder.encode(`${reply}${second}\r\n`));
+    expect(term.output).toBe(`${reply}\r\x1b[2K`);
+  });
+
+  it("acknowledges a chunk containing two retired echoes only after its final bytes parse", () => {
+    const term = new RecordingTerminal();
+    const acknowledge = vi.fn();
+    const nextNonce = "fedcba9876543210fedcba9876543210";
+    const first = probeFor(nonce);
+    const second = probeFor(nextNonce);
+    expectPtyEcho(term, first, null, { probeNonce: nonce })();
+    expectPtyEcho(term, second, null, { probeNonce: nextNonce })();
+    writePtyOutput(term, encoder.encode(`${first}\r\n${second}\r\nrest`), acknowledge);
+    expect(term.output).toBe("\r\x1b[2K\r\x1b[2Krest");
+    expect(acknowledge).not.toHaveBeenCalled();
+    expect(term.callbacks).toHaveLength(1);
+    term.callbacks[0]();
+    expect(acknowledge).toHaveBeenCalledOnce();
+  });
+
+  it.each(["expiry", "user input", "disposal"] as const)("preserves the exact text after retired-probe %s", (reason) => {
+    const term = new RecordingTerminal();
+    const probe = probeFor(nonce);
+    expectPtyEcho(term, probe, null, { probeNonce: nonce })();
+    if (reason === "expiry") vi.advanceTimersByTime(60_001);
+    else cancelPtyEcho(term, reason === "disposal");
+    writePtyOutput(term, encoder.encode(`${probe}\r\n`));
+    expect(term.output).toBe(`${probe}\r\n`);
+  });
+
+  it("does not search past ambiguous genuine output for a retired probe", () => {
+    const term = new RecordingTerminal();
+    const probe = probeFor(nonce);
+    expectPtyEcho(term, probe, null, { probeNonce: nonce })();
+    const raw = `genuine output\r\n${probe}\r\n`;
+    writePtyOutput(term, encoder.encode(raw));
+    expect(term.output).toBe(raw);
+  });
+
+  it("preserves a changed probe line even when its nonce is unchanged", () => {
+    const term = new RecordingTerminal();
+    const probe = probeFor(nonce);
+    expectPtyEcho(term, probe, null, { probeNonce: nonce })();
+    const raw = `${probe} extra\r\n${probe}\r\n`;
+    writePtyOutput(term, encoder.encode(raw));
+    expect(term.output).toBe(raw);
+  });
+
+  it("does not retain a line without its declared exact nonce", () => {
+    const term = new RecordingTerminal();
+    const probe = probeFor(nonce);
+    expectPtyEcho(term, probe, null, { probeNonce: "f".repeat(32) })();
+    vi.advanceTimersByTime(3_000);
+    writePtyOutput(term, encoder.encode(`${probe}\r\n`));
+    expect(term.output).toBe(`${probe}\r\n`);
+  });
+
+  it("keeps the ordinary buffering deadline for a fragmented retired echo", () => {
+    const term = new RecordingTerminal();
+    const probe = probeFor(nonce);
+    expectPtyEcho(term, probe, null, { probeNonce: nonce })();
+    vi.advanceTimersByTime(20_000);
+    writePtyOutput(term, encoder.encode(probe.slice(0, 12)));
+    vi.advanceTimersByTime(2_001);
+    expect(term.output).toBe(probe.slice(0, 12));
+    writePtyOutput(term, encoder.encode(`${probe.slice(12)}\r\n`));
+    expect(term.output).toBe(`${probe}\r\n`);
+  });
+
+  it("bounds the number of retained probe expectations", () => {
+    const term = new RecordingTerminal();
+    for (let index = 0; index < 5; index++) {
+      const owned = index.toString(16).repeat(32);
+      expectPtyEcho(term, probeFor(owned), null, { probeNonce: owned })();
+    }
+    const expired = `${probeFor("0".repeat(32))}\r\n`;
+    writePtyOutput(term, encoder.encode(expired));
+    expect(term.output).toBe(expired);
+  });
+
+  it("does not extend retired retention when the system clock moves backward", () => {
+    const term = new RecordingTerminal();
+    const probe = probeFor(nonce);
+    expectPtyEcho(term, probe, null, { probeNonce: nonce })();
+    vi.setSystemTime(Date.now() - 3_600_000);
+    vi.advanceTimersByTime(60_001);
+    writePtyOutput(term, encoder.encode(`${probe}\r\n`));
+    expect(term.output).toBe(`${probe}\r\n`);
   });
 
   it.each([

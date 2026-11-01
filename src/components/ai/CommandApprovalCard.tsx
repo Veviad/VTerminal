@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Hourglass, LockKeyhole, Play, ServerCog, SkipForward, Square, Terminal } from "lucide-react";
 import { S } from "../../lib/strings";
 import type { OutputPolicy } from "../../lib/types";
 import { subscribeTerm } from "../../lib/termRegistry";
+import { APPROVAL_PROMPT_TTL_MS } from "../../lib/approvalPrompt";
 
 export function CommandApprovalCard({
   command,
@@ -46,16 +47,35 @@ export function CommandApprovalCard({
   // One response per card — the backend oneshot is consumed by the first one,
   // so later clicks would silently fail and desync the UI.
   const [responded, setResponded] = useState(false);
-  const [remotePromptConfirmed, setRemotePromptConfirmed] = useState(false);
+  const [promptConfirmedAt, setPromptConfirmedAt] = useState<number | null>(null);
+  const [promptExpired, setPromptExpired] = useState(false);
+  const remotePromptConfirmed = promptConfirmedAt !== null;
+  const confirmPromptRef = useRef(onConfirmPrompt);
+  confirmPromptRef.current = onConfirmPrompt;
+  const invalidatePrompt = (expired: boolean) => {
+    confirmPromptRef.current?.(false);
+    setPromptConfirmedAt(null);
+    setPromptExpired(expired);
+  };
   useEffect(() => {
-    if (!remoteSessionId || !remotePromptConfirmed) return;
+    if (!remoteSessionId || !remotePromptConfirmed || responded) return;
     return subscribeTerm(remoteSessionId, (event) => {
       if (event.type === "userInput" || event.type === "data" || event.type === "bufferChange" || event.type === "disposed") {
-        onConfirmPrompt?.(false);
-        setRemotePromptConfirmed(false);
+        confirmPromptRef.current?.(false);
+        setPromptConfirmedAt(null);
+        setPromptExpired(false);
       }
     });
-  }, [remoteSessionId, remotePromptConfirmed, onConfirmPrompt]);
+  }, [remoteSessionId, remotePromptConfirmed, responded]);
+  useEffect(() => {
+    if (promptConfirmedAt === null || responded) return;
+    const timer = setTimeout(() => {
+      confirmPromptRef.current?.(false);
+      setPromptConfirmedAt(null);
+      setPromptExpired(true);
+    }, Math.max(0, promptConfirmedAt + APPROVAL_PROMPT_TTL_MS - Date.now()));
+    return () => clearTimeout(timer);
+  }, [promptConfirmedAt, responded]);
   const changed = edited.trim() !== command.trim();
   const empty = edited.trim() === "";
   const targetLabel = target ?? (targetRole === "remote" ? "remote shell" : S.aiPanel.localShell);
@@ -66,6 +86,13 @@ export function CommandApprovalCard({
 
   const respond = (decision: "run" | "skip" | "stop", editedCommand?: string) => {
     if (responded) return;
+    if (decision === "run" && targetRole === "remote"
+      && (promptConfirmedAt === null || Date.now() >= promptConfirmedAt + APPROVAL_PROMPT_TTL_MS)) {
+      // A backgrounded webview may deliver the click before its expired timer.
+      // Keep this approval pending so an explicit re-confirmation can retry it.
+      invalidatePrompt(promptConfirmedAt !== null || promptExpired);
+      return;
+    }
     setResponded(true);
     onRespond(decision, editedCommand);
   };
@@ -142,12 +169,22 @@ export function CommandApprovalCard({
             checked={remotePromptConfirmed}
             onChange={(e) => {
               const checked = e.target.checked;
-              setRemotePromptConfirmed(onConfirmPrompt ? onConfirmPrompt(checked) && checked : checked);
+              // Capture time before the binding callback, so the UI cannot
+              // remain checked beyond the execution binding's deadline.
+              const capturedAt = Date.now();
+              const accepted = onConfirmPrompt ? onConfirmPrompt(checked) && checked : checked;
+              setPromptConfirmedAt(accepted ? capturedAt : null);
+              setPromptExpired(false);
             }}
             disabled={responded || targetChanged}
           />
           <span>I checked that the remote terminal is at an empty shell prompt, with no program waiting for input.</span>
         </label>
+      )}
+      {targetRole === "remote" && promptExpired && !responded && (
+        <p role="status" className="mt-1 text-[11px] text-warning">
+          Prompt confirmation expired. Verify that the SSH terminal is still at an empty prompt, then confirm again.
+        </p>
       )}
       <div className="mt-2 flex items-center gap-2">
         <button

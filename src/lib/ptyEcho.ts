@@ -10,65 +10,144 @@ interface PendingEcho {
   timer: ReturnType<typeof setTimeout>;
   protocol: { kind: "osc" | "dcs"; escaped: boolean; prefix: string } | null;
   forwardedBytes: number;
+  probeNonce?: string;
+  expiresAt?: number;
+  retired: boolean;
 }
 
-const pending = new WeakMap<EchoTerminal, PendingEcho>();
+const pending = new WeakMap<EchoTerminal, PendingEcho[]>();
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const MAX_ECHO_BYTES = 65_536;
 const ECHO_WAIT_MS = 2_000;
+/** Retain only exact, nonce-owned setup lines after their request stops waiting.
+ * Incoming printable bytes still get the ordinary short buffering deadline. */
+const LATE_PROBE_ECHO_MS = 60_000;
+const MAX_EXPECTATIONS = 4;
 
-/** Only arm for an exact line that the executor is about to
- * write. Ordinary terminal output never goes through a protocol-text regex. */
+function removeEcho(term: EchoTerminal, echo: PendingEcho): void {
+  clearTimeout(echo.timer);
+  const queue = pending.get(term);
+  if (!queue) return;
+  const index = queue.indexOf(echo);
+  if (index >= 0) queue.splice(index, 1);
+  if (!queue.length) pending.delete(term);
+}
+
+function retireEcho(term: EchoTerminal, echo: PendingEcho): void {
+  if (!pending.get(term)?.includes(echo)) return;
+  clearTimeout(echo.timer);
+  if (echo.probeNonce && echo.expiresAt && performance.now() < echo.expiresAt && !echo.bytes.length && !echo.acknowledgments.length) {
+    echo.retired = true;
+    echo.timer = setTimeout(() => retireEcho(term, echo), echo.expiresAt - performance.now());
+    return;
+  }
+  removeEcho(term, echo);
+  if (echo.bytes.length || echo.acknowledgments.length) writeEcho(term, echo, echo.bytes);
+}
+
+/** Only arm for an exact line that the executor is about to write. A private
+ * probe nonce may retain an empty expectation across a delayed SSH response;
+ * ordinary output is never matched against a generic protocol-text regex. */
 export function expectPtyEcho(
   term: EchoTerminal,
   line: string,
   visible: string | null,
+  options?: { probeNonce: string },
 ): () => void {
-  cancelPtyEcho(term);
+  // A replacement supersedes ordinary command expectations. An older probe
+  // may still be in the transport, so preserve its exact owned line briefly.
+  for (const existing of [...(pending.get(term) ?? [])]) {
+    if (!existing.probeNonce) {
+      removeEcho(term, existing);
+      if (existing.bytes.length || existing.acknowledgments.length) writeEcho(term, existing, existing.bytes);
+    }
+  }
+  const requestedNonce = options?.probeNonce;
+  const probeNonce = visible === null && requestedNonce !== undefined
+    && /^[a-f0-9]{32}$/.test(requestedNonce) && line.includes(`RP;${requestedNonce};`)
+    ? requestedNonce : undefined;
   const echo: PendingEcho = {
     line,
     visible,
     bytes: new Uint8Array(),
     acknowledgments: [],
-    timer: setTimeout(() => cancelPtyEcho(term), ECHO_WAIT_MS),
+    timer: setTimeout(() => retireEcho(term, echo), ECHO_WAIT_MS),
     protocol: null,
     forwardedBytes: 0,
+    probeNonce,
+    expiresAt: probeNonce ? performance.now() + LATE_PROBE_ECHO_MS : undefined,
+    retired: false,
   };
-  pending.set(term, echo);
-  return () => {
-    if (pending.get(term) === echo) cancelPtyEcho(term);
-  };
+  const queue = pending.get(term) ?? [];
+  queue.push(echo);
+  pending.set(term, queue);
+  while (queue.length > MAX_EXPECTATIONS) {
+    const oldest = queue[0];
+    removeEcho(term, oldest);
+    if (oldest.bytes.length || oldest.acknowledgments.length) writeEcho(term, oldest, oldest.bytes);
+  }
+  return () => retireEcho(term, echo);
 }
 
-/** Fail open on timeout, failed dispatch or user input. Disposal may discard
- * the small held echo because the terminal is about to be destroyed. */
+/** User input/disposal invalidates all active and retired expectations. A
+ * request's private cleanup callback instead retires only its owned probe. */
 export function cancelPtyEcho(term: EchoTerminal, discard = false): void {
-  const echo = pending.get(term);
-  if (!echo) return;
+  const queue = pending.get(term);
+  if (!queue) return;
   pending.delete(term);
-  clearTimeout(echo.timer);
-  if (discard) {
-    // Discarded data is consumed without a parser when the terminal closes.
-    for (const acknowledge of echo.acknowledgments.splice(0)) acknowledge();
-  } else if (echo.bytes.length || echo.acknowledgments.length) {
-    writeEcho(term, echo, echo.bytes);
+  for (const echo of queue) {
+    clearTimeout(echo.timer);
+    if (discard) {
+      for (const acknowledge of echo.acknowledgments.splice(0)) acknowledge();
+    } else if (echo.bytes.length || echo.acknowledgments.length) {
+      writeEcho(term, echo, echo.bytes);
+    }
   }
 }
 
+/** Keep acknowledgment ownership on the final bytes of the original chunk,
+ * even when several exact retired echoes arrive together after SSH resumes. */
+function writeAndContinue(term: EchoTerminal, echo: PendingEcho, prefix: Uint8Array, rest: Uint8Array): void {
+  if (!rest.length || !pending.get(term)?.length) {
+    const output = new Uint8Array(prefix.length + rest.length);
+    output.set(prefix);
+    output.set(rest, prefix.length);
+    writeEcho(term, echo, output);
+    return;
+  }
+  const acknowledgments = echo.acknowledgments.splice(0);
+  term.write(prefix);
+  writePtyOutput(term, rest, () => {
+    for (const acknowledge of acknowledgments) acknowledge();
+  });
+}
+
 /** Feed live PTY bytes into xterm, replacing only a proven command-line echo.
- * Keep the original-byte acknowledgment callback even when the echo shrinks.
- * Held chunks remain outstanding until xterm parses their eventual write.
- * The 64 KiB echo cap stays below the backend's 256 KiB resume watermark. */
+ * The input hold remains bounded to 2 seconds/64 KiB. Empty, nonce-owned probe
+ * expectations may survive longer, without holding output or acknowledgments. */
 export function writePtyOutput(
   term: EchoTerminal,
   bytes: Uint8Array,
   onParsed?: () => void,
 ): void {
-  const echo = pending.get(term);
-  if (!echo) {
+  if (!bytes.length) {
     term.write(bytes, onParsed);
     return;
+  }
+  for (const candidate of [...(pending.get(term) ?? [])]) {
+    if (candidate.expiresAt && performance.now() >= candidate.expiresAt) retireEcho(term, candidate);
+  }
+  const queue = pending.get(term);
+  const echo = queue?.[0];
+  if (!echo || !queue) {
+    term.write(bytes, onParsed);
+    return;
+  }
+  if (echo.retired) {
+    echo.retired = false;
+    clearTimeout(echo.timer);
+    echo.timer = setTimeout(() => retireEcho(term, echo), Math.min(ECHO_WAIT_MS, Math.max(0, (echo.expiresAt ?? performance.now()) - performance.now())));
   }
   if (onParsed) echo.acknowledgments.push(onParsed);
   let held = new Uint8Array(echo.bytes.length + bytes.length);
@@ -76,17 +155,20 @@ export function writePtyOutput(
   held.set(bytes, echo.bytes.length);
   echo.bytes = held;
 
-  // Shell titles, cwd notifications and terminal queries can precede the
-  // input echo. Forward those bytes now (a query may be waiting for a reply),
-  // but keep the exact match armed for the following line. Only peel leading
-  // controls: once printable input is held, forwarding a query ahead of it
-  // would change the cursor position reported to the shell, so fail open.
-  const prefix = leadingProtocol(echo, held);
+  const prefix = leadingProtocol(echo, held, queue);
   if (prefix.length) {
     echo.forwardedBytes += prefix.length;
-    if (prefix.endsExpectation || echo.forwardedBytes > MAX_ECHO_BYTES) {
+    if (prefix.endsExpectation || prefix.endProbeNonce) {
+      const through = prefix.endProbeNonce
+        ? queue.findIndex((candidate) => candidate.probeNonce === prefix.endProbeNonce)
+        : 0;
+      for (const candidate of queue.slice(0, through + 1)) removeEcho(term, candidate);
+      writeAndContinue(term, echo, prefix.bytes, held.subarray(prefix.length));
+      return;
+    }
+    if (echo.forwardedBytes > MAX_ECHO_BYTES) {
       pending.delete(term);
-      clearTimeout(echo.timer);
+      for (const candidate of queue) clearTimeout(candidate.timer);
       writeEcho(term, echo, held);
       return;
     }
@@ -99,53 +181,45 @@ export function writePtyOutput(
   }
 
   const newline = held.indexOf(10);
-  // Only line-editor decorations may be held. OSC completion/prompt signals,
-  // terminal queries and other controls must reach xterm immediately, even
-  // without a newline: the shell may be waiting for xterm's response.
   const echoLength = newline < 0 ? held.length : newline + 1;
-  if (hasNonEchoControl(held.subarray(0, newline < 0 ? held.length : newline)) ||
-      echoLength > MAX_ECHO_BYTES) {
+  if (hasNonEchoControl(held.subarray(0, newline < 0 ? held.length : newline)) || echoLength > MAX_ECHO_BYTES) {
     pending.delete(term);
-    clearTimeout(echo.timer);
+    for (const candidate of queue) clearTimeout(candidate.timer);
     writeEcho(term, echo, held);
     return;
   }
   if (newline < 0) return;
 
-  pending.delete(term);
-  clearTimeout(echo.timer);
-  const raw = decoder.decode(held.subarray(0, newline));
-  const normalized = normalizeEcho(raw);
-  if (!normalized || normalized.text !== echo.line) {
-    // A concurrent message, an unfamiliar line editor, or no command echo.
-    // Preserve every byte rather than risk eating real output.
+  const normalized = normalizeEcho(decoder.decode(held.subarray(0, newline)));
+  const index = normalized ? queue.findIndex((candidate) => candidate.line === normalized.text) : -1;
+  if (!normalized || index < 0) {
+    // Unknown text invalidates the queue. Preserve genuine output instead of
+    // searching later lines for something resembling our protocol.
+    pending.delete(term);
+    for (const candidate of queue) clearTimeout(candidate.timer);
     writeEcho(term, echo, held);
     return;
   }
-
-  // Probe: clear the existing prompt row so the shell's next prompt replaces
-  // it. Command: show the approved text; execution modifiers stay in details.
-  // Mode changes (especially bracketed paste) still belong to the real shell.
-  // When ZLE erased a right prompt, clear it before drawing the shorter line.
+  const matched = queue[index];
+  for (const candidate of queue.slice(0, index + 1)) removeEcho(term, candidate);
   const replacement = encoder.encode(
-    (echo.visible === null
+    (matched.visible === null
       ? "\r\x1b[2K"
-      : `${normalized.clearToEnd ? "\x1b[K" : ""}${echo.visible}\r\n`) + normalized.modes,
+      : `${normalized.clearToEnd ? "\x1b[K" : ""}${matched.visible}\r\n`) + normalized.modes,
   );
-  const output = new Uint8Array(replacement.length + held.length - newline - 1);
-  output.set(replacement);
-  output.set(held.subarray(newline + 1), replacement.length);
-  writeEcho(term, echo, output);
+  writeAndContinue(term, echo, replacement, held.subarray(newline + 1));
 }
 
-/** Forward strings incrementally without buffering their payloads. A shell
- * start/completion signal ends the expectation: a later identical line could
- * be genuine command output, especially with terminal echo disabled. */
-function leadingProtocol(echo: PendingEcho, bytes: Uint8Array): {
-  length: number; bytes: Uint8Array; endsExpectation: boolean;
+/** Forward strings incrementally without buffering their payloads. Ordinary
+ * command expectations end at shell lifecycle signals. Owned probes instead
+ * retire at a matching RP nonce, so an older reply cannot disarm a newer echo
+ * expectation and a disabled-echo probe cannot consume later genuine output. */
+function leadingProtocol(echo: PendingEcho, bytes: Uint8Array, queue: readonly PendingEcho[]): {
+  length: number; bytes: Uint8Array; endsExpectation: boolean; endProbeNonce?: string;
 } {
   let i = 0;
   let endsExpectation = false;
+  let endProbeNonce: string | undefined;
   while (i < bytes.length) {
     if (echo.protocol) {
       const protocol = echo.protocol;
@@ -153,10 +227,12 @@ function leadingProtocol(echo: PendingEcho, bytes: Uint8Array): {
       if (protocol.prefix.length < 256) protocol.prefix += String.fromCharCode(byte);
       if ((protocol.kind === "osc" && byte === 7) || (protocol.escaped && byte === 92) ||
           byte === 24 || byte === 26) {
-        endsExpectation = protocol.kind === "osc" &&
+        const replyNonce = protocol.kind === "osc" ? /^6973;RP;([a-f0-9]{32});/.exec(protocol.prefix)?.[1] : undefined;
+        if (replyNonce && queue.some((candidate) => candidate.probeNonce === replyNonce)) endProbeNonce = replyNonce;
+        endsExpectation = !echo.probeNonce && protocol.kind === "osc" &&
           /^(?:133;[ACD](?:;|\x07|\x1b|$)|6973;)/.test(protocol.prefix);
         echo.protocol = null;
-        if (endsExpectation) break;
+        if (endsExpectation || endProbeNonce) break;
       } else {
         protocol.escaped = byte === 27;
       }
@@ -178,7 +254,7 @@ function leadingProtocol(echo: PendingEcho, bytes: Uint8Array): {
     if (!query && !echoCsiKind(sequence)) break;
     i = end + 1;
   }
-  return { length: i, bytes: bytes.subarray(0, i), endsExpectation };
+  return { length: i, bytes: bytes.subarray(0, i), endsExpectation, endProbeNonce };
 }
 
 function writeEcho(term: EchoTerminal, echo: PendingEcho, bytes: Uint8Array): void {
