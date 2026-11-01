@@ -154,6 +154,12 @@ function hasFiles(dt: DataTransfer | null): boolean {
   return !!dt && Array.from(dt.types).includes("Files");
 }
 
+// Runbooks and Schedules unmount this panel while the Agent keeps running.
+// Keep native writes ordered across remounts, including a newer selection made
+// before an earlier panel instance receives its acknowledgement.
+const permissionChanges = new Map<string, { generation: number; promise: Promise<void> }>();
+let permissionGeneration = 0;
+
 export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const collapsed = !useAppStore((s) => s.aiPanelOpen);
   const sessions = useAppStore((s) => s.sessions);
@@ -191,6 +197,8 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const detachFileFromAi = useAppStore((s) => s.detachFileFromAi);
   const [modeSaveError, setModeSaveError] = useState(false);
   const modeSelectionId = useRef(0);
+  const [permissionChangeError, setPermissionChangeError] = useState<{ sessionId: string; requestId: string; message: string } | null>(null);
+  const [permissionChanging, setPermissionChanging] = useState<{ sessionId: string; requestId: string; generation: number } | null>(null);
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
   const setSettingsTab = useAppStore((s) => s.setSettingsTab);
   const startSidecar = useAppStore((s) => s.startSidecar);
@@ -355,39 +363,61 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const knowledgeWarning = stream?.knowledgeWarning ?? null;
   const hasChat = streamHasConversation(stream);
 
-  /** Change the standing mode and, when Full is selected, release the exact
-   *  local approval already on screen. Remote commands still need the separate
-   *  empty-prompt confirmation; selecting Full cannot supply it.
-   *  CommandProposal events themselves remain backend-owned and are
-   *  never auto-clicked by classification logic in the frontend. */
+  /** Native acknowledgement owns the visible mode during a run. Changes for
+   *  one request/role are serialized, and superseded replies cannot release an
+   *  approval or overwrite the latest selection. */
   const changePermissionMode = (next: (typeof PERMISSION_OPTIONS)[number]["value"], role?: AgentTargetRole) => {
     if (!sessionId) return;
-    const proposalToRelease =
-      next === "full" &&
-      pendingProposal &&
-      !proposalRemote &&
-      (role === undefined || pendingProposal.targetRole === role)
-        ? pendingProposal.approvalId
-        : null;
-    if (role && sidecar) {
-      setSidecarPermission(sidecar.ownerSessionId, role, next);
-    } else {
-      useAppStore.getState().setPermissionMode(sessionId, next);
+    const targetSessionId = sessionId;
+    const requestId = stream?.requestId;
+    const binding = role ? sidecar : null;
+    const targetIsCurrent = () => {
+      if (!binding) return true;
+      const current = sidecarForSession(useAppStore.getState().sidecars, targetSessionId);
+      return current?.localSessionId === binding.localSessionId
+        && current.remoteSessionId === binding.remoteSessionId && !current.degraded;
+    };
+    const applyMode = () => {
+      if (!targetIsCurrent()) return;
+      if (role && binding) {
+        setSidecarPermission(binding.ownerSessionId, role, next);
+      } else {
+        useAppStore.getState().setPermissionMode(targetSessionId, next);
+      }
+    };
+    if (!requestId) {
+      applyMode();
+      setPermissionChangeError(null);
+      return;
     }
-    if (!stream?.requestId) return;
-    void api
-      .agentSetPermissionMode(stream.requestId, next, role)
-      .then(() => {
-        const current = useAppStore.getState().aiStreams[sessionId];
-        if (
-          proposalToRelease &&
-          current?.requestId === stream.requestId &&
-          current.pendingProposal?.approvalId === proposalToRelease
-        ) {
-          void respondToProposal(sessionId, "run");
-        }
-      })
-      .catch(() => {});
+    const proposalToRelease = next === "full" && pendingProposal && !proposalRemote
+      && (role === undefined || pendingProposal.targetRole === role)
+      ? pendingProposal.approvalId : null;
+    const key = `${requestId}:${role ?? "single"}`;
+    const previous = permissionChanges.get(key)?.promise ?? Promise.resolve();
+    const change = { generation: ++permissionGeneration, promise: Promise.resolve() };
+    permissionChanges.set(key, change);
+    setPermissionChangeError(null);
+    setPermissionChanging({ sessionId: targetSessionId, requestId, generation: change.generation });
+    const latest = () => permissionChanges.get(key) === change;
+    const requestIsCurrent = () => useAppStore.getState().aiStreams[targetSessionId]?.requestId === requestId;
+    change.promise = previous.then(async () => {
+      if (!latest() || !requestIsCurrent() || !targetIsCurrent()) return;
+      await api.agentSetPermissionMode(requestId, next, role);
+      if (!latest() || !requestIsCurrent() || !targetIsCurrent()) return;
+      applyMode();
+      const current = useAppStore.getState().aiStreams[targetSessionId];
+      if (proposalToRelease && current?.pendingProposal?.approvalId === proposalToRelease) {
+        await respondToProposal(targetSessionId, "run");
+      }
+    }).catch((error) => {
+      if (latest() && requestIsCurrent() && targetIsCurrent()) {
+        setPermissionChangeError({ sessionId: targetSessionId, requestId, message: String(error) });
+      }
+    }).finally(() => {
+      if (latest()) permissionChanges.delete(key);
+      setPermissionChanging((current) => current?.generation === change.generation ? null : current);
+    });
   };
 
   // Text files cost nothing special on any model — they are folded into the
@@ -849,6 +879,15 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
         <div className="shrink-0 border-b border-border-subtle bg-warning/10 px-3 py-1 text-[10px] text-warning">
           {S.aiPanel.sidecar.remoteFull(sidecar.remoteIdentity.label)}
         </div>
+      )}
+
+      {permissionChanging?.sessionId === sessionId && permissionChanging.requestId === stream?.requestId && (
+        <p role="status" className="px-3 py-1 text-[10px] text-text-muted">Updating command permissions…</p>
+      )}
+      {permissionChangeError?.sessionId === sessionId && permissionChangeError.requestId === stream?.requestId && (
+        <p role="alert" className="px-3 py-2 text-[11px] text-error">
+          {S.aiPanel.permissionLabel}: {permissionChangeError.message}
+        </p>
       )}
 
       {modeSaveError && (

@@ -33,18 +33,27 @@ export type PrivateToken =
 /**
  * Build a nonce-bound probe line. Valid syntax in zsh, bash, dash/sh AND fish,
  * so it cannot spray a syntax error into the user's terminal. Its real job is
- * binary: if no matching RP comes back, there is no shell in the foreground at
- * all (a pager, a REPL, a half-finished quote) and we must not type a command.
+ * binary: a matching RP proves this probe reached a shell. A missing reply is
+ * inconclusive (transport delay and shell customization can also cause it), so
+ * the caller must keep the command unexecuted without inventing a foreground
+ * program diagnosis.
  *
  * `\033`/`\007` rather than `\e`/`ESC \`: `\e` is not POSIX printf, and BEL
  * avoids the doubled-backslash ST terminator entirely.
  */
 export function probeFor(nonce: string): string {
   assertNonce(nonce);
-  // Prefix each value so fish preserves an argument for unset variables. Fish
-  // otherwise expands a quoted unset list variable to zero arguments, which
-  // would shift FISH_VERSION into the zsh field.
-  return `printf '\\033]6973;RP;${nonce};%s;%s;%s\\007' "z$ZSH_VERSION" "b$BASH_VERSION" "f$FISH_VERSION"`;
+  // Nounset shells reject ordinary references to another shell's unset version
+  // variable. Keep POSIX default expansions inside a quoted eval argument so
+  // fish can parse the outer line too. A read-only status-builtin lookup inside
+  // eval selects the fish reply without parsing POSIX expansions in fish. The
+  // eval boundary also contains zsh's missing-builtin diagnostic. Bash/dash
+  // expose eval through command, while zsh needs builtin. No shell state changes.
+  // command also bypasses user functions/aliases named eval or printf. It must
+  // remain an unquoted keyword in the shared outer line for fish to accept it.
+  const posix = `\\command printf '\\033]6973;RP;${nonce};%s;%s;f\\007' "z\${ZSH_VERSION-}" "b\${BASH_VERSION-}"`;
+  const quoted = `'${posix.replaceAll("'", `'"'"'`)}'`;
+  return `builtin eval 'builtin status' >/dev/null 2>&1 && command printf '\\033]6973;RP;${nonce};z;b;f%s\\007' "$FISH_VERSION" || command eval ${quoted} 2>/dev/null || builtin eval ${quoted} 2>/dev/null`;
 }
 
 /**
@@ -55,7 +64,7 @@ export function probeFor(nonce: string): string {
 export function sentinelSuffix(kind: "posix" | "fish", nonce: string): string {
   assertNonce(nonce);
   const status = kind === "fish" ? "$status" : "$?";
-  return `; printf '\\033]6973;RD;%s;${nonce}\\007' ${status}`;
+  return `; command printf '\\033]6973;RD;%s;${nonce}\\007' ${status}`;
 }
 
 function assertNonce(nonce: string): void {

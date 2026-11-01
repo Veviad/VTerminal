@@ -1426,7 +1426,7 @@ describe("runInTerminal — remote session", () => {
     expect(ptyWrite).not.toHaveBeenCalled();
   });
 
-  it("runs at a freshly attested remote prompt and reuses the untouched proof", async () => {
+  it("reuses prompt attestation but checks SSH liveness before each command", async () => {
     entry = makeEntry(["remote$ "]);
     const binding = captureApprovalPromptBinding("s1")!;
     const first = runInTerminal("s1", "ap1", "hostname", {
@@ -1448,7 +1448,10 @@ describe("runInTerminal — remote session", () => {
     });
     await flush();
     expect(ptyWrite).toHaveBeenCalledTimes(3);
-    emit({ type: "osc", payload: `RD;0;${commandNonce(ptyWrite.mock.calls[2][1])}` });
+    emit({ type: "osc", payload: `RP;${probeNonce(ptyWrite.mock.calls[2][1])};z;b5.2;f` });
+    await flush();
+    expect(ptyWrite).toHaveBeenCalledTimes(4);
+    emit({ type: "osc", payload: `RD;0;${commandNonce(ptyWrite.mock.calls[3][1])}` });
     expect((await second).exitCode).toBe(0);
   });
 
@@ -1567,7 +1570,7 @@ describe("runInTerminal — remote session", () => {
     await vi.advanceTimersByTimeAsync(200);
 
     const written = ptyWrite.mock.calls[1][1];
-    expect(written).toContain(`${typed("uname -a")}; printf`);
+    expect(written).toContain(`${typed("uname -a")}; command printf`);
     const nonce = commandNonce(written);
     expect(nonce).not.toBe(probe);
 
@@ -1621,7 +1624,7 @@ describe("runInTerminal — remote session", () => {
     expect(ptyWrite.mock.calls.length).toBe(before + 2);
   };
 
-  it("probes once per proven shell epoch and reuses it for later commands", async () => {
+  it("uses fresh health and completion nonces for every command in an unchanged shell", async () => {
     entry = makeEntry(["$ ", "out", "$ "]);
 
     const first = runInTerminal("s1", "ap1", "id", { timeoutMs: 60_000 });
@@ -1635,20 +1638,20 @@ describe("runInTerminal — remote session", () => {
 
     const second = runInTerminal("s1", "ap2", "whoami", { timeoutMs: 60_000 });
     await flush();
-    // The whole point: a probe is a visible `printf` line in the user's own
-    // terminal, and the epoch the first one attested is still the live one, so
-    // the second command goes straight in — probe, command, command.
+    // The operator does not need to re-attest, but cached health is never
+    // enough to send a command into a silently stalled SSH connection.
     expect(ptyWrite).toHaveBeenCalledTimes(3);
-    const secondCommand = commandNonce(ptyWrite.mock.calls[2][1]);
-    // Reusing the PROOF is not reusing the completion token: attribution stays
-    // per command, so a replayed RD from `id` can never settle `whoami`.
+    const secondProbe = probeNonce(ptyWrite.mock.calls[2][1]);
+    expect(secondProbe).not.toBe(firstProbe);
+    emit({ type: "osc", payload: `RP;${secondProbe};z;b5.2;f` });
+    await flush();
+    const secondCommand = commandNonce(ptyWrite.mock.calls[3][1]);
     expect(secondCommand).not.toBe(firstCommand);
-    expect(secondCommand).not.toBe(firstProbe);
+    expect(secondCommand).not.toBe(secondProbe);
     emit({ type: "osc", payload: `RD;0;${firstCommand}` });
     emit({ type: "osc", payload: `RD;0;${secondCommand}` });
-
     expect((await second).exitCode).toBe(0);
-    expect(ptyWrite).toHaveBeenCalledTimes(3);
+    expect(ptyWrite).toHaveBeenCalledTimes(4);
   });
 
   it.each(["input", "expiry", "replacement", "target", "disconnect"] as const)(
@@ -1797,14 +1800,103 @@ describe("runInTerminal — remote session", () => {
     expect(outcome.note).toBe("[private output suppressed]");
   });
 
+  it("detects a silently stale SSH link even when prompt attestation is still reusable", async () => {
+    vi.useFakeTimers();
+    entry = makeEntry(["remote$ "]);
+    await proveShell("live-ssh", "pwd", tickFakeTimers);
+    expect(hasReusableRemoteShellProof("s1")).toBe(true);
+    const second = runInTerminal("s1", "stale-ssh", "touch /tmp/must-not-run", {
+      requireRemotePromptAttestation: true, timeoutMs: 60_000,
+    });
+    await tickFakeTimers();
+    expect(ptyWrite).toHaveBeenCalledTimes(3);
+    expect(ptyWrite.mock.calls[2][1]).toContain("6973;RP");
+    await vi.advanceTimersByTimeAsync(10_001);
+    const outcome = await second;
+    expect(outcome.error).toBe("shell_probe_failed");
+    expect(outcome.note).toContain("stale or disconnected");
+    expect(ptyWrite).toHaveBeenCalledTimes(3);
+    expect(ptyWrite.mock.calls.some(([, line]) => line.includes("must-not-run"))).toBe(false);
+    expect(hasReusableRemoteShellProof("s1")).toBe(false);
+  });
+
+  it("allows a delayed SSH probe response without writing the command twice", async () => {
+    vi.useFakeTimers();
+    entry = makeEntry(["remote$ "]);
+    const promise = runInTerminal("s1", "slow-probe", "pwd", { timeoutMs: 20_000 });
+    await tickFakeTimers();
+    const probe = probeNonce(ptyWrite.mock.calls[0][1]);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(ptyWrite).toHaveBeenCalledTimes(1);
+    emit({ type: "osc", payload: `RP;${probe};z;b5.2;f` });
+    await tickFakeTimers();
+    expect(ptyWrite).toHaveBeenCalledTimes(2);
+    emit({ type: "osc", payload: `RD;0;${commandNonce(ptyWrite.mock.calls[1][1])}` });
+    expect((await promise).exitCode).toBe(0);
+  });
+
+  it("bounds a delayed probe by the command's own deadline", async () => {
+    vi.useFakeTimers();
+    entry = makeEntry(["remote$ "]);
+    const promise = runInTerminal("s1", "short-budget", "pwd", { timeoutMs: 2_000 });
+    await vi.advanceTimersByTimeAsync(2_001);
+    const outcome = await promise;
+    expect(outcome.error).toBe("shell_probe_failed");
+    expect(outcome.durationMs).toBeLessThanOrEqual(2_001);
+    expect(ptyWrite).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels a preflight probe immediately, ignores its late reply, and permits retry", async () => {
+    vi.useFakeTimers();
+    entry = makeEntry(["remote$ "]);
+    const promise = runInTerminal("s1", "cancel-probe", "pwd", { timeoutMs: 60_000 });
+    await tickFakeTimers();
+    const oldProbe = probeNonce(ptyWrite.mock.calls[0][1]);
+    expect(abortSession("s1", "cancelled", "another-approval")).toBe(false);
+    expect(abortSession("s1", "cancelled", "cancel-probe")).toBe(true);
+    expect((await promise).error).toBe("cancelled");
+    emit({ type: "osc", payload: `RP;${oldProbe};z;b5.2;f` });
+    await tickFakeTimers();
+    expect(ptyWrite).toHaveBeenCalledTimes(1);
+    expect(listeners.size).toBe(0);
+    expect(hasReusableRemoteShellProof("s1")).toBe(false);
+    await proveShell("retry-probe", "pwd", tickFakeTimers);
+    expect(ptyWrite).toHaveBeenCalledTimes(3);
+  });
+
+  it("releases a cancelled prompt wait before any probe is written", async () => {
+    vi.useFakeTimers();
+    entry = makeEntry(["remote$ "], { bufferType: "alternate" });
+    const promise = runInTerminal("s1", "cancel-wait", "pwd", { timeoutMs: 60_000 });
+    await tickFakeTimers();
+    expect(abortSession("s1", "cancelled", "cancel-wait")).toBe(true);
+    await vi.advanceTimersByTimeAsync(100);
+    expect((await promise).error).toBe("cancelled");
+    expect(ptyWrite).not.toHaveBeenCalled();
+    entry.term.buffer.active.type = "normal";
+    await proveShell("retry-wait", "pwd", tickFakeTimers);
+  });
+
+  it("reports a terminal closed during probing without blaming a foreground program", async () => {
+    vi.useFakeTimers();
+    entry = makeEntry(["remote$ "]);
+    const promise = runInTerminal("s1", "closed-probe", "pwd", { timeoutMs: 60_000 });
+    await tickFakeTimers();
+    entry.disposed = true;
+    emit({ type: "disposed" });
+    expect((await promise).error).toBe("terminal_closed");
+    expect(ptyWrite).toHaveBeenCalledTimes(1);
+  });
+
   it("refuses to run at all when nothing answers the probe", async () => {
     vi.useFakeTimers();
     entry = makeEntry(["some pager output"]);
     const promise = runInTerminal("s1", "ap1", "echo hi", { timeoutMs: 60_000 });
-    await vi.advanceTimersByTimeAsync(3000);
+    await vi.advanceTimersByTimeAsync(10_001);
 
     const outcome = await promise;
-    expect(outcome.error).toBe("not_a_shell");
+    expect(outcome.error).toBe("shell_probe_failed");
+    expect(outcome.note).toContain("does not establish that another program is running");
     // Only the probe was written, never the command.
     expect(ptyWrite).toHaveBeenCalledTimes(1);
     expect(ptyWrite.mock.calls[0][1]).toContain("6973;RP");

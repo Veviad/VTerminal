@@ -77,6 +77,8 @@ export interface SessionUiState {
    *  which `cwd`/`gitBranch` describe a different machine and must not be sent
    *  to the model as current. */
   remote: RemoteContext | null;
+  /** Transient failed health check for the current remote connection. Never persisted. */
+  remoteUnresponsive?: boolean;
   /** Block whose lifetime IS the nested session — when it ends we are back on
    *  the local shell and `remote` must clear. */
   nestedBlockId: string | null;

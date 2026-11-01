@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import {
   canSentinel,
   dialectFromProbe,
@@ -336,7 +338,7 @@ describe("hardenCommand", () => {
 
   it("composes with the sentinel, which must stay last for $? to be the command's", () => {
     const line = hardenCommand("id").line + sentinelSuffix("posix", NONCE);
-    expect(line).toMatch(/id < \/dev\/null; printf .*\$\?$/);
+    expect(line).toMatch(/id < \/dev\/null; command printf .*\$\?$/);
   });
 
   it("introduces no control characters", () => {
@@ -357,28 +359,104 @@ describe("shell snippets", () => {
 
   it("binds the probe reply to a 128-bit nonce and reports each shell variable", () => {
     const probe = probeFor(NONCE);
-    expect(probe).toMatch(/^printf /);
+    expect(probe).toMatch(/^builtin eval 'builtin status' /);
     expect(probe).not.toContain("/usr/bin/printf");
     expect(probe).toContain(`RP;${NONCE}`);
-    expect(probe).toContain("$ZSH_VERSION");
-    expect(probe).toContain("$BASH_VERSION");
+    expect(probe).toContain("${ZSH_VERSION-}");
+    expect(probe).toContain("${BASH_VERSION-}");
     expect(probe).toContain("$FISH_VERSION");
-    expect(probe).toContain('"z$ZSH_VERSION"');
-    expect(probe).toContain('"b$BASH_VERSION"');
-    expect(probe).toContain('"f$FISH_VERSION"');
+    expect(probe).toContain('"z${ZSH_VERSION-}"');
+    expect(probe).toContain('"b${BASH_VERSION-}"');
+    expect(probe).toContain('"$FISH_VERSION"');
   });
 
   it("sentinel captures the command's own status", () => {
     expect(sentinelSuffix("posix", NONCE)).toContain("$?");
     expect(sentinelSuffix("fish", NONCE)).toContain("$status");
     expect(sentinelSuffix("posix", NONCE)).toContain(NONCE);
-    expect(sentinelSuffix("posix", NONCE)).toMatch(/^; printf /);
+    expect(sentinelSuffix("posix", NONCE)).toMatch(/^; command printf /);
     expect(sentinelSuffix("fish", NONCE)).not.toContain("/usr/bin/printf");
   });
 
   it("rejects malformed protocol nonces", () => {
     expect(() => probeFor("short")).toThrow(/128-bit/);
     expect(() => sentinelSuffix("posix", "g".repeat(32))).toThrow(/128-bit/);
+  });
+});
+
+const realShells = [
+  { path: "/bin/bash", args: ["--noprofile", "--norc", "-c"], fish: false },
+  { path: "/bin/zsh", args: ["-f", "-c"], fish: false },
+  { path: "/bin/sh", args: ["-c"], fish: false },
+  { path: "/bin/dash", args: ["-c"], fish: false },
+  { path: "/usr/bin/fish", args: ["--no-config", "-c"], fish: true },
+].filter(({ path }) => existsSync(path));
+
+describe.each(realShells.length ? realShells : [null])("real shell protocol: $path", (shell) => {
+  if (!shell) {
+    it.skip("requires an installed POSIX shell", () => {});
+    return;
+  }
+  const execute = (script: string) => spawnSync(shell.path, [...shell.args, script], {
+    encoding: "utf8",
+    timeout: 5_000,
+    env: { PATH: "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin", TERM: "xterm", LC_ALL: "C" },
+  });
+
+  it("proves readiness without expanding unset shell-version variables", () => {
+    const result = execute(`${shell.fish ? "" : "set -u; "}${probeFor(NONCE)}`);
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe("");
+    const payload = /\x1b\]6973;([^\x07]+)\x07/.exec(result.stdout)?.[1];
+    const token = parsePrivateToken(payload ?? "");
+    expect(token?.t).toBe("RP");
+    expect(token && token.t === "RP" ? token.nonce : null).toBe(NONCE);
+    expect(dialectFromProbe(token as never)).toBe(shell.fish ? "fish" : "posix");
+  });
+
+  it("bypasses printf and eval functions for the probe and completion", () => {
+    // POSIX shells such as dash reserve eval even when invoked as /bin/sh.
+    // Probe this executable's capability rather than inferring its dialect
+    // from the path; the protocol checks below still run in every shell.
+    const evalOverride = !shell.fish && execute("eval() { :; }\n").status === 0
+      ? "eval() { command printf OVERRIDE; }\n"
+      : "";
+    const overrides = shell.fish
+      ? "function printf; command printf OVERRIDE; end\n"
+      : `set -u\nprintf() { command printf OVERRIDE; }\n${evalOverride}`;
+    const result = execute(`${overrides}${probeFor(NONCE)}\nfalse${sentinelSuffix(shell.fish ? "fish" : "posix", NONCE)}`);
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(result.stdout).not.toContain("OVERRIDE");
+    expect(result.stdout).toContain(`\x1b]6973;RP;${NONCE};`);
+    expect(result.stdout).toContain(`\x1b]6973;RD;1;${NONCE}\x07`);
+  });
+
+  it.skipIf(shell.fish)("does not mistake an inherited Fish version for the active dialect", () => {
+    const result = execute(`FISH_VERSION=stale\n${probeFor(NONCE)}`);
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe("");
+    const payload = /\x1b\]6973;([^\x07]+)\x07/.exec(result.stdout)?.[1];
+    const token = parsePrivateToken(payload ?? "");
+    expect(token?.t).toBe("RP");
+    expect(dialectFromProbe(token as never)).toBe("posix");
+  });
+
+  it("bypasses a printf alias without changing its definition", () => {
+    const aliases = shell.fish
+      ? "alias printf 'command printf OVERRIDE'\n"
+      : `${shell.path.endsWith("bash") ? "shopt -s expand_aliases\n" : ""}alias printf='command printf OVERRIDE'\n`;
+    const inspectAlias = shell.fish ? "functions printf" : "\\alias printf";
+    const result = execute(`${aliases}${probeFor(NONCE)}\nfalse${sentinelSuffix(shell.fish ? "fish" : "posix", NONCE)}\n${inspectAlias}`);
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toContain(`\x1b]6973;RP;${NONCE};`);
+    expect(result.stdout).toContain(`\x1b]6973;RD;1;${NONCE}\x07`);
+    expect(result.stdout.match(/OVERRIDE/g)).toHaveLength(1);
   });
 });
 

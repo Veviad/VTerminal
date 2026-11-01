@@ -56,6 +56,7 @@ let steerCounter = 1;
 const steerDispatches = new Map<string, Promise<void>>();
 /** Operator attestations are one-shot and tied to a particular approval. */
 const agentPromptBindings = new Map<string, string>();
+const approvalResponsesInFlight = new Set<string>();
 type AgentTargetEpoch = {
   sessionId: string;
   remote: { kind: string; target: string | null; hostId: string | null } | null;
@@ -733,7 +734,7 @@ export function useAiStream() {
       const ownerSessionId = initialStore.resolveAiOwner(sessionId);
       const stream = ownRecordValue(initialStore.aiStreams, ownerSessionId);
       const proposal = stream?.pendingProposal;
-      if (!proposal) return;
+      if (!proposal || approvalResponsesInFlight.has(proposal.approvalId)) return;
       const targetSessionId = proposal.targetSessionId ?? ownerSessionId;
       const proposedTarget = agentProposalTargets.get(proposal.approvalId);
       if (decision === "run" && (!proposedTarget || !matchesAgentTarget(proposedTarget, targetSessionId))) {
@@ -744,7 +745,12 @@ export function useAiStream() {
         initialStore.setPendingProposal(ownerSessionId, null, "streaming");
         initialStore.noteBlockedCommand(ownerSessionId, proposal.command,
           "Nothing was executed: the terminal target changed after this command was proposed.");
-        await api.respondToApproval(proposal.approvalId, "skip").catch(() => {});
+        await api.respondToApproval(proposal.approvalId, "skip").catch(() => {
+          if (stream?.requestId && ownsActiveRequest(ownerSessionId, stream.requestId)) {
+            stopAgentAfterTerminalFailure(ownerSessionId, stream.requestId,
+              "Could not dismiss the command after its terminal target changed. The Agent stopped; retry the request.");
+          }
+        });
         return;
       }
       if (decision !== "run") agentProposalTargets.delete(proposal.approvalId);
@@ -762,9 +768,22 @@ export function useAiStream() {
           .getState()
           .setPendingProposal(ownerSessionId, null, "streaming");
       }
-      await api
-        .respondToApproval(proposal.approvalId, decision, editedCommand)
-        .catch(() => {});
+      approvalResponsesInFlight.add(proposal.approvalId);
+      try {
+        await api.respondToApproval(proposal.approvalId, decision, editedCommand);
+      } catch {
+        if (stream?.requestId && ownsActiveRequest(ownerSessionId, stream.requestId)) {
+          const binding = agentPromptBindings.get(proposal.approvalId);
+          agentPromptBindings.delete(proposal.approvalId);
+          if (binding) releaseApprovalPromptBinding(binding);
+          agentProposalTargets.delete(proposal.approvalId);
+          abortSession(targetSessionId, "cancelled", proposal.approvalId);
+          stopAgentAfterTerminalFailure(ownerSessionId, stream.requestId,
+            "Could not confirm the command approval response. The Agent stopped; verify the terminal before retrying.");
+        }
+      } finally {
+        approvalResponsesInFlight.delete(proposal.approvalId);
+      }
     },
     [],
   );
@@ -1390,6 +1409,7 @@ export function cardStatus(o: PtyExecOutcome): SettledCommandStatus {
     case "integration_unavailable":
     case "unsafe_command":
     case "not_a_shell":
+    case "shell_probe_failed":
     case "target_changed":
       return "blocked";
     case "terminal_closed":
@@ -1404,6 +1424,7 @@ export function cardStatus(o: PtyExecOutcome): SettledCommandStatus {
 /** A post-dispatch command without trusted completion evidence owns an unknown
  *  foreground terminal. Stop the run before it can propose another command. */
 export function commandOutcomeFence(o: PtyExecOutcome): string | undefined {
+  if (o.error === "shell_probe_failed") return S.aiPanel.shellProbeFailedCommand;
   if (o.error === "interrupt_failed") return S.aiPanel.interruptFailedRun;
   if (o.error === "interrupted" && o.exitCode === null)
     return S.aiPanel.interruptUnconfirmedRun;
@@ -1429,6 +1450,8 @@ function noteForCommandError(error: string | null | undefined): string | undefin
       return "Nothing was executed: the command could not be typed safely.";
     case "not_a_shell":
       return "Nothing was executed: the terminal was not at a shell prompt.";
+    case "shell_probe_failed":
+      return S.aiPanel.shellProbeFailedCommand;
     case "target_changed":
       return "Nothing was executed: the approved terminal target changed.";
     default:
@@ -1460,6 +1483,9 @@ export function commandResultPresentation(
         ? { fence: S.aiPanel.interruptUnconfirmedRun }
         : {}),
     };
+  }
+  if (error === "shell_probe_failed") {
+    return { status: "blocked", note: S.aiPanel.shellProbeFailedCommand, fence: S.aiPanel.shellProbeFailedCommand };
   }
   if (error === "cancelled") {
     return {

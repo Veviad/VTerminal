@@ -14,6 +14,14 @@ use crate::database::{queries, DbState};
 use crate::pty::PtyManager;
 
 const MAX_PASSWORD_BYTES: usize = 4096;
+// Mirrors src/lib/ssh.ts. Password grants bind the exact saved-host launch,
+// including its bounded keepalive defaults, rather than accepting arbitrary -o.
+const INTERACTIVE_KEEPALIVE_OPTIONS: [&str; 4] = [
+    "-o",
+    "ServerAliveInterval=30",
+    "-o",
+    "ServerAliveCountMax=3",
+];
 
 fn credential_id(
     id: &str,
@@ -169,8 +177,8 @@ fn validate(h: &mut queries::SshHostInput) -> Result<(), String> {
     }
     match h.port {
         Some(0) => return Err("port must be between 1 and 65535".into()),
-        // Normalize the default away so the line stays `ssh host`, and so the
-        // importer does not stamp `-p 22` onto every row it reads.
+        // Normalize the default away so the importer does not stamp a redundant
+        // `-p 22` onto every row it reads.
         Some(22) => h.port = None,
         _ => {}
     }
@@ -436,6 +444,7 @@ fn password_launch(
     if let Some(port) = host.port {
         argv.extend(["-p".into(), port.to_string()]);
     }
+    argv.extend(INTERACTIVE_KEEPALIVE_OPTIONS.map(str::to_owned));
     argv.push(format!("{user}@{}", host.hostname));
     if has_control_chars(command)
         || shlex::split(command).as_ref() != Some(&argv)
@@ -817,23 +826,38 @@ mod tests {
             updated_at: String::new(),
             has_password: true,
         };
-        assert!(password_launch(&saved, "ssh deploy@prod-01").is_ok());
+        let direct = "ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 deploy@prod-01";
+        let (argv, prompt) = password_launch(&saved, direct).unwrap();
+        assert_eq!(argv, shlex::split(direct).unwrap());
+        assert_eq!(prompt, "deploy@prod-01's password:");
         for command in [
-            "ssh root@prod-01",
-            "ssh deploy@other",
-            "ssh deploy@prod-01; true",
-            "ssh -J bastion deploy@prod-01",
+            "ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 root@prod-01",
+            "ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 deploy@other",
+            "ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 deploy@prod-01; true",
+            "ssh -J bastion -o ServerAliveInterval=30 -o ServerAliveCountMax=3 deploy@prod-01",
+            "ssh deploy@prod-01",
+            "ssh -o ServerAliveInterval=0 -o ServerAliveCountMax=3 deploy@prod-01",
+            "ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=9 deploy@prod-01",
         ] {
             assert!(password_launch(&saved, command).is_err(), "{command}");
         }
         saved.jump_host = Some("bastion".into());
-        assert!(password_launch(&saved, "ssh deploy@prod-01").is_err());
+        assert!(password_launch(&saved, direct).is_err());
         saved.jump_host = None;
         saved.port = Some(2222);
-        assert!(password_launch(&saved, "ssh deploy@prod-01").is_err());
-        assert!(password_launch(&saved, "ssh -p 2222 deploy@prod-01").is_ok());
+        assert!(password_launch(&saved, direct).is_err());
+        let with_port =
+            "ssh -p 2222 -o ServerAliveInterval=30 -o ServerAliveCountMax=3 deploy@prod-01";
+        assert!(password_launch(&saved, with_port).is_ok());
+        saved.extra_args = Some("-o ServerAliveInterval=12".into());
+        assert!(password_launch(&saved, with_port).is_err());
+        saved.extra_args = None;
         saved.username = None;
-        assert!(password_launch(&saved, "ssh prod-01").is_err());
+        assert!(password_launch(
+            &saved,
+            "ssh -p 2222 -o ServerAliveInterval=30 -o ServerAliveCountMax=3 prod-01"
+        )
+        .is_err());
     }
 
     fn host(label: &str, hostname: &str) -> queries::SshHostInput {

@@ -71,6 +71,7 @@ export type ExecError =
   | "integration_unavailable"
   | "terminal_closed"
   | "not_a_shell"
+  | "shell_probe_failed"
   | "command_not_observed"
   | "unsafe_command"
   | "interrupted"
@@ -138,6 +139,7 @@ const jobs = new Map<string, Job>();
  * settles. This closes the async gap before `jobs.set`, where two callers could
  * otherwise probe and dispatch into the same terminal concurrently. */
 const preflightReservations = new Map<string, string>();
+const preflightControllers = new Map<string, AbortController>();
 interface ResolvedExecMode {
   mode: ExecMode;
   dialect: ShellDialect;
@@ -163,7 +165,9 @@ const IDLE_WAIT_MAX_MS = 20_000;
 const IDLE_POLL_MS = 100;
 const QUIESCENCE_MS = 600;
 const BLOCK_BIND_MS = 5_000;
-const PROBE_WAIT_MS = 2_000;
+// Allow a remote round trip, shell startup hooks and a busy webview to respond.
+// The command deadline still bounds this one-shot probe; it is never retried.
+const PROBE_WAIT_MS = 10_000;
 const CARD_REFRESH_MS = 750;
 const MODEL_TAIL = 8_192;
 const CARD_TAIL = 4_096;
@@ -345,7 +349,14 @@ export function abortSession(
   expectedApprovalId?: string,
 ): boolean {
   const job = jobs.get(sessionId);
-  if (!job || (expectedApprovalId !== undefined && job.approvalId !== expectedApprovalId)) return false;
+  if (!job) {
+    const approvalId = preflightReservations.get(sessionId);
+    const controller = preflightControllers.get(sessionId);
+    if (!controller || (expectedApprovalId !== undefined && approvalId !== expectedApprovalId)) return false;
+    controller.abort(reason);
+    return true;
+  }
+  if (expectedApprovalId !== undefined && job.approvalId !== expectedApprovalId) return false;
   job.finish({
     exitCode: null,
     output: "",
@@ -420,7 +431,9 @@ export async function runInTerminal(
     return unsafeSentinelOutcome(startedAt);
   }
 
+  const controller = new AbortController();
   preflightReservations.set(sessionId, approvalId);
+  preflightControllers.set(sessionId, controller);
   try {
     return await runReservedInTerminal({
       sessionId,
@@ -434,10 +447,12 @@ export async function runInTerminal(
       startedAt,
       remoteAtStart,
       authorizedRemoteProbe,
+      signal: controller.signal,
     });
   } finally {
     if (preflightReservations.get(sessionId) === approvalId) {
       preflightReservations.delete(sessionId);
+      preflightControllers.delete(sessionId);
     }
   }
 }
@@ -454,6 +469,7 @@ interface ReservedRun {
   startedAt: number;
   remoteAtStart: RemoteContext | null;
   authorizedRemoteProbe: boolean;
+  signal: AbortSignal;
 }
 
 async function runReservedInTerminal({
@@ -468,9 +484,14 @@ async function runReservedInTerminal({
   startedAt,
   remoteAtStart,
   authorizedRemoteProbe,
+  signal,
 }: ReservedRun): Promise<PtyExecOutcome> {
   let dispatchAuthorized = false;
   const commandDeadlineAt = startedAt + timeoutMs;
+  const abortedOutcome = (): PtyExecOutcome => signal.reason === "closed"
+    ? closedOutcome(startedAt, null)
+    : { exitCode: null, output: "", durationMs: Date.now() - startedAt, mode: null, error: "cancelled" };
+  if (signal.aborted) return abortedOutcome();
   const remainingCommandMs = (maximum = Number.POSITIVE_INFINITY): number =>
     Math.max(0, Math.min(maximum, commandDeadlineAt - Date.now()));
 
@@ -512,9 +533,13 @@ async function runReservedInTerminal({
           if (settled) return;
           settled = true;
           clearTimeout(timer);
+          signal.removeEventListener("abort", onAbort);
           resolve(authorized);
         };
+        const onAbort = () => finish(false);
+        signal.addEventListener("abort", onAbort, { once: true });
         timer = setTimeout(() => finish(false), remaining);
+        if (signal.aborted) return finish(false);
         Promise.resolve(opts.beforeWrite!()).then(
           (authorized) => finish(authorized),
           () => finish(false),
@@ -541,6 +566,7 @@ async function runReservedInTerminal({
   // even this harmless capability challenge.
   if (authorizedRemoteProbe) {
     dispatchAuthorized = await acquireDispatchAuthorization();
+    if (signal.aborted) return abortedOutcome();
     if (!dispatchAuthorized) return authorizationUnavailable(null);
     if (!remoteIdentityMatches(sessionId, remoteAtStart)) {
       return {
@@ -573,12 +599,11 @@ async function runReservedInTerminal({
   // 1. Wait for the terminal to be safe to type into (never inject blind).
   // Local runbooks use the integrated prompt gate. Remote runbooks claim
   // authorization before the fresh capability probe.
-  const attestedPromptWasProbed = !!approvedPrompt
-    && !!remoteAtStart
-    && !reusableShellProof(sessionId, remoteAtStart);
+  const attestedPromptWasProbed = !!approvedPrompt && !!remoteAtStart;
   const resolvedMode = opts.nonceCompletion && !authorizedRemoteProbe
-    ? await resolveSentinelPrompt(sessionId, idleWaitMs, remoteAtStart, commandDeadlineAt)
-    : await resolveMode(sessionId, idleWaitMs, remoteAtStart, commandDeadlineAt, approvedPrompt, !!opts.requireRemotePromptAttestation);
+    ? await resolveSentinelPrompt(sessionId, idleWaitMs, remoteAtStart, commandDeadlineAt, signal)
+    : await resolveMode(sessionId, idleWaitMs, remoteAtStart, commandDeadlineAt, approvedPrompt, !!opts.requireRemotePromptAttestation, signal);
+  if (signal.aborted || resolvedMode === "cancelled") return abortedOutcome();
   if (resolvedMode === "closed") return closedOutcome(startedAt, null);
   if (resolvedMode === "busy") {
     // Without any local integration events, a missing prompt is an unknown
@@ -603,14 +628,14 @@ async function runReservedInTerminal({
     }
     return busyOutcome(startedAt, null, "a program is in the foreground or the user is typing");
   }
-  if (resolvedMode === "not_a_shell") {
+  if (resolvedMode === "shell_probe_failed") {
     return {
       exitCode: null,
       output: "",
       durationMs: Date.now() - startedAt,
       mode: null,
-      error: "not_a_shell",
-      note: "Nothing was executed: the visible terminal is not sitting at a shell prompt (a pager, editor, or another program has it). Ask the user to return to a prompt.",
+      error: "shell_probe_failed",
+      note: S.aiPanel.shellProbeFailedCommand,
     };
   }
   if (resolvedMode === "target_changed") {
@@ -679,6 +704,7 @@ async function runReservedInTerminal({
   }
   if (opts.beforeWrite && !dispatchAuthorized) {
     dispatchAuthorized = await acquireDispatchAuthorization();
+    if (signal.aborted) return abortedOutcome();
     if (!dispatchAuthorized) return authorizationUnavailable(mode);
   }
 
@@ -732,6 +758,7 @@ async function runReservedInTerminal({
     };
   }
 
+  if (signal.aborted) return abortedOutcome();
   return await new Promise<PtyExecOutcome>((resolve) => {
     const entry = getTerm(sessionId);
     if (!entry || entry.disposed) {
@@ -1318,7 +1345,8 @@ type ModeResolution =
   | ResolvedExecMode
   | "busy"
   | "closed"
-  | "not_a_shell"
+  | "shell_probe_failed"
+  | "cancelled"
   | "target_changed";
 
 function sameRemoteIdentity(
@@ -1344,8 +1372,9 @@ function remoteIdentityMatches(
 /**
  * A remote shell capability proof, and the epoch it describes.
  *
- * The probe is a separate shell round trip. Its input echo is hidden by the
- * PTY display filter, but repeating it for every command still adds latency.
+ * The operator attestation can be reused for an unchanged prompt. Liveness
+ * cannot: every remote command requires a fresh nonce-bound round trip, so a
+ * silently stale SSH link is detected before sending the requested command.
  *
  * What it buys is a fact about the TERMINAL, not about the command: a
  * POSIX-ish shell rather than a pager, an editor or a REPL is reading this
@@ -1450,12 +1479,14 @@ async function resolveSentinelPrompt(
   idleWaitMs: number,
   expectedRemote: RemoteContext | null,
   commandDeadlineAt: number,
+  signal?: AbortSignal,
 ): Promise<ModeResolution> {
   if (!remoteIdentityMatches(sessionId, expectedRemote)) return "target_changed";
   const ready = await waitForPrompt(
     sessionId,
     Math.max(0, Math.min(idleWaitMs, commandDeadlineAt - Date.now())),
     expectedRemote ? "nested" : "integrated",
+    signal,
   );
   if (ready !== "ok") return ready;
   return remoteIdentityMatches(sessionId, expectedRemote)
@@ -1471,6 +1502,7 @@ async function resolveMode(
   commandDeadlineAt: number,
   approvedPrompt: ApprovalPromptSnapshot | null = null,
   requireRemotePromptAttestation = false,
+  signal?: AbortSignal,
 ): Promise<ModeResolution> {
   if (!remoteIdentityMatches(sessionId, expectedRemote)) return "target_changed";
 
@@ -1479,6 +1511,7 @@ async function resolveMode(
       sessionId,
       Math.max(0, Math.min(idleWaitMs, commandDeadlineAt - Date.now())),
       "integrated",
+      signal,
     );
     if (ready !== "ok") return ready;
     return remoteIdentityMatches(sessionId, expectedRemote)
@@ -1490,6 +1523,7 @@ async function resolveMode(
     sessionId,
     Math.max(0, Math.min(idleWaitMs, commandDeadlineAt - Date.now())),
     "nested",
+    signal,
   );
   if (ready !== "ok") return ready;
   // The probe is itself terminal input. Bind it to the same remote fingerprint
@@ -1499,8 +1533,7 @@ async function resolveMode(
   // Checked HERE rather than before the wait above: `waitForPrompt` can block
   // for `idleWaitMs`, and a keystroke during it must invalidate the proof.
   const proven = reusableShellProof(sessionId, expectedRemote);
-  if (proven) return { mode: "sentinel", dialect: proven.dialect };
-  if (requireRemotePromptAttestation && expectedRemote && !approvedPrompt) return "busy";
+  if (requireRemotePromptAttestation && !approvedPrompt && !proven) return "busy";
 
   // A quiet row alone cannot distinguish a prompt from partially typed input.
   // Recheck the operator's exact attestation immediately before the probe;
@@ -1520,8 +1553,16 @@ async function resolveMode(
     probeFor(probeNonce),
     probeWaitMs,
     (token) => token.t === "RP" && token.nonce === probeNonce ? token : null,
+    signal,
   );
-  if (!probe) return "not_a_shell";
+  if (signal?.aborted) return "cancelled";
+  if (!probe) {
+    forgetShellProof(sessionId);
+    if (!liveEntry(sessionId) || useAppStore.getState().sessions.find((session) => session.id === sessionId)?.exited) return "closed";
+    if (!remoteIdentityMatches(sessionId, expectedRemote) || getTerm(sessionId) !== probeEntry || probeEntry?.lastUserInputAt !== probeInputAt) return "target_changed";
+    useAppStore.getState().updateSessionUi(sessionId, { remoteUnresponsive: true });
+    return "shell_probe_failed";
+  }
   if (!remoteIdentityMatches(sessionId, expectedRemote)) return "target_changed";
   if (!probeEntry || getTerm(sessionId) !== probeEntry || probeEntry.lastUserInputAt !== probeInputAt) return "target_changed";
   // RP is printed before the interactive shell redraws its prompt. Bind the
@@ -1531,6 +1572,7 @@ async function resolveMode(
     sessionId,
     Math.max(0, Math.min(idleWaitMs, commandDeadlineAt - Date.now())),
     "nested",
+    signal,
   );
   if (promptReady !== "ok") return promptReady;
   if (!remoteIdentityMatches(sessionId, expectedRemote)) return "target_changed";
@@ -1539,6 +1581,7 @@ async function resolveMode(
   // Recorded only now, so the keyboard-quiet snapshot is taken as late as
   // possible: anything the user typed while the prompt redrew is already in it.
   rememberShellProof(sessionId, expectedRemote, dialect);
+  useAppStore.getState().updateSessionUi(sessionId, { remoteUnresponsive: false });
   return { mode: "sentinel", dialect };
 }
 
@@ -1548,6 +1591,7 @@ function sendAndAwait<T>(
   line: string,
   timeoutMs: number,
   match: (t: PrivateToken) => T | null,
+  signal?: AbortSignal,
 ): Promise<T | null> {
   return new Promise((resolve) => {
     let done = false;
@@ -1556,10 +1600,12 @@ function sendAndAwait<T>(
       if (done) return;
       done = true;
       cancelEcho();
+      signal?.removeEventListener("abort", onAbort);
       clearTimeout(timer);
       unsubscribe();
       resolve(value);
     };
+    const onAbort = () => settle(null);
     const unsubscribe = subscribeTerm(sessionId, (e) => {
       if (e.type === "disposed") return settle(null);
       if (e.type !== "osc") return;
@@ -1569,6 +1615,8 @@ function sendAndAwait<T>(
       if (hit) settle(hit);
     });
     const timer = setTimeout(() => settle(null), timeoutMs);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) return settle(null);
     const entry = getTerm(sessionId);
     if (entry) cancelEcho = expectPtyEcho(entry.term, line, null);
     void api.ptyWrite(sessionId, `${line}\r`).catch(() => settle(null));
@@ -1585,11 +1633,13 @@ function waitForPrompt(
   sessionId: string,
   timeoutMs: number,
   kind: "integrated" | "nested",
-): Promise<"ok" | "busy" | "closed"> {
+  signal?: AbortSignal,
+): Promise<"ok" | "busy" | "closed" | "cancelled"> {
   const deadline = Date.now() + timeoutMs;
   const graceUntil = Date.now() + 1_500;
   return new Promise((resolve) => {
     const tick = () => {
+      if (signal?.aborted) return resolve("cancelled");
       const entry = getTerm(sessionId);
       const session = useAppStore.getState().sessions.find((s) => s.id === sessionId);
       if (!entry || entry.disposed || session?.exited) return resolve("closed");

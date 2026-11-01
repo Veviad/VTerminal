@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.16
+
+- Check SSH shell health before each remote command, stop before dispatch when the connection does not respond, and offer a new SSH tab for an unresponsive saved-host session.
+- Make shell readiness and completion markers tolerate strict unset-variable handling and common aliases or functions in Bash, zsh, dash, and fish; allow more time for slow SSH responses.
+- Add bounded keepalive defaults to saved interactive SSH connections while preserving explicit host options.
+- Keep permission changes consistent with native authorization during classification, readiness checks, and panel changes; surface rejected permission and approval responses.
+
 ## 0.6.15
 
 - Show the remote empty-prompt confirmation in Full and automatic Agent modes, so an initial SSH command can run instead of repeatedly returning “not run.”

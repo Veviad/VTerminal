@@ -221,6 +221,7 @@ export function useSessions() {
               const connect = takePendingConnect(sessionId, command);
               useAppStore.getState().updateSessionUi(sessionId, {
                 remote: nested,
+                remoteUnresponsive: false,
                 nestedBlockId: blockId,
                 remoteHost: connect
                   ? {
@@ -288,6 +289,7 @@ export function useSessions() {
               }
               s.updateSessionUi(sessionId, {
                 remote: null,
+                remoteUnresponsive: false,
                 nestedBlockId: null,
                 remoteHost: null,
               });

@@ -125,6 +125,32 @@ describe("ReconnectBar", () => {
     });
   });
 
+  it("offers only a new SSH tab when an existing remote session fails its health check", async () => {
+    useAppStore.getState().updateSessionUi(session.id, {
+      remote: { kind: "ssh", target: "ansible@cluster2.maholick.com" },
+      remoteUnresponsive: true,
+      remoteHost: { id: "host-1", label: "Cluster 2", color: null },
+    });
+    render(<ReconnectBar sessionId={session.id} />);
+    const open = await screen.findByRole("button", { name: "New SSH tab" });
+    expect(screen.getByTitle("ansible@cluster2.maholick.com")).toHaveTextContent("SSH session not responding");
+    expect(open).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Reconnect" })).not.toBeInTheDocument();
+    fireEvent.click(open);
+    await waitFor(() => expect(mocks.connectToHost).toHaveBeenCalledWith(host, "new-tab", mocks.createSession, session.id));
+    act(() => useAppStore.getState().updateSessionUi(session.id, { remoteUnresponsive: false }));
+    expect(screen.queryByRole("button", { name: "New SSH tab" })).not.toBeInTheDocument();
+  });
+
+  it("does not reconnect an unresponsive manual SSH session using an unrelated saved-host provenance", async () => {
+    useAppStore.getState().updateSessionUi(session.id, {
+      remote: { kind: "ssh", target: "another-host" }, remoteUnresponsive: true, remoteHost: null,
+    });
+    render(<ReconnectBar sessionId={session.id} />);
+    expect(screen.queryByRole("button", { name: "New SSH tab" })).not.toBeInTheDocument();
+    expect(mocks.sshHostsGet).not.toHaveBeenCalled();
+  });
+
   it("stays disabled while the shell is busy or the user is mid-command", async () => {
     render(<ReconnectBar sessionId={session.id} />);
 

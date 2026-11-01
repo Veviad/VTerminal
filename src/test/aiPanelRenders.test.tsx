@@ -421,6 +421,7 @@ describe("AiPanel renders", () => {
       expect(setMode).toHaveBeenCalledWith("req-full", "full", undefined);
       expect(approve).toHaveBeenCalledWith("approval-full", "skip");
     });
+    expect(useAppStore.getState().aiStreams.s1.permissionMode).toBe("full");
   });
 
   it("keeps the remote prompt confirmation pending when Full is selected", async () => {
@@ -440,6 +441,100 @@ describe("AiPanel renders", () => {
     await waitFor(() => expect(setMode).toHaveBeenCalledWith("req-remote-full", "full", undefined));
     expect(approve).not.toHaveBeenCalled();
     expect(useAppStore.getState().aiStreams.s1.pendingProposal?.approvalId).toBe("remote-full");
+  });
+
+  it("keeps the acknowledged mode and approval when native permissions reject Full", async () => {
+    const setMode = vi.spyOn(api, "agentSetPermissionMode").mockRejectedValue("permission mode exceeds the scheduled action's approved limit");
+    const approve = vi.spyOn(api, "respondToApproval").mockResolvedValue(undefined);
+    seedReadyPanel({ mode: "agent", status: "awaiting_approval", requestId: "limited-run", permissionMode: "auto_read",
+      pendingProposal: { approvalId: "limited-command", command: "pwd", explanation: "Inspect directory", readOnly: true, network: false, outputPolicy: "normal" } });
+    render(<AiPanel sessionId="s1" />);
+    fireEvent.click(screen.getByRole("button", { name: S.aiPanel.permissionLabel }));
+    fireEvent.click(screen.getByRole("option", { name: (name) => name.startsWith(S.aiPanel.permission.full) }));
+    await waitFor(() => expect(setMode).toHaveBeenCalledWith("limited-run", "full", undefined));
+    await waitFor(() => expect(screen.getByText(/permission mode exceeds the scheduled action/)).toHaveAttribute("role", "alert"));
+    expect(useAppStore.getState().aiStreams.s1.permissionMode).toBe("auto_read");
+    expect(screen.getByRole("button", { name: S.aiPanel.permissionLabel })).toHaveTextContent(S.aiPanel.permission.auto_read);
+    expect(approve).not.toHaveBeenCalled();
+  });
+
+  it("serializes permission changes and never releases a superseded Full selection", async () => {
+    const first = deferred<void>();
+    const setMode = vi.spyOn(api, "agentSetPermissionMode").mockImplementationOnce(() => first.promise).mockResolvedValue(undefined);
+    const approve = vi.spyOn(api, "respondToApproval").mockResolvedValue(undefined);
+    seedReadyPanel({ mode: "agent", status: "awaiting_approval", requestId: "changing-run", permissionMode: "ask",
+      pendingProposal: { approvalId: "waiting-command", command: "pwd", explanation: "Inspect directory", readOnly: true, network: false, outputPolicy: "normal" } });
+    render(<AiPanel sessionId="s1" />);
+    const select = (mode: "full" | "auto_all" | "auto_read") => {
+      fireEvent.click(screen.getByRole("button", { name: S.aiPanel.permissionLabel }));
+      fireEvent.click(screen.getByRole("option", { name: (name) => name.startsWith(S.aiPanel.permission[mode]) }));
+    };
+    select("full");
+    await waitFor(() => expect(setMode).toHaveBeenCalledTimes(1));
+    expect(useAppStore.getState().aiStreams.s1.permissionMode).toBe("ask");
+    select("auto_all");
+    select("auto_read");
+    expect(setMode).toHaveBeenCalledTimes(1);
+    await act(async () => first.resolve());
+    await waitFor(() => expect(setMode).toHaveBeenCalledTimes(2));
+    expect(setMode).toHaveBeenLastCalledWith("changing-run", "auto_read", undefined);
+    expect(useAppStore.getState().aiStreams.s1.permissionMode).toBe("auto_read");
+    expect(approve).not.toHaveBeenCalled();
+  });
+
+  it("keeps permission writes ordered across panel unmount and remount", async () => {
+    const first = deferred<void>();
+    const setMode = vi.spyOn(api, "agentSetPermissionMode").mockImplementationOnce(() => first.promise).mockResolvedValue(undefined);
+    const approve = vi.spyOn(api, "respondToApproval").mockResolvedValue(undefined);
+    seedReadyPanel({ mode: "agent", status: "awaiting_approval", requestId: "remounted-run", permissionMode: "ask",
+      pendingProposal: { approvalId: "remounted-command", command: "pwd", explanation: "Inspect directory", readOnly: true, network: false, outputPolicy: "normal" } });
+    const firstPanel = render(<AiPanel sessionId="s1" />);
+    fireEvent.click(screen.getByRole("button", { name: S.aiPanel.permissionLabel }));
+    fireEvent.click(screen.getByRole("option", { name: (name) => name.startsWith(S.aiPanel.permission.full) }));
+    await waitFor(() => expect(setMode).toHaveBeenCalledTimes(1));
+    firstPanel.unmount();
+    render(<AiPanel sessionId="s1" />);
+    fireEvent.click(screen.getByRole("button", { name: S.aiPanel.permissionLabel }));
+    fireEvent.click(screen.getByRole("option", { name: (name) => name.startsWith(S.aiPanel.permission.ask) }));
+    expect(setMode).toHaveBeenCalledTimes(1);
+    await act(async () => first.resolve());
+    await waitFor(() => expect(setMode).toHaveBeenCalledTimes(2));
+    expect(setMode).toHaveBeenLastCalledWith("remounted-run", "ask", undefined);
+    expect(useAppStore.getState().aiStreams.s1.permissionMode).toBe("ask");
+    expect(approve).not.toHaveBeenCalled();
+  });
+
+  it("ignores a permission reply after another Agent request replaces it", async () => {
+    const pending = deferred<void>();
+    vi.spyOn(api, "agentSetPermissionMode").mockReturnValue(pending.promise);
+    const approve = vi.spyOn(api, "respondToApproval").mockResolvedValue(undefined);
+    seedReadyPanel({ mode: "agent", status: "streaming", requestId: "old-run", permissionMode: "ask" });
+    render(<AiPanel sessionId="s1" />);
+    fireEvent.click(screen.getByRole("button", { name: S.aiPanel.permissionLabel }));
+    fireEvent.click(screen.getByRole("option", { name: (name) => name.startsWith(S.aiPanel.permission.full) }));
+    await waitFor(() => expect(api.agentSetPermissionMode).toHaveBeenCalledTimes(1));
+    act(() => useAppStore.setState({ aiStreams: { s1: { ...emptyAiStream(), mode: "agent", requestId: "new-run", permissionMode: "auto_read" } } }));
+    await act(async () => pending.resolve());
+    expect(useAppStore.getState().aiStreams.s1.permissionMode).toBe("auto_read");
+    expect(approve).not.toHaveBeenCalled();
+  });
+
+  it("keeps Sidecar permission acknowledgements separate by role", async () => {
+    const local = deferred<void>();
+    const setMode = vi.spyOn(api, "agentSetPermissionMode").mockImplementation((_request, _mode, role) => role === "local" ? local.promise : Promise.resolve());
+    seedReadyPanel({ mode: "agent", status: "streaming", requestId: "sidecar-run" });
+    useAppStore.setState({ sessions: [session("s1"), session("s2")], sidecars: { s1: makeSidecarBinding() } });
+    render(<AiPanel sessionId="s1" />);
+    fireEvent.click(screen.getByRole("button", { name: `Local: ${S.aiPanel.permissionLabel}` }));
+    fireEvent.click(screen.getByRole("option", { name: (name) => name.startsWith(S.aiPanel.permission.full) }));
+    await waitFor(() => expect(setMode).toHaveBeenCalledWith("sidecar-run", "full", "local"));
+    fireEvent.click(screen.getByRole("button", { name: `SSH: ${S.aiPanel.permissionLabel}` }));
+    fireEvent.click(screen.getByRole("option", { name: (name) => name.startsWith(S.aiPanel.permission.auto_read) }));
+    await waitFor(() => expect(useAppStore.getState().sidecars.s1.permissions.remote).toBe("auto_read"));
+    expect(useAppStore.getState().sidecars.s1.permissions.local).toBe("ask");
+    await act(async () => local.resolve());
+    await waitFor(() => expect(useAppStore.getState().sidecars.s1.permissions.local).toBe("full"));
+    expect(useAppStore.getState().sidecars.s1.permissions.remote).toBe("auto_read");
   });
 
   /** A card standing while "Reads" is armed has to say why, or the mode reads as
