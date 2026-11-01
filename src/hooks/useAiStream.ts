@@ -1,7 +1,7 @@
 import { useCallback } from "react";
 import * as api from "../lib/tauri";
 import { useAppStore, type AiStreamState, type CommandTargetMeta } from "../stores/appStore";
-import { getTerm } from "../lib/termRegistry";
+import { getTerm, subscribeTerm } from "../lib/termRegistry";
 import { readLineRange, readScreenTail } from "../lib/terminalSnapshot";
 import {
   abortSession,
@@ -62,6 +62,7 @@ type AgentTargetEpoch = {
   remote: { kind: string; target: string | null; hostId: string | null } | null;
   nestedBlockId: string | null;
   savedHostId: string | null;
+  entry: ReturnType<typeof getTerm>;
 };
 const agentProposalTargets = new Map<string, AgentTargetEpoch>();
 
@@ -76,18 +77,128 @@ function snapshotAgentTarget(sessionId: string): AgentTargetEpoch {
     } : null,
     nestedBlockId: ui?.nestedBlockId ?? null,
     savedHostId: ui?.remoteHost?.id ?? null,
+    entry: getTerm(sessionId),
   };
 }
 
 function matchesAgentTarget(expected: AgentTargetEpoch, sessionId: string): boolean {
   const current = snapshotAgentTarget(sessionId);
-  return expected.sessionId === current.sessionId
+  return expected.entry === current.entry && !current.entry?.disposed
+    && expected.sessionId === current.sessionId
     && expected.nestedBlockId === current.nestedBlockId
     && expected.savedHostId === current.savedHostId
     && expected.remote?.kind === current.remote?.kind
     && expected.remote?.target === current.remote?.target
     && expected.remote?.hostId === current.remote?.hostId
     && !!expected.remote === !!current.remote;
+}
+
+const AGENT_TARGET_CHANGED = "The terminal target changed during this Agent run. Nothing further was executed; verify the intended terminal and start a new request.";
+
+interface AgentRunGuard {
+  ownerSessionId: string;
+  preparing: boolean;
+  check(): boolean;
+  cleanup(): void;
+  approvals: Set<string>;
+}
+const agentRunGuards = new Map<string, AgentRunGuard>();
+
+/** No native permission record exists during attachment/OCR preparation. The
+ * final synchronous dispatch reads the locally selected modes immediately
+ * after this phase ends; native scheduled ceilings remain authoritative. */
+export function isAgentPreparing(ownerSessionId: string, requestId: string): boolean {
+  const guard = agentRunGuards.get(requestId);
+  return guard?.ownerSessionId === ownerSessionId && guard.preparing
+    && ownsActiveRequest(ownerSessionId, requestId);
+}
+
+/** A run keeps its original terminal scope even before its first proposal.
+ * Store changes are observed synchronously so disconnect/reconnect ABA cannot
+ * silently reauthorize a run against the same host label. */
+function bindAgentRun(ownerSessionId: string, requestId: string): AgentRunGuard {
+  const initial = useAppStore.getState();
+  const initialBinding = initial.sidecarForSession(ownerSessionId);
+  const bindingIdentity = initialBinding ? {
+    owner: initialBinding.ownerSessionId,
+    local: initialBinding.localSessionId,
+    remote: initialBinding.remoteSessionId,
+    kind: initialBinding.remoteIdentity.kind,
+    target: initialBinding.remoteIdentity.target,
+    hostId: initialBinding.remoteIdentity.hostId,
+  } : null;
+  const targets = (initialBinding
+    ? [initialBinding.localSessionId, initialBinding.remoteSessionId]
+    : [ownerSessionId]).map(snapshotAgentTarget);
+  let retired = false;
+  let invalidated = false;
+  let unsubscribeStore = () => {};
+  const unsubscribeTerms: Array<() => void> = [];
+  const approvals = new Set<string>();
+  let observedSessions = initial.sessions;
+  let observedSidecars = initial.sidecars;
+  let observedUi = targets.map((target) => initial.sessionUi[target.sessionId]);
+  const cleanup = () => {
+    if (retired) return;
+    retired = true;
+    unsubscribeStore();
+    for (const unsubscribe of unsubscribeTerms) unsubscribe();
+    for (const approvalId of approvals) {
+      agentProposalTargets.delete(approvalId);
+      const prompt = agentPromptBindings.get(approvalId);
+      agentPromptBindings.delete(approvalId);
+      if (prompt) releaseApprovalPromptBinding(prompt);
+    }
+    if (agentRunGuards.get(requestId) === guard) agentRunGuards.delete(requestId);
+  };
+  const invalidate = () => {
+    if (invalidated || retired) return false;
+    invalidated = true;
+    // Retire subscriptions before store writes, and fence ownership before any
+    // cancellation IPC yields. Never abort a replacement request's terminal.
+    cleanup();
+    if (!ownsActiveRequest(ownerSessionId, requestId)) return false;
+    for (const target of targets) abortSession(target.sessionId, "cancelled");
+    stopAgentAfterTerminalFailure(ownerSessionId, requestId, AGENT_TARGET_CHANGED);
+    return false;
+  };
+  const check = () => {
+    if (invalidated) return false;
+    if (retired || !ownsActiveRequest(ownerSessionId, requestId)) {
+      cleanup();
+      return false;
+    }
+    const state = useAppStore.getState();
+    // Entry identity is not React/store state, so always check these two cheap
+    // registry lookups. Permission, focus and split changes are not identity.
+    if (targets.some((target) => getTerm(target.sessionId) !== target.entry || target.entry?.disposed)) return invalidate();
+    if (state.sessions === observedSessions && state.sidecars === observedSidecars
+      && targets.every((target, index) => state.sessionUi[target.sessionId] === observedUi[index])) return true;
+    observedSessions = state.sessions;
+    observedSidecars = state.sidecars;
+    observedUi = targets.map((target) => state.sessionUi[target.sessionId]);
+    const binding = state.sidecarForSession(ownerSessionId);
+    const sameBinding = bindingIdentity
+      ? !!binding && !binding.degraded
+        && binding.ownerSessionId === bindingIdentity.owner
+        && binding.localSessionId === bindingIdentity.local
+        && binding.remoteSessionId === bindingIdentity.remote
+        && binding.remoteIdentity.kind === bindingIdentity.kind
+        && binding.remoteIdentity.target === bindingIdentity.target
+        && binding.remoteIdentity.hostId === bindingIdentity.hostId
+      : !binding;
+    if (!sameBinding || targets.some((target) =>
+      !matchesAgentTarget(target, target.sessionId)
+      || !state.sessions.some((session) => session.id === target.sessionId && !session.exited))) return invalidate();
+    return true;
+  };
+  const guard: AgentRunGuard = { ownerSessionId, preparing: true, check, cleanup, approvals };
+  agentRunGuards.set(requestId, guard);
+  unsubscribeStore = useAppStore.subscribe(() => { check(); });
+  for (const target of targets) unsubscribeTerms.push(subscribeTerm(target.sessionId, (event) => {
+    if (event.type === "disposed") invalidate();
+  }));
+  return guard;
 }
 
 function newSteerId(): string {
@@ -462,6 +573,7 @@ export function useAiStream() {
     // Like ask mode, own the session before attachment persistence yields. This
     // makes a shutdown fence authoritative even while no backend request exists.
     store.initAiStream(ownerSessionId, "agent", requestId);
+    const runGuard = bindAgentRun(ownerSessionId, requestId);
     let staged: Awaited<ReturnType<typeof persistAttachments>>;
     try {
       staged = await persistAttachments(
@@ -476,7 +588,7 @@ export function useAiStream() {
       }
       return;
     }
-    if (!ownsActiveRequest(ownerSessionId, requestId)) return;
+    if (!runGuard.check()) return;
 
     // Pairing is conversation-scoped and may be ended by New Chat, a target
     // disconnect, or a tab close while attachment preflight is awaiting disk.
@@ -517,13 +629,14 @@ export function useAiStream() {
     }
     if (outgoing.images.length > 0 && !store.catalog.find((m) => m.id === store.activeModelId)?.supports_vision) {
       const folded = ocrAvailable() ? await transcribeImages(requestId, outgoing.prompt, staged) : null;
-      if (!ownsActiveRequest(ownerSessionId, requestId)) return;
+      if (!runGuard.check()) return;
       if (folded === null) {
         liveStore.finishAiStream(ownerSessionId, S.vision.readFailed, undefined, requestId);
         return;
       }
       outgoing = { prompt: folded, images: [] };
     }
+    if (!runGuard.check()) return;
     liveStore.pushAiMessage(ownerSessionId, {
       id: `msg-${Date.now()}`,
       role: "user",
@@ -550,23 +663,27 @@ export function useAiStream() {
     const docBuckets =
       activeStream?.attachedBucketRefs ??
       (activeStream?.attachedBucketIds ?? []).map(normalizeKnowledgeBucketRef);
-    const sidecarTargets: SidecarAgentTargets | undefined = liveSidecar
+    if (!runGuard.check()) return;
+    runGuard.preparing = false;
+    const dispatchSidecar = useAppStore.getState().sidecarForSession(ownerSessionId);
+    const sidecarTargets: SidecarAgentTargets | undefined = dispatchSidecar
       ? {
-          local: buildTerminalContext(liveSidecar.localSessionId),
-          remote: buildTerminalContext(liveSidecar.remoteSessionId),
+          local: buildTerminalContext(dispatchSidecar.localSessionId),
+          remote: buildTerminalContext(dispatchSidecar.remoteSessionId),
         }
       : undefined;
-    const permissionModes = liveSidecar
+    const permissionModes = dispatchSidecar
       ? {
           single: "ask" as const,
-          local: liveSidecar.permissions.local,
-          remote: liveSidecar.permissions.remote,
+          local: dispatchSidecar.permissions.local,
+          remote: dispatchSidecar.permissions.remote,
         }
       : {
           single: activeStream?.permissionMode ?? ("ask" as const),
           local: "ask" as const,
           remote: "ask" as const,
         };
+    if (!runGuard.check()) return;
     try {
       const transcript = await api.agentStart(
         requestId,
@@ -672,7 +789,7 @@ export function useAiStream() {
             if (folded === null) throw new Error(S.vision.readFailed);
             outgoing = { prompt: folded, images: [] };
           }
-          if (!ownsActiveRequest(ownerSessionId, requestId)) throw new Error("Agent run ended");
+          if (!ownsActiveRequest(ownerSessionId, requestId) || agentRunGuards.get(requestId)?.check() === false) throw new Error("Agent run ended");
           await api.agentSteer(requestId, steerId, body, outgoing.prompt, outgoing.images);
         } catch {
           // Keep the message and files together for an explicit retry.
@@ -696,6 +813,8 @@ export function useAiStream() {
     const ownerSessionId = store.resolveAiOwner(sessionId);
     const proposal = ownRecordValue(store.aiStreams, ownerSessionId)?.pendingProposal;
     if (!proposal) return false;
+    const requestId = ownRecordValue(store.aiStreams, ownerSessionId)?.requestId;
+    if (!requestId || !agentRunGuards.get(requestId)?.check()) return false;
     const previous = agentPromptBindings.get(proposal.approvalId);
     if (previous) releaseApprovalPromptBinding(previous);
     agentPromptBindings.delete(proposal.approvalId);
@@ -735,6 +854,7 @@ export function useAiStream() {
       const stream = ownRecordValue(initialStore.aiStreams, ownerSessionId);
       const proposal = stream?.pendingProposal;
       if (!proposal || approvalResponsesInFlight.has(proposal.approvalId)) return;
+      if (!stream.requestId || !agentRunGuards.get(stream.requestId)?.check()) return;
       const targetSessionId = proposal.targetSessionId ?? ownerSessionId;
       const proposedTarget = agentProposalTargets.get(proposal.approvalId);
       if (decision === "run" && (!proposedTarget || !matchesAgentTarget(proposedTarget, targetSessionId))) {
@@ -798,6 +918,8 @@ export function useAiStream() {
       const stream = ownRecordValue(state.aiStreams, ownerSessionId);
       const proposal = stream?.pendingMcpProposal;
       if (!proposal || !stream.requestId) return;
+      const runGuard = agentRunGuards.get(stream.requestId);
+      if (runGuard && !runGuard.check()) return;
       state.setPendingMcpProposal(ownerSessionId, null);
       if (decision === "deny") {
         state.finishMcpTool(
@@ -991,6 +1113,8 @@ function canDispatchToTarget(
   const store = useAppStore.getState();
   if (ownRecordValue(store.aiStreams, ownerSessionId)?.requestId !== requestId)
     return false;
+  const guard = agentRunGuards.get(requestId);
+  if (!guard || !guard.check()) return false;
   const target = resolveCommandTarget(ownerSessionId, event);
   return target.ok && target.sessionId === expectedSessionId;
 }
@@ -1052,6 +1176,14 @@ function dispatchPanelEvent(
   // stale stream can never mutate a newer run's state.
   if (ownRecordValue(store.aiStreams, sessionId)?.requestId !== requestId)
     return;
+  const runGuard = agentRunGuards.get(requestId);
+  if (runGuard && !runGuard.check()) return;
+  if (!runGuard && store.aiStreams[sessionId]?.mode === "agent"
+    && (e.type === "CommandProposal" || e.type === "TerminalPromptCheck"
+      || e.type === "CommandStarted" || e.type === "RunInTerminal")) {
+    stopAgentAfterTerminalFailure(sessionId, requestId, AGENT_TARGET_CHANGED);
+    return;
+  }
   switch (e.type) {
     case "Activity":
       store.recordAiActivity(sessionId, e.activity);
@@ -1093,6 +1225,7 @@ function dispatchPanelEvent(
         rejectTargetedRun(sessionId, requestId, target.reason, e.approval_id);
         break;
       }
+      runGuard?.approvals.add(e.approval_id);
       agentProposalTargets.set(e.approval_id, snapshotAgentTarget(target.sessionId));
       setTimeout(() => agentProposalTargets.delete(e.approval_id), 30 * 60_000);
       const proposalUi = store.sessionUi[target.sessionId];
@@ -1424,6 +1557,7 @@ export function cardStatus(o: PtyExecOutcome): SettledCommandStatus {
 /** A post-dispatch command without trusted completion evidence owns an unknown
  *  foreground terminal. Stop the run before it can propose another command. */
 export function commandOutcomeFence(o: PtyExecOutcome): string | undefined {
+  if (o.error === "target_changed") return AGENT_TARGET_CHANGED;
   if (o.error === "shell_probe_failed") return S.aiPanel.shellProbeFailedCommand;
   if (o.error === "interrupt_failed") return S.aiPanel.interruptFailedRun;
   if (o.error === "interrupted" && o.exitCode === null)
@@ -1483,6 +1617,9 @@ export function commandResultPresentation(
         ? { fence: S.aiPanel.interruptUnconfirmedRun }
         : {}),
     };
+  }
+  if (error === "target_changed") {
+    return { status: "blocked", note: noteForCommandError(error), fence: AGENT_TARGET_CHANGED };
   }
   if (error === "shell_probe_failed") {
     return { status: "blocked", note: S.aiPanel.shellProbeFailedCommand, fence: S.aiPanel.shellProbeFailedCommand };

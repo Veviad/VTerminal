@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderHook } from "@testing-library/react";
+import type { IMarker } from "@xterm/xterm";
+import type { BlockTrackerCallbacks } from "../lib/osc133";
 
 const restoreMock = vi.fn();
 const scrollbackMock = vi.fn(async (_id: string) => null as string | null);
@@ -33,6 +35,7 @@ const archiveOnCloseMock = vi.fn(async (_sessionId: string) => {});
 const disposeTermMock = vi.fn();
 const releaseWebglMock = vi.fn();
 const setExpectedShellScopeMock = vi.fn();
+const trackerCallbacks = new Map<string, BlockTrackerCallbacks>();
 
 vi.mock("../lib/tauri", () => ({
   workspaceRestore: () => restoreMock(),
@@ -93,7 +96,9 @@ const fakeTerm = {
 };
 
 vi.mock("../lib/termRegistry", () => ({
-  getOrCreateTerm: () => ({
+  getOrCreateTerm: (sessionId: string, _options: unknown, callbacks: BlockTrackerCallbacks) => {
+    trackerCallbacks.set(sessionId, callbacks);
+    return ({
     term: fakeTerm,
     fit: { fit: vi.fn() },
     // offsetParent null models an inactive/hidden pane.
@@ -105,9 +110,11 @@ vi.mock("../lib/termRegistry", () => ({
       isAtPromptColumn: () => true,
       setExpectedShellScope: (scope: string) => setExpectedShellScopeMock(scope),
     },
-  }),
+    });
+  },
   getTerm: () => ({
     term: fakeTerm,
+    blockMarkers: new Map(),
     fit: { fit: vi.fn() },
     container: { offsetParent: {} },
     disposed: false,
@@ -251,6 +258,7 @@ beforeEach(() => {
   hydrateAttachmentsMock.mockClear();
   setAiPanelOpenMock.mockClear();
   ptyEventHandlers.clear();
+  trackerCallbacks.clear();
   spawnMock.mockReset();
   spawnMock.mockImplementation(
     async (
@@ -683,6 +691,101 @@ describe("restoreSessions", () => {
       globalThis.requestAnimationFrame = original;
     }
   }, 5000);
+});
+
+describe("standalone Agent environment transitions", () => {
+  const marker = (): IMarker => ({ id: 1, line: 0, isDisposed: false,
+    onDispose: () => ({ dispose() {} }), dispose() {} });
+
+  it.each(["ask", "auto_read", "auto_smart", "auto_all", "full"] as const)(
+    "fences %s work before entering SSH", async (mode) => {
+      const { result } = renderHook(() => useSessions());
+      const id = await result.current.createSession();
+      useAppStore.getState().initAiStream(id, "agent", "local-goal");
+      useAppStore.getState().setPermissionMode(id, mode);
+      aiCancelMock.mockImplementationOnce(async () => {
+        expect(useAppStore.getState().aiStreams[id].requestId).toBeNull();
+        expect(useAppStore.getState().sessionUi[id].remote).toBeNull();
+      });
+
+      trackerCallbacks.get(id)!.onBlockStart("ssh-prod", "ssh deploy@prod", marker());
+
+      expect(aiCancelMock).toHaveBeenCalledWith("local-goal");
+      expect(abortSessionMock).toHaveBeenCalledWith(id, "cancelled");
+      expect(useAppStore.getState().aiStreams[id]).toMatchObject({ requestId: null, generationId: null, status: "error",
+        lastError: expect.stringContaining("terminal target changed") });
+      expect(useAppStore.getState().sessionUi[id].remote).toMatchObject({ kind: "ssh", target: "deploy@prod" });
+      expect(ptyWriteMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["ask", "auto_read", "auto_smart", "auto_all", "full"] as const)(
+    "fences %s remote work before SSH returns to the local shell", async (mode) => {
+      const { result } = renderHook(() => useSessions());
+      const id = await result.current.createSession();
+      const callbacks = trackerCallbacks.get(id)!;
+      callbacks.onBlockStart("ssh-prod", "ssh deploy@prod", marker());
+      abortSessionMock.mockClear();
+      useAppStore.getState().initAiStream(id, "agent", "remote-goal");
+      useAppStore.getState().setPermissionMode(id, mode);
+      aiCancelMock.mockImplementationOnce(async () => {
+        expect(useAppStore.getState().aiStreams[id].requestId).toBeNull();
+        expect(useAppStore.getState().sessionUi[id].remote?.target).toBe("deploy@prod");
+      });
+
+      callbacks.onBlockEnd("ssh-prod", 255, marker());
+
+      expect(aiCancelMock).toHaveBeenCalledWith("remote-goal");
+      expect(abortSessionMock).toHaveBeenCalledWith(id, "cancelled");
+      expect(useAppStore.getState().aiStreams[id]).toMatchObject({ requestId: null, generationId: null, status: "error",
+        lastError: expect.stringContaining("terminal target changed") });
+      expect(useAppStore.getState().sessionUi[id]).toMatchObject({ remote: null, nestedBlockId: null });
+      expect(useAppStore.getState().sessions.find((session) => session.id === id)?.exited).toBe(false);
+      expect(ptyWriteMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    "ssh prod uptime",
+    "docker exec immich pgrep server",
+    "docker exec -it database psql -c 'select 1'",
+    "docker run -d nginx",
+    "kubectl exec pod -- cat /etc/os-release",
+    "nix build",
+    "nix-shell --run 'echo ready'",
+    "toolbox run uname -a",
+    "vagrant ssh web -c uptime",
+  ])("keeps a one-off command within the current Agent target: %s", async (command) => {
+    const { result } = renderHook(() => useSessions());
+    const id = await result.current.createSession();
+    useAppStore.getState().initAiStream(id, "agent", "one-off-goal");
+    useAppStore.getState().setPermissionMode(id, "full");
+    const callbacks = trackerCallbacks.get(id)!;
+
+    callbacks.onBlockStart("one-off", command, marker());
+    callbacks.onBlockEnd("one-off", 0, marker());
+
+    expect(useAppStore.getState().aiStreams[id]).toMatchObject({ requestId: "one-off-goal", status: "streaming", permissionMode: "full" });
+    expect(useAppStore.getState().sessionUi[id]).toMatchObject({ remote: null, nestedBlockId: null });
+    expect(aiCancelMock).not.toHaveBeenCalled();
+    expect(abortSessionMock).not.toHaveBeenCalled();
+  });
+
+  it("fences a completed remote generation before its late provider promise settles", async () => {
+    const { result } = renderHook(() => useSessions());
+    const id = await result.current.createSession();
+    const callbacks = trackerCallbacks.get(id)!;
+    callbacks.onBlockStart("ssh-prod", "ssh deploy@prod", marker());
+    useAppStore.getState().initAiStream(id, "agent", "finished-remote-goal");
+    useAppStore.getState().finishAiStream(id, undefined, undefined, "finished-remote-goal");
+    expect(useAppStore.getState().aiStreams[id].generationId).toBe("finished-remote-goal");
+
+    callbacks.onBlockEnd("ssh-prod", 255, marker());
+
+    expect(useAppStore.getState().aiStreams[id].generationId).toBeNull();
+    expect(aiCancelMock).not.toHaveBeenCalled();
+    expect(ptyWriteMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("sidecar terminal lifecycle", () => {

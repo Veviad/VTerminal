@@ -37,19 +37,19 @@ fn result_flags(error: Option<&str>, exit_code: Option<i32>) -> (bool, bool) {
         // The terminal may still be occupied. Ending the loop prevents a second
         // command from being proposed against an unknown foreground process.
         Some(
-            "interrupt_failed" | "command_not_observed" | "terminal_closed" | "shell_probe_failed",
+            "interrupt_failed"
+            | "command_not_observed"
+            | "terminal_closed"
+            | "shell_probe_failed"
+            | "target_changed",
         ) => (false, true),
         Some("interrupted") if exit_code.is_none() => (false, true),
         Some("cancelled") => (false, true),
         // These fail before a command is dispatched, so the Agent can rewrite
         // or wait without treating the terminal as an unknown foreground job.
-        Some(
-            "terminal_busy"
-            | "integration_unavailable"
-            | "unsafe_command"
-            | "not_a_shell"
-            | "target_changed",
-        ) => (false, false),
+        Some("terminal_busy" | "integration_unavailable" | "unsafe_command" | "not_a_shell") => {
+            (false, false)
+        }
         // A confirmed completion after SIGINT is an ordinary interrupted step.
         Some("interrupted") => (false, false),
         // Future or malformed machine codes are conservative by default. If no
@@ -183,12 +183,17 @@ mod tests {
             "integration_unavailable",
             "unsafe_command",
             "not_a_shell",
-            "target_changed",
         ] {
             assert_eq!(result_flags(Some(error), None), (false, false), "{error}");
         }
         assert_eq!(result_flags(Some("future_error"), None), (false, true));
         assert_eq!(result_flags(Some("cancelled"), None), (false, true));
+    }
+
+    #[test]
+    fn changed_terminal_identity_stops_the_agent_instead_of_retrying_locally() {
+        assert_eq!(result_flags(Some("target_changed"), None), (false, true));
+        assert_eq!(result_flags(Some("target_changed"), Some(0)), (false, true));
     }
 
     #[test]

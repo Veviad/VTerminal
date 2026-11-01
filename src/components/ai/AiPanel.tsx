@@ -35,7 +35,8 @@ import {
 } from "../../lib/aiPanel";
 import { panelWidthCss, ratioFromDrag } from "../../lib/panelRatio";
 import { ownRecordValue } from "../../lib/records";
-import { useAiStream } from "../../hooks/useAiStream";
+import { isAgentPreparing, useAiStream } from "../../hooks/useAiStream";
+import { scheduleOwnerOf } from "../../lib/scheduleLiveJobs";
 import { useDismissibleLayer } from "../../hooks/useDismissibleLayer";
 import { useStickyScroll } from "../../hooks/useStickyScroll";
 import { ProviderActivityFeed } from "./ProviderActivityFeed";
@@ -363,9 +364,10 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const knowledgeWarning = stream?.knowledgeWarning ?? null;
   const hasChat = streamHasConversation(stream);
 
-  /** Native acknowledgement owns the visible mode during a run. Changes for
-   *  one request/role are serialized, and superseded replies cannot release an
-   *  approval or overwrite the latest selection. */
+  /** Preparation still owns a local mode choice; the final dispatch reads it.
+   *  Once native execution starts, acknowledgement owns the visible mode.
+   *  Changes for one request/role are serialized, and superseded replies cannot
+   *  release an approval or overwrite the latest selection. */
   const changePermissionMode = (next: (typeof PERMISSION_OPTIONS)[number]["value"], role?: AgentTargetRole) => {
     if (!sessionId) return;
     const targetSessionId = sessionId;
@@ -385,7 +387,13 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
         useAppStore.getState().setPermissionMode(targetSessionId, next);
       }
     };
-    if (!requestId) {
+    const preparing = !!requestId && isAgentPreparing(useAppStore.getState().resolveAiOwner(targetSessionId), requestId);
+    if (requestId && preparing && scheduleOwnerOf(targetSessionId) !== null) {
+      setPermissionChangeError({ sessionId: targetSessionId, requestId,
+        message: "Scheduled Agent permissions can be changed after preparation finishes." });
+      return;
+    }
+    if (!requestId || preparing) {
       applyMode();
       setPermissionChangeError(null);
       return;
