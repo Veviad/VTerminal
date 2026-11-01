@@ -416,9 +416,15 @@ describe.each(realShells.length ? realShells : [null])("real shell protocol: $pa
   });
 
   it("bypasses printf and eval functions for the probe and completion", () => {
+    // POSIX shells such as dash reserve eval even when invoked as /bin/sh.
+    // Probe this executable's capability rather than inferring its dialect
+    // from the path; the protocol checks below still run in every shell.
+    const evalOverride = !shell.fish && execute("eval() { :; }\n").status === 0
+      ? "eval() { command printf OVERRIDE; }\n"
+      : "";
     const overrides = shell.fish
       ? "function printf; command printf OVERRIDE; end\n"
-      : `set -u\nprintf() { command printf OVERRIDE; }\n${shell.path.endsWith("dash") ? "" : "eval() { command printf OVERRIDE; }\n"}`;
+      : `set -u\nprintf() { command printf OVERRIDE; }\n${evalOverride}`;
     const result = execute(`${overrides}${probeFor(NONCE)}\nfalse${sentinelSuffix(shell.fish ? "fish" : "posix", NONCE)}`);
     expect(result.error).toBeUndefined();
     expect(result.status).toBe(0);
