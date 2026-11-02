@@ -429,13 +429,13 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
     setPermissionChanging({ sessionId: targetSessionId, requestId, generation: change.generation });
     const latest = () => permissionChanges.get(key) === change;
     const requestIsCurrent = () => {
-      const current = useAppStore.getState().aiStreams[targetSessionId];
+      const current = ownRecordValue(useAppStore.getState().aiStreams, targetSessionId);
       return current?.requestId === requestId && !current.newChatPending;
     };
     change.promise = previous.then(async () => {
       if (!latest() || !requestIsCurrent() || !targetIsCurrent()) return;
       await api.agentSetPermissionMode(requestId, next, role);
-      const acknowledged = useAppStore.getState().aiStreams[targetSessionId];
+      const acknowledged = ownRecordValue(useAppStore.getState().aiStreams, targetSessionId);
       if (acknowledged?.requestId === requestId && acknowledged.newChatPending) {
         // Native accepted this mode, but the reset fence prevented the UI from
         // adopting it. Retire the same run synchronously before cancellation
@@ -446,9 +446,11 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
       if (!requestIsCurrent() || !targetIsCurrent()) return;
       applyMode();
       const currentState = useAppStore.getState();
-      const current = currentState.aiStreams[targetSessionId];
+      const current = ownRecordValue(currentState.aiStreams, targetSessionId);
+      const currentPermissions = role && binding
+        ? currentState.sidecarForSession(targetSessionId)?.permissions : undefined;
       const currentMode = role && binding
-        ? currentState.sidecarForSession(targetSessionId)?.permissions[role]
+        ? role === "local" ? currentPermissions?.local : currentPermissions?.remote
         : current?.permissionMode;
       if (current?.requestId === requestId && currentMode !== next) {
         // A synchronous conservative cleanup may disarm the UI while the
