@@ -6,6 +6,8 @@
 - Continue the exact pending SSH command after an acknowledged Full selection when the current shell proof is reusable; otherwise keep an explicit prompt confirmation.
 - Keep edited or cleared command drafts pending when selecting Full, so the original proposal cannot run in place of the visible edit.
 - Keep New Chat controls and dispatch fenced until archiving and terminal reset finish, so a new goal or permission choice cannot be discarded by a delayed reset.
+- Ignore late Full-mode acknowledgements while New Chat owns the conversation, including when exit preparation refuses its archive lease.
+- Keep the visible permission mode aligned with accepted native updates when a newer queued change fails, without releasing superseded command approvals.
 
 ## 0.6.18
 

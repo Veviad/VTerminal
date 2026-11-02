@@ -1009,6 +1009,22 @@ describe("native terminal readiness gates", () => {
     expect(api.respondToApproval).not.toHaveBeenCalledWith("exact-proposal", "run");
   });
 
+  it("keeps Run and prompt proof fenced during a pending New Chat without consuming the approval", async () => {
+    const { emit, result } = await start();
+    act(() => emit({ ...check, type: "CommandProposal", approval_id: "reset-pending" }));
+    act(() => useAppStore.getState().setNewChatPending(SID, true));
+    pty.hasReusableRemoteShellProof.mockReturnValue(true);
+    expect(result.current.proposalHasReusablePrompt(SID, "reset-pending")).toBe(false);
+    expect(pty.hasReusableRemoteShellProof).not.toHaveBeenCalled();
+    await act(async () => result.current.respondToProposal(SID, "run"));
+    expect(api.respondToApproval).not.toHaveBeenCalled();
+    expect(useAppStore.getState().aiStreams[SID].pendingProposal?.approvalId).toBe("reset-pending");
+    act(() => useAppStore.getState().setNewChatPending(SID, false));
+    expect(result.current.proposalHasReusablePrompt(SID, "reset-pending")).toBe(true);
+    await act(async () => result.current.respondToProposal(SID, "run"));
+    expect(api.respondToApproval).toHaveBeenCalledExactlyOnceWith("reset-pending", "run", undefined);
+  });
+
   it.each(["skip", "stop"] as const)("settles a prompt check with %s without a terminal write", async (decision) => {
     const { emit, result } = await start();
     act(() => emit({ ...check, approval_id: `readiness-${decision}` }));
