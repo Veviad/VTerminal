@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Hourglass, LockKeyhole, Play, ServerCog, SkipForward, Square, Terminal } from "lucide-react";
 import { S } from "../../lib/strings";
-import type { OutputPolicy } from "../../lib/types";
+import type { CommandApprovalGate, OutputPolicy } from "../../lib/types";
 import { subscribeTerm } from "../../lib/termRegistry";
 import { APPROVAL_PROMPT_TTL_MS } from "../../lib/approvalPrompt";
 
@@ -14,10 +14,12 @@ export function CommandApprovalCard({
   outputPolicy,
   queuedSteers = 0,
   askedBecause = null,
+  gate = "command_permission",
   onRemember,
   onRespond,
   remoteSessionId,
   onConfirmPrompt,
+  onDraftChange,
   targetChanged = false,
 }: {
   command: string;
@@ -32,6 +34,9 @@ export function CommandApprovalCard({
    *  asks about everything, where no explanation is owed. Without it the "Reads"
    *  mode looks broken every time it correctly stops for a write. */
   askedBecause?: string | null;
+  /** Display provenance only. A readiness gate still uses the same target and
+   * one-use prompt checks; its label grants no execution permission. */
+  gate?: CommandApprovalGate;
   onRemember?: (effect: "allow" | "ask" | "deny") => void;
   /** Messages the user typed while this card was up. The loop is parked on this
    *  gate and only appends them once the round ends, so the wait is real and has
@@ -40,6 +45,9 @@ export function CommandApprovalCard({
   onRespond: (decision: "run" | "skip" | "stop", editedCommand?: string) => void;
   remoteSessionId?: string;
   onConfirmPrompt?: (confirmed: boolean) => boolean;
+  /** Report edits synchronously so a pending Full-mode acknowledgement cannot
+   * release the original command while a different draft is visible. */
+  onDraftChange?: (modified: boolean) => void;
   targetChanged?: boolean;
 }) {
   const [editing, setEditing] = useState(false);
@@ -102,8 +110,13 @@ export function CommandApprovalCard({
       className={`rounded-lg border bg-bg-card p-3 ${
         targetRole === "remote" ? "border-warning/50" : "border-accent/40"
       } ${responded ? "opacity-80" : ""}`}
-      aria-label={`${targetRole === "remote" ? "Remote" : "Local"} command approval for ${targetLabel}`}
+      aria-label={`${targetRole === "remote" ? "Remote" : "Local"} ${gate === "terminal_readiness" ? "prompt confirmation" : "command approval"} for ${targetLabel}`}
     >
+      <p className="mb-2 text-[12px] font-semibold text-text-primary">
+        {gate === "terminal_readiness"
+          ? targetRole === "remote" ? "SSH prompt confirmation" : "Terminal prompt confirmation"
+          : "Command approval"}
+      </p>
       {/* Where it lands. Commands now run in the real terminal — which may be
           SSH'd into a production host — so this is a safety affordance, not
           decoration. */}
@@ -121,7 +134,8 @@ export function CommandApprovalCard({
       </div>
       {askedBecause && (
         <p className="mb-2 text-[10px] text-text-muted">
-          {askedBecause === "writes" ? S.aiPanel.askedBecause.writes : `asking: ${askedBecause}`}
+          {gate === "terminal_readiness" ? askedBecause
+            : askedBecause === "writes" ? S.aiPanel.askedBecause.writes : `asking: ${askedBecause}`}
         </p>
       )}
       {targetChanged && (
@@ -141,7 +155,11 @@ export function CommandApprovalCard({
       {editing ? (
         <textarea
           value={edited}
-          onChange={(e) => setEdited(e.target.value)}
+          onChange={(e) => {
+            const value = e.target.value;
+            onDraftChange?.(value !== command);
+            setEdited(value);
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
@@ -214,7 +232,7 @@ export function CommandApprovalCard({
         </button>
         {changed && !empty && <span className="text-[10px] text-warning">edited</span>}
       </div>
-      {outputPolicy !== "private" && onRemember && !responded && (
+      {gate === "command_permission" && outputPolicy !== "private" && onRemember && !responded && (
         <details className="mt-2 text-[10px] text-text-muted">
           <summary className="cursor-pointer select-none hover:text-text-secondary">
             Remember policy for this exact argv shape

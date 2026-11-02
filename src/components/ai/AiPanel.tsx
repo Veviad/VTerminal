@@ -200,6 +200,14 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const modeSelectionId = useRef(0);
   const [permissionChangeError, setPermissionChangeError] = useState<{ sessionId: string; requestId: string; message: string } | null>(null);
   const [permissionChanging, setPermissionChanging] = useState<{ sessionId: string; requestId: string; generation: number } | null>(null);
+  // The card owns its visible draft. A ref makes the post-IPC admission check
+  // see typing immediately without repainting the whole transcript per key.
+  const proposalDrafts = useRef(new Map<string, boolean>());
+  const panelMounted = useRef(true);
+  useEffect(() => {
+    panelMounted.current = true;
+    return () => { panelMounted.current = false; };
+  }, []);
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
   const setSettingsTab = useAppStore((s) => s.setSettingsTab);
   const startSidecar = useAppStore((s) => s.startSidecar);
@@ -217,6 +225,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
     steer,
     attestProposalPrompt,
     proposalTargetIsCurrent,
+    proposalHasReusablePrompt,
     respondToProposal,
     respondToMcpProposal,
     cancel,
@@ -318,6 +327,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   // changing a character.
   const activeEntry = catalog.find((m) => m.id === activeModelId);
   const mode: AiMode = stream?.mode ?? "ask";
+  const newChatPending = stream?.newChatPending ?? false;
   const messages = stream?.messages ?? [];
   const busy =
     stream?.status === "streaming" ||
@@ -339,6 +349,15 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
         ? sidecar.permissions.local
         : sidecar.permissions.remote
       : permissionMode;
+  // Native provenance survives mode changes, while the visible explanation
+  // describes the acknowledged mode now. Full can authorize an older remote
+  // proposal without supplying the missing one-use SSH prompt confirmation.
+  const proposalGate = pendingProposal?.gate === "terminal_readiness"
+    || (proposalRemote && proposalPermissionMode === "full")
+    ? "terminal_readiness" : "command_permission";
+  const proposalAskedBecause = proposalGate === "terminal_readiness"
+    ? proposalPermissionMode === "full" ? S.aiPanel.fullPromptConfirmation : S.aiPanel.promptConfirmation
+    : pendingProposal?.askReason ?? (pendingProposal ? askReason(proposalPermissionMode, pendingProposal) : null);
   const proposalTarget = pendingProposal?.proposedTargetLabel !== undefined
     ? pendingProposal.proposedTargetLabel
     : sidecar && proposalRole
@@ -370,6 +389,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
    *  release an approval or overwrite the latest selection. */
   const changePermissionMode = (next: (typeof PERMISSION_OPTIONS)[number]["value"], role?: AgentTargetRole) => {
     if (!sessionId) return;
+    if (useAppStore.getState().aiStreams[useAppStore.getState().resolveAiOwner(sessionId)]?.newChatPending) return;
     const targetSessionId = sessionId;
     const requestId = stream?.requestId;
     const binding = role ? sidecar : null;
@@ -398,7 +418,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
       setPermissionChangeError(null);
       return;
     }
-    const proposalToRelease = next === "full" && pendingProposal && !proposalRemote
+    const proposalToRelease = next === "full" && pendingProposal
       && (role === undefined || pendingProposal.targetRole === role)
       ? pendingProposal.approvalId : null;
     const key = `${requestId}:${role ?? "single"}`;
@@ -415,7 +435,9 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
       if (!latest() || !requestIsCurrent() || !targetIsCurrent()) return;
       applyMode();
       const current = useAppStore.getState().aiStreams[targetSessionId];
-      if (proposalToRelease && current?.pendingProposal?.approvalId === proposalToRelease) {
+      if (proposalToRelease && current?.pendingProposal?.approvalId === proposalToRelease
+        && panelMounted.current && !proposalDrafts.current.get(proposalToRelease)
+        && (!proposalRemote || proposalHasReusablePrompt(targetSessionId, proposalToRelease))) {
         await respondToProposal(targetSessionId, "run");
       }
     }).catch((error) => {
@@ -508,6 +530,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
 
   const submit = () => {
     if (!sessionId || !aiReady || sidecar?.degraded) return;
+    if (useAppStore.getState().aiStreams[useAppStore.getState().resolveAiOwner(sessionId)]?.newChatPending) return;
     // A large paste has already been accepted (the native paste was prevented),
     // but its Blob may not have reached pendingAttachments yet. Sending during
     // that gap would strand the paste on the following turn.
@@ -553,7 +576,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
         if (!hasFiles(e.dataTransfer)) return;
         e.preventDefault();
         setDragDepth(0);
-        if (sessionId)
+        if (sessionId && !newChatPending)
           void stageInputs(sessionId, inputsFromFileList(e.dataTransfer.files));
       }}
     >
@@ -587,7 +610,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
                   if (selectionId === modeSelectionId.current) setModeSaveError(true);
                 });
               }}
-              disabled={busy}
+              disabled={busy || newChatPending}
               className={`flex items-center gap-1 rounded-md px-2.5 py-0.5 text-[11px] font-medium transition-all duration-150 ${
                 mode === m || (mode === "explain" && m === "ask")
                   ? m === "agent"
@@ -619,7 +642,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
               void startNewChat(sessionId);
             }}
             onBlur={() => setConfirmClear(false)}
-            disabled={!sessionId || !hasChat}
+            disabled={!sessionId || !hasChat || newChatPending}
             className={`rounded-md p-1 transition-colors duration-100 hover:bg-bg-hover ${
               confirmClear
                 ? "text-error"
@@ -642,7 +665,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
                 onClick={() => {
                   setSidecarMenuOpen((open) => !open);
                 }}
-                disabled={busy}
+                disabled={busy || newChatPending}
                 className={`flex items-center gap-1 rounded-md px-1.5 py-1 text-[10px] font-medium transition-colors ${
                   sidecar
                     ? "bg-accent/10 text-accent"
@@ -799,6 +822,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
                 value={permissionMode}
                 options={PERMISSION_OPTIONS}
                 onChange={(next) => changePermissionMode(next)}
+              disabled={newChatPending}
               ariaLabel={S.aiPanel.permissionLabel}
               hint={S.aiPanel.permissionLabel}
               size="sm"
@@ -814,7 +838,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             <BucketPicker sessionId={sessionId} />
           )}
           {(agentMode || mode === "ask") && sessionId && (
-            <McpPicker sessionId={sessionId} disabled={busy} />
+            <McpPicker sessionId={sessionId} disabled={busy || newChatPending} />
           )}
           {/* Reasoning depth for the model in use. The rungs come from that
               model's own capabilities, so this is not a fixed on/off switch — and
@@ -849,6 +873,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
           sessions={sessions}
           sessionUi={sessionUi}
           activeSessionId={activeSessionId}
+          disabled={newChatPending}
           onFocus={(targetSessionId) =>
             setSidecarFocusedSession(sidecar.ownerSessionId, targetSessionId)
           }
@@ -891,6 +916,9 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
 
       {permissionChanging?.sessionId === sessionId && permissionChanging.requestId === stream?.requestId && (
         <p role="status" className="px-3 py-1 text-[10px] text-text-muted">Updating command permissions…</p>
+      )}
+      {newChatPending && (
+        <p role="status" className="px-3 py-2 text-[11px] text-text-muted">Preparing a new chat…</p>
       )}
       {permissionChangeError?.sessionId === sessionId && permissionChangeError.requestId === stream?.requestId && (
         <p role="alert" className="px-3 py-2 text-[11px] text-error">
@@ -971,15 +999,17 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             targetChanged={proposedTargetChanged}
             remoteSessionId={pendingProposal.targetSessionId ?? sessionId}
             onConfirmPrompt={(confirmed) => attestProposalPrompt(sessionId, confirmed)}
+            onDraftChange={(modified) => {
+              if (modified) proposalDrafts.current.set(pendingProposal.approvalId, true);
+              else proposalDrafts.current.delete(pendingProposal.approvalId);
+            }}
             outputPolicy={pendingProposal.outputPolicy}
             target={proposalTarget}
             queuedSteers={queuedSteers}
+            gate={proposalGate}
             // Why this is asking despite an armed auto mode. Null in Confirm,
             // where no explanation is owed.
-            askedBecause={
-              pendingProposal.askReason ??
-              askReason(proposalPermissionMode, pendingProposal)
-            }
+            askedBecause={proposalAskedBecause}
             onRemember={
               pendingProposal.outputPolicy === "private"
                 ? undefined
@@ -1045,7 +1075,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             <button
               type="button"
               onClick={() => void continueRun(sessionId)}
-              disabled={Boolean(sidecar?.degraded)}
+              disabled={newChatPending || Boolean(sidecar?.degraded)}
               title={
                 sidecar?.degraded ? S.aiPanel.sidecar.degradedHint : undefined
               }
@@ -1192,7 +1222,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             multiple
             hidden
             onChange={(e) => {
-              if (sessionId)
+              if (sessionId && !newChatPending)
                 void stageInputs(sessionId, inputsFromFileList(e.target.files));
               // Reset, or picking the same file twice in a row is a no-op.
               e.target.value = "";
@@ -1200,7 +1230,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
           />
           <button
             onClick={() => fileInputRef.current?.click()}
-            disabled={busy && !steering}
+            disabled={newChatPending || (busy && !steering)}
             title={S.attachments.attach}
             className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-text-muted transition-colors duration-150 hover:bg-bg-hover hover:text-text-secondary disabled:opacity-60"
           >
@@ -1225,7 +1255,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
               }
             }}
             rows={1}
-            disabled={(busy && !steering) || Boolean(sidecar?.degraded)}
+            disabled={newChatPending || (busy && !steering) || Boolean(sidecar?.degraded)}
             placeholder={
               steering
                 ? S.aiPanel.steerPlaceholder
@@ -1255,6 +1285,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
               onClick={submit}
               disabled={
                 pastedTextStaging ||
+                newChatPending ||
                 !aiReady ||
                 imagesBlocked ||
                 Boolean(sidecar?.degraded) ||
@@ -1331,6 +1362,7 @@ function SidecarContextBar({
   sessions,
   sessionUi,
   activeSessionId,
+  disabled = false,
   onFocus,
   onPermission,
 }: {
@@ -1338,6 +1370,7 @@ function SidecarContextBar({
   sessions: Session[];
   sessionUi: Record<string, SessionUiState>;
   activeSessionId: string | null;
+  disabled?: boolean;
   onFocus: (sessionId: string) => void;
   onPermission: (
     role: AgentTargetRole,
@@ -1410,7 +1443,7 @@ function SidecarContextBar({
               ariaLabel={`${role === "remote" ? "SSH" : "Local"}: ${S.aiPanel.permissionLabel}`}
               hint={S.aiPanel.permissionLabel}
               size="sm"
-              disabled={Boolean(binding.degraded)}
+              disabled={disabled || Boolean(binding.degraded)}
               icon={<ShieldCheck size={9} />}
             />
           </div>

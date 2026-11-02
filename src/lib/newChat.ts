@@ -99,13 +99,36 @@ export function hasConversation(sessionId: string): boolean {
  * archive write was refused and the conversation was deliberately left in place.
  */
 export function startNewChat(sessionId: string): Promise<boolean> {
-  const owner = useAppStore.getState().resolveAiOwner(sessionId);
+  const initialStore = useAppStore.getState();
+  const owner = initialStore.resolveAiOwner(sessionId);
   const existing = newChatsInFlight.get(owner);
   if (existing) return existing;
-  const operation = trackArchiveMutation(async () => {
+  if (!initialStore.sessions.some((session) => session.id === owner) ||
+      !streamHasConversation(initialStore.aiStreams[owner])) return Promise.resolve(false);
+
+  // Acquire before publishing state or invoking the archive factory: either can
+  // synchronously notify subscribers. Those callers must join this operation,
+  // and every entry point must see the reset fence before the old run goes idle.
+  let resolve!: (value: boolean) => void;
+  const operation = new Promise<boolean>((complete) => { resolve = complete; });
+  newChatsInFlight.set(owner, operation);
+  initialStore.setNewChatPending(owner, true);
+  const settle = (result: boolean) => {
+    if (newChatsInFlight.get(owner) === operation) {
+      newChatsInFlight.delete(owner);
+      useAppStore.getState().setNewChatPending(owner, false);
+    }
+    resolve(result);
+  };
+  const fail = (error: unknown) => {
+    console.warn(`starting a new chat for ${owner} failed:`, error);
+    useAppStore.getState().finishAiStream(owner, S.aiPanel.newChatFailed);
+    settle(false);
+  };
+  void trackArchiveMutation(async () => {
     const store = useAppStore.getState();
-    const ownerSessionId = store.resolveAiOwner(sessionId);
-    const binding = store.sidecarForSession(sessionId);
+    const ownerSessionId = owner;
+    const binding = store.sidecarForSession(ownerSessionId);
     const targetSessionIds = binding
       ? [binding.localSessionId, binding.remoteSessionId]
       : [ownerSessionId];
@@ -270,7 +293,6 @@ export function startNewChat(sessionId: string): Promise<boolean> {
       transcriptPause.release();
       markTranscriptDirty(ownerSessionId);
     }
-  }, false).finally(() => newChatsInFlight.delete(owner));
-  newChatsInFlight.set(owner, operation);
+  }, false).then(settle, fail);
   return operation;
 }

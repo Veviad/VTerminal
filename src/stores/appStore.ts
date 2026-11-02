@@ -168,6 +168,8 @@ export interface AiStreamState {
     network: boolean;
     outputPolicy: OutputPolicy;
     assessment?: import("../lib/types").CommandAssessment;
+    /** Missing for legacy in-memory callers; defaults to command permission. */
+    gate?: import("../lib/types").CommandApprovalGate;
     askReason?: string;
     targetRole?: AgentTargetRole;
     targetSessionId?: string;
@@ -193,6 +195,9 @@ export interface AiStreamState {
    *  `newAiConversation`. Widened from a boolean `autoAccept`; the safety
    *  property is unchanged, a fresh tab is still never pre-armed. */
   permissionMode: PermissionMode;
+  /** New Chat owns this conversation until archiving and clearing have finished.
+   * Shared store state keeps remounted panels and programmatic starts fenced. */
+  newChatPending: boolean;
   /** Set when the run stopped at a guard rail instead of finishing.
    *
    *  Deliberately separate from `lastError`: the transcript is intact,
@@ -327,6 +332,7 @@ export function emptyAiStream(mode: AiMode = "ask"): AiStreamState {
     pendingMcpProposal: null,
     mcpSelection: { server_ids: [], disabled_tools: {} },
     permissionMode: "ask",
+    newChatPending: false,
     pause: null,
     compaction: null,
     steerQueue: [],
@@ -448,6 +454,7 @@ export interface AppState {
     error?: string,
   ): void;
   setPermissionMode(sessionId: string, mode: PermissionMode): void;
+  setNewChatPending(sessionId: string, pending: boolean): void;
   noteBlockedCommand(
     sessionId: string,
     command: string,
@@ -1075,7 +1082,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   setSidecarPermission: (sessionId, role, mode) =>
     set((state) => {
       const binding = findSidecarForSession(state.sidecars, sessionId);
-      if (!binding || binding.degraded) return {};
+      if (!binding || binding.degraded ||
+          (state.aiStreams[binding.ownerSessionId]?.newChatPending && mode !== "ask")) return {};
       return {
         sidecars: {
           ...state.sidecars,
@@ -1485,10 +1493,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((state) => {
       const ownerSessionId = resolveSidecarAiOwner(state.sidecars, sessionId);
       return {
-        ...withAiStream(state, ownerSessionId, () => ({
+        ...withAiStream(state, ownerSessionId, (stream) => ({
           // Spread the zero value rather than listing fields: a field added to
           // AiStreamState later would otherwise silently survive the wipe.
           ...emptyAiStream(defaultAiModeFor(state)),
+          // The operation still owns this tab while cleared scrollback is
+          // persisted. Publishing an empty panel must not enable another run.
+          newChatPending: stream.newChatPending,
           mcpSelection: defaultMcpSelection(state.mcpServers),
         })),
         // New Chat is the explicit conversation boundary for a sidecar.
@@ -1638,8 +1649,17 @@ export const useAppStore = create<AppState>((set, get) => ({
     ),
 
   setPermissionMode: (sessionId, mode) =>
+    set((state) => {
+      const owner = resolveSidecarAiOwner(state.sidecars, sessionId);
+      // Scheduled-run cleanup may need to disarm a cancelled run even if its
+      // simultaneous New Chat archive later fails. Never block that downgrade.
+      if (state.aiStreams[owner]?.newChatPending && mode !== "ask") return {};
+      return withAiStream(state, sessionId, (s) => ({ ...s, permissionMode: mode }));
+    }),
+
+  setNewChatPending: (sessionId, pending) =>
     set((state) =>
-      withAiStream(state, sessionId, (s) => ({ ...s, permissionMode: mode })),
+      withAiStream(state, sessionId, (stream) => ({ ...stream, newChatPending: pending })),
     ),
 
   // A command policy refused. Appended already SETTLED, in one set(): there was

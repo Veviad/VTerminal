@@ -219,8 +219,10 @@ This matters more in a terminal than anywhere else, so it is worth being precise
 - **Reads** mode can auto-run network-backed commands only when their shape is proven read-only and web access is enabled. GitHub CLI writes, GraphQL, request bodies, method overrides, browser launches, and unknown shapes remain approval-gated.
 - **Auto** mode runs standard commands, including writes and network access, but still asks for sensitive, privileged, opaque, private-output, and saved always-ask operations.
 - **Full** mode authorizes every executable command automatically. Explicit deny rules and disabled capabilities still block execution instead of asking.
+- Selecting Full also authorizes the exact command already waiting. An unedited SSH command continues automatically when its current shell proof is reusable; otherwise the card asks only for an **SSH prompt confirmation**, separately from command permission. Edited or cleared drafts keep their manual Run/Skip controls.
 - Commands run in your **visible PTY**, so you see exactly what ran, and it runs wherever that tab is — including over `ssh`.
 - Every mode still requires a ready terminal. For SSH, VTerminal asks you to confirm an empty shell prompt when it cannot verify the current prompt. The confirmation expires after 30 seconds; the checkbox clears so you can verify the prompt again. This check does not change your command permission mode; typing in the terminal or reconnecting can require another confirmation.
+- New Chat waits for archiving and terminal reset before accepting another goal or permission choice. Each new or reopened conversation visibly starts at **Confirm**.
 - Commands you edit before approving are treated as *your* text, not the model's.
 
 When web access is disabled, VTerminal withholds the model's fetch tooling and rejects network-shaped commands before an approval card is even drawn.

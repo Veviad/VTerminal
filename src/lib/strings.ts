@@ -198,6 +198,8 @@ export const S = {
     askedBecause: {
       writes: "asking: this may change state or could not be verified as read-only",
     },
+    promptConfirmation: "Confirm the SSH prompt. Command permissions are checked again before execution.",
+    fullPromptConfirmation: "Full access authorizes this command. Confirm the SSH prompt to continue.",
     deepThink: "Extended thinking",
     editHint: "click command to edit",
     skipped: "skipped",

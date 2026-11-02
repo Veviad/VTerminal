@@ -946,9 +946,9 @@ async fn process_tool_calls(
                         } else if assessment.effect == super::policy::CommandEffect::SensitiveRead {
                             "this read may reveal credential or secret values"
                         } else if effective_output_policy == OutputPolicy::Private {
-                            "private-output commands always require approval"
+                            "private-output commands require approval in this permission mode"
                         } else if assessment.privileged {
-                            "privileged commands always require approval"
+                            "privileged commands require approval in this permission mode"
                         } else if assessment.opaque {
                             "dynamic or opaque execution cannot be verified"
                         } else if rule_decision == super::policy::RuleDecision::Ask {
@@ -3337,6 +3337,78 @@ mod tests {
                             .iter()
                             .all(|m| !m.content.contains("SYNTHETIC_PROMPT_GATE_OUTPUT")));
                     }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn full_allows_privileged_find_pipeline_while_guarded_modes_require_approval() {
+        let command = "sudo find /tmp/vterminal-permission-fixture -type f -size 0 | wc -l";
+        assert!(super::super::policy::assess(command).privileged);
+        for mode in [
+            PermissionMode::Ask,
+            PermissionMode::AutoRead,
+            PermissionMode::AutoSmart,
+            PermissionMode::AutoAll,
+            PermissionMode::Full,
+        ] {
+            for role in [None, Some("local"), Some("remote")] {
+                let full = mode == PermissionMode::Full;
+                let target = if role.is_some() {
+                    sidecar_config().exec_target
+                } else {
+                    ExecTarget::Pty {
+                        session_id: "single-session".into(),
+                    }
+                };
+                let (outcome, events) = prompt_gate_fixture(
+                    target,
+                    mode,
+                    json!({"command": command, "target": role}),
+                    Some(ApprovalResponse {
+                        decision: if full {
+                            ApprovalDecision::Run
+                        } else {
+                            ApprovalDecision::Skip
+                        },
+                        edited_command: None,
+                    }),
+                )
+                .await;
+                assert_eq!(outcome.termination, AgentTermination::Completed);
+                let gates: Vec<_> = events
+                    .iter()
+                    .filter(|event| {
+                        event["type"] == "TerminalPromptCheck" || event["type"] == "CommandProposal"
+                    })
+                    .collect();
+                assert_eq!(gates.len(), 1, "{mode:?} {role:?}");
+                assert_eq!(gates[0]["command"], command);
+                assert_eq!(gates[0]["assessment"]["privileged"], true);
+                assert_eq!(gates[0]["output_policy"], "normal");
+                assert_eq!(
+                    gates[0]["type"],
+                    if full {
+                        "TerminalPromptCheck"
+                    } else {
+                        "CommandProposal"
+                    },
+                    "{mode:?} {role:?}"
+                );
+                assert_eq!(
+                    gates[0]["ask_reason"],
+                    if full {
+                        "the remote shell prompt needs confirmation before automatic execution"
+                    } else {
+                        "privileged commands require approval in this permission mode"
+                    }
+                );
+                let dispatch = events.iter().find(|event| event["type"] == "RunInTerminal");
+                assert_eq!(dispatch.is_some(), full, "{mode:?} {role:?}");
+                if let Some(dispatch) = dispatch {
+                    assert_eq!(dispatch["command"], command);
+                    assert_eq!(dispatch["approval_id"], gates[0]["approval_id"]);
                 }
             }
         }

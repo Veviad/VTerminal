@@ -282,6 +282,7 @@ export function useAiStream() {
   const generateCommand = useCallback(
     async (sessionId: string, prompt: string) => {
       const store = useAppStore.getState();
+      if (store.aiStreams[store.resolveAiOwner(sessionId)]?.newChatPending) return;
       const requestId = newRequestId();
       store.updateSessionUi(sessionId, {
         composerStatus: "generating",
@@ -843,6 +844,22 @@ export function useAiStream() {
     return !!target && matchesAgentTarget(target, proposal.targetSessionId ?? ownerSessionId);
   }, []);
 
+  /** Read-only check used after an explicit, acknowledged Full selection. It
+   * never captures or renews prompt trust, and cannot authorize a different
+   * proposal or terminal. Actual dispatch revalidates the same target/proof. */
+  const proposalHasReusablePrompt = useCallback((sessionId: string, approvalId: string): boolean => {
+    const store = useAppStore.getState();
+    const ownerSessionId = store.resolveAiOwner(sessionId);
+    const stream = ownRecordValue(store.aiStreams, ownerSessionId);
+    const proposal = stream?.pendingProposal;
+    if (!proposal || proposal.approvalId !== approvalId || !stream.requestId
+      || !agentRunGuards.get(stream.requestId)?.check()) return false;
+    const targetSessionId = proposal.targetSessionId ?? ownerSessionId;
+    const target = agentProposalTargets.get(approvalId);
+    return !!target && matchesAgentTarget(target, targetSessionId)
+      && hasReusableRemoteShellProof(targetSessionId);
+  }, []);
+
   const respondToProposal = useCallback(
     async (
       sessionId: string,
@@ -992,6 +1009,7 @@ export function useAiStream() {
     steer,
     attestProposalPrompt,
     proposalTargetIsCurrent,
+    proposalHasReusablePrompt,
     respondToProposal,
     respondToMcpProposal,
     cancel,
@@ -1001,8 +1019,10 @@ export function useAiStream() {
 function isSessionBusy(sessionId: string): boolean {
   const store = useAppStore.getState();
   const ownerSessionId = store.resolveAiOwner(sessionId);
-  const status = ownRecordValue(store.aiStreams, ownerSessionId)?.status;
+  const stream = ownRecordValue(store.aiStreams, ownerSessionId);
+  const status = stream?.status;
   return (
+    stream?.newChatPending === true ||
     status === "streaming" ||
     status === "awaiting_approval" ||
     status === "executing"
@@ -1250,6 +1270,7 @@ function dispatchPanelEvent(
           readOnly: e.read_only,
           network: e.network,
           outputPolicy: e.output_policy,
+          gate: e.type === "TerminalPromptCheck" ? "terminal_readiness" : "command_permission",
           proposedRemote,
           proposedTargetLabel: target.meta?.label ?? describeRemote(proposalUi?.remote ?? null) ?? proposalUi?.cwd ?? null,
           ...(e.assessment ? { assessment: e.assessment } : {}),

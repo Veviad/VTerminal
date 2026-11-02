@@ -49,6 +49,7 @@ vi.mock("../lib/ptyExec", () => ({
 }));
 
 import { chatArchiveId, hasConversation, startNewChat } from "../lib/newChat";
+import { freezeArchiveMutations, resumeArchiveMutations } from "../lib/archiveWriteTracker";
 import { captureSidecarRemoteIdentity } from "../lib/sidecar";
 import { emptyAiStream, emptySessionUi, useAppStore } from "../stores/appStore";
 import type { AiMessage, ArchiveSessionInput, ChatMessage, Session } from "../lib/types";
@@ -245,6 +246,9 @@ describe("startNewChat", () => {
     const first = startNewChat("sess-1-0");
     const second = startNewChat("sess-1-0");
     expect(second).toBe(first);
+    expect(useAppStore.getState().aiStreams["sess-1-0"].newChatPending).toBe(true);
+    useAppStore.getState().setPermissionMode("sess-1-0", "auto_all");
+    expect(useAppStore.getState().aiStreams["sess-1-0"].permissionMode).toBe("ask");
     expect(clearTerminalMock).not.toHaveBeenCalled();
     expect(useAppStore.getState().aiStreams["sess-1-0"].messages).toHaveLength(2);
     for (let i = 0; i < 5 && !finishArchive; i++) await Promise.resolve();
@@ -253,6 +257,73 @@ describe("startNewChat", () => {
     expect(archivePutManyMock).toHaveBeenCalledOnce();
     expect(clearTerminalMock).toHaveBeenCalledOnce();
     expect(archivePutManyMock.mock.invocationCallOrder[0]).toBeLessThan(clearTerminalMock.mock.invocationCallOrder[0]);
+    expect(useAppStore.getState().aiStreams["sess-1-0"].newChatPending).toBe(false);
+    useAppStore.getState().setPermissionMode("sess-1-0", "auto_all");
+    expect(useAppStore.getState().aiStreams["sess-1-0"].permissionMode).toBe("auto_all");
+  });
+
+  it("acquires the operation before publishing a state change that reenters New Chat", async () => {
+    let reentered: Promise<boolean> | undefined;
+    const unsubscribe = useAppStore.subscribe((state) => {
+      if (state.aiStreams["sess-1-0"].newChatPending && !reentered) {
+        reentered = startNewChat("sess-1-0");
+      }
+    });
+    const operation = startNewChat("sess-1-0");
+    unsubscribe();
+    expect(reentered).toBe(operation);
+    await expect(operation).resolves.toBe(true);
+    expect(archivePutManyMock).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the reset fence after publishing the fresh conversation until persistence finishes", async () => {
+    let finishPersistence!: () => void;
+    persistClearedMock.mockImplementationOnce(() => new Promise<void>((resolve) => { finishPersistence = resolve; }));
+    const operation = startNewChat("sess-1-0");
+    await vi.waitFor(() => expect(persistClearedMock).toHaveBeenCalledOnce());
+    const fresh = useAppStore.getState().aiStreams["sess-1-0"];
+    expect(fresh.messages).toEqual([]);
+    expect(fresh.status).toBe("idle");
+    expect(fresh.newChatPending).toBe(true);
+    useAppStore.getState().setPermissionMode("sess-1-0", "auto_all");
+    expect(useAppStore.getState().aiStreams["sess-1-0"].permissionMode).toBe("ask");
+    expect(startNewChat("sess-1-0")).toBe(operation);
+    finishPersistence();
+    await expect(operation).resolves.toBe(true);
+    expect(useAppStore.getState().aiStreams["sess-1-0"].newChatPending).toBe(false);
+  });
+
+  it("fences both Sidecar permission roles while the shared conversation is archived", async () => {
+    const { ownerId, remoteId } = seedSidecar();
+    useAppStore.getState().setSidecarPermission(ownerId, "local", "auto_all");
+    useAppStore.getState().setSidecarPermission(ownerId, "remote", "auto_all");
+    let finishArchive!: () => void;
+    archivePutManyMock.mockImplementationOnce(() => new Promise<void>((resolve) => { finishArchive = resolve; }));
+    const operation = startNewChat(remoteId);
+    await vi.waitFor(() => expect(archivePutManyMock).toHaveBeenCalledOnce());
+    const permissions = useAppStore.getState().sidecarForSession(ownerId)!.permissions;
+    useAppStore.getState().setSidecarPermission(remoteId, "local", "auto_read");
+    useAppStore.getState().setSidecarPermission(ownerId, "remote", "auto_read");
+    useAppStore.getState().setPermissionMode(remoteId, "auto_all");
+    expect(useAppStore.getState().sidecarForSession(ownerId)!.permissions).toEqual(permissions);
+    useAppStore.getState().setSidecarPermission(remoteId, "remote", "ask");
+    expect(useAppStore.getState().sidecarForSession(ownerId)!.permissions.remote).toBe("ask");
+    expect(useAppStore.getState().aiStreams[remoteId].permissionMode).toBe("ask");
+    expect(startNewChat(ownerId)).toBe(operation);
+    finishArchive();
+    await expect(operation).resolves.toBe(true);
+  });
+
+  it("releases the reset fence when exit preparation refuses the archive lease", async () => {
+    freezeArchiveMutations();
+    try {
+      await expect(startNewChat("sess-1-0")).resolves.toBe(false);
+      expect(useAppStore.getState().aiStreams["sess-1-0"].newChatPending).toBe(false);
+      expect(useAppStore.getState().aiStreams["sess-1-0"].messages).toHaveLength(2);
+      expect(archivePutManyMock).not.toHaveBeenCalled();
+    } finally {
+      resumeArchiveMutations();
+    }
   });
 
   it("hands the reopened row's supersede to the chat, not to the tab", async () => {
@@ -350,8 +421,13 @@ describe("startNewChat", () => {
   });
 
   it("keeps the conversation when the archive write is refused", async () => {
+    useAppStore.getState().setPermissionMode("sess-1-0", "auto_all");
     archivePutManyMock.mockRejectedValue(new Error("db locked"));
-    await expect(startNewChat("sess-1-0")).resolves.toBe(false);
+    const operation = startNewChat("sess-1-0");
+    // A cancelled scheduled run must still be able to disarm its permission
+    // while New Chat is pending, even when that archive will fail.
+    useAppStore.getState().setPermissionMode("sess-1-0", "ask");
+    await expect(operation).resolves.toBe(false);
 
     // Losing a conversation to a database error is worse than a click that
     // reports why it did nothing.
@@ -359,8 +435,14 @@ describe("startNewChat", () => {
     expect(stream.messages).toHaveLength(2);
     expect(stream.modelTranscript).toEqual(TRANSCRIPT);
     expect(stream.lastError).toBeTruthy();
+    expect(stream.newChatPending).toBe(false);
+    expect(stream.permissionMode).toBe("ask");
     expect(clearTerminalMock).not.toHaveBeenCalled();
     expect(persistClearedMock).not.toHaveBeenCalled();
+
+    archivePutManyMock.mockResolvedValue(undefined);
+    await expect(startNewChat("sess-1-0")).resolves.toBe(true);
+    expect(useAppStore.getState().aiStreams["sess-1-0"].newChatPending).toBe(false);
   });
 
   it("does nothing for an empty panel or an unknown session", async () => {

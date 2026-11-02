@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.19
+
+- Distinguish SSH prompt confirmation from command permission, and remove stale privileged-command explanations after selecting Full.
+- Continue the exact pending SSH command after an acknowledged Full selection when the current shell proof is reusable; otherwise keep an explicit prompt confirmation.
+- Keep edited or cleared command drafts pending when selecting Full, so the original proposal cannot run in place of the visible edit.
+- Keep New Chat controls and dispatch fenced until archiving and terminal reset finish, so a new goal or permission choice cannot be discarded by a delayed reset.
+
 ## 0.6.18
 
 - Clear expired SSH empty-prompt confirmations and keep the approval available for an explicit recheck.

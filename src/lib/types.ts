@@ -1,6 +1,10 @@
 // Shared types — the TS mirror of the Rust serde enums and structs.
 // Wire casing: Rust emits snake_case fields inside tagged unions (Cowork convention).
 
+/** Native provenance of a pending Agent gate. Display metadata only; command
+ * authorization and prompt attestation remain independently enforced. */
+export type CommandApprovalGate = "command_permission" | "terminal_readiness";
+
 // ---------- Sessions & blocks ----------
 
 // The tab label is DERIVED, never stored — `resolveSessionTitle` in

@@ -2,6 +2,7 @@ import { act, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   Attachment,
+  Block,
   ChatMessage,
   KnowledgeBucketRef,
   Session,
@@ -153,6 +154,42 @@ beforeEach(() => {
   });
   useAppStore.getState().addSession(session());
   terminalRegistry.entries.set(SID, { disposed: false });
+});
+
+describe("New Chat operation fence", () => {
+  it("blocks every programmatic start while resetting and accepts a new authorized goal after completion", async () => {
+    const { result } = renderHook(() => useAiStream());
+    const block: Block = {
+      id: "failed-command", sessionId: SID, command: "false", state: "done",
+      exitCode: 1, startLine: 0, endLine: 1, startedAt: "2026-11-02T00:00:00Z",
+      endedAt: "2026-11-02T00:00:01Z", origin: "user",
+    };
+    act(() => useAppStore.getState().setNewChatPending(SID, true));
+    const pending = useAppStore.getState().aiStreams[SID];
+    await act(async () => {
+      await result.current.startAgent(SID, "new goal during archive");
+      await result.current.ask(SID, "new question during archive");
+      await result.current.explainBlock(SID, block);
+      await result.current.generateCommand(SID, "suggest during archive");
+    });
+    expect(api.agentStart).not.toHaveBeenCalled();
+    expect(api.aiAsk).not.toHaveBeenCalled();
+    expect(api.aiExplain).not.toHaveBeenCalled();
+    expect(api.aiSuggest).not.toHaveBeenCalled();
+    expect(useAppStore.getState().aiStreams[SID]).toBe(pending);
+    expect(useAppStore.getState().sessionUi[SID].composerRequestId).toBeNull();
+
+    act(() => {
+      useAppStore.getState().newAiConversation(SID);
+      useAppStore.getState().setNewChatPending(SID, false);
+      useAppStore.getState().setPermissionMode(SID, "auto_all");
+    });
+    await act(async () => result.current.startAgent(SID, "new goal after archive"));
+    expect(api.agentStart).toHaveBeenCalledOnce();
+    expect(api.agentStart.mock.calls[0][1]).toBe("new goal after archive");
+    expect(api.agentStart.mock.calls[0][8]).toEqual({ single: "auto_all", local: "ask", remote: "ask" });
+    expect(useAppStore.getState().aiStreams[SID].messages[0].content).toBe("new goal after archive");
+  });
 });
 
 describe("steering with attachments", () => {
@@ -913,7 +950,7 @@ describe("native terminal readiness gates", () => {
       expect(useAppStore.getState().aiStreams[SID]).toMatchObject({
         status: "awaiting_approval", pendingProposal: {
           approvalId: `readiness-${mode}`, proposedRemote: true,
-          proposedTargetLabel: "ssh audit-host",
+          proposedTargetLabel: "ssh audit-host", gate: "terminal_readiness",
         },
       });
       expect(api.respondToApproval).not.toHaveBeenCalled();
@@ -954,6 +991,22 @@ describe("native terminal readiness gates", () => {
     act(() => emit({ ...check, type: "CommandProposal", approval_id: "permission-required", output_policy: "private" }));
     expect(api.respondToApproval).not.toHaveBeenCalled();
     expect(useAppStore.getState().aiStreams[SID].pendingProposal?.approvalId).toBe("permission-required");
+    expect(useAppStore.getState().aiStreams[SID].pendingProposal?.gate).toBe("command_permission");
+  });
+
+  it("checks existing prompt proof only for the exact current proposal without minting trust or approving it", async () => {
+    const { emit, result } = await start();
+    act(() => emit({ ...check, type: "CommandProposal", approval_id: "exact-proposal" }));
+    expect(result.current.proposalHasReusablePrompt(SID, "another-proposal")).toBe(false);
+    expect(pty.hasReusableRemoteShellProof).not.toHaveBeenCalled();
+    expect(result.current.proposalHasReusablePrompt(SID, "exact-proposal")).toBe(false);
+    pty.hasReusableRemoteShellProof.mockReturnValue(true);
+    expect(result.current.proposalHasReusablePrompt(SID, "exact-proposal")).toBe(true);
+    expect(pty.captureApprovalPromptBinding).not.toHaveBeenCalled();
+    expect(api.respondToApproval).not.toHaveBeenCalled();
+    act(() => useAppStore.getState().updateSessionUi(SID, { remote: { kind: "ssh", target: "replacement" } }));
+    expect(result.current.proposalHasReusablePrompt(SID, "exact-proposal")).toBe(false);
+    expect(api.respondToApproval).not.toHaveBeenCalledWith("exact-proposal", "run");
   });
 
   it.each(["skip", "stop"] as const)("settles a prompt check with %s without a terminal write", async (decision) => {
