@@ -21,7 +21,7 @@ permissions:
 jobs:
   frontend:
     name: Frontend
-    runs-on: [self-hosted, Linux, coolify]
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -76,14 +76,10 @@ jobs:
   # diff. Separate job means both failures surface in the same run.
   format:
     name: Format
-    runs-on: [self-hosted, Linux, coolify]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Install rustup
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Install toolchain
         run: |
           rustup show
@@ -163,7 +159,7 @@ jobs:
 
   policy:
     name: PR policy
-    runs-on: [self-hosted, Linux, coolify]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
@@ -236,7 +232,7 @@ jobs:
     name: Quality gate
     needs: [frontend, format, rust, windows, policy]
     if: always()
-    runs-on: [self-hosted, Linux, coolify]
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Fail unless every job succeeded
