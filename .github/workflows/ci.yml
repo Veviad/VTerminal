@@ -21,7 +21,7 @@ permissions:
 jobs:
   frontend:
     name: Frontend
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, coolify]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -34,6 +34,12 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: src-tauri/mcp-relay/go.mod
+          # The relay has no external dependencies or go.sum.
+          cache: false
 
       - run: npm ci
 
@@ -70,10 +76,14 @@ jobs:
   # diff. Separate job means both failures surface in the same run.
   format:
     name: Format
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, coolify]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install rustup
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Install toolchain
         run: |
           rustup show
@@ -153,7 +163,7 @@ jobs:
 
   policy:
     name: PR policy
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, coolify]
     timeout-minutes: 10
     permissions:
       contents: read
@@ -226,7 +236,7 @@ jobs:
     name: Quality gate
     needs: [frontend, format, rust, windows, policy]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, coolify]
     timeout-minutes: 5
     steps:
       - name: Fail unless every job succeeded
