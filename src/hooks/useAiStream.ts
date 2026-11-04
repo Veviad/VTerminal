@@ -852,7 +852,7 @@ export function useAiStream() {
     const ownerSessionId = store.resolveAiOwner(sessionId);
     const stream = ownRecordValue(store.aiStreams, ownerSessionId);
     const proposal = stream?.pendingProposal;
-    if (!proposal || proposal.approvalId !== approvalId || !stream.requestId
+    if (!proposal || proposal.approvalId !== approvalId || !stream.requestId || stream.newChatPending
       || !agentRunGuards.get(stream.requestId)?.check()) return false;
     const targetSessionId = proposal.targetSessionId ?? ownerSessionId;
     const target = agentProposalTargets.get(approvalId);
@@ -871,6 +871,7 @@ export function useAiStream() {
       const stream = ownRecordValue(initialStore.aiStreams, ownerSessionId);
       const proposal = stream?.pendingProposal;
       if (!proposal || approvalResponsesInFlight.has(proposal.approvalId)) return;
+      if (decision === "run" && stream.newChatPending) return;
       if (!stream.requestId || !agentRunGuards.get(stream.requestId)?.check()) return;
       const targetSessionId = proposal.targetSessionId ?? ownerSessionId;
       const proposedTarget = agentProposalTargets.get(proposal.approvalId);

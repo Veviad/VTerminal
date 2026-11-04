@@ -384,9 +384,9 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const hasChat = streamHasConversation(stream);
 
   /** Preparation still owns a local mode choice; the final dispatch reads it.
-   *  Once native execution starts, acknowledgement owns the visible mode.
-   *  Changes for one request/role are serialized, and superseded replies cannot
-   *  release an approval or overwrite the latest selection. */
+   *  Once native execution starts, each acknowledgement owns the visible mode.
+   *  Changes for one request/role are serialized; superseded selections can
+   *  never release an approval, even while a newer mode is still pending. */
   const changePermissionMode = (next: (typeof PERMISSION_OPTIONS)[number]["value"], role?: AgentTargetRole) => {
     if (!sessionId) return;
     if (useAppStore.getState().aiStreams[useAppStore.getState().resolveAiOwner(sessionId)]?.newChatPending) return;
@@ -428,14 +428,38 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
     setPermissionChangeError(null);
     setPermissionChanging({ sessionId: targetSessionId, requestId, generation: change.generation });
     const latest = () => permissionChanges.get(key) === change;
-    const requestIsCurrent = () => useAppStore.getState().aiStreams[targetSessionId]?.requestId === requestId;
+    const requestIsCurrent = () => {
+      const current = ownRecordValue(useAppStore.getState().aiStreams, targetSessionId);
+      return current?.requestId === requestId && !current.newChatPending;
+    };
     change.promise = previous.then(async () => {
       if (!latest() || !requestIsCurrent() || !targetIsCurrent()) return;
       await api.agentSetPermissionMode(requestId, next, role);
-      if (!latest() || !requestIsCurrent() || !targetIsCurrent()) return;
+      const acknowledged = ownRecordValue(useAppStore.getState().aiStreams, targetSessionId);
+      if (acknowledged?.requestId === requestId && acknowledged.newChatPending) {
+        // Native accepted this mode, but the reset fence prevented the UI from
+        // adopting it. Retire the same run synchronously before cancellation
+        // yields, including when exit preparation declined the reset factory.
+        await cancel(targetSessionId);
+        return;
+      }
+      if (!requestIsCurrent() || !targetIsCurrent()) return;
       applyMode();
-      const current = useAppStore.getState().aiStreams[targetSessionId];
-      if (proposalToRelease && current?.pendingProposal?.approvalId === proposalToRelease
+      const currentState = useAppStore.getState();
+      const current = ownRecordValue(currentState.aiStreams, targetSessionId);
+      const currentPermissions = role && binding
+        ? currentState.sidecarForSession(targetSessionId)?.permissions : undefined;
+      const currentMode = role && binding
+        ? role === "local" ? currentPermissions?.local : currentPermissions?.remote
+        : current?.permissionMode;
+      if (current?.requestId === requestId && currentMode !== next) {
+        // A synchronous conservative cleanup may disarm the UI while the
+        // accepted native mode is wider. Do not leave that run hidden behind it.
+        await cancel(targetSessionId);
+        return;
+      }
+      if (latest() && proposalToRelease && current?.pendingProposal?.approvalId === proposalToRelease
+        && !current.newChatPending && currentMode === "full"
         && panelMounted.current && !proposalDrafts.current.get(proposalToRelease)
         && (!proposalRemote || proposalHasReusablePrompt(targetSessionId, proposalToRelease))) {
         await respondToProposal(targetSessionId, "run");

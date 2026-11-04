@@ -4,6 +4,8 @@ import { emptyAiStream, useAppStore } from "../stores/appStore";
 import { AiPanel } from "../components/ai/AiPanel";
 import { isAgentPreparing } from "../hooks/useAiStream";
 import { claimScheduleSession, releaseScheduleSession } from "../lib/scheduleLiveJobs";
+import { freezeArchiveMutations, resumeArchiveMutations } from "../lib/archiveWriteTracker";
+import { startNewChat } from "../lib/newChat";
 import { S } from "../lib/strings";
 import * as api from "../lib/tauri";
 import * as ptyExec from "../lib/ptyExec";
@@ -599,6 +601,119 @@ describe("AiPanel renders", () => {
     });
   });
 
+  it.each(([false, true] as const).flatMap((remote) =>
+    ([false, true] as const).map((frozen) => ({ remote, frozen })),
+  ))("fences a Full acknowledgement when actual New Chat claims the conversation (remote=$remote, archive frozen=$frozen)", async ({ remote, frozen }) => {
+    const nativeRound = deferred<Awaited<ReturnType<typeof api.agentStart>>>();
+    const acknowledgement = deferred<void>();
+    const start = vi.spyOn(api, "agentStart").mockReturnValue(nativeRound.promise);
+    const setMode = vi.spyOn(api, "agentSetPermissionMode").mockReturnValue(acknowledgement.promise);
+    const approve = vi.spyOn(api, "respondToApproval").mockResolvedValue(undefined);
+    let nativeMode = "ask";
+    let nativeRequestActive = true;
+    const cancelRequest = vi.spyOn(api, "aiCancel").mockImplementation(async () => { nativeRequestActive = false; });
+    vi.spyOn(api, "mcpDisconnect").mockResolvedValue(undefined);
+    vi.spyOn(ptyExec, "hasReusableRemoteShellProof").mockReturnValue(true);
+    seedReadyPanel({ mode: "agent", permissionMode: "ask" });
+    useAppStore.setState({ archiveEnabled: false, clearTerminalOnNewChat: false });
+    if (remote) useAppStore.getState().updateSessionUi("s1", { remote: { kind: "ssh", target: "audit-host" }, nestedBlockId: "ssh" });
+    render(<AiPanel sessionId="s1" />);
+    const box = screen.getByPlaceholderText(/Describe a goal/i);
+    fireEvent.change(box, { target: { value: "Inspect the outgoing fixture" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() => expect(start).toHaveBeenCalledOnce());
+    const emit = start.mock.calls[0][6] as (event: StreamEvent) => void;
+    act(() => emit({ type: "CommandProposal", approval_id: "outgoing-command", command: "printf outgoing",
+      explanation: "Inspect fixture", read_only: false, network: false, output_policy: "normal" }));
+    fireEvent.click(screen.getByRole("button", { name: S.aiPanel.permissionLabel }));
+    fireEvent.click(screen.getByRole("option", { name: (name) => name.startsWith(S.aiPanel.permission.full) }));
+    await waitFor(() => expect(setMode).toHaveBeenCalledOnce());
+    try {
+      await act(async () => {
+        // Queue the native ACK first. A frozen tracker declines the New Chat
+        // factory, so the pending fence is live while its old request still is.
+        nativeMode = "full"; // Native has accepted Full before acknowledging IPC.
+        acknowledgement.resolve();
+        if (frozen) freezeArchiveMutations();
+        const reset = startNewChat("s1");
+        expect(useAppStore.getState().aiStreams.s1.newChatPending).toBe(true);
+        expect(useAppStore.getState().aiStreams.s1.requestId !== null).toBe(frozen);
+        await expect(reset).resolves.toBe(!frozen);
+      });
+      expect(approve).not.toHaveBeenCalled();
+      expect(useAppStore.getState().aiStreams.s1.permissionMode).toBe("ask");
+      expect(useAppStore.getState().aiStreams.s1.requestId).toBeNull();
+      expect(useAppStore.getState().aiStreams.s1.pendingProposal).toBeNull();
+      expect(cancelRequest).toHaveBeenCalledExactlyOnceWith(start.mock.calls[0][0]);
+      expect(nativeMode).toBe("full");
+      expect(nativeRequestActive).toBe(false);
+      if (frozen) expect(useAppStore.getState().aiStreams.s1.messages.some((message) => message.content === "Inspect the outgoing fixture")).toBe(true);
+    } finally {
+      resumeArchiveMutations();
+      await act(async () => {
+        emit({ type: "Done", prompt_tokens: 0, completion_tokens: 0 });
+        nativeRound.resolve([]);
+      });
+    }
+  });
+
+  it("does not begin a queued permission IPC after New Chat acquires its reset fence", async () => {
+    const setMode = vi.spyOn(api, "agentSetPermissionMode").mockResolvedValue(undefined);
+    const approve = vi.spyOn(api, "respondToApproval").mockResolvedValue(undefined);
+    seedReadyPanel({ mode: "agent", status: "awaiting_approval", requestId: "not-dispatched-permission", permissionMode: "ask",
+      pendingProposal: { approvalId: "not-dispatched-command", command: "printf outgoing", explanation: "Inspect fixture",
+        readOnly: false, network: false, outputPolicy: "normal" } });
+    render(<AiPanel sessionId="s1" />);
+    fireEvent.click(screen.getByRole("button", { name: S.aiPanel.permissionLabel }));
+    fireEvent.click(screen.getByRole("option", { name: (name) => name.startsWith(S.aiPanel.permission.full) }));
+    freezeArchiveMutations();
+    try {
+      await act(async () => expect(startNewChat("s1")).resolves.toBe(false));
+      expect(setMode).not.toHaveBeenCalled();
+      expect(approve).not.toHaveBeenCalled();
+      expect(useAppStore.getState().aiStreams.s1.permissionMode).toBe("ask");
+    } finally {
+      resumeArchiveMutations();
+    }
+  });
+
+  it("does not release the pending command if a concurrent conservative reset disarms Full during acknowledgement", async () => {
+    const nativeRound = deferred<Awaited<ReturnType<typeof api.agentStart>>>();
+    const acknowledgement = deferred<void>();
+    const start = vi.spyOn(api, "agentStart").mockReturnValue(nativeRound.promise);
+    vi.spyOn(api, "agentSetPermissionMode").mockReturnValue(acknowledgement.promise);
+    const approve = vi.spyOn(api, "respondToApproval").mockResolvedValue(undefined);
+    const cancelRequest = vi.spyOn(api, "aiCancel").mockResolvedValue(undefined);
+    seedReadyPanel({ mode: "agent" });
+    render(<AiPanel sessionId="s1" />);
+    const box = screen.getByPlaceholderText(/Describe a goal/i);
+    fireEvent.change(box, { target: { value: "Inspect fixture" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() => expect(start).toHaveBeenCalledOnce());
+    const emit = start.mock.calls[0][6] as (event: StreamEvent) => void;
+    act(() => emit({ type: "CommandProposal", approval_id: "concurrently-disarmed", command: "printf outgoing",
+      explanation: "Inspect fixture", read_only: false, network: false, output_policy: "normal" }));
+    fireEvent.click(screen.getByRole("button", { name: S.aiPanel.permissionLabel }));
+    fireEvent.click(screen.getByRole("option", { name: (name) => name.startsWith(S.aiPanel.permission.full) }));
+    const unsubscribe = useAppStore.subscribe((state) => {
+      if (state.aiStreams.s1.permissionMode === "full") state.setPermissionMode("s1", "ask");
+    });
+    try {
+      await act(async () => acknowledgement.resolve());
+      expect(useAppStore.getState().aiStreams.s1.permissionMode).toBe("ask");
+      expect(approve).not.toHaveBeenCalled();
+      expect(useAppStore.getState().aiStreams.s1.pendingProposal).toBeNull();
+      expect(useAppStore.getState().aiStreams.s1.requestId).toBeNull();
+      expect(cancelRequest).toHaveBeenCalledExactlyOnceWith(start.mock.calls[0][0]);
+    } finally {
+      unsubscribe();
+      await act(async () => {
+        emit({ type: "Done", prompt_tokens: 0, completion_tokens: 0 });
+        nativeRound.resolve([]);
+      });
+    }
+  });
+
   it("keeps the acknowledged mode and approval when native permissions reject Full", async () => {
     const setMode = vi.spyOn(api, "agentSetPermissionMode").mockRejectedValue("permission mode exceeds the scheduled action's approved limit");
     const approve = vi.spyOn(api, "respondToApproval").mockResolvedValue(undefined);
@@ -721,6 +836,57 @@ describe("AiPanel renders", () => {
     expect(proof).not.toHaveBeenCalled();
   });
 
+  it.each(([false, true] as const).flatMap((remote) =>
+    ([false, true] as const).map((askSucceeds) => ({ remote, askSucceeds })),
+  ))("shows each accepted native mode when Full is superseded by Confirm (remote=$remote, Confirm succeeds=$askSucceeds)", async ({ remote, askSucceeds }) => {
+    const nativeRound = deferred<Awaited<ReturnType<typeof api.agentStart>>>();
+    const fullAck = deferred<void>();
+    let resolveAsk!: () => void;
+    let rejectAsk!: (error: Error) => void;
+    const askAck = new Promise<void>((resolve, reject) => { resolveAsk = resolve; rejectAsk = reject; });
+    const start = vi.spyOn(api, "agentStart").mockReturnValue(nativeRound.promise);
+    const setMode = vi.spyOn(api, "agentSetPermissionMode")
+      .mockReturnValueOnce(fullAck.promise).mockReturnValueOnce(askAck);
+    const approve = vi.spyOn(api, "respondToApproval").mockResolvedValue(undefined);
+    const proof = vi.spyOn(ptyExec, "hasReusableRemoteShellProof").mockReturnValue(true);
+    seedReadyPanel({ mode: "agent", permissionMode: "ask" });
+    if (remote) useAppStore.getState().updateSessionUi("s1", { remote: { kind: "ssh", target: "audit-host" }, nestedBlockId: "ssh" });
+    render(<AiPanel sessionId="s1" />);
+    const box = screen.getByPlaceholderText(/Describe a goal/i);
+    fireEvent.change(box, { target: { value: "Inspect fixture" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() => expect(start).toHaveBeenCalledOnce());
+    const emit = start.mock.calls[0][6] as (event: StreamEvent) => void;
+    act(() => emit({ type: "CommandProposal", approval_id: "superseded-native-full", command: "printf fixture",
+      explanation: "Inspect fixture", read_only: false, network: false, output_policy: "normal" }));
+    const select = (mode: "full" | "ask") => {
+      fireEvent.click(screen.getByRole("button", { name: S.aiPanel.permissionLabel }));
+      fireEvent.click(screen.getByRole("option", { name: (name) => name.startsWith(S.aiPanel.permission[mode]) }));
+    };
+    select("full");
+    await waitFor(() => expect(setMode).toHaveBeenCalledOnce());
+    select("ask");
+    await act(async () => fullAck.resolve());
+    await waitFor(() => expect(setMode).toHaveBeenCalledTimes(2));
+    expect(useAppStore.getState().aiStreams.s1.permissionMode).toBe("full");
+    expect(screen.getByRole("button", { name: S.aiPanel.permissionLabel })).toHaveTextContent(S.aiPanel.permission.full);
+    expect(approve).not.toHaveBeenCalled();
+    expect(proof).not.toHaveBeenCalled();
+    await act(async () => {
+      if (askSucceeds) resolveAsk();
+      else rejectAsk(new Error("Confirm update failed"));
+    });
+    expect(useAppStore.getState().aiStreams.s1.permissionMode).toBe(askSucceeds ? "ask" : "full");
+    if (!askSucceeds) expect(screen.getByRole("alert")).toHaveTextContent("Confirm update failed");
+    expect(useAppStore.getState().aiStreams.s1.pendingProposal?.approvalId).toBe("superseded-native-full");
+    expect(approve).not.toHaveBeenCalled();
+    expect(proof).not.toHaveBeenCalled();
+    await act(async () => {
+      emit({ type: "Done", prompt_tokens: 0, completion_tokens: 0 });
+      nativeRound.resolve([]);
+    });
+  });
+
   it("keeps permission writes ordered across panel unmount and remount", async () => {
     const first = deferred<void>();
     const setMode = vi.spyOn(api, "agentSetPermissionMode").mockImplementationOnce(() => first.promise).mockResolvedValue(undefined);
@@ -743,19 +909,22 @@ describe("AiPanel renders", () => {
     expect(approve).not.toHaveBeenCalled();
   });
 
-  it("ignores a permission reply after another Agent request replaces it", async () => {
+  it.each([false, true])("ignores a permission reply after another Agent request replaces it (replacement reset pending=%s)", async (newChatPending) => {
     const pending = deferred<void>();
     vi.spyOn(api, "agentSetPermissionMode").mockReturnValue(pending.promise);
     const approve = vi.spyOn(api, "respondToApproval").mockResolvedValue(undefined);
+    const cancelRequest = vi.spyOn(api, "aiCancel").mockResolvedValue(undefined);
     seedReadyPanel({ mode: "agent", status: "streaming", requestId: "old-run", permissionMode: "ask" });
     render(<AiPanel sessionId="s1" />);
     fireEvent.click(screen.getByRole("button", { name: S.aiPanel.permissionLabel }));
     fireEvent.click(screen.getByRole("option", { name: (name) => name.startsWith(S.aiPanel.permission.full) }));
     await waitFor(() => expect(api.agentSetPermissionMode).toHaveBeenCalledTimes(1));
-    act(() => useAppStore.setState({ aiStreams: { s1: { ...emptyAiStream(), mode: "agent", requestId: "new-run", permissionMode: "auto_read" } } }));
+    act(() => useAppStore.setState({ aiStreams: { s1: { ...emptyAiStream(), mode: "agent", requestId: "new-run", permissionMode: "auto_read", newChatPending } } }));
     await act(async () => pending.resolve());
     expect(useAppStore.getState().aiStreams.s1.permissionMode).toBe("auto_read");
     expect(approve).not.toHaveBeenCalled();
+    expect(cancelRequest).not.toHaveBeenCalled();
+    expect(useAppStore.getState().aiStreams.s1.requestId).toBe("new-run");
   });
 
   it("keeps Sidecar permission acknowledgements separate by role", async () => {
