@@ -41,10 +41,10 @@ tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde-saphyr = "=2.0.0"
+serde-saphyr = "=2.1.1"
 semver = { version = "=1.0.28", features = ["serde"] }
 schemars = "=1.2.3"
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 # Statically compiled into the app; no dylib, Python process, or system SQLite
 # extension is required on user machines. Pin the pre-v1 API deliberately.
 sqlite-vec = "=0.1.9"
@@ -53,7 +53,7 @@ portable-pty = "0.9.0"
 reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], default-features = false }
 # Official Tier-1 MCP client.  Keep the protocol implementation in the SDK and
 # VTerminal's policy (credentials, approvals, sandboxing, lifecycle) around it.
-rmcp = { version = "=3.7.0", default-features = false, features = ["client", "auth", "transport-async-rw", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
+rmcp = { version = "=3.9.0", default-features = false, features = ["client", "auth", "transport-async-rw", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
 # Already in the lock file via reqwest, so this is free to compile. Used by
 # `models::remote_probe` to normalize whatever address a user types for a remote
 # inference server — the policy there is subtle enough (default ports, path
@@ -73,7 +73,7 @@ log = "0.4"
 thiserror = "2"
 async-trait = "0.1"
 shlex = "=2.0.1"
-sysinfo = "0.39"
+sysinfo = "0.40"
 sha2 = "0.11"
 zeroize = "1"
 # Runtime MCP sandboxes and integration harnesses both need private,
