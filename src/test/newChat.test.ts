@@ -51,6 +51,7 @@ vi.mock("../lib/ptyExec", () => ({
 import { chatArchiveId, hasConversation, startNewChat } from "../lib/newChat";
 import { freezeArchiveMutations, resumeArchiveMutations } from "../lib/archiveWriteTracker";
 import { captureSidecarRemoteIdentity } from "../lib/sidecar";
+import { claimScheduleSession, releaseScheduleSession } from "../lib/scheduleLiveJobs";
 import { emptyAiStream, emptySessionUi, useAppStore } from "../stores/appStore";
 import type { AiMessage, ArchiveSessionInput, ChatMessage, Session } from "../lib/types";
 
@@ -228,6 +229,42 @@ describe("startNewChat", () => {
     expect(useAppStore.getState().sessions.map((s) => s.id)).toEqual(["sess-1-0"]);
     expect(clearTerminalMock).toHaveBeenCalledOnce();
     expect(persistClearedMock).toHaveBeenCalledWith(["sess-1-0"]);
+  });
+
+  it.each(["auto_read", "auto_smart", "auto_all", "full"] as const)(
+    "keeps the selected %s permission in the same terminal",
+    async (permissionMode) => {
+      useAppStore.getState().setPermissionMode("sess-1-0", permissionMode);
+      await expect(startNewChat("sess-1-0")).resolves.toBe(true);
+      expect(useAppStore.getState().aiStreams["sess-1-0"].permissionMode).toBe(permissionMode);
+      useAppStore.getState().addSession(makeSession("sess-2-0"));
+      expect(useAppStore.getState().aiStreams["sess-2-0"].permissionMode).toBe("ask");
+    },
+  );
+
+  it("uses Confirm when New Chat starts in a schedule-owned terminal", async () => {
+    const sessionId = "sess-1-0";
+    expect(claimScheduleSession("run-1", sessionId)).toBe(true);
+    useAppStore.getState().setPermissionMode(sessionId, "auto_all");
+    try {
+      await expect(startNewChat(sessionId)).resolves.toBe(true);
+      expect(useAppStore.getState().aiStreams[sessionId].permissionMode).toBe("ask");
+    } finally {
+      releaseScheduleSession(sessionId);
+    }
+  });
+
+  it("uses Confirm when the terminal target changes during archiving", async () => {
+    const sessionId = "sess-1-0";
+    useAppStore.getState().setPermissionMode(sessionId, "full");
+    archivePutManyMock.mockImplementationOnce(async () => {
+      useAppStore.getState().updateSessionUi(sessionId, {
+        remote: { kind: "ssh", target: "test-host" },
+        nestedBlockId: "ssh-block",
+      });
+    });
+    await expect(startNewChat(sessionId)).resolves.toBe(true);
+    expect(useAppStore.getState().aiStreams[sessionId].permissionMode).toBe("ask");
   });
 
   it("keeps terminal history when clearing on new chat is disabled", async () => {

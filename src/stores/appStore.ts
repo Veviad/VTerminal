@@ -190,10 +190,8 @@ export interface AiStreamState {
   } | null;
   /** Snapshot of global defaults when this conversation was created. */
   mcpSelection: McpChatSelection;
-  /** How much this agent run may do without asking. Per-session, never
-   *  persisted, never inherited — see `restoreAiTranscript` and
-   *  `newAiConversation`. Widened from a boolean `autoAccept`; the safety
-   *  property is unchanged, a fresh tab is still never pre-armed. */
+  /** In-memory permission for the live terminal. New Chat can keep this
+   *  selection in the same terminal. New and restored tabs start at Confirm. */
   permissionMode: PermissionMode;
   /** New Chat owns this conversation until archiving and clearing have finished.
    * Shared store state keeps remounted panels and programmatic starts fenced. */
@@ -557,8 +555,8 @@ export interface AppState {
    *  Clears the panel AND `modelTranscript` — both halves, or ask mode forgets
    *  while agent mode keeps replaying the old run. The caller is responsible for
    *  preserving the outgoing conversation first (`lib/newChat.ts` archives it);
-   *  this action itself is a pure wipe. */
-  newAiConversation(sessionId: string): void;
+   *  the terminal's interactive permission may carry over to the new chat. */
+  newAiConversation(sessionId: string, keepTerminalPermission?: boolean): void;
   attachBlockToAi(sessionId: string, blockId: string): void;
   detachBlockFromAi(sessionId: string, blockId: string): void;
   attachBucketToAi(
@@ -1489,7 +1487,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       sidecars: withoutSidecarForSession(state.sidecars, sessionId),
     })),
 
-  newAiConversation: (sessionId) =>
+  newAiConversation: (sessionId, keepTerminalPermission = false) =>
     set((state) => {
       const ownerSessionId = resolveSidecarAiOwner(state.sidecars, sessionId);
       return {
@@ -1497,6 +1495,8 @@ export const useAppStore = create<AppState>((set, get) => ({
           // Spread the zero value rather than listing fields: a field added to
           // AiStreamState later would otherwise silently survive the wipe.
           ...emptyAiStream(defaultAiModeFor(state)),
+          permissionMode: keepTerminalPermission && !state.sidecars[ownerSessionId]
+            ? stream.permissionMode : "ask",
           // The operation still owns this tab while cleared scrollback is
           // persisted. Publishing an empty panel must not enable another run.
           newChatPending: stream.newChatPending,

@@ -422,6 +422,50 @@ describe("AiPanel renders", () => {
     });
   });
 
+  it.each([
+    { remote: false, proven: false },
+    { remote: true, proven: true },
+    { remote: true, proven: false },
+  ])("reconciles a command arriving while Full is being acknowledged (remote=$remote, proven=$proven)", async ({ remote, proven }) => {
+    const nativeRound = deferred<Awaited<ReturnType<typeof api.agentStart>>>();
+    const acknowledgement = deferred<void>();
+    const start = vi.spyOn(api, "agentStart").mockReturnValue(nativeRound.promise);
+    const setMode = vi.spyOn(api, "agentSetPermissionMode").mockReturnValue(acknowledgement.promise);
+    const approve = vi.spyOn(api, "respondToApproval").mockResolvedValue(undefined);
+    vi.spyOn(ptyExec, "hasReusableRemoteShellProof").mockReturnValue(proven);
+    seedReadyPanel({ mode: "agent" });
+    if (remote) useAppStore.getState().updateSessionUi("s1", {
+      remote: { kind: "ssh", target: "audit-host" }, nestedBlockId: "ssh",
+    });
+    render(<AiPanel sessionId="s1" />);
+    const box = screen.getByPlaceholderText(/Describe a goal/i);
+    fireEvent.change(box, { target: { value: "Inspect the fixture" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() => expect(start).toHaveBeenCalledOnce());
+    const emit = start.mock.calls[0][6] as (event: StreamEvent) => void;
+
+    fireEvent.click(screen.getByRole("button", { name: S.aiPanel.permissionLabel }));
+    fireEvent.click(screen.getByRole("option", { name: (name) => name.startsWith(S.aiPanel.permission.full) }));
+    await waitFor(() => expect(setMode).toHaveBeenCalledOnce());
+    act(() => emit({ type: "CommandProposal", approval_id: "permission-race", command: "pwd",
+      explanation: "Inspect fixture", read_only: true, network: false, output_policy: "normal" }));
+    expect(screen.getByText("Command approval")).toBeVisible();
+    expect(approve).not.toHaveBeenCalled();
+
+    await act(async () => acknowledgement.resolve());
+    expect(useAppStore.getState().aiStreams.s1.permissionMode).toBe("full");
+    if (remote && !proven) {
+      expect(approve).not.toHaveBeenCalled();
+      expect(screen.getByText("SSH prompt confirmation")).toBeVisible();
+    } else {
+      expect(approve).toHaveBeenCalledExactlyOnceWith("permission-race", "run", undefined);
+    }
+    await act(async () => {
+      emit({ type: "Done", prompt_tokens: 0, completion_tokens: 0 });
+      nativeRound.resolve([]);
+    });
+  });
+
   it("keeps the remote prompt confirmation pending when Full is selected", async () => {
     const setMode = vi.spyOn(api, "agentSetPermissionMode").mockResolvedValue(undefined);
     const approve = vi.spyOn(api, "respondToApproval").mockResolvedValue(undefined);
@@ -969,12 +1013,12 @@ describe("AiPanel renders", () => {
     expect(start).not.toHaveBeenCalled();
     await act(async () => archive.resolve());
     await waitFor(() => expect(screen.queryByText("Preparing a new chat…")).toBeNull());
-    expect(useAppStore.getState().aiStreams.s1.permissionMode).toBe("ask");
+    expect(useAppStore.getState().aiStreams.s1.permissionMode).toBe("full");
     expect(useAppStore.getState().aiStreams.s1.requestId).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: S.aiPanel.titleAgent }));
     fireEvent.click(screen.getByRole("button", { name: S.aiPanel.permissionLabel }));
-    fireEvent.click(screen.getByRole("option", { name: (name) => name.startsWith(S.aiPanel.permission.full) }));
-    expect(useAppStore.getState().aiStreams.s1.permissionMode).toBe("full");
+    fireEvent.click(screen.getByRole("option", { name: (name) => name.startsWith(S.aiPanel.permission.auto_read) }));
+    expect(useAppStore.getState().aiStreams.s1.permissionMode).toBe("auto_read");
   });
 
   /** A card standing while "Reads" is armed has to say why, or the mode reads as

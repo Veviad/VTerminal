@@ -36,6 +36,7 @@ import { getTerm } from "./termRegistry";
 import { clearTerminalBuffer } from "./terminalClear";
 import { markScrollbackDirty, markTranscriptDirty, persistClearedScrollback } from "./sessionPersistence";
 import type { ArchiveSessionInput } from "./types";
+import { scheduleOwnerOf } from "./scheduleLiveJobs";
 
 const newChatsInFlight = new Map<string, Promise<boolean>>();
 
@@ -129,6 +130,9 @@ export function startNewChat(sessionId: string): Promise<boolean> {
     const store = useAppStore.getState();
     const ownerSessionId = owner;
     const binding = store.sidecarForSession(ownerSessionId);
+    const interactiveTerminal = !binding && scheduleOwnerOf(ownerSessionId) === null;
+    const originalTerminal = getTerm(ownerSessionId);
+    const originalUi = store.sessionUi[ownerSessionId];
     const targetSessionIds = binding
       ? [binding.localSessionId, binding.remoteSessionId]
       : [ownerSessionId];
@@ -279,7 +283,15 @@ export function startNewChat(sessionId: string): Promise<boolean> {
 
       // newAiConversation also removes the transient binding. The shell and SSH
       // connection stay alive even when the screen and scrollback were cleared.
-      useAppStore.getState().newAiConversation(ownerSessionId);
+      const current = useAppStore.getState();
+      const currentUi = current.sessionUi[ownerSessionId];
+      const keepTerminalPermission = interactiveTerminal
+        && scheduleOwnerOf(ownerSessionId) === null
+        && getTerm(ownerSessionId) === originalTerminal && !originalTerminal?.disposed
+        && currentUi?.remote === originalUi?.remote
+        && currentUi?.nestedBlockId === originalUi?.nestedBlockId
+        && currentUi?.remoteHost?.id === originalUi?.remoteHost?.id;
+      current.newAiConversation(ownerSessionId, keepTerminalPermission);
       // The split row inherited the supersede, so the tab must stop claiming it:
       // its next close is the end of a NEW thread of work.
       if (session.archivedFrom) {

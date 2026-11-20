@@ -1,9 +1,8 @@
 /**
  * How much an agent run may do without stopping to ask.
  *
- * Per-session and never persisted (see `AiStreamState.permissionMode`): a fresh
- * tab always starts at `ask`, which is the same safety property the boolean
- * `autoAccept` this replaced was guarding.
+ * The selection lives in a terminal tab. New Chat keeps it for the same
+ * interactive terminal. Fresh and restored tabs start at `ask`.
  *
  * Scheduled Actions widen that in exactly one place, and the rule is worth
  * stating precisely because the old sentence read as absolute. A fresh USER tab

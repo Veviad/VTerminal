@@ -418,9 +418,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
       setPermissionChangeError(null);
       return;
     }
-    const proposalToRelease = next === "full" && pendingProposal
-      && (role === undefined || pendingProposal.targetRole === role)
-      ? pendingProposal.approvalId : null;
+    const proposalAtSelection = pendingProposal?.approvalId;
     const key = `${requestId}:${role ?? "single"}`;
     const previous = permissionChanges.get(key)?.promise ?? Promise.resolve();
     const change = { generation: ++permissionGeneration, promise: Promise.resolve() };
@@ -458,10 +456,17 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
         await cancel(targetSessionId);
         return;
       }
-      if (latest() && proposalToRelease && current?.pendingProposal?.approvalId === proposalToRelease
-        && !current.newChatPending && currentMode === "full"
-        && panelMounted.current && !proposalDrafts.current.get(proposalToRelease)
-        && (!proposalRemote || proposalHasReusablePrompt(targetSessionId, proposalToRelease))) {
+      // The old mode can still propose a command while native is processing
+      // the change. Reconcile that waiter when Full is acknowledged, while
+      // keeping any existing card tied to the proposal the operator saw.
+      const proposal = current?.pendingProposal;
+      if (latest() && proposal && current.requestId === requestId && !current.newChatPending
+        && currentMode === "full" && (role === undefined || proposal.targetRole === role)
+        && (proposalAtSelection === undefined || proposalAtSelection === proposal.approvalId)
+        && panelMounted.current && !proposalDrafts.current.get(proposal.approvalId)) {
+        const needsRemoteProof = proposal.proposedRemote
+          ?? (proposal.targetRole ? proposal.targetRole === "remote" : !!currentState.sessionUi[targetSessionId]?.remote);
+        if (needsRemoteProof && !proposalHasReusablePrompt(targetSessionId, proposal.approvalId)) return;
         await respondToProposal(targetSessionId, "run");
       }
     }).catch((error) => {
@@ -612,12 +617,10 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
           </span>
         </div>
       )}
-      {/* Header */}
-      {/* `gap-1` and `min-w-0` on both clusters: this row has no wrap and no scroll, so
-          without them a narrow panel clips whatever is furthest right — the collapse
-          chevron — instead of letting the dropdown triggers shorten. */}
-      <div className="flex h-9 shrink-0 items-center justify-between gap-1 border-b border-border-subtle px-2">
-        <div className="flex min-w-0 items-center rounded-lg bg-bg-primary p-0.5 border border-border-subtle">
+      {/* Keep each trigger legible at the minimum panel width. The end padding
+          reserves room for the collapse button even when the controls wrap. */}
+      <div className="relative flex min-h-9 shrink-0 flex-wrap content-center items-center justify-end gap-x-1 gap-y-0.5 border-b border-border-subtle ps-2 pe-8 py-1.5">
+        <div className="me-auto flex shrink-0 items-center rounded-lg border border-border-subtle bg-bg-primary p-0.5">
           {(["ask", "agent"] as const).map((m) => (
             <button
               key={m}
@@ -648,10 +651,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             </button>
           ))}
         </div>
-        <div className="flex min-w-0 items-center gap-0.5">
-          {/* First in the cluster deliberately: Auto-accept appears and vanishes
-              with the mode, and a button that moves under the cursor is a button
-              you misclick. */}
+        <div className="contents">
           <button
             onClick={() => {
               if (!sessionId) return;
@@ -667,7 +667,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             }}
             onBlur={() => setConfirmClear(false)}
             disabled={!sessionId || !hasChat || newChatPending}
-            className={`rounded-md p-1 transition-colors duration-100 hover:bg-bg-hover ${
+            className={`shrink-0 rounded-md p-1 transition-colors duration-100 hover:bg-bg-hover ${
               confirmClear
                 ? "text-error"
                 : "text-text-muted hover:text-text-secondary"
@@ -684,7 +684,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             <MessageSquarePlus size={14} />
           </button>
           {agentMode && sessionId && (
-            <div className="relative">
+            <div className="relative shrink-0">
               <button
                 onClick={() => {
                   setSidecarMenuOpen((open) => !open);
@@ -831,16 +831,8 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
                 ))}
             </div>
           )}
-          {/* A dropdown rather than a segmented control, because three segmented
-              controls plus two buttons need ~510px and this panel defaults to 420px and
-              floors at 320px, in a fixed-height row with no wrap and no scroll.
-
-              Collapsing a SAFETY control is only acceptable because the trigger still
-              renders the current mode in its own tone. Unattended modes stay warning-coloured,
-              and the matching warning banner below this row is untouched. Hiding the options is
-              fine; hiding the state would break the promise that arming auto-accept is a
-              deliberate, visible act. The per-mode explanations also read better here:
-              as a segmented control they were tooltips nobody hovered. */}
+          {/* The trigger keeps the active permission mode visible, including its
+              warning tone, while the menu has room for each mode's explanation. */}
           {agentMode && sessionId && !sidecar && (
               <Dropdown
                 value={permissionMode}
@@ -883,8 +875,9 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
           )}
           <button
             onClick={() => setAiPanelOpen(false)}
-            className="rounded-md p-1 text-text-muted transition-colors duration-100 hover:bg-bg-hover hover:text-text-secondary"
+            className="absolute end-2 top-1.5 rounded-md p-1 text-text-muted transition-colors duration-100 hover:bg-bg-hover hover:text-text-secondary"
             title={S.aiPanel.collapse}
+            aria-label={S.aiPanel.collapse}
           >
             <ChevronRight size={14} />
           </button>
