@@ -168,7 +168,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let Ok(pid) = sysinfo::get_current_pid() else {
             return 0;
         };
-        let mut system = sysinfo::System::new();
+        let Ok(mut system) = sysinfo::System::new() else {
+            return 0;
+        };
         system.refresh_processes_specifics(
             sysinfo::ProcessesToUpdate::Some(&[pid]),
             false,
