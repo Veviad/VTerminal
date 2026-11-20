@@ -48,6 +48,11 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
 
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: src-tauri/mcp-relay/go.mod
+          cache: false
+
       - name: Configure Windows toolchain and short target path
         run: |
           rustup show
@@ -152,6 +157,11 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
 
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: src-tauri/mcp-relay/go.mod
+          cache: false
+
       - name: Configure Windows toolchain and short target path
         run: |
           rustup show
@@ -243,6 +253,11 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: src-tauri/mcp-relay/go.mod
+          cache: false
 
       - name: Configure Windows toolchain and short target path
         run: |

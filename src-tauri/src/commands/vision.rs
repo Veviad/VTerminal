@@ -84,19 +84,12 @@ mod enabled {
             .unwrap_or(0)
     }
 
-    fn total_ram() -> u64 {
-        use sysinfo::System;
-        let mut sys = System::new();
-        sys.refresh_memory();
-        sys.total_memory()
-    }
-
     #[tauri::command(rename_all = "snake_case")]
     pub async fn vision_catalog(
         app: tauri::AppHandle<Wry>,
     ) -> Result<Vec<VisionCatalogEntry>, String> {
         let dir = models_dir(&app)?;
-        let ram = total_ram();
+        let ram = settings::total_ram_bytes();
         let chat_bytes = active_chat_bytes(&app);
         let selected = settings::read_string(&app, "vision_model_id");
 
@@ -284,7 +277,7 @@ mod enabled {
 
         // Re-check server-side. A disabled button is not a guarantee: the chat
         // model can be switched between rendering the row and clicking it.
-        let ram = total_ram();
+        let ram = settings::total_ram_bytes();
         let chat_bytes = active_chat_bytes(&app);
         let total = m.total_bytes();
         if !registry::fits_in_ram(total, m.min_ram_gb, ram) {

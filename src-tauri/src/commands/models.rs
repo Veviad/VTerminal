@@ -434,10 +434,7 @@ fn catalog_provider_presence(
 
 #[tauri::command]
 pub fn models_catalog(app: tauri::AppHandle<Wry>) -> Result<Vec<CatalogEntry>, String> {
-    let sys = sysinfo::System::new_with_specifics(
-        sysinfo::RefreshKind::nothing().with_memory(sysinfo::MemoryRefreshKind::everything()),
-    );
-    let total_ram = sys.total_memory();
+    let total_ram = settings::total_ram_bytes();
     let downloaded = models_dir(&app)
         .map(|dir| registry::load(&dir))
         .unwrap_or_default();

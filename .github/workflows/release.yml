@@ -210,6 +210,11 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
 
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: src-tauri/mcp-relay/go.mod
+          cache: false
+
       # Tauri updater signatures are mandatory. Authenticode is deliberately
       # optional for the Windows preview and is not supplied by this workflow.
       - name: Verify updater signing key

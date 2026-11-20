@@ -842,11 +842,16 @@ pub struct SystemInfo {
     pub local_acceleration: LocalAccelerationInfo,
 }
 
+pub(super) fn total_ram_bytes() -> u64 {
+    sysinfo::System::new_with_specifics(
+        sysinfo::RefreshKind::nothing().with_memory(sysinfo::MemoryRefreshKind::everything()),
+    )
+    .map_or(0, |system| system.total_memory())
+}
+
 #[tauri::command]
 pub async fn get_system_info(_app: tauri::AppHandle<Wry>) -> Result<SystemInfo, String> {
-    let sys = sysinfo::System::new_with_specifics(
-        sysinfo::RefreshKind::nothing().with_memory(sysinfo::MemoryRefreshKind::everything()),
-    );
+    let total_ram_bytes = total_ram_bytes();
     #[cfg(target_os = "windows")]
     let (wsl_status, wsl_distribution) = {
         let result = crate::windows_terminal::prepare(&_app, false).await;
@@ -883,7 +888,7 @@ pub async fn get_system_info(_app: tauri::AppHandle<Wry>) -> Result<SystemInfo, 
         generation_fallback_reason: None,
     };
     Ok(SystemInfo {
-        total_ram_bytes: sys.total_memory(),
+        total_ram_bytes,
         os: std::env::consts::OS,
         arch: std::env::consts::ARCH,
         terminal_backend: if cfg!(target_os = "windows") {
