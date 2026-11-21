@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.20
+
+- Keep the selected Agent permission when starting a new chat in the same terminal.
+- Resolve command approvals that arrive while switching to Full when the terminal is ready.
+- Keep permission controls visible at the minimum Agent panel width.
+- Patch vulnerable ZIP, GLib, and PostCSS dependencies and update the WSL relay toolchain.
+
 ## 0.6.19
 
 - Distinguish SSH prompt confirmation from command permission, and remove stale privileged-command explanations after selecting Full.
