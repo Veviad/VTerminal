@@ -41,10 +41,10 @@ tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde-saphyr = "=2.1.1"
+serde-saphyr = "=2.2.0"
 semver = { version = "=1.0.28", features = ["serde"] }
 schemars = "=1.2.3"
-rusqlite = { version = "0.42", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 # Statically compiled into the app; no dylib, Python process, or system SQLite
 # extension is required on user machines. Pin the pre-v1 API deliberately.
 sqlite-vec = "=0.1.9"
@@ -53,7 +53,7 @@ portable-pty = "0.9.0"
 reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], default-features = false }
 # Official Tier-1 MCP client.  Keep the protocol implementation in the SDK and
 # VTerminal's policy (credentials, approvals, sandboxing, lifecycle) around it.
-rmcp = { version = "=3.10.0", default-features = false, features = ["client", "auth", "transport-async-rw", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
+rmcp = { version = "=3.11.0", default-features = false, features = ["client", "auth", "transport-async-rw", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
 # Already in the lock file via reqwest, so this is free to compile. Used by
 # `models::remote_probe` to normalize whatever address a user types for a remote
 # inference server — the policy there is subtle enough (default ports, path
@@ -116,7 +116,7 @@ security-framework = "3.7"
 # Resolve the post-update executable from the bundle's signed metadata before
 # relaunching; the executable name is not required to match the old binary.
 plist = "1.10"
-nix = { version = "0.31", features = ["signal", "process"] }
+nix = { version = "0.32", features = ["signal", "process"] }
 # Safe wrappers over core llama.h. Chosen over mistral.rs because its GGUF
 # architecture coverage is a strict superset (Gemma 4 and Qwen3.5/3.6 do not
 # load in mistral.rs) and it returns load errors instead of panicking on an
