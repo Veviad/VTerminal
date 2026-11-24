@@ -58,7 +58,10 @@ rmcp = { version = "=3.11.0", default-features = false, features = ["client", "a
 # `models::remote_probe` to normalize whatever address a user types for a remote
 # inference server — the policy there is subtle enough (default ports, path
 # prefixes, credentials) that hand-rolled parsing would be the wrong economy.
-url = "2"
+# 2.5.9 is a security floor, not a feature bump: RUSTSEC-2026-0592 (stack
+# overflow in `Url::origin()` on deeply nested `blob:` URLs, reachable here via
+# `response.url().origin()` in knowledge/qdrant.rs) is fixed in 2.5.9.
+url = "2.5.9"
 futures = "0.3"
 http = "1"
 uuid = { version = "1", features = ["v4"] }
